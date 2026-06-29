@@ -143,6 +143,7 @@ async def test_memory_basic_runtime_injects_snapshot_and_tool_writes_are_session
     first_request_text = "\n".join(message.content for message in provider.requests[0].messages)
     second_step_text = "\n".join(message.content for message in provider.requests[1].messages)
 
+    assert "You have persistent memory across sessions" in first_request_text
     assert "Initial project convention" in first_request_text
     assert "User prefers terse replies" in first_request_text
     assert "New durable memory" not in second_step_text
@@ -151,6 +152,7 @@ async def test_memory_basic_runtime_injects_snapshot_and_tool_writes_are_session
     assert first.tool_results[0].result.is_error is False
     history = app.runner.session_store.read_messages(session_id)
     assert all(message.role != "system" for message in history)
+    assert all("You have persistent memory across sessions" not in message.content for message in history)
     assert all("Initial project convention" not in message.content for message in history)
 
     await app.runner.run_turn("same session")
@@ -162,4 +164,3 @@ async def test_memory_basic_runtime_injects_snapshot_and_tool_writes_are_session
     await app.runner.run_turn("fresh session")
     new_session_text = "\n".join(message.content for message in provider.requests[3].messages)
     assert "New durable memory" in new_session_text
-

@@ -220,8 +220,7 @@ It installs:
 
 - `agent/lib/memory_basic`: shared parsing, snapshot, and file-write helpers;
 - `agent/input/memory_context`: an input module inserted before `base_input`;
-- `agent/tools/memory`: an authored `memory` tool;
-- `agent/skills/memory_policy`: guidance for what belongs in durable memory.
+- `agent/tools/memory`: an authored `memory` tool.
 
 The package stores user data outside package-owned component targets:
 
@@ -233,8 +232,8 @@ The package stores user data outside package-owned component targets:
 ```
 
 These files are created lazily by the input module or tool. Package uninstall
-removes the installed lib/input/tool/skill components and the pipeline entry, but
-it does not delete `memory/USER.md` or `memory/MEMORY.md`.
+removes the installed lib/input/tool components and the pipeline entry, but it
+does not delete `memory/USER.md` or `memory/MEMORY.md`.
 
 `USER.md` stores stable user profile and preference facts. `MEMORY.md` stores the
 agent's project, environment, convention, and tool notes. Entries are separated
@@ -243,10 +242,10 @@ with `§`, may be multiline, and are bounded by character limits from
 
 At session start, `memory_context` reads the files, sanitizes prompt-injection or
 secret-exfiltration patterns out of the model-facing snapshot, writes
-`memory_basic_snapshot.json` under the session root, and injects non-empty memory
-blocks as transient system context. Later writes in the same session persist to
-disk immediately but do not update that session's snapshot; a new session sees
-the updated files.
+`memory_basic_snapshot.json` under the session root, and injects a short memory
+usage guidance plus non-empty memory blocks as transient system context. Later
+writes in the same session persist to disk immediately but do not update that
+session's snapshot; a new session sees the updated files.
 
 The `memory` tool supports `add`, `replace`, `remove`, and an all-or-nothing
 `operations` batch for a single target (`memory` or `user`). Exact duplicate adds

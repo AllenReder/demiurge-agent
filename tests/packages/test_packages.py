@@ -130,12 +130,11 @@ def test_builtin_catalog_lists_memory_basic_package():
 
     package = catalog.packages["memory_basic"]
     assert {"memory", "context"}.issubset(package.tags)
-    assert {component.kind for component in package.components} == {"lib", "input", "tool", "skill"}
+    assert {component.kind for component in package.components} == {"lib", "input", "tool"}
     assert [component.component_id for component in package.components] == [
         "memory_lib",
         "memory_context",
         "memory_tool",
-        "memory_policy",
     ]
 
 
@@ -150,7 +149,7 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert (core_path / "agent" / "lib" / "memory_basic" / "store.py").exists()
     assert (core_path / "agent" / "input" / "memory_context" / "module.py").exists()
     assert (core_path / "agent" / "tools" / "memory" / "module.py").exists()
-    assert (core_path / "agent" / "skills" / "memory_policy" / "SKILL.md").exists()
+    assert not (core_path / "agent" / "skills" / "memory_policy").exists()
     assert not (core_path / "memory").exists()
     config = yaml.safe_load((core_path / "agent" / "lib" / "memory_basic" / "config.yaml").read_text())
     assert config["storage"] == {"relative_to": "core_root", "path": "memory"}

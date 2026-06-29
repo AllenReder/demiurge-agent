@@ -30,7 +30,3 @@ components:
     kind: tool
     source: memory
     target: agent/tools/memory
-  - id: memory_policy
-    kind: skill
-    source: memory_policy
-    target: agent/skills/memory_policy
