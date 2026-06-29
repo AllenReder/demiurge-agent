@@ -2,21 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from demiurge.sdk import ToolResult
 
-from .tts_minimax.synthesizer import synthesize_to_file
-
-
-def _load_config() -> dict[str, Any]:
-    path = Path(__file__).with_name("config.yaml")
-    if not path.exists():
-        return {}
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return loaded if isinstance(loaded, dict) else {}
+from .tts_minimax.synthesizer import load_synthesis_config, synthesize_to_file
 
 
 async def execute(ctx, args):
@@ -24,7 +13,7 @@ async def execute(ctx, args):
     text = str(args.get("text") or "").strip()
     if not text:
         return ToolResult(content="text is required", is_error=True)
-    config = _load_config()
+    config = load_synthesis_config(__file__)
     synthesis = await asyncio.to_thread(
         synthesize_to_file,
         text,

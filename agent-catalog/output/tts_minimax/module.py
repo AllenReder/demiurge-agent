@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from pathlib import Path
 from typing import Any
 
-import yaml
-
-from .tts_minimax.synthesizer import synthesize_to_file
+from .tts_minimax.synthesizer import load_synthesis_config, synthesize_to_file
 
 
 _MD_CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
@@ -22,16 +19,8 @@ _MD_HR = re.compile(r"---+")
 _MD_EXCESS_NL = re.compile(r"\n{3,}")
 
 
-def _load_config() -> dict[str, Any]:
-    path = Path(__file__).with_name("config.yaml")
-    if not path.exists():
-        return {}
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
 async def process(ctx):
-    config = _load_config()
+    config = load_synthesis_config(__file__)
     text = str(ctx.output.content or "").strip()
     summarizer_core = config.get("summarizer_core")
     if summarizer_core:

@@ -153,14 +153,18 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert (core_path / "agent" / "lib" / "tts_minimax" / "synthesizer.py").exists()
     assert (core_path / "agent" / "output" / "tts_minimax" / "module.py").exists()
     assert not (core_path / "agent" / "tools" / "tts_synthesize").exists()
-    config_text = (core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    assert config["summarizer_core"] is None
-    assert config["provider"] == "tts_minimax"
-    assert config["api_key_env"] == "DEMIURGE_MINIMAX_API_KEY"
-    assert "emotion" not in config["voice_setting"]
-    assert config["audio_setting"] == {}
-    assert "\\u8BED" not in config_text
+    lib_config_text = (core_path / "agent" / "lib" / "tts_minimax" / "config.yaml").read_text()
+    lib_config = yaml.safe_load(lib_config_text)
+    assert lib_config["provider"] == "tts_minimax"
+    assert lib_config["api_key_env"] == "DEMIURGE_MINIMAX_API_KEY"
+    assert "emotion" not in lib_config["voice_setting"]
+    assert lib_config["audio_setting"] == {}
+    assert "\\u8BED" not in lib_config_text
+    output_config = yaml.safe_load((core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text())
+    assert output_config["summarizer_core"] is None
+    assert output_config["summary"] == "MiniMax TTS audio"
+    assert "provider" not in output_config
+    assert "api_key_env" not in output_config
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_output"]
     assert pipeline["parallel"] == ["tts_minimax"]
@@ -202,7 +206,7 @@ def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):
     result = manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"api_key": "secret-value"})
 
     core_path = app.version_store.active_core_path("assistant")
-    config = yaml.safe_load((core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text())
+    config = yaml.safe_load((core_path / "agent" / "lib" / "tts_minimax" / "config.yaml").read_text())
     assert config["api_key"] == "secret-value"
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     record = registry["installed"][0]
@@ -364,7 +368,7 @@ def test_wizard_installs_with_option_answers(tmp_path):
     PackageWizard(manager=manager, version_store=app.version_store, console=console, prompt=prompt).run()
 
     config = yaml.safe_load(
-        (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax" / "config.yaml").read_text()
+        (app.version_store.active_core_path("assistant") / "agent" / "lib" / "tts_minimax" / "config.yaml").read_text()
     )
     assert config["api_key"] == "wizard-secret"
     registry = yaml.safe_load((app.version_store.active_core_path("assistant") / "packages.yaml").read_text())
@@ -480,6 +484,10 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
 
     assert (app.version_store.active_core_path("assistant") / "agent" / "tools" / "text_to_speech").exists()
     assert not (app.version_store.active_core_path("assistant") / "agent" / "tools" / "tts_synthesize").exists()
+    tool_config = yaml.safe_load(
+        (app.version_store.active_core_path("assistant") / "agent" / "tools" / "text_to_speech" / "config.yaml").read_text()
+    )
+    assert tool_config == {"filename_template": "{turn_id}-tool.{format}"}
     assert "tool voice" in calls[0]["json"]["text"]
     audio_delivery = next(
         delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
@@ -501,7 +509,7 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     _manager(app).install(core_id="assistant", package_id="minimax_tts")
-    config_path = app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax" / "config.yaml"
+    config_path = app.version_store.active_core_path("assistant") / "agent" / "lib" / "tts_minimax" / "config.yaml"
     config = yaml.safe_load(config_path.read_text())
     config["output_format"] = "url"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")

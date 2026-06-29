@@ -74,6 +74,11 @@ components:
     kind: lib
     source: tts_minimax
     target: agent/lib/tts_minimax
+    config:
+      provider: tts_minimax
+      model: speech-2.8-hd
+      voice_setting:
+        voice_id: male-qn-qingse
   - id: tts_output
     kind: output
     source: tts_minimax
@@ -81,7 +86,6 @@ components:
     pipeline:
       group: parallel
     config:
-      provider: tts_minimax
       summarizer_core: null
     config_when:
       - when:
@@ -215,13 +219,16 @@ Options:
   output module to summarize text before synthesis.
 - `enable_tool=true`: also install an authored `text_to_speech` tool and the
   `tts_voice` skill.
-- `api_key=<value>`: optional secret written into component config. If omitted,
-  the module reads `DEMIURGE_MINIMAX_API_KEY`.
+- `api_key=<value>`: optional secret written into the shared
+  `agent/lib/tts_minimax/config.yaml`. If omitted, the module reads
+  `DEMIURGE_MINIMAX_API_KEY`.
 
 The output module and authored tool both reuse shared code from
-`agent/lib/tts_minimax`. The output module runs in the output `parallel`
-pipeline so normal text can be delivered before slower speech generation
-finishes. The MiniMax Speech T2A non-streaming `t2a_v2` HTTP API generates
-local audio artifacts, and both the output module and `text_to_speech` tool send
-audio with `history_policy="transient"`, so generated audio is not written to
-session history.
+`agent/lib/tts_minimax`. MiniMax provider and synthesis settings live in the
+shared lib config; the output module and `text_to_speech` tool keep only their
+slot-local behavior and overrides. The output module runs in the output
+`parallel` pipeline so normal text can be delivered before slower speech
+generation finishes. The MiniMax Speech T2A non-streaming `t2a_v2` HTTP API
+generates local audio artifacts, and both the output module and
+`text_to_speech` tool send audio with `history_policy="transient"`, so generated
+audio is not written to session history.

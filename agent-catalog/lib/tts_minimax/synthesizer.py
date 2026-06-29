@@ -9,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import yaml
+
 
 DEFAULT_BASE_URL = "https://api.minimaxi.com/v1/t2a_v2"
 DEFAULT_MODEL = "speech-2.8-hd"
@@ -43,6 +45,13 @@ class SynthesisResult:
     path: Path
     media_type: str
     metadata: dict[str, Any]
+
+
+def load_synthesis_config(slot_file: str | Path | None = None) -> dict[str, Any]:
+    config = _load_yaml_mapping(Path(__file__).with_name("config.yaml"))
+    if slot_file is None:
+        return config
+    return _merge_config(config, _load_yaml_mapping(Path(slot_file).with_name("config.yaml")))
 
 
 def synthesize_to_file(text: str, config: Mapping[str, Any], *, workspace: Path, turn_id: str) -> SynthesisResult:
@@ -221,6 +230,24 @@ def _timeout(config: Mapping[str, Any]) -> float:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return dict(loaded) if isinstance(loaded, Mapping) else {}
+
+
+def _merge_config(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[str(key)] = _merge_config(current, value)
+        else:
+            merged[str(key)] = value
+    return merged
 
 
 def _drop_none(value: Any) -> Any:

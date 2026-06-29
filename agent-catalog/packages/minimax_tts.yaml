@@ -33,12 +33,6 @@ components:
     kind: lib
     source: tts_minimax
     target: agent/lib/tts_minimax
-  - id: tts_output
-    kind: output
-    source: tts_minimax
-    target: agent/output/tts_minimax
-    pipeline:
-      group: parallel
     config:
       provider: tts_minimax
       base_url: https://api.minimaxi.com/v1/t2a_v2
@@ -46,17 +40,23 @@ components:
       voice_setting:
         voice_id: male-qn-qingse
       audio_setting: {}
-      summarizer_core: null
       output_dir: .demiurge-tts
-      filename_template: "{turn_id}.{format}"
       media_type: audio/mpeg
-      summary: MiniMax TTS audio
-      max_text_length: 10000
-      strip_markdown: true
       api_key: ${options.api_key}
       api_key_env: DEMIURGE_MINIMAX_API_KEY
       group_id: null
       group_id_env: DEMIURGE_MINIMAX_GROUP_ID
+  - id: tts_output
+    kind: output
+    source: tts_minimax
+    target: agent/output/tts_minimax
+    pipeline:
+      group: parallel
+    config:
+      summarizer_core: null
+      summary: MiniMax TTS audio
+      max_text_length: 10000
+      strip_markdown: true
     config_when:
       - when:
           mode: summary
@@ -77,19 +77,7 @@ components:
     when:
       enable_tool: true
     config:
-      provider: tts_minimax
-      base_url: https://api.minimaxi.com/v1/t2a_v2
-      model: speech-2.8-hd
-      voice_setting:
-        voice_id: male-qn-qingse
-      audio_setting: {}
-      output_dir: .demiurge-tts
       filename_template: "{turn_id}-tool.{format}"
-      media_type: audio/mpeg
-      api_key: ${options.api_key}
-      api_key_env: DEMIURGE_MINIMAX_API_KEY
-      group_id: null
-      group_id_env: DEMIURGE_MINIMAX_GROUP_ID
   - id: tts_voice_skill
     kind: skill
     source: tts_voice
