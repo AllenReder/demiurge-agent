@@ -1,0 +1,16 @@
+{
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "call_tools_list",
+          "name": "tools_list",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "content": "Smoke turn completed."
+    }
+  ]
+}

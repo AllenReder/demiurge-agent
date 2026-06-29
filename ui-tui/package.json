@@ -1,0 +1,31 @@
+{
+  "name": "@demiurge/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --import tsx src/entry.tsx",
+    "start": "node dist/entry.js",
+    "build": "esbuild src/entry.tsx --bundle --minify --platform=node --format=esm --target=node20 --outfile=dist/entry.js --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ink": "7.1.0",
+    "marked": "^18.0.5",
+    "react": "19.2.7",
+    "shiki": "^4.3.0",
+    "string-width": "^8.2.1",
+    "wrap-ansi": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.2",
+    "@types/react": "19.2.17",
+    "esbuild": "0.28.1",
+    "ink-testing-library": "4.0.0",
+    "react-devtools-core": "^7.0.1",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  }
+}

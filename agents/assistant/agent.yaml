@@ -1,0 +1,67 @@
+schema_version: 1
+agent:
+  id: assistant
+  version: "0001"
+  parent: null
+  summary: "Initial demiurge assistant core."
+runtime:
+  language: python
+  python: ">=3.11,<3.14"
+  surface_root: agent
+  max_model_steps: 90
+model:
+  provider: auto
+  model_name: null
+  model_name_env: "DEMIURGE_MODEL_NAME"
+  base_url: null
+  base_url_env: "DEMIURGE_BASE_URL"
+  api_key: null
+  api_key_env: "DEMIURGE_API_KEY"
+  model_options: {}
+channels:
+  telegram:
+    enabled: false
+    bot_token_env: "DEMIURGE_TELEGRAM_BOT_TOKEN"
+    bot_token: null
+    bot_username: null
+    allowed_users: []
+    allowed_chats: []
+    unauthorized_response: brief
+    poll_timeout: 30
+    message_format: markdown_v2
+    register_commands: true
+    send_typing: true
+    rich_messages: true
+    reply_to_mode: "off"
+slots:
+  soul: agent/SOUL.md
+  input: agent/input
+  output: agent/output
+  tools: agent/tools
+  skills: agent/skills
+tools:
+  toolsets:
+    - coding
+    - demiurge_control
+capabilities:
+  defaults:
+    fs.read:
+      scope: workspace
+      max_chars_per_call: 20000
+    fs.write:
+      scope: workspace
+    terminal.exec:
+      scope: workspace
+    tool.call:evolve_core:
+      max_calls_per_turn: 1
+    tool.call:rollback_core:
+      max_calls_per_turn: 1
+    network.fetch:
+      requires_approval: true
+dependencies:
+  mode: host_shared
+  allow_additional_dependencies: false
+tests:
+  commands: []
+  smoke:
+    fake_llm_script: agent/tests/fixtures/fake_llm/basic_turn.json

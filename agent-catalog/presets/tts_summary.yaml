@@ -1,0 +1,48 @@
+schema_version: 1
+id: tts_summary
+name: TTS with summarize
+feature: tts
+summary: Summarize the parent assistant output with a child core before generating voice.
+tags:
+  - tts
+options:
+  - id: api_key
+    type: secret
+    prompt: MiniMax API key
+    required: false
+    default: null
+writes:
+  api_key:
+    component: tts_minimax
+    path: config.api_key
+components:
+  - id: tts_summarizer
+    kind: core
+    source: tts_summarizer
+    target_core_id: tts_summarizer
+  - id: tts_minimax
+    kind: output
+    source: tts_minimax
+    target: agent/output/tts_minimax
+    pipeline:
+      group: serial
+      after: base_output
+    config:
+      provider: tts_minimax
+      base_url: https://api.minimaxi.com/v1/t2a_v2
+      model: speech-2.8-hd
+      voice_setting:
+        voice_id: male-qn-qingse
+      audio_setting: {}
+      summarizer_core: tts_summarizer
+      summarizer_context: Summarize this assistant reply into short spoken text for TTS.
+      output_dir: .demiurge-tts
+      filename_template: "{turn_id}.{format}"
+      media_type: audio/mpeg
+      summary: MiniMax summarized TTS audio
+      max_text_length: 10000
+      strip_markdown: true
+      api_key: null
+      api_key_env: DEMIURGE_MINIMAX_API_KEY
+      group_id: null
+      group_id_env: DEMIURGE_MINIMAX_GROUP_ID

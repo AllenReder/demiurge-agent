@@ -1,0 +1,4 @@
+entrypoint: module:process
+description: "Appends the raw channel text to the current user turn input."
+failure_policy: hard
+capabilities: []

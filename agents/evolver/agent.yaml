@@ -1,0 +1,33 @@
+schema_version: 1
+agent:
+  id: evolver
+  version: "0001"
+  parent: null
+  summary: "Host-managed seed evolver core. v1 EvolutionRuntime applies structured file ops."
+runtime:
+  language: python
+  surface_root: agent
+model:
+  provider: auto
+  model_name: null
+  model_name_env: "DEMIURGE_EVOLVER_MODEL_NAME"
+  base_url: null
+  base_url_env: "DEMIURGE_EVOLVER_BASE_URL"
+  api_key: null
+  api_key_env: "DEMIURGE_EVOLVER_API_KEY"
+slots:
+  soul: agent/SOUL.md
+  input: agent/input
+  output: agent/output
+  tools: agent/tools
+tools:
+  toolsets: []
+capabilities:
+  defaults: {}
+dependencies:
+  mode: host_shared
+  allow_additional_dependencies: false
+tests:
+  commands: []
+  smoke:
+    fake_llm_script: null

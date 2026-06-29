@@ -1,0 +1,595 @@
+import json
+
+import yaml
+import pytest
+
+from demiurge.app import create_app
+from demiurge.security.approval import StaticApprovalProvider
+from demiurge.security.capabilities import CapabilityFacade
+from demiurge.core import BUILTIN_TOOLSETS
+from demiurge.providers import ToolCall
+from demiurge.sdk import AgentInput, TurnContext
+from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
+
+
+def _load_core_with(
+    app,
+    *,
+    toolsets: list[str] | None = None,
+    capabilities: dict[str, dict] | None = None,
+):
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    if toolsets is not None:
+        raw.setdefault("tools", {})["toolsets"] = toolsets
+    defaults = raw.setdefault("capabilities", {}).setdefault("defaults", {})
+    for capability, value in (capabilities or {}).items():
+        defaults[capability] = value
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+
+def _install_test_skills(app):
+    root = app.version_store.active_core_path("assistant") / "agent" / "skills"
+    debugging = root / "debugging"
+    references = debugging / "references"
+    references.mkdir(parents=True, exist_ok=True)
+    (debugging / "SKILL.md").write_text(
+        "---\n"
+        "name: debugging\n"
+        "description: Debug failing commands.\n"
+        "category: development\n"
+        "---\n\n"
+        "# Debugging\n\n"
+        "Start from the exact failing command.\n",
+        encoding="utf-8",
+    )
+    (references / "checklist.md").write_text("# Debugging Checklist\n\n- Reproduce the failure.\n", encoding="utf-8")
+    (root / "project-notes.md").write_text(
+        "---\n"
+        "name: project-notes\n"
+        "description: Summarize project context.\n"
+        "category: development\n"
+        "---\n\n"
+        "# Project Notes\n\n"
+        "Use this skill when project context matters.\n",
+        encoding="utf-8",
+    )
+
+
+def _turn(core):
+    return TurnContext(
+        session_id="session_test",
+        turn_id="turn_test",
+        core_id=core.core_id,
+        core_version=core.version,
+        user_input=AgentInput(content="test"),
+        state={},
+    )
+
+
+async def _execute(app, core, name, arguments):
+    return await app.tool_runtime.execute(
+        ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
+        core=core,
+        turn=_turn(core),
+        capability=CapabilityFacade(core),
+        emit_event=app.runner.event_log.emit,
+    )
+
+
+def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    expected = set(BUILTIN_TOOLSETS["coding"] + BUILTIN_TOOLSETS["demiurge_control"])
+
+    assert set(core.builtin_tool_names) == expected
+    defaults = core.raw_manifest["capabilities"]["defaults"]
+    assert {"fs.read", "fs.write", "terminal.exec", "network.fetch"}.issubset(defaults)
+
+
+@pytest.mark.asyncio
+async def test_readonly_file_tools_auto_approve_inside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("alpha\nneedle\nomega", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    listed = await _execute(app, core, "search_files", {"path": ".", "target": "name", "query": "note"})
+    read = await _execute(app, core, "read_file", {"path": "note.txt", "offset": 0, "limit": 5})
+    searched = await _execute(app, core, "search_files", {"query": "needle", "path": "."})
+
+    assert listed.is_error is False
+    assert "note.txt" in listed.content
+    assert read.content.startswith("alpha")
+    assert "truncated" in read.content
+    assert "note.txt:2" in searched.content
+    events = [event["type"] for event in app.runner.event_log.tail(20)]
+    assert "approval.decided" in events
+    assert "approval.requested" not in events
+
+
+@pytest.mark.asyncio
+async def test_search_files_name_and_content_modes_shape_output(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "alpha.txt").write_text("needle\n", encoding="utf-8")
+    (workspace / "beta.md").write_text("other\nneedle again\n", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"fs.read": {"scope": "workspace"}})
+
+    names = await _execute(app, core, "search_files", {"target": "name", "query": "alpha", "pattern": "*.txt"})
+    content = await _execute(app, core, "search_files", {"target": "content", "query": "needle", "path": ".", "pattern": "*.*"})
+
+    assert names.is_error is False
+    assert "alpha.txt" in names.content
+    assert "beta.md" not in names.content
+    assert content.is_error is False
+    assert "alpha.txt:1" in content.content
+    assert content.data["matches"][0]["path"] == "alpha.txt"
+
+
+@pytest.mark.asyncio
+async def test_sensitive_read_requires_approval_and_can_be_denied(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text("TOKEN=secret", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "read_file", {"path": ".env"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    events = [event["type"] for event in app.runner.event_log.tail(20)]
+    assert "approval.requested" in events
+    assert "approval.denied" in events
+
+
+@pytest.mark.asyncio
+async def test_write_and_patch_tools_with_approval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+
+    write = await _execute(app, core, "write_file", {"path": "notes/a.txt", "content": "hello"})
+    patch = await _execute(app, core, "patch", {"path": "notes/a.txt", "old": "hello", "new": "there"})
+
+    assert all(not item.is_error for item in [write, patch])
+    assert (workspace / "notes/a.txt").read_text(encoding="utf-8") == "there"
+    assert "-hello" in patch.content
+    assert "+there" in patch.content
+
+
+@pytest.mark.asyncio
+async def test_write_tool_denial_does_not_create_file(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "write_file", {"path": "blocked.txt", "content": "nope"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert not (workspace / "blocked.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_escape_is_rejected_before_execution(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "read_file", {"path": "../outside.txt"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    success = await _execute(app, core, "terminal", {"command": "printf hello", "cwd": "."})
+    timeout = await _execute(app, core, "terminal", {"command": "sleep 2", "timeout_seconds": 1})
+    escape = await _execute(app, core, "terminal", {"command": "pwd", "cwd": ".."})
+
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    denied = await _execute(app, core, "terminal", {"command": "printf denied"})
+
+    assert success.is_error is False
+    assert "hello" in success.content
+    assert timeout.is_error is True
+    assert timeout.data["timed_out"] is True
+    assert escape.is_error is True
+    assert escape.data["executionStarted"] is False
+    assert denied.is_error is True
+    assert denied.data["executionStarted"] is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    started = await _execute(app, core, "terminal", {"command": "printf ready", "background": True})
+    process_id = started.data["process_id"]
+    waited = await _execute(app, core, "process", {"action": "wait", "process_id": process_id, "timeout_seconds": 5})
+    log = await _execute(app, core, "process", {"action": "log", "process_id": process_id})
+    listed = await _execute(app, core, "process", {"action": "list"})
+
+    assert started.is_error is False
+    assert waited.is_error is False
+    assert waited.data["running"] is False
+    assert "ready" in log.content
+    assert process_id in listed.content
+
+
+@pytest.mark.asyncio
+async def test_todo_tool_persists_per_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = _load_core_with(app, capabilities={})
+
+    added = await _execute(app, core, "todo", {"action": "add", "text": "ship docs"})
+    listed = await _execute(app, core, "todo", {"action": "list"})
+    completed = await _execute(app, core, "todo", {"action": "complete", "index": 1})
+
+    assert added.is_error is False
+    assert "ship docs" in listed.content
+    assert completed.data["todos"][0]["done"] is True
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_creates_updates_and_deletes_runtime_skill(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+
+    created = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+    skill_path = app.version_store.active_core_path("assistant") / "agent/skills/local-note/SKILL.md"
+    assert created.is_error is False
+    assert skill_path.exists()
+
+    updated = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "update", "name": "local-note", "content": "---\ndescription: updated\n---\n\n# Updated\n"},
+    )
+    assert updated.is_error is False
+    assert "# Updated" in skill_path.read_text(encoding="utf-8")
+
+    reloaded = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    deleted = await _execute(app, reloaded, "skill_manage", {"action": "delete", "name": "local-note"})
+
+    assert deleted.is_error is False
+    assert not skill_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_session_search_reads_existing_messages_without_history_write(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    await app.runner.run_turn("alpha search target")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    before = app.runner.session_store.message_count(app.runner.session_id)
+
+    result = await _execute(app, core, "session_search", {"query": "alpha", "limit": 5})
+    after = app.runner.session_store.message_count(app.runner.session_id)
+
+    assert result.is_error is False
+    assert "alpha search target" in result.content
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_web_extract_requires_approval_and_truncates(tmp_path, monkeypatch):
+    class Headers:
+        def get_content_charset(self):
+            return "utf-8"
+
+        def get(self, name):
+            return "text/plain" if name == "content-type" else None
+
+    class Response:
+        status = 200
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size):
+            return ("x" * 100).encode("utf-8")[:size]
+
+    def fake_urlopen(request, timeout):
+        return Response()
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    denied = await _execute(app, core, "web_extract", {"url": "https://example.com"})
+
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    monkeypatch.setattr("demiurge.tools.runtime.urllib.request.urlopen", fake_urlopen)
+    fetched = await _execute(app, core, "web_extract", {"url": "https://example.com", "max_chars": 20})
+
+    assert denied.is_error is True
+    assert denied.data["executionStarted"] is False
+    assert fetched.is_error is False
+    assert fetched.content == "x" * 20
+    assert fetched.model_output == "x" * 20
+    assert fetched.data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_removed_tool_names_are_not_aliases(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = _load_core_with(app, capabilities={})
+
+    removed = [
+        "list_dir",
+        "glob",
+        "grep",
+        "append_file",
+        "patch_file",
+        "mkdir",
+        "delete_path",
+        "run_command",
+        "ask_question",
+        "web_fetch",
+        "web_search",
+    ]
+    results = [await _execute(app, core, name, {}) for name in removed]
+
+    assert all(result.is_error for result in results)
+    assert all("tool not found" in result.content for result in results)
+
+
+@pytest.mark.asyncio
+async def test_tools_list_returns_registry_metadata(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "tools_list", {})
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["success"] is True
+    names = {tool["name"] for tool in payload["tools"]}
+    assert {"tools_list", "skills_list", "read_file", "write_file", "patch", "terminal", "process", "echo"}.issubset(names)
+    read_file = next(tool for tool in payload["tools"] if tool["name"] == "read_file")
+    assert read_file["source"] == "builtin"
+    assert read_file["capability"] == "fs.read"
+    terminal = next(tool for tool in payload["tools"] if tool["name"] == "terminal")
+    assert terminal["capability"] == "terminal.exec"
+    assert terminal["approval_policy"] == "prompt"
+    model_payload = json.loads(result.model_output or "")
+    model_terminal = next(tool for tool in model_payload["tools"] if tool["name"] == "terminal")
+    assert model_terminal == {
+        "name": "terminal",
+        "description": terminal["description"],
+        "source": "builtin",
+        "enabled": True,
+    }
+    assert "api_key" not in result.content
+    assert "approval_policy" not in result.model_output
+    assert "capability" not in result.model_output
+    assert "risk" not in result.model_output
+
+
+def test_builtin_tool_descriptions_are_model_facing_not_approval_prompts():
+    prompt_text = "\n".join(definition.description.lower() for definition in BUILTIN_TOOL_DEFINITIONS.values())
+
+    assert "after approval" not in prompt_text
+    assert "requires approval" not in prompt_text
+    assert "need approval" not in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_core_approval_config_cannot_lower_host_safety_baseline(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["approval"] = {"tools": {"terminal": "auto"}}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "terminal", {"command": "printf no"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "printf yes"})
+
+    assert result.is_error is False
+    assert "yes" in result.content
+    assert result.data["executionStarted"] is True
+
+
+@pytest.mark.asyncio
+async def test_skills_list_returns_metadata_without_skill_body(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "skills_list", {})
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["success"] is True
+    assert payload["count"] == 2
+    assert payload["categories"] == ["development"]
+    assert {skill["name"] for skill in payload["skills"]} == {"debugging", "project-notes"}
+    assert payload["skills"][0]["description"]
+    assert "Start from the exact failing command" not in result.content
+    assert "Use this skill when" not in result.content
+    assert result.model_output == result.content
+
+
+@pytest.mark.asyncio
+async def test_skills_list_filters_by_category(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    development = await _execute(app, core, "skills_list", {"category": "development"})
+    missing = await _execute(app, core, "skills_list", {"category": "missing"})
+
+    assert development.data["count"] == 2
+    assert missing.data["count"] == 0
+    assert missing.data["categories"] == ["development"]
+
+
+@pytest.mark.asyncio
+async def test_skill_view_loads_main_document_into_model_output(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "skill_view", {"name": "debugging"})
+
+    assert result.is_error is False
+    assert result.data["skill_id"] == "debugging"
+    assert result.data["category"] == "development"
+    assert result.data["linked_files"] == {"references": ["references/checklist.md"]}
+    assert "# Debugging" in result.data["content"]
+    assert "<skill name=\"debugging\"" in result.model_output
+    assert "Start from the exact failing command" in result.model_output
+    assert "references/checklist.md" in result.model_output
+
+
+@pytest.mark.asyncio
+async def test_skill_view_loads_packaged_linked_file(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "skill_view",
+        {"name": "debugging", "file_path": "references/checklist.md"},
+    )
+
+    assert result.is_error is False
+    assert result.data["file_path"] == "references/checklist.md"
+    assert "Debugging Checklist" in result.data["content"]
+    assert "<skill_file name=\"debugging\"" in result.model_output
+    assert "Debugging Checklist" in result.model_output
+
+
+@pytest.mark.asyncio
+async def test_skill_view_rejects_unknown_or_unlinked_files(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    unknown_skill = await _execute(app, core, "skill_view", {"name": "missing"})
+    absolute = await _execute(
+        app,
+        core,
+        "skill_view",
+        {"name": "debugging", "file_path": "/tmp/secret.txt"},
+    )
+    parent_escape = await _execute(
+        app,
+        core,
+        "skill_view",
+        {"name": "debugging", "file_path": "../debugging/SKILL.md"},
+    )
+    unlinked = await _execute(
+        app,
+        core,
+        "skill_view",
+        {"name": "debugging", "file_path": "SKILL.md"},
+    )
+
+    assert unknown_skill.is_error is True
+    assert "skill not found" in unknown_skill.content
+    assert absolute.is_error is True
+    assert parent_escape.is_error is True
+    assert unlinked.is_error is True
+    assert "not allowed" in unlinked.content
+
+
+@pytest.mark.asyncio
+async def test_skill_view_rejects_linked_file_that_becomes_symlink_escape(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_test_skills(app)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    skill_file = app.version_store.active_core_path("assistant") / "agent/skills/debugging/references/checklist.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    skill_file.unlink()
+    skill_file.symlink_to(outside)
+
+    result = await _execute(
+        app,
+        core,
+        "skill_view",
+        {"name": "debugging", "file_path": "references/checklist.md"},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+
+
+@pytest.mark.asyncio
+async def test_missing_capability_denies_builtin_even_when_visible(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["capabilities"]["defaults"].pop("fs.write")
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "write_file", {"path": "x.txt", "content": "x"})
+
+    assert result.is_error is True
+    assert "capability denied" in result.content

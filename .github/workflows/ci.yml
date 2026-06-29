@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  python:
+    name: Python 3.11
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev --python "3.11"
+
+      - name: Compile Python sources
+        run: uv run python -m compileall demiurge tests
+
+      - name: Run Python tests
+        run: uv run pytest -vv --durations=20 -o faulthandler_timeout=60
+
+      - name: Check CLI help
+        run: |
+          uv run demiurge --help
+          uv run demiurge init --help
+
+      - name: Build package
+        run: uv build
+
+  tui:
+    name: TUI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui-tui/package-lock.json
+
+      - name: Install TUI dependencies
+        working-directory: ui-tui
+        run: npm ci
+
+      - name: Typecheck TUI
+        working-directory: ui-tui
+        run: npm run typecheck
+
+      - name: Test TUI
+        working-directory: ui-tui
+        run: npm test -- --run
+
+      - name: Build TUI
+        working-directory: ui-tui
+        run: npm run build
+
+      - name: Check packaged TUI asset
+        run: cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check whitespace
+        run: |
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD -- ':!demiurge/ui/tui_dist/entry.js'
+          else
+            empty_tree="$(git hash-object -t tree /dev/null)"
+            git diff --check "$empty_tree" HEAD -- ':!demiurge/ui/tui_dist/entry.js'
+          fi

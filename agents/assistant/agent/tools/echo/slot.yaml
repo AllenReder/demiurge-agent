@@ -1,0 +1,9 @@
+entrypoint: module:execute
+description: "Echoes input text. Used as a minimal authored tool adapter."
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  additionalProperties: false
+capabilities: []

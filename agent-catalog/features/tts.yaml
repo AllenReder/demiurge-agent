@@ -1,0 +1,8 @@
+schema_version: 1
+id: tts
+name: Text to speech
+summary: Generate and deliver voice artifacts from assistant output.
+tags:
+  tts:
+    conflict: advisory
+    summary: Multiple active TTS output modules may deliver duplicate audio.
