@@ -1,14 +1,43 @@
-# demiurge
+<!-- Logo/wordmark slot: add docs/assets/demiurge-wordmark.svg here when the asset is ready. -->
 
-`demiurge` is a local-first Python agent harness where the host owns the runtime loop, tools, approvals, state, delivery, and versioning, while each agent core stays as an authored `agent.yaml + agent/` surface.
+<h1 align="center">demiurge</h1>
+
+<p align="center">
+  <strong>Local-first Python agent framework for modular IO and controlled agent-core evolution.</strong>
+</p>
+
+<p align="center">
+  <kbd><strong>English</strong></kbd>
+  <a href="README.zh-CN.md"><kbd>中文</kbd></a>
+</p>
+
+<p align="center">
+  <a href="docs/README.md">Docs</a> ·
+  <a href="docs/quickstart.md">Quickstart</a> ·
+  <a href="docs/agent-core-authoring.md">Authoring</a> ·
+  <a href="docs/channels.md">Channels</a> ·
+  <a href="docs/security.md">Security</a>
+</p>
+
+`demiurge` is a local-first Python agent harness. The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, while each agent core stays as an inspectable `agent.yaml + agent/` authored surface.
+
+That split keeps the runtime stable while letting IO modules, skills, schedules, and candidate core changes evolve inside a clear boundary.
 
 Status: **alpha / developer preview**. APIs, runtime layout, and authoring contracts may still change.
 
-中文说明: [README.zh-CN.md](README.zh-CN.md)
+## Why demiurge?
+
+| Capability | What it means |
+| --- | --- |
+| Modular IO | Agent cores can shape input, format output, emit local artifacts, and route delivery without taking over host-owned capabilities or approvals. |
+| Controlled evolution | Core changes are designed to be file-backed, diffable, testable, and promotable through host-owned version controls. |
+| Host-owned harness | Provider calls, tool execution, approvals, state writes, sessions, and delivery stay under a stable runtime boundary. |
+| Authored surface | Agent behavior lives in readable files: instructions, skills, schedules, IO modules, tests, and optional code slots. |
+| Local-first runtime | Live cores, sessions, configuration, and workspaces live under `~/.demiurge` by default. |
 
 ## Quickstart
 
-Managed install is the default path:
+Managed install is the default path. It creates a runtime home, installs the managed checkout, and starts with the fake provider:
 
 ```bash
 scripts/install.sh
@@ -29,13 +58,34 @@ Update the managed checkout later:
 
 `demiurge update` updates code and dependencies, then runs a read-only runtime drift check. It does not overwrite live agent cores.
 
-## Agent Cores and IO
+## Agent Core and IO
 
-An agent core is the authored surface under `~/.demiurge/agents/<core>/`: `agent.yaml` plus an `agent/` directory. The host owns execution, provider calls, tools, approvals, state, sessions, and delivery; the core declares instructions, skills, channels, and optional code slots.
+An agent core is the authored surface under `~/.demiurge/agents/<core>/`: `agent.yaml` plus an `agent/` directory.
+
+```text
+assistant/
+├── agent.yaml
+└── agent/
+    ├── instructions.md
+    ├── skills/
+    ├── schedules/
+    ├── input/
+    ├── output/
+    ├── lib/
+    └── tests/
+```
+
+The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares instructions, skills, channels, schedules, IO modules, and optional code slots.
 
 IO modules are core-local extension points for input shaping and output delivery. They let a core adapt channel input, format responses, emit local artifacts, or route output while still going through host-owned capabilities and approvals.
 
 See [docs/agents.md](docs/agents.md), [docs/agent-core-authoring.md](docs/agent-core-authoring.md), and [docs/channels.md](docs/channels.md) for the full authoring model.
+
+## Evolution Boundary
+
+demiurge treats an agent core as a versionable filesystem surface. The intended evolution path is to propose candidate core changes, evaluate them with tests or runtime checks, then promote or roll them back through the host.
+
+Authored slots should not bypass host-owned controls for dependency changes, dangerous capabilities, production state mutation, provider calls, or tool execution. This keeps agent behavior open to iteration without making the runtime loop itself self-modifying.
 
 ## Configure a Real Provider
 
@@ -101,11 +151,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow.
 
 ## Documentation
 
-- User documentation: [docs/README.md](docs/README.md)
-- Security policy: [SECURITY.md](SECURITY.md)
-- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Release checklist: [RELEASE.md](RELEASE.md)
-- License: [LICENSE](LICENSE)
+| Page | Purpose |
+| --- | --- |
+| [docs/README.md](docs/README.md) | User documentation index. |
+| [docs/quickstart.md](docs/quickstart.md) | Install, initialize runtime home, and start the TUI. |
+| [docs/agent-core-authoring.md](docs/agent-core-authoring.md) | Author IO modules and customize runtime agent cores. |
+| [docs/channels.md](docs/channels.md) | Local TUI and Telegram gateway behavior. |
+| [docs/security.md](docs/security.md) | Workspace scope, approvals, and channel trust boundaries. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development and verification workflow. |
+| [RELEASE.md](RELEASE.md) | Release checklist. |
 
 ## License
 
@@ -113,4 +167,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-demiurge's design has been informed by [OpenClaw](https://github.com/openclaw/openclaw), [Hermes Agent](https://github.com/NousResearch/hermes-agent), and [OpenCode](https://github.com/anomalyco/opencode).
+demiurge's design has been informed by [OpenClaw](https://github.com/openclaw/openclaw), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Eve](https://github.com/vercel/eve), and [OpenCode](https://github.com/anomalyco/opencode).
