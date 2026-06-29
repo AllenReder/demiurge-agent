@@ -165,7 +165,7 @@ function ListBlock(props: { columns: number; marginTop?: number; token: Tokens.L
 
 function splitListItem(tokens: Token[]): { inlineTokens: Token[] | undefined; remaining: Token[] } {
   let firstContentIndex = 0
-  while (tokens[firstContentIndex]?.type === "checkbox") firstContentIndex += 1
+  while (tokens[firstContentIndex]?.type === "checkbox" || tokens[firstContentIndex]?.type === "space") firstContentIndex += 1
   const firstToken = tokens[firstContentIndex]
   if (!firstToken) return { inlineTokens: undefined, remaining: [] }
   if ((firstToken.type === "text" || firstToken.type === "paragraph") && "tokens" in firstToken && Array.isArray(firstToken.tokens)) {

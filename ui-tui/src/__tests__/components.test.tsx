@@ -169,6 +169,32 @@ describe("Ink TUI components", () => {
     expect(lines.every((line) => displayWidth(line) <= 54)).toBe(true)
   })
 
+  it("keeps ordered markers attached when model output puts text on the next indented line", () => {
+    const markdown = render(
+      <Markdown
+        columns={72}
+        text={[
+          "1.",
+          "   **核心指令**—就是开头那段：",
+          "",
+          "   你运行在 demiurge 宿主框架中。",
+          "2.",
+          "   **技能加载规则**—每次回复前扫描技能列表。",
+        ].join("\n")}
+      />,
+    )
+    const lines = markdown.lastFrame()!.split("\n")
+    const first = lines.find((line) => line.includes("核心指令")) ?? ""
+    const second = lines.find((line) => line.includes("技能加载规则")) ?? ""
+
+    expect(first).toContain("1.")
+    expect(first).not.toContain("**核心指令**")
+    expect(second).toContain("2.")
+    expect(second).not.toContain("**技能加载规则**")
+    expect(lines.some((line) => line.trim() === "1.")).toBe(false)
+    expect(lines.some((line) => line.trim() === "2.")).toBe(false)
+  })
+
   it("renders narrow markdown tables as vertical key/value blocks", () => {
     const table = render(<Markdown columns={24} text={"| very long name | description |\n| --- | --- |\n| read_file | read workspace text |"} />)
     expect(table.lastFrame()).toContain("very long name:")
