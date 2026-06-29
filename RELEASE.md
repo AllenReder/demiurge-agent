@@ -28,8 +28,13 @@ cd ui-tui && npm run build
 cd ..
 cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 uv build
-uv run python -m zipfile -l dist/demiurge-0.1.1-py3-none-any.whl | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
-tar -tzf dist/demiurge-0.1.1.tar.gz | rg '^demiurge-[^/]+/\.temp/' && exit 1 || true
+version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+wheel="dist/demiurge-${version}-py3-none-any.whl"
+sdist="dist/demiurge-${version}.tar.gz"
+test -f "$wheel"
+test -f "$sdist"
+uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
+tar -tzf "$sdist" | rg '^demiurge-[^/]+/\.temp/' && exit 1 || true
 scripts/smoke_wheel_install.sh
 git diff --check
 ```
@@ -44,10 +49,13 @@ git diff --check
 5. Create a signed or annotated tag when possible:
 
 ```bash
-git tag -a v0.1.1 -m "demiurge v0.1.1"
+version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+git tag -a "v${version}" -m "demiurge ${version}"
 ```
 
-6. Create a GitHub release and attach `dist/*.whl` and `dist/*.tar.gz`.
+6. Create a GitHub release for that tag and attach `dist/*.whl` and
+   `dist/*.tar.gz`. For PEP 440 pre-releases such as `0.2.0a1`, use the
+   clearer public tag spelling described in the versioning policy if needed.
 
 ## First Public Alpha Notes
 
