@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from demiurge.packages import PackageManager, PackageOperationError, PresetInfo, PresetOption
+from demiurge.packages import PackageInfo, PackageManager, PackageOperationError, PackageOption
 from demiurge.storage import VersionStore
 
 
@@ -37,6 +37,7 @@ class PromptToolkitPackagePrompt:
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
 
         index = {"value": max(0, min(default_index, len(choices) - 1))}
 
@@ -46,8 +47,11 @@ class PromptToolkitPackagePrompt:
                 selected = offset == index["value"]
                 prefix = "> " if selected else "  "
                 style = "reverse" if selected else ""
-                detail = f" - {choice.description}" if choice.description else ""
-                rows.append((style, f"{prefix}{choice.label}{detail}\n"))
+                rows.append((style, f"{prefix}{choice.label}"))
+                if choice.description:
+                    description_style = "reverse" if selected else "class:description"
+                    rows.append((description_style, f" - {choice.description}"))
+                rows.append((style, "\n"))
             rows.append(("", "\nUp/Down to choose, Enter to confirm, Ctrl-C to cancel."))
             return rows
 
@@ -74,6 +78,7 @@ class PromptToolkitPackagePrompt:
         app = Application(
             layout=Layout(Window(FormattedTextControl(_text), dont_extend_height=True)),
             key_bindings=kb,
+            style=Style.from_dict({"description": "ansibrightblack", "title": "bold"}),
             full_screen=False,
             erase_when_done=True,
         )
@@ -126,13 +131,20 @@ class PackageWizard:
                 action = self.prompt.select(
                     "Package manager",
                     [
-                        SelectChoice("browse", "Browse catalog", "View presets and install"),
+                        SelectChoice("all", "All packages", "Browse all catalog packages"),
+                        SelectChoice("search", "Search packages", "Filter by package id, name, summary, or tag"),
+                        SelectChoice("tags", "Browse by tag", "View packages grouped by tag"),
                         SelectChoice("installed", "Installed packages", "View and uninstall"),
                         SelectChoice("exit", "Exit"),
                     ],
                 )
-                if action == "browse":
-                    self._browse_catalog(core_id)
+                if action == "search":
+                    query = self.prompt.input("Search query").strip()
+                    self._browse_packages(core_id, self._search_packages(query), title=f"Search: {query or '(all)'}")
+                elif action == "tags":
+                    self._browse_tags(core_id)
+                elif action == "all":
+                    self._browse_packages(core_id, self.manager.list(core_id=core_id).packages, title="All packages")
                 elif action == "installed":
                     self._installed_packages(core_id)
                 elif action == "exit":
@@ -155,30 +167,79 @@ class PackageWizard:
             default_index=default_index,
         )
 
-    def _browse_catalog(self, core_id: str) -> None:
+    def _browse_tags(self, core_id: str) -> None:
+        result = self.manager.list(core_id=core_id)
+        choices = [SelectChoice(tag, tag, f"{self._tag_count(tag)} package(s)") for tag in result.tags]
+        choices.append(SelectChoice("back", "Back"))
+        selected = self.prompt.select("Browse by tag", choices)
+        if selected == "back":
+            return
+        tagged = self.manager.list(core_id=core_id, tag=selected).packages
+        self._browse_packages(core_id, tagged, title=f"Tag: {selected}")
+
+    def _search_packages(self, query: str) -> list[PackageInfo]:
+        packages = self.manager.list().packages
+        if not query:
+            return packages
+        normalized = query.lower()
+        return [
+            package
+            for package in packages
+            if normalized in package.package_id.lower()
+            or normalized in package.name.lower()
+            or normalized in package.summary.lower()
+            or any(normalized in tag.lower() for tag in package.tags)
+        ]
+
+    def _browse_packages(self, core_id: str, packages: list[PackageInfo], *, title: str) -> None:
         while True:
-            result = self.manager.list(core_id=core_id)
-            installed_ids = {item.preset_id for item in result.installed}
+            installed_ids = {item.package_id for item in self.manager.list(core_id=core_id).installed}
+            if not packages:
+                self.console.print("No packages found.")
+                return
             choices = [
                 SelectChoice(
-                    preset.preset_id,
-                    f"{preset.preset_id}{' [installed]' if preset.preset_id in installed_ids else ''}",
-                    preset.summary,
+                    package.package_id,
+                    f"{package.package_id}{' [installed]' if package.package_id in installed_ids else ''}",
+                    package.summary,
                 )
-                for preset in result.presets
+                for package in packages
             ]
             choices.append(SelectChoice("back", "Back"))
-            selected = self.prompt.select("Browse catalog", choices)
+            selected = self.prompt.select(title, choices)
             if selected == "back":
                 return
-            preset = self.manager.catalog.presets[selected]
-            self._print_preset(preset, installed=selected in installed_ids)
-            actions = [SelectChoice("install", "Install"), SelectChoice("back", "Back")]
-            if selected in installed_ids:
-                actions = [SelectChoice("back", "Back")]
-            action = self.prompt.select(f"Preset {selected}", actions)
-            if action == "install":
-                self._install(core_id, preset)
+            package = self.manager.catalog.packages[selected]
+            self._package_detail(core_id, package)
+
+    def _package_detail(self, core_id: str, package: PackageInfo) -> None:
+        installed_ids = {item.package_id for item in self.manager.list(core_id=core_id).installed}
+        installed = package.package_id in installed_ids
+        self._print_package(package, installed=installed)
+        actions = [SelectChoice("back", "Back")]
+        if not installed:
+            actions.insert(0, SelectChoice("install", "Install"))
+        action = self.prompt.select(f"Package {package.package_id}", actions)
+        if action != "install":
+            return
+        answers = self._collect_options(package)
+        try:
+            preview = self.manager.preview_install(core_id=core_id, package_id=package.package_id, option_answers=answers)
+        except PackageOperationError as exc:
+            self.console.print(f"[red]Install blocked:[/red] {exc}")
+            return
+        self._print_preview(preview)
+        if not self.prompt.confirm(f"Install {package.package_id} into {core_id}?", default=False):
+            self.console.print("Install canceled.")
+            return
+        try:
+            result = self.manager.install(core_id=core_id, package_id=package.package_id, option_answers=answers)
+        except PackageOperationError as exc:
+            self.console.print(f"[red]Install failed:[/red] {exc}")
+            return
+        self.console.print(f"installed {result.package_id} for {result.core_id}")
+        for warning in result.warnings:
+            self.console.print(f"warning: {warning}")
 
     def _installed_packages(self, core_id: str) -> None:
         while True:
@@ -187,49 +248,42 @@ class PackageWizard:
                 self.console.print("No packages installed.")
                 return
             self._print_installed(core_id)
-            choices = [SelectChoice(item.preset_id, item.preset_id, ", ".join(item.tags)) for item in installed]
+            choices = [SelectChoice(item.package_id, item.package_id, ", ".join(item.tags)) for item in installed]
             choices.append(SelectChoice("back", "Back"))
             selected = self.prompt.select("Installed packages", choices)
             if selected == "back":
                 return
-            record = next(item for item in installed if item.preset_id == selected)
+            record = next(item for item in installed if item.package_id == selected)
             self._print_installed_detail(core_id, selected)
+            try:
+                preview = self.manager.preview_uninstall(core_id=core_id, package_id=record.package_id)
+            except PackageOperationError as exc:
+                self.console.print(f"[red]Uninstall blocked:[/red] {exc}")
+                continue
             action = self.prompt.select(
-                f"Installed preset {selected}",
+                f"Installed package {selected}",
                 [SelectChoice("uninstall", "Uninstall"), SelectChoice("back", "Back")],
             )
             if action != "uninstall":
                 continue
+            self._print_preview(preview)
             if not self.prompt.confirm(f"Uninstall {selected} from {core_id}?", default=False):
                 self.console.print("Uninstall canceled.")
                 continue
-            result = self.manager.uninstall(core_id=core_id, preset_id=record.preset_id)
-            self.console.print(f"uninstalled {result.preset_id} for {result.core_id}")
+            result = self.manager.uninstall(core_id=core_id, package_id=record.package_id)
+            self.console.print(f"uninstalled {result.package_id} for {result.core_id}")
+            for warning in result.warnings:
+                self.console.print(f"warning: {warning}")
 
-    def _install(self, core_id: str, preset: PresetInfo) -> None:
-        warnings = self.manager.install_warnings(core_id=core_id, preset_id=preset.preset_id)
-        if warnings:
-            self.console.print(Panel("\n".join(warnings), title="Tag conflict warning", style="yellow"))
-            if not self.prompt.confirm("Install anyway?", default=False):
-                self.console.print("Install canceled.")
-                return
-        answers = self._collect_options(preset)
-        try:
-            result = self.manager.install(core_id=core_id, preset_id=preset.preset_id, option_answers=answers)
-        except PackageOperationError as exc:
-            self.console.print(f"[red]Install failed:[/red] {exc}")
-            return
-        self.console.print(f"installed {result.preset_id} for {result.core_id}")
-        for warning in result.warnings:
-            self.console.print(f"warning: {warning}")
-
-    def _collect_options(self, preset: PresetInfo) -> dict[str, object]:
+    def _collect_options(self, package: PackageInfo) -> dict[str, object]:
         answers: dict[str, object] = {}
-        for option in preset.options:
+        for option in package.options:
             answers[option.option_id] = self._collect_option(option)
         return answers
 
-    def _collect_option(self, option: PresetOption) -> object:
+    def _collect_option(self, option: PackageOption) -> object:
+        if option.description and option.option_type != "choice":
+            self.console.print(f"[dim]{option.description}[/dim]")
         if option.option_type == "bool":
             default = bool(option.default) if option.has_default and option.default is not None else False
             return self.prompt.confirm(option.prompt, default=default)
@@ -237,7 +291,7 @@ class PackageWizard:
             default_index = option.choices.index(option.default) if option.default in option.choices else 0
             return self.prompt.select(
                 option.prompt,
-                [SelectChoice(choice, choice) for choice in option.choices],
+                [SelectChoice(choice, choice, option.choice_descriptions.get(choice, "")) for choice in option.choices],
                 default_index=default_index,
             )
         default = str(option.default) if option.has_default and option.default is not None else None
@@ -248,40 +302,54 @@ class PackageWizard:
             return default
         return value
 
-    def _print_preset(self, preset: PresetInfo, *, installed: bool) -> None:
-        table = Table(title=f"Package preset: {preset.preset_id}")
+    def _print_package(self, package: PackageInfo, *, installed: bool) -> None:
+        table = Table(title=f"Package: {package.package_id}")
         table.add_column("field")
         table.add_column("value")
-        table.add_row("name", preset.name)
-        table.add_row("feature", preset.feature_id)
-        table.add_row("tags", ", ".join(preset.tags))
-        table.add_row("summary", preset.summary)
+        table.add_row("name", package.name)
+        table.add_row("tags", ", ".join(package.tags))
+        table.add_row("summary", package.summary)
         table.add_row("installed", "yes" if installed else "no")
-        table.add_row("options", self._format_options(preset))
+        table.add_row("options", self._format_options(package))
         table.add_row(
             "components",
             "\n".join(
                 f"{component.kind}:{component.source}"
                 + (f" -> {component.target}" if component.target else "")
                 + (f" -> core {component.target_core_id}" if component.target_core_id else "")
-                for component in preset.components
+                + (f" when {component.when}" if component.when else "")
+                for component in package.components
             ),
         )
+        self.console.print(table)
+
+    def _print_preview(self, preview) -> None:
+        table = Table(title=f"{preview.action.title()} preview: {preview.package_id}")
+        table.add_column("kind")
+        table.add_column("target")
+        table.add_column("action")
+        for component in preview.components:
+            target = str(component.get("target") or component.get("target_core_id") or "")
+            if preview.action == "uninstall":
+                action = "remove" if component.get("remove", True) else "keep shared"
+            else:
+                action = "reuse" if component.get("reused") else "write"
+            table.add_row(str(component.get("kind") or ""), target, action)
         self.console.print(table)
 
     def _print_installed(self, core_id: str) -> None:
         result = self.manager.list(core_id=core_id)
         table = Table(title=f"Installed packages: {core_id}")
-        table.add_column("preset")
+        table.add_column("package")
         table.add_column("tags")
         table.add_column("installed")
         for item in result.installed:
-            table.add_row(item.preset_id, ", ".join(item.tags), item.installed_at)
+            table.add_row(item.package_id, ", ".join(item.tags), item.installed_at)
         self.console.print(table)
 
-    def _print_installed_detail(self, core_id: str, preset_id: str) -> None:
-        record = next(item for item in self.manager.list(core_id=core_id).installed if item.preset_id == preset_id)
-        table = Table(title=f"Installed preset: {preset_id}")
+    def _print_installed_detail(self, core_id: str, package_id: str) -> None:
+        record = next(item for item in self.manager.list(core_id=core_id).installed if item.package_id == package_id)
+        table = Table(title=f"Installed package: {package_id}")
         table.add_column("field")
         table.add_column("value")
         table.add_row("tags", ", ".join(record.tags))
@@ -290,21 +358,32 @@ class PackageWizard:
             "components",
             "\n".join(
                 f"{component.get('kind')}:{component.get('target') or component.get('target_core_id')}"
+                + (" (reused)" if component.get("reused") else "")
                 for component in record.components
             ),
         )
         self.console.print(table)
 
-    def _format_options(self, preset: PresetInfo) -> str:
-        if not preset.options:
+    def _format_options(self, package: PackageInfo) -> str:
+        if not package.options:
             return "(none)"
         rows = []
-        for option in preset.options:
+        for option in package.options:
             required = "required" if option.required else "optional"
             secret = ", secret" if option.secret else ""
             choices = f", choices={','.join(option.choices)}" if option.choices else ""
-            rows.append(f"{option.option_id}: {option.option_type} ({required}{secret}{choices})")
+            description = f" - {option.description}" if option.description else ""
+            choice_details = [
+                f"{choice}: {option.choice_descriptions[choice]}"
+                for choice in option.choices
+                if choice in option.choice_descriptions
+            ]
+            choice_suffix = f"\n  " + "\n  ".join(choice_details) if choice_details else ""
+            rows.append(f"{option.option_id}: {option.option_type} ({required}{secret}{choices}){description}{choice_suffix}")
         return "\n".join(rows)
+
+    def _tag_count(self, tag: str) -> int:
+        return sum(1 for package in self.manager.catalog.packages.values() if tag in package.tags)
 
 
 def run_package_wizard(

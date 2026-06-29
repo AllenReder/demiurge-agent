@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-from .synthesizer import synthesize_to_file
+from .tts_minimax.synthesizer import synthesize_to_file
 
 
 _MD_CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)

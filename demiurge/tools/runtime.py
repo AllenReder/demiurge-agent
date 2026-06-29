@@ -1167,6 +1167,7 @@ class ToolRuntime:
             slot_id=slot.slot_id,
             slot_path=slot.relative_path,
             capability=capability,
+            workspace=self.workspace.root,
         )
         value = func(ctx, call.arguments)
         if inspect.isawaitable(value):

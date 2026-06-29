@@ -1,4 +1,4 @@
 schema_version: 1
 id: demiurge_builtin
 name: Demiurge built-in agent catalog
-summary: Built-in optional agent components and install presets.
+summary: Built-in optional agent packages.

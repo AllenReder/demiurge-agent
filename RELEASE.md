@@ -28,8 +28,8 @@ cd ui-tui && npm run build
 cd ..
 cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 uv build
-uv run python -m zipfile -l dist/demiurge-0.1.0-py3-none-any.whl | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
-tar -tzf dist/demiurge-0.1.0.tar.gz | rg '^demiurge-[^/]+/\.temp/' && exit 1 || true
+uv run python -m zipfile -l dist/demiurge-0.1.1-py3-none-any.whl | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
+tar -tzf dist/demiurge-0.1.1.tar.gz | rg '^demiurge-[^/]+/\.temp/' && exit 1 || true
 scripts/smoke_wheel_install.sh
 git diff --check
 ```
@@ -44,7 +44,7 @@ git diff --check
 5. Create a signed or annotated tag when possible:
 
 ```bash
-git tag -a v0.1.0 -m "demiurge v0.1.0"
+git tag -a v0.1.1 -m "demiurge v0.1.1"
 ```
 
 6. Create a GitHub release and attach `dist/*.whl` and `dist/*.tar.gz`.

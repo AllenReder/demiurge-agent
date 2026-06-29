@@ -44,7 +44,7 @@ Interactive approvals are provided by the current interaction bridge:
 - TUI uses a local modal with allow-once, allow-for-session, and deny choices.
 - Telegram private chats use MarkdownV2 approval messages with inline `Allow once`, `Allow for session`, and `Deny` buttons.
 - Telegram approvals pause the current turn until resolved or timed out.
-- Telegram group chats do not support interactive approvals in v1; approval-required actions fail closed.
+- Telegram group chats do not currently support interactive approvals; approval-required actions fail closed.
 
 ## Telegram Access Policy
 
@@ -81,9 +81,9 @@ Regardless of config, the host always enforces:
 - dependency-file gates;
 - self-evolution write boundaries.
 
-## Non-Goals in v1
+## Current Non-Goals
 
-v1 does not provide:
+The current implementation does not provide:
 
 - container sandboxing;
 - PTY isolation;

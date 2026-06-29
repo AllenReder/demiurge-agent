@@ -57,7 +57,7 @@ Common TUI slash commands:
 - `/tools`
 - `/skills [category]`
 - `/skill <name> [file_path]`
-- `/packages [preset|install <preset>|uninstall <preset>]`
+- `/packages [package|install <package>|uninstall <package>]`
 - `/sessions`
 - `/resume [session_id|number]`
 - `/new`
@@ -154,13 +154,18 @@ read-only.
 uv run demiurge package
 uv run demiurge package list
 uv run demiurge package list --core assistant
-uv run demiurge package install tts_only --core assistant
-uv run demiurge package uninstall tts_only --core assistant
+uv run demiurge package list --tag tts --json
+uv run demiurge package install minimax_tts --core assistant
+uv run demiurge package install minimax_tts --core assistant --option mode=summary
+uv run demiurge package install minimax_tts --core assistant --preview
+uv run demiurge package uninstall minimax_tts --core assistant
+uv run demiurge package uninstall minimax_tts --core assistant --preview
 ```
 
-`package` manages catalog presets installed into runtime active cores. Without a
+`package` manages catalog packages installed into runtime active cores. Without a
 subcommand, it starts the interactive wizard. Scripted `install` and
-`uninstall` require `--core`.
+`uninstall` require `--core`. `install --option KEY=VALUE` may be repeated for
+package options. `--preview` shows the planned changes without writing files.
 
 `--catalog-root PATH` can point to another catalog with the same layout as
 `agent-catalog/`.
@@ -172,7 +177,8 @@ uv run demiurge gateway --core assistant
 ```
 
 `gateway` does not start the TUI. It reads external channel config from the
-current core and runs enabled channel bridges. v1 supports Telegram.
+current core and runs enabled channel bridges. The current external channel
+implementation supports Telegram.
 
 Telegram must be enabled in the core:
 

@@ -1,0 +1,99 @@
+schema_version: 2
+id: minimax_tts
+name: MiniMax TTS
+summary: Generate speech audio with MiniMax, either directly or through a summarizer core.
+tags:
+  - audio
+  - tts
+  - provider:minimax
+options:
+  - id: mode
+    type: choice
+    prompt: TTS mode
+    description: Choose whether the output module speaks the final text directly or first runs a summarizer core.
+    default: direct
+    choices:
+      - value: direct
+        description: Generate speech from the assistant reply as-is.
+      - value: summary
+        description: Summarize the assistant reply before generating speech.
+  - id: enable_tool
+    type: bool
+    prompt: Add agent TTS tool
+    description: Also install an authored tool so the agent can generate speech on demand.
+    default: false
+  - id: api_key
+    type: secret
+    prompt: MiniMax API key
+    description: Optional direct MiniMax API key; leave empty to read DEMIURGE_MINIMAX_API_KEY.
+    required: false
+    default: null
+components:
+  - id: tts_lib
+    kind: lib
+    source: tts_minimax
+    target: agent/lib/tts_minimax
+  - id: tts_output
+    kind: output
+    source: tts_minimax
+    target: agent/output/tts_minimax
+    pipeline:
+      group: serial
+      after: base_output
+    config:
+      provider: tts_minimax
+      base_url: https://api.minimaxi.com/v1/t2a_v2
+      model: speech-2.8-hd
+      voice_setting:
+        voice_id: male-qn-qingse
+      audio_setting: {}
+      summarizer_core: null
+      output_dir: .demiurge-tts
+      filename_template: "{turn_id}.{format}"
+      media_type: audio/mpeg
+      summary: MiniMax TTS audio
+      max_text_length: 10000
+      strip_markdown: true
+      api_key: ${options.api_key}
+      api_key_env: DEMIURGE_MINIMAX_API_KEY
+      group_id: null
+      group_id_env: DEMIURGE_MINIMAX_GROUP_ID
+    config_when:
+      - when:
+          mode: summary
+        config:
+          summarizer_core: tts_summarizer
+          summarizer_context: Summarize this assistant reply into short spoken text for TTS.
+          summary: MiniMax summarized TTS audio
+  - id: tts_summarizer
+    kind: core
+    source: tts_summarizer
+    target_core_id: tts_summarizer
+    when:
+      mode: summary
+  - id: tts_tool
+    kind: tool
+    source: tts_synthesize
+    target: agent/tools/tts_synthesize
+    when:
+      enable_tool: true
+    config:
+      provider: tts_minimax
+      base_url: https://api.minimaxi.com/v1/t2a_v2
+      model: speech-2.8-hd
+      voice_setting:
+        voice_id: male-qn-qingse
+      audio_setting: {}
+      output_dir: .demiurge-tts
+      filename_template: "{turn_id}-tool.{format}"
+      media_type: audio/mpeg
+      api_key: ${options.api_key}
+      api_key_env: DEMIURGE_MINIMAX_API_KEY
+      group_id: null
+      group_id_env: DEMIURGE_MINIMAX_GROUP_ID
+  - id: tts_voice_skill
+    kind: skill
+    source: tts_voice
+    target: agent/skills/tts_voice
+    when:
+      enable_tool: true

@@ -4,6 +4,7 @@ from urllib.request import Request
 
 import pytest
 import yaml
+from rich.console import Console
 
 from demiurge.app import create_app
 from demiurge.cli import main
@@ -16,9 +17,11 @@ from demiurge.packages import (
     PackageOperationError,
     default_catalog_root,
 )
+from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
+from demiurge.sdk import AgentInput, TurnContext
+from demiurge.security.capabilities import CapabilityFacade
 from demiurge.ui_gateway import TuiInteractionBridge
-from rich.console import Console
 
 
 def _manager(app, catalog_root: Path | None = None) -> PackageManager:
@@ -91,26 +94,26 @@ def _mock_minimax_http(
     return calls
 
 
-def test_builtin_catalog_lists_tts_presets():
+def test_builtin_catalog_lists_minimax_tts_package():
     catalog = PackageCatalog.load(default_catalog_root())
 
     assert catalog.catalog.catalog_id == "demiurge_builtin"
-    assert {"tts_only", "tts_summary"}.issubset(catalog.presets)
-    assert catalog.presets["tts_only"].options[0].option_id == "api_key"
-    assert catalog.presets["tts_only"].writes[0].path == "config.api_key"
-    assert catalog.presets["tts_only"].writes[0].component_id == "tts_minimax"
-    assert catalog.features["tts"].tags["tts"]["conflict"] == "advisory"
+    package = catalog.packages["minimax_tts"]
+    assert {"audio", "tts", "provider:minimax"}.issubset(package.tags)
+    assert [option.option_id for option in package.options] == ["mode", "enable_tool", "api_key"]
+    mode = package.options[0]
+    assert mode.description
+    assert mode.choice_descriptions["direct"]
+    assert mode.choice_descriptions["summary"]
+    assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
 
 
 def test_catalog_rejects_component_source_escape(tmp_path):
     root = tmp_path / "catalog"
-    (root / "features").mkdir(parents=True)
-    (root / "presets").mkdir()
+    (root / "packages").mkdir(parents=True)
     (root / "catalog.yaml").write_text("id: test\n", encoding="utf-8")
-    (root / "features" / "tts.yaml").write_text("id: tts\n", encoding="utf-8")
-    (root / "presets" / "bad.yaml").write_text(
+    (root / "packages" / "bad.yaml").write_text(
         "id: bad\n"
-        "feature: tts\n"
         "components:\n"
         "  - id: bad\n"
         "    kind: output\n"
@@ -122,15 +125,17 @@ def test_catalog_rejects_component_source_escape(tmp_path):
         PackageCatalog.load(root)
 
 
-def test_install_and_uninstall_tts_only_preset(tmp_path):
+def test_install_and_uninstall_minimax_direct_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    result = manager.install(core_id="assistant", preset_id="tts_only")
+    result = manager.install(core_id="assistant", package_id="minimax_tts")
 
     core_path = app.version_store.active_core_path("assistant")
     assert result.registry_path == core_path / "packages.yaml"
+    assert (core_path / "agent" / "lib" / "tts_minimax" / "synthesizer.py").exists()
     assert (core_path / "agent" / "output" / "tts_minimax" / "module.py").exists()
+    assert not (core_path / "agent" / "tools" / "tts_synthesize").exists()
     config_text = (core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text()
     config = yaml.safe_load(config_text)
     assert config["summarizer_core"] is None
@@ -138,28 +143,30 @@ def test_install_and_uninstall_tts_only_preset(tmp_path):
     assert config["api_key_env"] == "DEMIURGE_MINIMAX_API_KEY"
     assert "emotion" not in config["voice_setting"]
     assert config["audio_setting"] == {}
-    assert "caption:" not in config_text
     assert "\\u8BED" not in config_text
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_output", "tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
-    assert registry["installed"][0]["preset_id"] == "tts_only"
+    assert registry["schema_version"] == 2
+    assert registry["installed"][0]["package_id"] == "minimax_tts"
     assert registry["installed"][0]["options"]["api_key"] is None
+    assert "config" not in registry["installed"][0]["components"][0]
 
-    removed = manager.uninstall(core_id="assistant", preset_id="tts_only")
+    removed = manager.uninstall(core_id="assistant", package_id="minimax_tts")
 
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "output" / "tts_minimax").exists()
+    assert not (core_path / "agent" / "lib" / "tts_minimax").exists()
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_output"]
     assert not (core_path / "packages.yaml").exists()
 
 
-def test_install_summary_preset_copies_child_core_and_config(tmp_path):
+def test_install_summary_mode_copies_child_core_and_config(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    manager.install(core_id="assistant", preset_id="tts_summary")
+    manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"mode": "summary"})
 
     core_path = app.version_store.active_core_path("assistant")
     child_core = app.version_store.active_core_path("tts_summarizer")
@@ -173,7 +180,7 @@ def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    result = manager.install(core_id="assistant", preset_id="tts_only", option_answers={"api_key": "secret-value"})
+    result = manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"api_key": "secret-value"})
 
     core_path = app.version_store.active_core_path("assistant")
     config = yaml.safe_load((core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text())
@@ -181,7 +188,6 @@ def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     record = registry["installed"][0]
     assert record["options"]["api_key"] == REDACTED_SECRET
-    assert "config" not in record["components"][0]
     assert "config" not in result.components[0]
 
 
@@ -192,11 +198,11 @@ def test_package_options_validate_required_defaults_and_choices(tmp_path):
     manager = _manager(app, catalog_root)
 
     with pytest.raises(PackageOperationError, match="run `demiurge package`"):
-        manager.install(core_id="assistant", preset_id="voice")
+        manager.install(core_id="assistant", package_id="voice")
     with pytest.raises(PackageOperationError, match="must be one of"):
-        manager.install(core_id="assistant", preset_id="voice", option_answers={"voice": "bad"})
+        manager.install(core_id="assistant", package_id="voice", option_answers={"voice": "bad"})
 
-    manager.install(core_id="assistant", preset_id="voice", option_answers={"voice": "alto"})
+    manager.install(core_id="assistant", package_id="voice", option_answers={"voice": "alto"})
     config = yaml.safe_load(
         (app.version_store.active_core_path("assistant") / "agent" / "output" / "voice" / "config.yaml").read_text()
     )
@@ -209,7 +215,7 @@ def test_package_options_use_defaults_for_noninteractive_install(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app, catalog_root)
 
-    manager.install(core_id="assistant", preset_id="voice")
+    manager.install(core_id="assistant", package_id="voice")
 
     config = yaml.safe_load(
         (app.version_store.active_core_path("assistant") / "agent" / "output" / "voice" / "config.yaml").read_text()
@@ -217,40 +223,97 @@ def test_package_options_use_defaults_for_noninteractive_install(tmp_path):
     assert config["voice"] == "alto"
 
 
-def test_install_rejects_existing_target(tmp_path):
-    app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app)
-
-    manager.install(core_id="assistant", preset_id="tts_only")
-
-    with pytest.raises(RuntimeError, match="target already exists"):
-        manager.install(core_id="assistant", preset_id="tts_summary")
-
-
-def test_tag_conflict_is_warning_not_blocker(tmp_path):
+def test_install_rejects_existing_unmanaged_target(tmp_path):
     catalog_root = tmp_path / "catalog"
     _write_test_catalog(catalog_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app, catalog_root)
 
-    first = manager.install(core_id="assistant", preset_id="first")
-    second = manager.install(core_id="assistant", preset_id="second")
+    manager.install(core_id="assistant", package_id="first")
 
-    assert first.warnings == []
-    assert "shares tag(s) tts" in second.warnings[0]
-    assert (app.version_store.active_core_path("assistant") / "agent" / "output" / "second").exists()
+    with pytest.raises(RuntimeError, match="target already exists"):
+        manager.install(core_id="assistant", package_id="second")
+
+
+def test_shared_lib_source_is_reused_and_pruned_last(tmp_path):
+    catalog_root = tmp_path / "catalog"
+    _write_shared_lib_catalog(catalog_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, catalog_root)
+
+    first = manager.install(core_id="assistant", package_id="first")
+    second = manager.install(core_id="assistant", package_id="second")
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert first.components[0]["reused"] is False
+    assert second.components[0]["reused"] is True
+    assert (core_path / "agent" / "lib" / "shared").exists()
+
+    removed = manager.uninstall(core_id="assistant", package_id="first")
+    assert "kept shared target" in removed.warnings[0]
+    assert (core_path / "agent" / "lib" / "shared").exists()
+
+    manager.uninstall(core_id="assistant", package_id="second")
+    assert not (core_path / "agent" / "lib" / "shared").exists()
 
 
 def test_cli_package_list_and_install(tmp_path, capsys):
     home = tmp_path / "home"
 
-    main(["--home", str(home), "package", "list", "--json"])
+    main(["--home", str(home), "package", "list", "--tag", "tts", "--json"])
     listed = json.loads(capsys.readouterr().out)
-    assert "tts_only" in {preset["id"] for preset in listed["presets"]}
+    minimax = next(package for package in listed["packages"] if package["id"] == "minimax_tts")
+    mode = next(option for option in minimax["options"] if option["id"] == "mode")
+    assert mode["description"]
+    assert mode["choice_descriptions"]["summary"]
+    assert "tts" in listed["tags"]
 
-    main(["--home", str(home), "package", "install", "tts_only", "--core", "assistant", "--json"])
+    main(
+        [
+            "--home",
+            str(home),
+            "package",
+            "install",
+            "minimax_tts",
+            "--core",
+            "assistant",
+            "--preview",
+            "--json",
+        ]
+    )
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["preview"] is True
+    assert preview["package_id"] == "minimax_tts"
+    assert not (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
+
+    main(
+        [
+            "--home",
+            str(home),
+            "package",
+            "install",
+            "minimax_tts",
+            "--core",
+            "assistant",
+            "--option",
+            "mode=summary",
+            "--option",
+            "enable_tool=true",
+            "--json",
+        ]
+    )
     installed = json.loads(capsys.readouterr().out)
     assert installed["action"] == "install"
+    assert installed["preview"] is False
+    assert installed["package_id"] == "minimax_tts"
+    assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
+    assert (home / "agents" / "assistant" / "agent" / "tools" / "tts_synthesize").exists()
+    assert (home / "agents" / "tts_summarizer" / "agent.yaml").exists()
+
+    main(["--home", str(home), "package", "uninstall", "minimax_tts", "--core", "assistant", "--preview", "--json"])
+    uninstall_preview = json.loads(capsys.readouterr().out)
+    assert uninstall_preview["preview"] is True
+    assert uninstall_preview["components"][0]["remove"] is True
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
 
 
@@ -272,7 +335,8 @@ def test_wizard_installs_with_option_answers(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
     prompt = _FakePrompt(
-        selections=["assistant", "browse", "tts_only", "install", "back", "exit"],
+        selections=["assistant", "all", "minimax_tts", "install", "direct", "back", "exit"],
+        confirms=[False, True],
         inputs=["wizard-secret"],
     )
     console = Console(record=True)
@@ -285,42 +349,25 @@ def test_wizard_installs_with_option_answers(tmp_path):
     assert config["api_key"] == "wizard-secret"
     registry = yaml.safe_load((app.version_store.active_core_path("assistant") / "packages.yaml").read_text())
     assert registry["installed"][0]["options"]["api_key"] == REDACTED_SECRET
+    main_menu = next(call for call in prompt.select_calls if call["title"] == "Package manager")
+    assert [choice.value for choice in main_menu["choices"][:3]] == ["all", "search", "tags"]
+    mode_select = next(call for call in prompt.select_calls if call["title"] == "TTS mode")
+    assert mode_select["choices"][0].description
+    assert mode_select["choices"][1].description
 
 
 def test_wizard_uninstalls_installed_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
-    manager.install(core_id="assistant", preset_id="tts_only")
+    manager.install(core_id="assistant", package_id="minimax_tts")
     prompt = _FakePrompt(
-        selections=["assistant", "installed", "tts_only", "uninstall", "exit"],
+        selections=["assistant", "installed", "minimax_tts", "uninstall", "exit"],
         confirms=[True],
     )
 
     PackageWizard(manager=manager, version_store=app.version_store, console=Console(record=True), prompt=prompt).run()
 
     assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax").exists()
-
-
-def test_wizard_tag_conflict_cancel_and_confirm(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_test_catalog(catalog_root)
-    app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
-    manager.install(core_id="assistant", preset_id="first")
-
-    cancel_prompt = _FakePrompt(
-        selections=["assistant", "browse", "second", "install", "back", "exit"],
-        confirms=[False],
-    )
-    PackageWizard(manager=manager, version_store=app.version_store, console=Console(record=True), prompt=cancel_prompt).run()
-    assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "second").exists()
-
-    confirm_prompt = _FakePrompt(
-        selections=["assistant", "browse", "second", "install", "back", "exit"],
-        confirms=[True],
-    )
-    PackageWizard(manager=manager, version_store=app.version_store, console=Console(record=True), prompt=confirm_prompt).run()
-    assert (app.version_store.active_core_path("assistant") / "agent" / "output" / "second").exists()
 
 
 @pytest.mark.asyncio
@@ -330,21 +377,21 @@ async def test_tui_packages_command_lists_details_and_installs(tmp_path):
     bridge = TuiInteractionBridge(app, emit=sink)
 
     assert (await bridge.command("/packages"))["handled"] is True
-    assert (await bridge.command("/packages tts_only"))["handled"] is True
-    assert (await bridge.command("/packages install tts_only"))["handled"] is True
+    assert (await bridge.command("/packages minimax_tts"))["handled"] is True
+    assert (await bridge.command("/packages install minimax_tts"))["handled"] is True
 
     output = sink.text()
-    assert "tts_only" in output
-    assert "Package preset: tts_only" in output
-    assert "installed tts_only for assistant" in output
+    assert "minimax_tts" in output
+    assert "Package: minimax_tts" in output
+    assert "installed minimax_tts for assistant" in output
 
 
 @pytest.mark.asyncio
-async def test_tts_only_preset_delivers_hex_audio_from_parent_output(tmp_path, monkeypatch):
+async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", preset_id="tts_only")
+    _manager(app).install(core_id="assistant", package_id="minimax_tts")
     calls = _mock_minimax_http(monkeypatch)
 
     result = await InteractionRuntime(app.runner).handle(
@@ -364,11 +411,11 @@ async def test_tts_only_preset_delivers_hex_audio_from_parent_output(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_tts_summary_preset_uses_child_result_then_parent_delivers_audio(tmp_path, monkeypatch):
+async def test_minimax_summary_mode_uses_child_result_then_parent_delivers_audio(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", preset_id="tts_summary")
+    _manager(app).install(core_id="assistant", package_id="minimax_tts", option_answers={"mode": "summary"})
     calls = _mock_minimax_http(monkeypatch)
 
     result = await InteractionRuntime(app.runner).handle(
@@ -385,11 +432,40 @@ async def test_tts_summary_preset_uses_child_result_then_parent_delivers_audio(t
 
 
 @pytest.mark.asyncio
+async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    manager = _manager(app)
+    manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"enable_tool": True})
+    calls = _mock_minimax_http(monkeypatch)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await app.tool_runtime.execute(
+        ToolCall(name="tts_synthesize", arguments={"text": "tool voice"}, id="tts_tool"),
+        core=core,
+        turn=TurnContext(
+            session_id="test",
+            turn_id="turn-tool",
+            core_id=core.core_id,
+            core_version=core.version,
+            user_input=AgentInput(content="tool"),
+            state={},
+        ),
+        capability=CapabilityFacade(core),
+    )
+
+    assert result.is_error is False
+    assert "tool voice" in calls[0]["json"]["text"]
+    assert next(workspace.glob(".demiurge-tts/*-tool.mp3")).read_bytes() == b"MINIMAX-AUDIO"
+
+
+@pytest.mark.asyncio
 async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", preset_id="tts_only")
+    _manager(app).install(core_id="assistant", package_id="minimax_tts")
     config_path = app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax" / "config.yaml"
     config = yaml.safe_load(config_path.read_text())
     config["output_format"] = "url"
@@ -415,7 +491,7 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", preset_id="tts_only")
+    _manager(app).install(core_id="assistant", package_id="minimax_tts")
     _mock_minimax_http(
         monkeypatch,
         response={
@@ -438,10 +514,9 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
 
 
 def _write_test_catalog(root: Path) -> None:
-    (root / "features").mkdir(parents=True)
-    (root / "presets").mkdir()
+    (root / "packages").mkdir(parents=True)
     for component in ("first", "second"):
-        slot = root / "components" / "output" / component
+        slot = root / "output" / component
         slot.mkdir(parents=True)
         (slot / "slot.yaml").write_text(
             "entrypoint: module:process\n"
@@ -453,28 +528,37 @@ def _write_test_catalog(root: Path) -> None:
         )
         (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
     (root / "catalog.yaml").write_text("id: test_catalog\nname: Test\n", encoding="utf-8")
-    (root / "features" / "tts.yaml").write_text(
-        "id: tts\n"
-        "name: TTS\n"
-        "tags:\n"
-        "  tts:\n"
-        "    conflict: advisory\n",
-        encoding="utf-8",
-    )
-    for preset in ("first", "second"):
-        (root / "presets" / f"{preset}.yaml").write_text(
-            f"id: {preset}\n"
-            "feature: tts\n"
+    for package_id, source in (("first", "first"), ("second", "second")):
+        (root / "packages" / f"{package_id}.yaml").write_text(
+            f"id: {package_id}\n"
             "tags:\n"
             "  - tts\n"
             "components:\n"
-            f"  - id: {preset}\n"
+            f"  - id: {package_id}\n"
             "    kind: output\n"
-            f"    source: {preset}\n"
-            f"    target: agent/output/{preset}\n"
+            f"    source: {source}\n"
+            "    target: agent/output/shared_voice\n"
             "    pipeline:\n"
             "      group: serial\n"
             "      after: base_output\n",
+            encoding="utf-8",
+        )
+
+
+def _write_shared_lib_catalog(root: Path) -> None:
+    lib = root / "lib" / "shared"
+    lib.mkdir(parents=True)
+    (lib / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "packages").mkdir(parents=True)
+    (root / "catalog.yaml").write_text("id: shared_catalog\nname: Shared\n", encoding="utf-8")
+    for package_id in ("first", "second"):
+        (root / "packages" / f"{package_id}.yaml").write_text(
+            f"id: {package_id}\n"
+            "components:\n"
+            "  - id: shared\n"
+            "    kind: lib\n"
+            "    source: shared\n"
+            "    target: agent/lib/shared\n",
             encoding="utf-8",
         )
 
@@ -490,8 +574,10 @@ class _FakePrompt:
         self.selections = list(selections or [])
         self.confirms = list(confirms or [])
         self.inputs = list(inputs or [])
+        self.select_calls = []
 
     def select(self, title, choices, *, default_index=0):
+        self.select_calls.append({"title": title, "choices": list(choices), "default_index": default_index})
         if not self.selections:
             return choices[default_index].value
         value = self.selections.pop(0)
@@ -510,10 +596,9 @@ class _FakePrompt:
 
 
 def _write_option_catalog(root: Path, *, required_default: bool) -> None:
-    slot = root / "components" / "output" / "voice"
+    slot = root / "output" / "voice"
     slot.mkdir(parents=True)
-    (root / "features").mkdir(parents=True)
-    (root / "presets").mkdir()
+    (root / "packages").mkdir(parents=True)
     (slot / "slot.yaml").write_text(
         "entrypoint: module:process\n"
         "description: option output\n"
@@ -524,26 +609,22 @@ def _write_option_catalog(root: Path, *, required_default: bool) -> None:
     )
     (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
     (root / "catalog.yaml").write_text("id: options_catalog\nname: Options\n", encoding="utf-8")
-    (root / "features" / "tts.yaml").write_text("id: tts\nname: TTS\n", encoding="utf-8")
     default_line = "    default: alto\n" if required_default else ""
-    (root / "presets" / "voice.yaml").write_text(
+    (root / "packages" / "voice.yaml").write_text(
         "id: voice\n"
-        "feature: tts\n"
         "tags:\n"
         "  - voice\n"
         "options:\n"
         "  - id: voice\n"
         "    type: choice\n"
         "    prompt: Voice\n"
+        "    description: Select the voice used for generated audio.\n"
         "    required: true\n"
         f"{default_line}"
         "    choices:\n"
-        "      - alto\n"
+        "      - value: alto\n"
+        "        description: Higher register voice.\n"
         "      - bass\n"
-        "writes:\n"
-        "  voice:\n"
-        "    component: voice\n"
-        "    path: config.voice\n"
         "components:\n"
         "  - id: voice\n"
         "    kind: output\n"
@@ -553,6 +634,6 @@ def _write_option_catalog(root: Path, *, required_default: bool) -> None:
         "      group: serial\n"
         "      after: base_output\n"
         "    config:\n"
-        "      voice: null\n",
+        "      voice: ${options.voice}\n",
         encoding="utf-8",
     )

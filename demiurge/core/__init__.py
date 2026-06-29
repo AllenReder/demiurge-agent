@@ -750,7 +750,7 @@ def _load_module_from_slot(slot: SlotDefinition, module_name: str) -> ModuleType
     if not module_path.exists():
         raise CoreLoadError(f"slot module not found: {module_path}")
     package_name = _slot_package_name(slot)
-    _ensure_slot_package(package_name, slot.path)
+    _ensure_slot_package(package_name, _slot_package_paths(slot))
     _ensure_slot_parent_packages(package_name, module_name, slot.path)
     unique_name = f"{package_name}.{module_name}"
     spec = importlib.util.spec_from_file_location(unique_name, module_path)
@@ -768,13 +768,26 @@ def _slot_package_name(slot: SlotDefinition) -> str:
     return f"_demiurge_slot_{label}_{digest}"
 
 
-def _ensure_slot_package(package_name: str, package_path: Path) -> None:
+def _slot_package_paths(slot: SlotDefinition) -> list[Path]:
+    paths = [slot.path]
+    parts = Path(slot.relative_path).parts
+    if len(parts) >= 3 and parts[0] == "agent":
+        core_root = slot.path
+        for _ in parts:
+            core_root = core_root.parent
+        lib_root = core_root / "agent" / "lib"
+        if lib_root.exists() and lib_root.is_dir():
+            paths.append(lib_root)
+    return paths
+
+
+def _ensure_slot_package(package_name: str, package_paths: list[Path]) -> None:
     package = sys.modules.get(package_name)
     if package is None:
         package = ModuleType(package_name)
         package.__package__ = package_name
         sys.modules[package_name] = package
-    package.__path__ = [str(package_path)]  # type: ignore[attr-defined]
+    package.__path__ = [str(path) for path in package_paths]  # type: ignore[attr-defined]
 
 
 def _ensure_slot_parent_packages(package_name: str, module_name: str, slot_path: Path) -> None:

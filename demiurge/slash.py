@@ -30,7 +30,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("tools", "Show visible tools", "Tools", surfaces=("tui", "telegram")),
     SlashCommandSpec("skills", "Show skill index", "Tools", "/skills [category]", surfaces=("tui", "telegram")),
     SlashCommandSpec("skill", "View a skill or linked file", "Tools", "/skill <name> [file_path]", surfaces=("tui", "telegram")),
-    SlashCommandSpec("packages", "List or install agent package presets", "Tools", "/packages [preset|install <preset>|uninstall <preset>]"),
+    SlashCommandSpec("packages", "List or install agent packages", "Tools", "/packages [package|install <package>|uninstall <package>]"),
     SlashCommandSpec("tool-display", "Show or change tool display", "Tools", "/tool-display quiet|summary|full"),
     SlashCommandSpec("sessions", "List recent sessions", "Sessions", "/sessions [limit]", surfaces=("tui", "telegram")),
     SlashCommandSpec(

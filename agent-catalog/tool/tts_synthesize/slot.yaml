@@ -1,0 +1,18 @@
+entrypoint: module:execute
+description: Generate a local speech audio artifact from text using the configured MiniMax TTS provider.
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+      description: Text to synthesize into speech.
+  required:
+    - text
+  additionalProperties: false
+capability: network.fetch
+risk: medium
+approval_policy: prompt
+display_policy: summary
+model_output_policy: content
+capabilities:
+  - network.fetch

@@ -88,4 +88,5 @@ Telegram delivery reuses the host `TelegramInteractionBridge.deliver()` path.
 It does not create a user-input turn and does not wait for interactive clarify
 or approval.
 
-Hermes-style runtime-created jobs and `origin` are not part of schedule v1.
+Hermes-style runtime-created jobs and `origin` are not part of the current
+schedule model.

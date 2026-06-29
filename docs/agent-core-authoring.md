@@ -1,7 +1,7 @@
 # Authoring Agent Cores
 
-This page is for users who want to hand-author or customize an agent core. In
-v1, the safest path is to modify a runtime core after initialization:
+This page is for users who want to hand-author or customize an agent core. The
+safest path is to modify a runtime core after initialization:
 
 ```text
 ~/.demiurge/agents/assistant/
@@ -198,7 +198,7 @@ for that turn is not delivered and is not written to session history. Assistant
 tool-call steps and tool results are still written by the host as transcript
 entries for later model context.
 
-In v1, input/output code slots are trusted authored modules.
+Input/output code slots are trusted authored modules.
 `ctx.input/ctx.output.send_*` is a built-in phase capability and does not need
 an extra delivery capability declaration. Higher-risk host APIs such as tool
 calls, state writes, agent calls, evolution, and rollback still require their
@@ -214,6 +214,18 @@ from .helper import build_payload
 Avoid bare imports such as `import helper`. Different slots may use the same
 helper filename, and bare imports can be affected by Python's global module
 cache.
+
+Shared authored code for a core belongs under `agent/lib/`. Slot packages also
+include that directory on their package path, so output modules, input modules,
+and authored tools can use relative imports for shared helpers:
+
+```python
+from .tts_minimax.synthesizer import synthesize_to_file
+```
+
+Keep `agent/lib/` code behind the slot or tool APIs that call it. The host still
+owns provider calls, tool scheduling, capabilities, state, sessions, and
+delivery boundaries.
 
 ## Structured Results With `ctx.result`
 

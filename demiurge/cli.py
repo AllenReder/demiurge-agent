@@ -9,7 +9,7 @@ from pathlib import Path
 from .app import HostConfig, create_app, ensure_runtime_defaults, init_runtime, load_host_config, refresh_runtime, source_agents_root
 from demiurge.channels.gateway import GatewayConfigError, run_gateway
 from demiurge.diagnostics.doctor import DoctorReport, DoctorRuntime
-from demiurge.packages import PackageCatalog, PackageManager, default_catalog_root
+from demiurge.packages import PackageCatalog, PackageManager, PackageOperationPreview, default_catalog_root
 from demiurge.package_wizard import run_package_wizard
 from demiurge.storage import VersionStore
 from demiurge.ui.tui import run_tui_from_args
@@ -57,19 +57,30 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Check runtime/source template drift")
     doctor_parser.add_argument("--core", dest="doctor_core", default=None, help="Core id to check")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    package_parser = subparsers.add_parser("package", help="Interactively manage, list, install, or uninstall agent package presets")
+    package_parser = subparsers.add_parser("package", help="Interactively manage, list, install, or uninstall agent packages")
     package_parser.add_argument("--catalog-root", type=Path, default=None, help="Agent catalog root")
     package_subparsers = package_parser.add_subparsers(dest="package_command")
-    package_list = package_subparsers.add_parser("list", help="List catalog presets and optionally installed packages")
+    package_list = package_subparsers.add_parser("list", help="List catalog packages and optionally installed packages")
     package_list.add_argument("--core", dest="package_core", default=None, help="Runtime core id to include installed state")
+    package_list.add_argument("--tag", dest="package_tag", default=None, help="Filter packages by tag")
     package_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    package_install = package_subparsers.add_parser("install", help="Install a preset into a runtime core")
-    package_install.add_argument("preset", help="Preset id to install")
+    package_install = package_subparsers.add_parser("install", help="Install a package into a runtime core")
+    package_install.add_argument("package_id", help="Package id to install")
     package_install.add_argument("--core", dest="package_core", required=True, help="Target runtime core id")
+    package_install.add_argument(
+        "--option",
+        dest="package_options",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Package option value; may be repeated",
+    )
+    package_install.add_argument("--preview", action="store_true", help="Show install plan without writing files")
     package_install.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    package_uninstall = package_subparsers.add_parser("uninstall", help="Uninstall a preset from a runtime core")
-    package_uninstall.add_argument("preset", help="Preset id to uninstall")
+    package_uninstall = package_subparsers.add_parser("uninstall", help="Uninstall a package from a runtime core")
+    package_uninstall.add_argument("package_id", help="Package id to uninstall")
     package_uninstall.add_argument("--core", dest="package_core", required=True, help="Target runtime core id")
+    package_uninstall.add_argument("--preview", action="store_true", help="Show uninstall plan without writing files")
     package_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     update_parser = subparsers.add_parser("update", help="Update a managed demiurge checkout")
     update_parser.add_argument("--home", dest="update_home", type=Path, default=None, help="Runtime home directory")
@@ -295,21 +306,28 @@ def _handle_package_command(args: argparse.Namespace) -> None:
         )
         return
     if args.package_command == "list":
-        result = manager.list(core_id=target_core)
+        result = manager.list(core_id=target_core, tag=getattr(args, "package_tag", None))
         if args.json:
             print(json.dumps(_package_list_to_dict(result), indent=2, ensure_ascii=False))
             return
         _print_package_list(result, core_id=target_core)
         return
     if args.package_command == "install":
-        result = manager.install(core_id=target_core, preset_id=args.preset)
+        package_options = _parse_package_options(args.package_options)
+        if args.preview:
+            result = manager.preview_install(core_id=target_core, package_id=args.package_id, option_answers=package_options)
+        else:
+            result = manager.install(core_id=target_core, package_id=args.package_id, option_answers=package_options)
         if args.json:
             print(json.dumps(_package_operation_to_dict(result), indent=2, ensure_ascii=False))
             return
         _print_package_operation(result)
         return
     if args.package_command == "uninstall":
-        result = manager.uninstall(core_id=target_core, preset_id=args.preset)
+        if args.preview:
+            result = manager.preview_uninstall(core_id=target_core, package_id=args.package_id)
+        else:
+            result = manager.uninstall(core_id=target_core, package_id=args.package_id)
         if args.json:
             print(json.dumps(_package_operation_to_dict(result), indent=2, ensure_ascii=False))
             return
@@ -320,27 +338,37 @@ def _handle_package_command(args: argparse.Namespace) -> None:
 
 def _print_package_list(result, *, core_id: str | None) -> None:
     print(f"catalog: {result.catalog.catalog_id} - {result.catalog.name}")
-    installed_ids = {item.preset_id for item in result.installed}
-    print("presets:")
-    for preset in result.presets:
-        marker = "*" if preset.preset_id in installed_ids else " "
-        print(f"{marker} {preset.preset_id} [{preset.feature_id}] - {preset.summary}")
+    installed_ids = {item.package_id for item in result.installed}
+    print("tags: " + (", ".join(result.tags) or "(none)"))
+    print("packages:")
+    for package in result.packages:
+        marker = "*" if package.package_id in installed_ids else " "
+        print(f"{marker} {package.package_id} [{', '.join(package.tags) or 'no tags'}] - {package.summary}")
     if core_id:
         print(f"installed for {core_id}:")
         if not result.installed:
             print("  (none)")
         for item in result.installed:
-            print(f"  - {item.preset_id} ({', '.join(item.tags) or 'no tags'})")
+            print(f"  - {item.package_id} ({', '.join(item.tags) or 'no tags'})")
 
 
 def _print_package_operation(result) -> None:
-    print(f"{result.action}ed {result.preset_id} for {result.core_id}")
+    if isinstance(result, PackageOperationPreview):
+        print(f"preview {result.action} {result.package_id} for {result.core_id}")
+    else:
+        print(f"{result.action}ed {result.package_id} for {result.core_id}")
     print(f"registry: {result.registry_path}")
     for component in result.components:
-        if component.get("kind") == "core":
-            print(f"- core {component.get('target_core_id')}")
+        if "remove" in component:
+            marker = "remove" if component.get("remove") else "keep"
+        elif component.get("reused"):
+            marker = "reuse"
         else:
-            print(f"- {component.get('kind')} {component.get('target')}")
+            marker = "write"
+        if component.get("kind") == "core":
+            print(f"- {marker} core {component.get('target_core_id')}")
+        else:
+            print(f"- {marker} {component.get('kind')} {component.get('target')}")
     for warning in result.warnings:
         print(f"warning: {warning}")
 
@@ -353,22 +381,13 @@ def _package_list_to_dict(result) -> dict[str, object]:
             "summary": result.catalog.summary,
             "root": str(result.catalog.root),
         },
-        "features": [
+        "tags": result.tags,
+        "packages": [
             {
-                "id": feature.feature_id,
-                "name": feature.name,
-                "summary": feature.summary,
-                "tags": feature.tags,
-            }
-            for feature in result.features
-        ],
-        "presets": [
-            {
-                "id": preset.preset_id,
-                "name": preset.name,
-                "summary": preset.summary,
-                "feature": preset.feature_id,
-                "tags": preset.tags,
+                "id": package.package_id,
+                "name": package.name,
+                "summary": package.summary,
+                "tags": package.tags,
                 "components": [
                     {
                         "id": component.component_id,
@@ -377,26 +396,18 @@ def _package_list_to_dict(result) -> dict[str, object]:
                         "target": component.target,
                         "target_core_id": component.target_core_id,
                         "config": component.config,
+                        "when": component.when,
                     }
-                    for component in preset.components
+                    for component in package.components
                 ],
-                "options": [_preset_option_to_dict(option) for option in preset.options],
-                "writes": [
-                    {
-                        "option": write.option_id,
-                        "component": write.component_id,
-                        "path": write.path,
-                    }
-                    for write in preset.writes
-                ],
+                "options": [_package_option_to_dict(option) for option in package.options],
             }
-            for preset in result.presets
+            for package in result.packages
         ],
         "installed": [
             {
-                "preset_id": item.preset_id,
+                "package_id": item.package_id,
                 "catalog_id": item.catalog_id,
-                "feature_id": item.feature_id,
                 "tags": item.tags,
                 "components": item.components,
                 "installed_at": item.installed_at,
@@ -411,15 +422,17 @@ def _package_list_to_dict(result) -> dict[str, object]:
 def _package_operation_to_dict(result) -> dict[str, object]:
     return {
         "action": result.action,
+        "preview": isinstance(result, PackageOperationPreview),
         "core_id": result.core_id,
-        "preset_id": result.preset_id,
+        "package_id": result.package_id,
         "components": result.components,
         "warnings": result.warnings,
         "registry_path": str(result.registry_path),
+        "options": result.options,
     }
 
 
-def _preset_option_to_dict(option) -> dict[str, object]:
+def _package_option_to_dict(option) -> dict[str, object]:
     default = option.default
     if option.secret and default is not None and default != "":
         default = "<redacted>"
@@ -427,9 +440,21 @@ def _preset_option_to_dict(option) -> dict[str, object]:
         "id": option.option_id,
         "type": option.option_type,
         "prompt": option.prompt,
+        "description": option.description,
         "default": default if option.has_default else None,
         "has_default": option.has_default,
         "required": option.required,
         "choices": option.choices,
+        "choice_descriptions": option.choice_descriptions,
         "secret": option.secret,
     }
+
+
+def _parse_package_options(values: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        key, sep, raw = value.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"invalid --option value, expected KEY=VALUE: {value}")
+        result[key.strip()] = raw
+    return result

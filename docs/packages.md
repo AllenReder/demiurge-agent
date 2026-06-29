@@ -1,8 +1,8 @@
 # Packages
 
 Package management is a user-facing runtime workflow for installing reusable
-catalog components into an agent core through presets. It is not an
-agent-callable tool in v1. The main interface is the standalone interactive CLI:
+catalog packages into an agent core. It is not an agent-callable tool. The main
+interface is the standalone interactive CLI:
 
 ```bash
 uv run demiurge package
@@ -17,20 +17,100 @@ The built-in catalog lives in the source checkout:
 ```text
 agent-catalog/
   catalog.yaml
-  features/
-  components/
-  presets/
+  input/
+  output/
+  tool/
+  skill/
+  lib/
+  core/
+  packages/
+    <package_id>.yaml
 ```
 
 Wheel installs use bundled fallback resources under
 `demiurge/resources/agent-catalog`.
 
-Future community catalogs should use the same root structure. `components/`
-stores uninstalled input/output/core templates. `presets/` describes which
-components to copy, default config writes, pipeline insertion, and tags.
+Catalog content is flat by component kind. A package recipe in `packages/`
+selects which components to install, how to configure them, and which pipeline
+edits to apply.
 
-Tag conflicts are advisory. The wizard shows warnings and asks for
-confirmation. Scripted install continues and returns warnings in the result.
+Supported component kinds are:
+
+- `input`: copied under `agent/input/<slot_id>` and may edit the input pipeline.
+- `output`: copied under `agent/output/<slot_id>` and may edit the output pipeline.
+- `tool`: copied under `agent/tools/<tool_id>`.
+- `skill`: copied under `agent/skills/<skill_id>`.
+- `lib`: copied under `agent/lib/<name>` for shared authored code.
+- `core`: copied as another runtime active core.
+
+## Package Recipe
+
+A package YAML file is a single installable recipe:
+
+```yaml
+schema_version: 2
+id: minimax_tts
+name: MiniMax TTS
+summary: Generate speech audio with MiniMax.
+tags:
+  - audio
+  - tts
+options:
+  - id: mode
+    type: choice
+    description: Choose whether TTS speaks the reply directly or summarizes it first.
+    default: direct
+    choices:
+      - value: direct
+        description: Generate speech from the assistant reply as-is.
+      - value: summary
+        description: Summarize the assistant reply before generating speech.
+  - id: enable_tool
+    type: bool
+    description: Also install an authored TTS tool for the agent.
+    default: false
+components:
+  - id: tts_lib
+    kind: lib
+    source: tts_minimax
+    target: agent/lib/tts_minimax
+  - id: tts_output
+    kind: output
+    source: tts_minimax
+    target: agent/output/tts_minimax
+    pipeline:
+      group: serial
+      after: base_output
+    config:
+      provider: tts_minimax
+      summarizer_core: null
+    config_when:
+      - when:
+          mode: summary
+        config:
+          summarizer_core: tts_summarizer
+  - id: tts_summarizer
+    kind: core
+    source: tts_summarizer
+    target_core_id: tts_summarizer
+    when:
+      mode: summary
+```
+
+`tags` are free-form metadata and may contain multiple values. They are used for
+search and filtering only; they do not imply conflicts or mutual exclusion.
+
+Option `description` text is shown by the interactive wizard. Choice entries may
+be plain strings or objects with `value` and `description`; choice descriptions
+are shown next to each selectable value.
+
+`when` includes or skips a component based on resolved option values.
+`config_when` conditionally merges extra config into a component config.
+Config values may reference options with `${options.<id>}`.
+
+Supported option types are `string`, `bool`, `choice`, `path`, and `secret`.
+Secret option values may be written to target component config, but
+`packages.yaml` records only `<redacted>`.
 
 ## Interactive Wizard
 
@@ -41,61 +121,55 @@ uv run demiurge package
 ```
 
 The wizard first selects a target runtime core, defaulting to `assistant`. It
-then offers catalog browsing, installed package view, and exit. Catalog browsing
-shows preset summaries, tags, components, options, and install action.
-Installed package view reads the target core's `packages.yaml` and can
-uninstall recorded packages.
+then offers:
+
+- Search packages
+- Browse by tag
+- All packages
+- Installed packages
+- Exit
+
+Install flow shows package details, asks for options, displays an install
+preview, then asks for confirmation. Uninstall flow shows the installed package,
+displays an uninstall preview, then asks for confirmation.
 
 ## Scripted Commands
 
-List presets:
+List packages:
 
 ```bash
 uv run demiurge package list
 uv run demiurge package list --core assistant
+uv run demiurge package list --tag tts --json
 ```
 
-Install a preset into an explicit runtime core:
+Install a package into an explicit runtime core:
 
 ```bash
-uv run demiurge package install tts_only --core assistant
+uv run demiurge package install minimax_tts --core assistant
+uv run demiurge package install minimax_tts --core assistant --option mode=summary
+uv run demiurge package install minimax_tts --core assistant --option enable_tool=true
+uv run demiurge package install minimax_tts --core assistant --preview
 ```
 
 Uninstall:
 
 ```bash
-uv run demiurge package uninstall tts_only --core assistant
+uv run demiurge package uninstall minimax_tts --core assistant
+uv run demiurge package uninstall minimax_tts --core assistant --preview
 ```
 
-v1 supports install and uninstall only. It does not support reinstall, config
-edit, upgrade, rollback, git commits, or agent-callable package tools. Existing
-target paths are rejected by default; no automatic overwrite or intelligent
-merge is attempted.
+The package command supports install and uninstall only. It does not support
+reinstall, config edit, upgrade, rollback, git commits, or agent-callable
+package management. `--preview` shows the planned file, core, and pipeline
+changes without writing files. Existing target paths are rejected unless the
+same source and target are already owned by another installed package, in which
+case the target is recorded as reused. Uninstall keeps reused targets until the
+final referencing package is removed.
 
-Scripted `install` does not accept option values. It uses preset defaults. If a
-required option has no default, the command fails and asks the user to use the
+If a required option has no default, scripted install must pass it with
+`--option KEY=VALUE`; otherwise the command fails and asks the user to use the
 interactive wizard.
-
-## Options and Writes
-
-Presets can declare options and writes:
-
-```yaml
-options:
-  - id: api_key
-    type: secret
-    prompt: MiniMax API key
-    default_env: DEMIURGE_MINIMAX_API_KEY
-writes:
-  - option: api_key
-    component: tts_minimax
-    path: api_key
-```
-
-Supported option types are `string`, `bool`, `choice`, `path`, and `secret`.
-`writes` only write answers into the target component `config.yaml`; package
-Python install hooks are not executed. Secret option values may be written to
-target config, but `packages.yaml` records only `<redacted>`.
 
 ## TUI Helper
 
@@ -103,9 +177,9 @@ TUI `/packages` manages the current core only:
 
 ```text
 /packages
-/packages tts_only
-/packages install tts_only
-/packages uninstall tts_only
+/packages minimax_tts
+/packages install minimax_tts
+/packages uninstall minimax_tts
 ```
 
 Use the standalone `demiurge package` wizard for cross-core installs or installs
@@ -122,27 +196,31 @@ Install only modifies the runtime active core, for example:
 It does not modify source templates under repository `agents/`.
 
 Each target core stores `packages.yaml` at its root. It records installed
-presets, component target paths, pipeline insertion info, tags, warnings, and
-option snapshots. Component runtime config lives in each component's own
-`config.yaml`. Uninstall uses `packages.yaml` to remove components and pipeline
-entries.
+package ids, tags, redacted option snapshots, owned or reused component targets,
+pipeline edits, warnings, and install time. Component runtime config lives in
+each component's own `config.yaml`. Uninstall uses `packages.yaml` to remove
+components and pipeline entries.
 
-## Built-In TTS Presets
+## Built-In MiniMax TTS
 
-The built-in catalog currently includes:
+The built-in catalog currently includes one TTS package:
 
-- `tts_only`: installs a parent output module that generates a local audio
-  artifact from `ctx.output.content` and delivers it with
-  `ctx.output.send_audio(...)`.
-- `tts_summary`: also installs a `tts_summarizer` child core. The parent output
-  module first calls `ctx.agents.run("tts_summarizer", ...)`, then generates and
-  delivers audio.
+```bash
+uv run demiurge package install minimax_tts --core assistant
+```
 
-The built-in TTS output component is `tts_minimax`. It uses the MiniMax Speech
-T2A non-streaming `t2a_v2` HTTP API to generate local audio artifacts. It reads
-`DEMIURGE_MINIMAX_API_KEY` by default or accepts an optional secret through the
-wizard. The real value is written to the target component config, while the
-package record stores `<redacted>`.
+Options:
 
-MiniMax audio delivery uses `history_policy="transient"` and does not write to
+- `mode=direct`: install the TTS output module directly.
+- `mode=summary`: also install a `tts_summarizer` child core and configure the
+  output module to summarize text before synthesis.
+- `enable_tool=true`: also install an authored `tts_synthesize` tool and the
+  `tts_voice` skill.
+- `api_key=<value>`: optional secret written into component config. If omitted,
+  the module reads `DEMIURGE_MINIMAX_API_KEY`.
+
+The output module and authored tool both reuse shared code from
+`agent/lib/tts_minimax`. The output module uses the MiniMax Speech T2A
+non-streaming `t2a_v2` HTTP API to generate local audio artifacts and delivers
+them with `history_policy="transient"`, so generated audio is not written to
 session history.

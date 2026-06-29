@@ -147,7 +147,7 @@ Approval resolution rules:
 
 Channel config belongs in a concrete agent core `agent.yaml`. The host reads it and owns the adapters. TUI is still the default local entry; `demiurge gateway` starts enabled external channels for the selected core.
 
-v1 external channels support Telegram:
+Current external channels support Telegram:
 
 ```yaml
 channels:

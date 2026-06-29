@@ -514,24 +514,27 @@ class TuiInteractionBridge:
         core_id = self.app.runner.core_id
         if not parts:
             result = manager.list(core_id=core_id)
-            installed_ids = {item.preset_id for item in result.installed}
-            rows = [("*" if preset.preset_id in installed_ids else "", preset.preset_id, preset.feature_id, ", ".join(preset.tags), preset.summary) for preset in result.presets]
-            await self._emit_command_output("packages", _format_table(["", "preset", "feature", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
+            installed_ids = {item.package_id for item in result.installed}
+            rows = [
+                ("*" if package.package_id in installed_ids else "", package.package_id, ", ".join(package.tags), package.summary)
+                for package in result.packages
+            ]
+            await self._emit_command_output("packages", _format_table(["", "package", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
             return True
         action = parts[0]
         if action in {"install", "uninstall"}:
             if len(parts) != 2:
-                await self._emit_command_output("packages", f"usage: /packages {action} <preset>")
+                await self._emit_command_output("packages", f"usage: /packages {action} <package>")
                 return True
             try:
-                result = manager.install(core_id=core_id, preset_id=parts[1]) if action == "install" else manager.uninstall(core_id=core_id, preset_id=parts[1])
+                result = manager.install(core_id=core_id, package_id=parts[1]) if action == "install" else manager.uninstall(core_id=core_id, package_id=parts[1])
             except PackageOperationError as exc:
                 await self._emit_command_output("packages", f"package {action} failed: {exc}")
                 return True
-            await self._emit_command_output("packages", f"{result.action}ed {result.preset_id} for {result.core_id}")
+            await self._emit_command_output("packages", f"{result.action}ed {result.package_id} for {result.core_id}")
             return True
-        preset = manager.catalog.presets.get(action)
-        await self._emit_command_output("packages", f"unknown preset: {action}" if preset is None else _format_key_values(f"Package preset: {preset.preset_id}", asdict(preset)))
+        package = manager.catalog.packages.get(action)
+        await self._emit_command_output("packages", f"unknown package: {action}" if package is None else _format_key_values(f"Package: {package.package_id}", asdict(package)))
         return True
 
     async def _sessions(self, args: str) -> bool:

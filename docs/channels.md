@@ -143,7 +143,7 @@ Approval-required tool calls in private chats send a structured MarkdownV2 messa
 
 The current turn pauses until approval resolves or times out. A 10-minute timeout denies the request. `/stop` cancels the current turn, clears queued work, and invalidates pending approval callbacks.
 
-Telegram group chats do not support interactive approvals in v1. Approval-required actions fail closed and ask the user to retry in a private chat.
+Telegram group chats do not currently support interactive approvals. Approval-required actions fail closed and ask the user to retry in a private chat.
 
 ## Reply Anchoring
 

@@ -19,7 +19,7 @@ These pages describe the user-facing behavior of demiurge. The root README also 
 | [providers.md](providers.md) | Fake and OpenAI-compatible provider configuration. |
 | [tools.md](tools.md) | Built-in tools, approval, workspace access, and output shaping. |
 | [skills.md](skills.md) | `agent/skills/` format and progressive skill loading. |
-| [packages.md](packages.md) | Built-in agent catalog, package wizard, presets, and installed package records. |
+| [packages.md](packages.md) | Built-in agent catalog, package wizard, tags, options, and installed package records. |
 | [schedules.md](schedules.md) | `agent/schedules/` cron declarations, run semantics, and delivery. |
 | [channels.md](channels.md) | Local TUI and Telegram polling gateway behavior. |
 | [sessions.md](sessions.md) | Durable sessions, resume, context assembly, and manual compaction. |
@@ -53,4 +53,5 @@ The default local entry is the TUI. External channels are started with:
 uv run demiurge gateway --core assistant
 ```
 
-External channels only listen when enabled in the current core. v1 supports Telegram.
+External channels only listen when enabled in the current core. The current
+external channel implementation supports Telegram.

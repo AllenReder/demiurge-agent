@@ -107,5 +107,5 @@ In the TUI:
 complete turns, and stores a reference-only `compaction_summary`. The summary
 is historical context, not the current task.
 
-Current v1 does not implement automatic threshold compaction, SQLite/FTS
-search, session trees, or exact token budgeting.
+The current implementation does not provide automatic threshold compaction,
+SQLite/FTS search, session trees, or exact token budgeting.

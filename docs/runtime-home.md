@@ -46,8 +46,8 @@ Typical layout:
 - `agents/agent.yaml`: global fallback config. It allows `model`, `ui`, and
   `approval`.
 - `agents/<core_id>/`: live runtime agent core.
-- `agents/<core_id>/packages.yaml`: package preset install records for that
-  core. Secret option values are redacted.
+- `agents/<core_id>/packages.yaml`: package install records for that core.
+  Secret option values are redacted.
 - `history/`: backups created before init refresh, promotion, or rollback.
 - `registry/`: active version pointers for each core.
 - `runs/`: evolution candidates, gate results, and reports.
