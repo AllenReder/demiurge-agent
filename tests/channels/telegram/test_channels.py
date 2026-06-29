@@ -1462,6 +1462,8 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
     await _wait_until(lambda: bool(api.sent))
+    await _wait_until(lambda: bool(bridge._pending_approvals))
+    approval_id = next(iter(bridge._pending_approvals))
     state = bridge._conversations["telegram:123"]
     task = state.active_task
 
@@ -1470,14 +1472,14 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     assert "whoami" in api.sent[0]["text"]
     assert api.sent[0]["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "Allow once", "callback_data": "approval:1:allow"}],
-            [{"text": "Allow for session", "callback_data": "approval:1:session"}],
-            [{"text": "Deny", "callback_data": "approval:1:deny"}],
+            [{"text": "Allow once", "callback_data": f"approval:{approval_id}:allow"}],
+            [{"text": "Allow for session", "callback_data": f"approval:{approval_id}:session"}],
+            [{"text": "Deny", "callback_data": f"approval:{approval_id}:deny"}],
         ]
     }
 
-    await bridge.handle_update(_callback(f"approval:1:{action}", chat_id=123, message_id=456, callback_id="cb_approval"))
-    await task
+    await bridge.handle_update(_callback(f"approval:{approval_id}:{action}", chat_id=123, message_id=456, callback_id="cb_approval"))
+    await asyncio.wait_for(task, timeout=1)
 
     assert runner.decision.value == expected
     assert bridge._pending_approvals == {}
