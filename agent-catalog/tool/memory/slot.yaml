@@ -5,8 +5,11 @@ description: >-
   project convention, environment fact, or tool/workflow lesson that should reduce
   future repetition. Do not save task progress, temporary todos, raw data dumps,
   commit or PR status, easily rediscovered facts, or reusable procedures that
-  belong in a skill. Make multiple changes in one operations batch when possible;
-  batch writes are all-or-nothing against the final character budget.
+  belong in a skill. Use action=list with target=all when the user asks to view,
+  list, inspect, or confirm what is currently stored in memory; list is read-only,
+  does not save or delete anything, and does not refresh the current session's
+  frozen memory snapshot. Make multiple changes in one operations batch when
+  possible; batch writes are all-or-nothing against the final character budget.
 input_schema:
   type: object
   properties:
@@ -15,14 +18,16 @@ input_schema:
       enum:
         - memory
         - user
-      description: memory stores environment/project/tool notes; user stores profile and preferences.
+        - all
+      description: memory stores environment/project/tool notes; user stores profile and preferences; all is only valid with action=list and returns both stores.
     action:
       type: string
       enum:
         - add
         - replace
         - remove
-      description: Single-operation action. Omit when using operations.
+        - list
+      description: Single-operation action. Use list to read current live memory entries; omit when using operations.
     content:
       type: string
       description: Entry content for add or replace.
@@ -56,4 +61,3 @@ approval_policy: auto
 display_policy: summary
 model_output_policy: content
 capabilities: []
-

@@ -162,6 +162,8 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert slot["approval_policy"] == "auto"
     assert slot["display_policy"] == "summary"
     assert slot["model_output_policy"] == "content"
+    assert set(slot["input_schema"]["properties"]["action"]["enum"]) == {"add", "replace", "remove", "list"}
+    assert set(slot["input_schema"]["properties"]["target"]["enum"]) == {"memory", "user", "all"}
 
     memory_dir = core_path / "memory"
     memory_dir.mkdir()

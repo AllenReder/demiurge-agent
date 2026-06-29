@@ -247,11 +247,14 @@ usage guidance plus non-empty memory blocks as transient system context. Later
 writes in the same session persist to disk immediately but do not update that
 session's snapshot; a new session sees the updated files.
 
-The `memory` tool supports `add`, `replace`, `remove`, and an all-or-nothing
-`operations` batch for a single target (`memory` or `user`). Exact duplicate adds
-are idempotent. Replacements and removals use a short unique `old_text`
-substring. The default authored tool metadata is `risk: medium` and
-`approval_policy: auto`.
+The `memory` tool supports `list`, `add`, `replace`, `remove`, and an
+all-or-nothing `operations` batch for a single write target (`memory` or
+`user`). Use `list` with `target: all` to read the current live disk entries from
+both stores; this is read-only, does not refresh the current session's frozen
+snapshot, and does not make freshly written memory visible in the current
+session prompt. Exact duplicate adds are idempotent. Replacements and removals
+use a short unique `old_text` substring. The default authored tool metadata is
+`risk: medium` and `approval_policy: auto`.
 
 ## Built-In MiniMax TTS
 

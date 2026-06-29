@@ -92,6 +92,26 @@ def test_memory_basic_store_batch_is_atomic_and_uses_final_budget(tmp_path):
     assert store.read_entries("memory") == ["short", "fit"]
 
 
+def test_memory_basic_store_lists_live_entries_for_all_targets(tmp_path):
+    store = _store(tmp_path, memory_chars=120, user_chars=120)
+    store.path_for("memory").write_text("project convention\n§\ntool lesson", encoding="utf-8")
+    store.path_for("user").write_text("User prefers concise replies", encoding="utf-8")
+
+    result = store.apply_tool_args({"target": "all", "action": "list"})
+
+    assert result["success"] is True
+    assert result["done"] is True
+    assert result["action"] == "list"
+    assert result["target"] == "all"
+    assert result["entry_count"] == 3
+    assert result["stores"]["memory"]["entries"] == ["project convention", "tool lesson"]
+    assert result["stores"]["memory"]["entry_count"] == 2
+    assert result["stores"]["user"]["entries"] == ["User prefers concise replies"]
+    assert result["stores"]["user"]["entry_count"] == 1
+    assert result["usage"]["memory"].endswith("/120 chars")
+    assert result["usage"]["user"].endswith("/120 chars")
+
+
 def test_memory_basic_store_sanitizes_snapshot_and_refuses_drift_rewrites(tmp_path):
     store = _store(tmp_path, memory_chars=160)
     memory_path = store.path_for("memory")
@@ -164,3 +184,55 @@ async def test_memory_basic_runtime_injects_snapshot_and_tool_writes_are_session
     await app.runner.run_turn("fresh session")
     new_session_text = "\n".join(message.content for message in provider.requests[3].messages)
     assert "New durable memory" in new_session_text
+
+
+@pytest.mark.asyncio
+async def test_memory_basic_runtime_lists_live_memory_without_refreshing_snapshot(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _manager(app).install(core_id="assistant", package_id="memory_basic")
+    core_path = app.version_store.active_core_path("assistant")
+    memory_dir = core_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("Initial project convention", encoding="utf-8")
+    (memory_dir / "USER.md").write_text("User prefers terse replies", encoding="utf-8")
+    provider = RecordingProvider(
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="memory_add",
+                        name="memory",
+                        arguments={"target": "memory", "action": "add", "content": "Live disk entry"},
+                    )
+                ]
+            ),
+            LLMResponse(content="after add"),
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="memory_list",
+                        name="memory",
+                        arguments={"target": "all", "action": "list"},
+                    )
+                ]
+            ),
+            LLMResponse(content="after list"),
+        ]
+    )
+    app.runner.provider = provider
+
+    await app.runner.run_turn("remember this")
+    result = await app.runner.run_turn("show memory")
+
+    list_result = result.tool_results[0].result
+    assert result.tool_results[0].call.name == "memory"
+    assert list_result.is_error is False
+    assert list_result.data["action"] == "list"
+    assert list_result.data["stores"]["memory"]["entries"] == ["Initial project convention", "Live disk entry"]
+    assert list_result.data["stores"]["user"]["entries"] == ["User prefers terse replies"]
+    assert list_result.display_output == "Listed 2 memory entries and 1 user entry."
+    list_request_text = "\n".join(message.content for message in provider.requests[2].messages)
+    assert "Initial project convention" in list_request_text
+    assert "Live disk entry" not in list_request_text
+    history = app.runner.session_store.read_messages(app.runner.session_id)
+    assert all(message.role != "system" for message in history)

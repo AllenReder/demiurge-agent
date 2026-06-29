@@ -140,14 +140,19 @@ class MemoryStore:
 
     def apply_tool_args(self, args: Mapping[str, Any]) -> dict[str, Any]:
         target = str(args.get("target") or "memory").strip()
+        action = str(args.get("action") or "").strip()
+        if action == "list":
+            return self.list_entries(target)
         if target not in TARGET_FILENAMES:
-            return {"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}
+            return {
+                "success": False,
+                "error": f"Invalid target '{target}'. Use 'memory' or 'user'; target 'all' is only valid with action=list.",
+            }
         operations = args.get("operations")
         if operations is not None:
             if not isinstance(operations, list):
                 return {"success": False, "error": "operations must be a list of objects."}
             return self.apply_batch(target, operations)
-        action = str(args.get("action") or "").strip()
         content = str(args.get("content") or "")
         old_text = str(args.get("old_text") or "")
         if action == "add":
@@ -156,7 +161,48 @@ class MemoryStore:
             return self.replace(target, old_text, content)
         if action == "remove":
             return self.remove(target, old_text)
-        return {"success": False, "error": "Unknown action. Use add, replace, remove, or operations."}
+        return {"success": False, "error": "Unknown action. Use add, replace, remove, list, or operations."}
+
+    def list_entries(self, target: str) -> dict[str, Any]:
+        if target == "all":
+            targets = ("memory", "user")
+        elif target in TARGET_FILENAMES:
+            targets = (target,)
+        else:
+            return {"success": False, "error": f"Invalid target '{target}'. Use 'memory', 'user', or 'all'."}
+
+        stores: dict[str, dict[str, Any]] = {}
+        for current_target in targets:
+            entries = self.read_entries(current_target, create=True)
+            current = self._char_count(entries)
+            limit = self._char_limit(current_target)
+            pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
+            stores[current_target] = {
+                "entries": entries,
+                "entry_count": len(entries),
+                "char_count": current,
+                "char_limit": limit,
+                "usage": f"{pct}% - {current:,}/{limit:,} chars",
+            }
+
+        memory_count = stores.get("memory", {}).get("entry_count", 0)
+        user_count = stores.get("user", {}).get("entry_count", 0)
+        if target == "all":
+            message = f"Listed {_entry_count_label(memory_count, 'memory')} and {_entry_count_label(user_count, 'user')}."
+        else:
+            count = stores[target]["entry_count"]
+            label = "memory" if target == "memory" else "user"
+            message = f"Listed {_entry_count_label(count, label)}."
+        return {
+            "success": True,
+            "done": True,
+            "action": "list",
+            "target": target,
+            "message": message,
+            "stores": stores,
+            "usage": {key: value["usage"] for key, value in stores.items()},
+            "entry_count": sum(value["entry_count"] for value in stores.values()),
+        }
 
     def add(self, target: str, content: str) -> dict[str, Any]:
         content = content.strip()
@@ -410,8 +456,15 @@ def tool_json_result(result: Mapping[str, Any]) -> str:
     return json.dumps(dict(result), ensure_ascii=False)
 
 
+def _entry_count_label(count: int, label: str) -> str:
+    suffix = "entry" if count == 1 else "entries"
+    return f"{count} {label} {suffix}"
+
+
 def tool_display_output(result: Mapping[str, Any]) -> str:
     if result.get("success"):
+        if result.get("action") == "list":
+            return str(result.get("message") or "memory listed")
         return str(result.get("message") or "memory updated")
     return str(result.get("error") or "memory update failed")
 
@@ -555,4 +608,3 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
