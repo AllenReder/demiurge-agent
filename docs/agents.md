@@ -56,6 +56,7 @@ assistant/
     tools/
     skills/
     schedules/
+    mcp/
 ```
 
 The host owns the loop, context assembly, provider calls, tool execution, and
@@ -63,6 +64,9 @@ interaction bridges. Agent cores contribute authored surface and may declare
 external channel config in `agent.yaml`. Gateway mode starts external channel
 adapters enabled by the current core. Channels are host adapters, not
 `agent/` slots.
+
+`slots.mcp: agent/mcp` is the optional MCP declaration root for a concrete
+core. Missing or empty `agent/mcp/` exposes no MCP tools.
 
 ## Input and Output Pipelines
 

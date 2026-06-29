@@ -34,7 +34,7 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Modular IO | Agent cores can shape input, format output, emit local artifacts, and route delivery without taking over host-owned capabilities or approvals. |
 | Controlled evolution | Core changes are designed to be file-backed, diffable, testable, and promotable through host-owned version controls. |
 | Host-owned harness | Provider calls, tool execution, approvals, state writes, sessions, and delivery stay under a stable runtime boundary. |
-| Authored surface | Agent behavior lives in readable files: instructions, skills, schedules, IO modules, tests, and optional code slots. |
+| Authored surface | Agent behavior lives in readable files: `SOUL.md`, skills, tools, schedules, IO modules, optional MCP declarations, tests, and optional code slots. |
 | Local-first runtime | Live cores, sessions, configuration, and workspaces live under `~/.demiurge` by default. |
 
 ## Quickstart
@@ -68,20 +68,24 @@ An agent core is the authored surface under `~/.demiurge/agents/<core>/`: `agent
 assistant/
 ├── agent.yaml
 └── agent/
-    ├── instructions.md
-    ├── skills/
-    ├── schedules/
+    ├── SOUL.md
     ├── input/
     ├── output/
+    ├── tools/
+    ├── skills/
+    ├── schedules/
+    ├── mcp/
     ├── lib/
     └── tests/
 ```
 
-The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares instructions, skills, channels, schedules, IO modules, and optional code slots.
+The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares its soul, skills, authored tools, channels, schedules, IO modules, optional MCP server tools, and optional code slots.
 
 IO modules are core-local extension points for input shaping and output delivery. They let a core adapt channel input, format responses, emit local artifacts, or route output while still going through host-owned capabilities and approvals.
 
-See [docs/agents.md](docs/agents.md), [docs/agent-core-authoring.md](docs/agent-core-authoring.md), and [docs/channels.md](docs/channels.md) for the full authoring model.
+MCP servers can be declared with `agent/mcp/*.yaml`. The core owns those declarations, while the host owns MCP transports, tool execution, capability checks, approvals, and logging.
+
+See [docs/agents.md](docs/agents.md), [docs/agent-core-authoring.md](docs/agent-core-authoring.md), [docs/tools.md](docs/tools.md), and [docs/channels.md](docs/channels.md) for the full authoring model.
 
 ## Evolution Boundary
 

@@ -34,7 +34,7 @@
 | 可拓展 IO | Agent core 可以整理输入、格式化输出、生成本地 artifact、路由 delivery，而不接管 host 拥有的 capabilities 和 approvals。 |
 | 受控进化 | Core 变更以文件为边界，天然可 diff、可测试，并通过 host 拥有的版本控制进行 promote 或 rollback。 |
 | Host-owned harness | Provider 调用、工具执行、审批、状态写入、session 和 delivery 始终处在稳定 runtime 边界内。 |
-| Authored surface | Agent 行为存在于可读文件中：instructions、skills、schedules、IO modules、tests 和可选 code slots。 |
+| Authored surface | Agent 行为存在于可读文件中：`SOUL.md`、skills、tools、schedules、IO modules、可选 MCP declarations、tests 和可选 code slots。 |
 | Local-first runtime | live cores、sessions、配置和 workspace 默认放在本机 `~/.demiurge` 下。 |
 
 ## 快速开始
@@ -68,20 +68,24 @@ agent core 是 `~/.demiurge/agents/<core>/` 下的 authored surface：`agent.yam
 assistant/
 ├── agent.yaml
 └── agent/
-    ├── instructions.md
-    ├── skills/
-    ├── schedules/
+    ├── SOUL.md
     ├── input/
     ├── output/
+    ├── tools/
+    ├── skills/
+    ├── schedules/
+    ├── mcp/
     ├── lib/
     └── tests/
 ```
 
-host 负责执行、provider 调用、工具、审批、状态、session 和 delivery。core 声明 instructions、skills、channels、schedules、IO modules 和可选 code slots。
+host 负责执行、provider 调用、工具、审批、状态、session 和 delivery。core 声明 soul、skills、authored tools、channels、schedules、IO modules、可选 MCP server tools 和可选 code slots。
 
 IO modules 是 core-local 的 input shaping 和 output delivery 扩展点。它们让 core 能适配 channel input、格式化回复、产生本地 artifact，或路由 output，同时仍经过宿主负责的 capabilities 和 approvals。
 
-完整 authoring model 见 [docs/agents.md](docs/agents.md)、[docs/agent-core-authoring.md](docs/agent-core-authoring.md) 和 [docs/channels.md](docs/channels.md)。
+MCP servers 可以通过 `agent/mcp/*.yaml` 声明。core 拥有这些声明；MCP transports、tool execution、capability checks、approvals 和 logging 仍由 host 拥有。
+
+完整 authoring model 见 [docs/agents.md](docs/agents.md)、[docs/agent-core-authoring.md](docs/agent-core-authoring.md)、[docs/tools.md](docs/tools.md) 和 [docs/channels.md](docs/channels.md)。
 
 ## 进化边界
 

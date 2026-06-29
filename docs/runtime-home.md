@@ -18,6 +18,7 @@ Typical layout:
       packages.yaml
     evolver/
   history/
+  logs/
   registry/
   runs/
   scheduler/
@@ -49,6 +50,8 @@ Typical layout:
 - `agents/<core_id>/packages.yaml`: package install records for that core.
   Secret option values are redacted.
 - `history/`: backups created before init refresh, promotion, or rollback.
+- `logs/`: runtime logs, including `logs/mcp-stderr.log` for MCP stdio stderr
+  and MCP runtime diagnostics.
 - `registry/`: active version pointers for each core.
 - `runs/`: evolution candidates, gate results, and reports.
 - `scheduler/<core_id>/`: scheduler state, run log, and lock file.
