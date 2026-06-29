@@ -1,4 +1,6 @@
-<!-- Logo/wordmark slot: add docs/assets/demiurge-wordmark.svg here when the asset is ready. -->
+<p align="center">
+  <img src="docs/assets/demiurge-icon-rounded.png" alt="demiurge icon" width="112">
+</p>
 
 <h1 align="center">demiurge</h1>
 
