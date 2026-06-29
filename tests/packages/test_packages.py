@@ -125,10 +125,10 @@ def test_builtin_catalog_lists_minimax_tts_package():
     assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
 
 
-def test_builtin_catalog_lists_basic_memory_package():
+def test_builtin_catalog_lists_memory_basic_package():
     catalog = PackageCatalog.load(default_catalog_root())
 
-    package = catalog.packages["basic_memory"]
+    package = catalog.packages["memory_basic"]
     assert {"memory", "context"}.issubset(package.tags)
     assert {component.kind for component in package.components} == {"lib", "input", "tool", "skill"}
     assert [component.component_id for component in package.components] == [
@@ -139,20 +139,20 @@ def test_builtin_catalog_lists_basic_memory_package():
     ]
 
 
-def test_install_and_uninstall_basic_memory_preserves_data(tmp_path):
+def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    result = manager.install(core_id="assistant", package_id="basic_memory")
+    result = manager.install(core_id="assistant", package_id="memory_basic")
 
     core_path = app.version_store.active_core_path("assistant")
     assert result.registry_path == core_path / "packages.yaml"
-    assert (core_path / "agent" / "lib" / "basic_memory" / "store.py").exists()
+    assert (core_path / "agent" / "lib" / "memory_basic" / "store.py").exists()
     assert (core_path / "agent" / "input" / "memory_context" / "module.py").exists()
     assert (core_path / "agent" / "tools" / "memory" / "module.py").exists()
     assert (core_path / "agent" / "skills" / "memory_policy" / "SKILL.md").exists()
     assert not (core_path / "memory").exists()
-    config = yaml.safe_load((core_path / "agent" / "lib" / "basic_memory" / "config.yaml").read_text())
+    config = yaml.safe_load((core_path / "agent" / "lib" / "memory_basic" / "config.yaml").read_text())
     assert config["storage"] == {"relative_to": "core_root", "path": "memory"}
     assert config["snapshot"]["mode"] == "session"
     assert config["limits"] == {"memory_chars": 2200, "user_chars": 1375}
@@ -167,12 +167,12 @@ def test_install_and_uninstall_basic_memory_preserves_data(tmp_path):
     memory_dir = core_path / "memory"
     memory_dir.mkdir()
     (memory_dir / "USER.md").write_text("User prefers concise Chinese replies.", encoding="utf-8")
-    removed = manager.uninstall(core_id="assistant", package_id="basic_memory")
+    removed = manager.uninstall(core_id="assistant", package_id="memory_basic")
 
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "input" / "memory_context").exists()
     assert not (core_path / "agent" / "tools" / "memory").exists()
-    assert not (core_path / "agent" / "lib" / "basic_memory").exists()
+    assert not (core_path / "agent" / "lib" / "memory_basic").exists()
     assert (memory_dir / "USER.md").read_text(encoding="utf-8") == "User prefers concise Chinese replies."
     pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_input"]

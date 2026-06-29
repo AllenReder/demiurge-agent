@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .basic_memory.store import load_or_create_session_snapshot, snapshot_blocks
+from .memory_basic.store import load_or_create_session_snapshot, snapshot_blocks
 
 
 def process(ctx):

@@ -150,7 +150,7 @@ Install a package into an explicit runtime core:
 
 ```bash
 uv run demiurge package install minimax_tts --core assistant
-uv run demiurge package install basic_memory --core assistant
+uv run demiurge package install memory_basic --core assistant
 uv run demiurge package install minimax_tts --core assistant --option mode=summary
 uv run demiurge package install minimax_tts --core assistant --option enable_tool=true
 uv run demiurge package install minimax_tts --core assistant --preview
@@ -160,7 +160,7 @@ Uninstall:
 
 ```bash
 uv run demiurge package uninstall minimax_tts --core assistant
-uv run demiurge package uninstall basic_memory --core assistant
+uv run demiurge package uninstall memory_basic --core assistant
 uv run demiurge package uninstall minimax_tts --core assistant --preview
 ```
 
@@ -183,9 +183,9 @@ TUI `/packages` manages the current core only:
 ```text
 /packages
 /packages minimax_tts
-/packages basic_memory
+/packages memory_basic
 /packages install minimax_tts
-/packages install basic_memory
+/packages install memory_basic
 /packages uninstall minimax_tts
 ```
 
@@ -213,12 +213,12 @@ components and pipeline entries.
 The built-in catalog includes a local file-backed memory package:
 
 ```bash
-uv run demiurge package install basic_memory --core assistant
+uv run demiurge package install memory_basic --core assistant
 ```
 
 It installs:
 
-- `agent/lib/basic_memory`: shared parsing, snapshot, and file-write helpers;
+- `agent/lib/memory_basic`: shared parsing, snapshot, and file-write helpers;
 - `agent/input/memory_context`: an input module inserted before `base_input`;
 - `agent/tools/memory`: an authored `memory` tool;
 - `agent/skills/memory_policy`: guidance for what belongs in durable memory.
@@ -239,11 +239,11 @@ it does not delete `memory/USER.md` or `memory/MEMORY.md`.
 `USER.md` stores stable user profile and preference facts. `MEMORY.md` stores the
 agent's project, environment, convention, and tool notes. Entries are separated
 with `§`, may be multiline, and are bounded by character limits from
-`agent/lib/basic_memory/config.yaml`.
+`agent/lib/memory_basic/config.yaml`.
 
 At session start, `memory_context` reads the files, sanitizes prompt-injection or
 secret-exfiltration patterns out of the model-facing snapshot, writes
-`basic_memory_snapshot.json` under the session root, and injects non-empty memory
+`memory_basic_snapshot.json` under the session root, and injects non-empty memory
 blocks as transient system context. Later writes in the same session persist to
 disk immediately but do not update that session's snapshot; a new session sees
 the updated files.

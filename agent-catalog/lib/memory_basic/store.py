@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - Unix fallback
 
 
 ENTRY_DELIMITER = "\n§\n"
-SNAPSHOT_FILENAME = "basic_memory_snapshot.json"
+SNAPSHOT_FILENAME = "memory_basic_snapshot.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "storage": {
         "relative_to": "core_root",
@@ -75,7 +75,7 @@ def resolve_core_root(slot_file: str | Path) -> Path:
 
 def load_memory_config(slot_file: str | Path) -> dict[str, Any]:
     core_root = resolve_core_root(slot_file)
-    config = _deep_merge(DEFAULT_CONFIG, _load_yaml_mapping(core_root / "agent" / "lib" / "basic_memory" / "config.yaml"))
+    config = _deep_merge(DEFAULT_CONFIG, _load_yaml_mapping(core_root / "agent" / "lib" / "memory_basic" / "config.yaml"))
     config = _deep_merge(config, _load_yaml_mapping(Path(slot_file).with_name("config.yaml")))
     config["core_root"] = str(core_root)
     return config
@@ -474,11 +474,11 @@ def _file_lock(path: Path):
 def _resolve_storage_dir(core_root: Path, storage: Mapping[str, Any]) -> Path:
     relative_to = str(storage.get("relative_to") or "core_root")
     if relative_to != "core_root":
-        raise ValueError("basic_memory storage.relative_to only supports core_root")
+        raise ValueError("memory_basic storage.relative_to only supports core_root")
     raw_path = str(storage.get("path") or "memory").strip()
     path = Path(raw_path)
     if path.is_absolute() or not raw_path or ".." in path.parts:
-        raise ValueError("basic_memory storage.path must be a non-empty core-root-relative path")
+        raise ValueError("memory_basic storage.path must be a non-empty core-root-relative path")
     return (core_root / path).resolve()
 
 

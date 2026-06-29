@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from demiurge.sdk import ToolResult
 
-from .basic_memory.store import MemoryStore, load_memory_config, tool_display_output, tool_json_result
+from .memory_basic.store import MemoryStore, load_memory_config, tool_display_output, tool_json_result
 
 
 def execute(ctx, args):

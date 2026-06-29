@@ -1,5 +1,5 @@
 schema_version: 2
-id: basic_memory
+id: memory_basic
 name: Basic Memory
 summary: Add Hermes-style local USER.md and MEMORY.md persistent memory.
 tags:
@@ -8,8 +8,8 @@ tags:
 components:
   - id: memory_lib
     kind: lib
-    source: basic_memory
-    target: agent/lib/basic_memory
+    source: memory_basic
+    target: agent/lib/memory_basic
     config:
       storage:
         relative_to: core_root
