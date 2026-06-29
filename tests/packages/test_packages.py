@@ -125,6 +125,59 @@ def test_builtin_catalog_lists_minimax_tts_package():
     assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
 
 
+def test_builtin_catalog_lists_basic_memory_package():
+    catalog = PackageCatalog.load(default_catalog_root())
+
+    package = catalog.packages["basic_memory"]
+    assert {"memory", "context"}.issubset(package.tags)
+    assert {component.kind for component in package.components} == {"lib", "input", "tool", "skill"}
+    assert [component.component_id for component in package.components] == [
+        "memory_lib",
+        "memory_context",
+        "memory_tool",
+        "memory_policy",
+    ]
+
+
+def test_install_and_uninstall_basic_memory_preserves_data(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    result = manager.install(core_id="assistant", package_id="basic_memory")
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert result.registry_path == core_path / "packages.yaml"
+    assert (core_path / "agent" / "lib" / "basic_memory" / "store.py").exists()
+    assert (core_path / "agent" / "input" / "memory_context" / "module.py").exists()
+    assert (core_path / "agent" / "tools" / "memory" / "module.py").exists()
+    assert (core_path / "agent" / "skills" / "memory_policy" / "SKILL.md").exists()
+    assert not (core_path / "memory").exists()
+    config = yaml.safe_load((core_path / "agent" / "lib" / "basic_memory" / "config.yaml").read_text())
+    assert config["storage"] == {"relative_to": "core_root", "path": "memory"}
+    assert config["snapshot"]["mode"] == "session"
+    assert config["limits"] == {"memory_chars": 2200, "user_chars": 1375}
+    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
+    assert pipeline["serial"][:2] == ["memory_context", "base_input"]
+    slot = yaml.safe_load((core_path / "agent" / "tools" / "memory" / "slot.yaml").read_text())
+    assert slot["risk"] == "medium"
+    assert slot["approval_policy"] == "auto"
+    assert slot["display_policy"] == "summary"
+    assert slot["model_output_policy"] == "content"
+
+    memory_dir = core_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "USER.md").write_text("User prefers concise Chinese replies.", encoding="utf-8")
+    removed = manager.uninstall(core_id="assistant", package_id="basic_memory")
+
+    assert removed.action == "uninstall"
+    assert not (core_path / "agent" / "input" / "memory_context").exists()
+    assert not (core_path / "agent" / "tools" / "memory").exists()
+    assert not (core_path / "agent" / "lib" / "basic_memory").exists()
+    assert (memory_dir / "USER.md").read_text(encoding="utf-8") == "User prefers concise Chinese replies."
+    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
+    assert pipeline["serial"] == ["base_input"]
+
+
 def test_catalog_rejects_component_source_escape(tmp_path):
     root = tmp_path / "catalog"
     (root / "packages").mkdir(parents=True)

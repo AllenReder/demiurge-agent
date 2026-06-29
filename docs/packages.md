@@ -150,6 +150,7 @@ Install a package into an explicit runtime core:
 
 ```bash
 uv run demiurge package install minimax_tts --core assistant
+uv run demiurge package install basic_memory --core assistant
 uv run demiurge package install minimax_tts --core assistant --option mode=summary
 uv run demiurge package install minimax_tts --core assistant --option enable_tool=true
 uv run demiurge package install minimax_tts --core assistant --preview
@@ -159,6 +160,7 @@ Uninstall:
 
 ```bash
 uv run demiurge package uninstall minimax_tts --core assistant
+uv run demiurge package uninstall basic_memory --core assistant
 uv run demiurge package uninstall minimax_tts --core assistant --preview
 ```
 
@@ -181,7 +183,9 @@ TUI `/packages` manages the current core only:
 ```text
 /packages
 /packages minimax_tts
+/packages basic_memory
 /packages install minimax_tts
+/packages install basic_memory
 /packages uninstall minimax_tts
 ```
 
@@ -204,9 +208,55 @@ pipeline edits, warnings, and install time. Component runtime config lives in
 each component's own `config.yaml`. Uninstall uses `packages.yaml` to remove
 components and pipeline entries.
 
+## Built-In Basic Memory
+
+The built-in catalog includes a local file-backed memory package:
+
+```bash
+uv run demiurge package install basic_memory --core assistant
+```
+
+It installs:
+
+- `agent/lib/basic_memory`: shared parsing, snapshot, and file-write helpers;
+- `agent/input/memory_context`: an input module inserted before `base_input`;
+- `agent/tools/memory`: an authored `memory` tool;
+- `agent/skills/memory_policy`: guidance for what belongs in durable memory.
+
+The package stores user data outside package-owned component targets:
+
+```text
+~/.demiurge/agents/assistant/
+  memory/
+    USER.md
+    MEMORY.md
+```
+
+These files are created lazily by the input module or tool. Package uninstall
+removes the installed lib/input/tool/skill components and the pipeline entry, but
+it does not delete `memory/USER.md` or `memory/MEMORY.md`.
+
+`USER.md` stores stable user profile and preference facts. `MEMORY.md` stores the
+agent's project, environment, convention, and tool notes. Entries are separated
+with `§`, may be multiline, and are bounded by character limits from
+`agent/lib/basic_memory/config.yaml`.
+
+At session start, `memory_context` reads the files, sanitizes prompt-injection or
+secret-exfiltration patterns out of the model-facing snapshot, writes
+`basic_memory_snapshot.json` under the session root, and injects non-empty memory
+blocks as transient system context. Later writes in the same session persist to
+disk immediately but do not update that session's snapshot; a new session sees
+the updated files.
+
+The `memory` tool supports `add`, `replace`, `remove`, and an all-or-nothing
+`operations` batch for a single target (`memory` or `user`). Exact duplicate adds
+are idempotent. Replacements and removals use a short unique `old_text`
+substring. The default authored tool metadata is `risk: medium` and
+`approval_policy: auto`.
+
 ## Built-In MiniMax TTS
 
-The built-in catalog currently includes one TTS package:
+The built-in catalog also includes a TTS package:
 
 ```bash
 uv run demiurge package install minimax_tts --core assistant

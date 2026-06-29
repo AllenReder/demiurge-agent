@@ -1,0 +1,36 @@
+schema_version: 2
+id: basic_memory
+name: Basic Memory
+summary: Add Hermes-style local USER.md and MEMORY.md persistent memory.
+tags:
+  - memory
+  - context
+components:
+  - id: memory_lib
+    kind: lib
+    source: basic_memory
+    target: agent/lib/basic_memory
+    config:
+      storage:
+        relative_to: core_root
+        path: memory
+      snapshot:
+        mode: session
+      limits:
+        memory_chars: 2200
+        user_chars: 1375
+  - id: memory_context
+    kind: input
+    source: memory_context
+    target: agent/input/memory_context
+    pipeline:
+      group: serial
+      before: base_input
+  - id: memory_tool
+    kind: tool
+    source: memory
+    target: agent/tools/memory
+  - id: memory_policy
+    kind: skill
+    source: memory_policy
+    target: agent/skills/memory_policy
