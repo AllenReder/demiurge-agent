@@ -34,7 +34,10 @@ Default behavior:
 
 - Ordinary read-only workspace access is allowed.
 - Sensitive reads require approval.
-- Writes, deletion, terminal commands, network access, and state-changing actions require approval.
+- Writes, deletion, network access, and state-changing actions require approval.
+- Terminal commands pass through a host-owned command guard. Clearly safe
+  inspect/test/build commands are auto-approved; promptable dangerous commands
+  require approval; catastrophic hardline commands are blocked before approval.
 - Non-interactive execution without an approval provider fails closed.
 
 Approval events are written to the session event log.
@@ -72,11 +75,18 @@ approval:
 
 Agent cores can declare stricter per-agent policy, but they cannot lower the host security baseline into unconditional allow.
 
+For terminal commands, `terminal: deny` blocks even safe commands. Global
+`terminal: auto` is an explicit trust setting for promptable terminal commands,
+but it still cannot bypass hardline blocks such as recursive root deletion,
+filesystem formatting, raw block-device writes, shutdown/reboot, fork bombs, or
+`sudo -S` password guessing.
+
 Regardless of config, the host always enforces:
 
 - workspace boundary checks;
 - declared capability requirements;
 - enabled-tool checks;
+- terminal hardline command blocks;
 - candidate evolution scope;
 - dependency-file gates;
 - self-evolution write boundaries.

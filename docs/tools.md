@@ -30,7 +30,10 @@ File and search tools:
 Terminal and process tools:
 
 - `terminal`: run a shell command inside the workspace. `background=true`
-  starts a background process and returns a `process_id`.
+  starts a background process and returns a `process_id`. Terminal commands
+  are reviewed by a host command guard: safe inspect/test/build commands can
+  run automatically, dangerous commands request approval, and catastrophic
+  hardline commands are blocked before approval.
 - `process`: manage background processes created by `terminal(background=true)`.
   Supports `list`, `poll`, `log`, `wait`, and `kill`. The process registry is
   in-memory for the current demiurge process and is not restored after restart.
@@ -121,6 +124,9 @@ currently resolves the setting at channel startup.
 ## Permissions
 
 An agent core must enable the toolset and declare matching capabilities. File
-writes, skill management, terminal commands, and network access require approval
-by default. Ordinary read-only file access inside the workspace may be allowed
-automatically, but sensitive reads still require approval.
+writes, skill management, promptable terminal commands, and network access
+require approval by default. Safe terminal commands may be approved
+automatically, but `terminal: deny` still blocks all terminal execution and
+hardline terminal blocks cannot be bypassed by approval config. Ordinary
+read-only file access inside the workspace may be allowed automatically, but
+sensitive reads still require approval.

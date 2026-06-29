@@ -4,12 +4,26 @@ import yaml
 import pytest
 
 from demiurge.app import create_app
-from demiurge.security.approval import StaticApprovalProvider
+from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
+
+
+class RecordingApprovalProvider:
+    name = "recording"
+
+    def __init__(self, decisions: list[str]):
+        self.decisions = decisions
+        self.requests = []
+
+    def decide(self, request):
+        self.requests.append(request)
+        if self.decisions:
+            return ApprovalDecision(self.decisions.pop(0), "recorded test decision")
+        return ApprovalDecision("deny", "no recorded decision left")
 
 
 def _load_core_with(
@@ -198,6 +212,7 @@ async def test_workspace_escape_is_rejected_before_execution(tmp_path):
 async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "denied.txt").write_text("keep", encoding="utf-8")
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     app.approval_runtime.provider = StaticApprovalProvider("allow")
     core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
@@ -207,7 +222,7 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     escape = await _execute(app, core, "terminal", {"command": "pwd", "cwd": ".."})
 
     app.approval_runtime.provider = StaticApprovalProvider("deny")
-    denied = await _execute(app, core, "terminal", {"command": "printf denied"})
+    denied = await _execute(app, core, "terminal", {"command": "rm denied.txt"})
 
     assert success.is_error is False
     assert "hello" in success.content
@@ -217,6 +232,47 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert escape.data["executionStarted"] is False
     assert denied.is_error is True
     assert denied.data["executionStarted"] is False
+    assert (workspace / "denied.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "printf safe"})
+
+    assert result.is_error is False
+    assert "safe" in result.content
+    events = app.runner.event_log.tail(20)
+    approval_events = [event for event in events if event["type"].startswith("approval.")]
+    assert [event["type"] for event in approval_events] == ["approval.decided"]
+    assert approval_events[0]["automatic"] is True
+    assert approval_events[0]["risk"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_global_terminal_deny_blocks_safe_commands(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "deny"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "printf no"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
 
 
 @pytest.mark.asyncio
@@ -224,7 +280,7 @@ async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
     core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
 
     started = await _execute(app, core, "terminal", {"command": "printf ready", "background": True})
@@ -238,6 +294,72 @@ async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
     assert waited.data["running"] is False
     assert "ready" in log.content
     assert process_id in listed.content
+
+
+@pytest.mark.asyncio
+async def test_terminal_dangerous_session_approval_caches_by_rule(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first = workspace / "first.txt"
+    second = workspace / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    first_result = await _execute(app, core, "terminal", {"command": "rm first.txt"})
+    second_result = await _execute(app, core, "terminal", {"command": "rm second.txt"})
+
+    assert first_result.data["executionStarted"] is True
+    assert second_result.data["executionStarted"] is True
+    assert not first.exists()
+    assert not second.exists()
+    assert len(provider.requests) == 1
+    assert provider.requests[0].cache_key == "terminal:terminal.exec:file-delete"
+
+
+@pytest.mark.asyncio
+async def test_terminal_hardline_blocks_before_global_auto(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "rm -rf /"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["command_guard"]["action"] == "block"
+
+
+@pytest.mark.asyncio
+async def test_terminal_promptable_commands_require_approval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    package_install = await _execute(app, core, "terminal", {"command": "npm install"})
+    redirection = await _execute(app, core, "terminal", {"command": "printf hello > out.txt"})
+    complex_shell = await _execute(app, core, "terminal", {"command": "python <<'PY'\nprint('hello')\nPY"})
+
+    assert package_install.is_error is True
+    assert package_install.data["executionStarted"] is False
+    assert redirection.is_error is True
+    assert redirection.data["executionStarted"] is False
+    assert not (workspace / "out.txt").exists()
+    assert complex_shell.is_error is True
+    assert complex_shell.data["executionStarted"] is False
 
 
 @pytest.mark.asyncio
@@ -414,6 +536,7 @@ def test_builtin_tool_descriptions_are_model_facing_not_approval_prompts():
 async def test_core_approval_config_cannot_lower_host_safety_baseline(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "blocked.txt").write_text("blocked", encoding="utf-8")
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     app.approval_runtime.provider = StaticApprovalProvider("deny")
     manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
@@ -422,17 +545,20 @@ async def test_core_approval_config_cannot_lower_host_safety_baseline(tmp_path):
     manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
 
-    result = await _execute(app, core, "terminal", {"command": "printf no"})
+    result = await _execute(app, core, "terminal", {"command": "rm blocked.txt"})
 
     assert result.is_error is True
     assert result.data["executionStarted"] is False
     assert result.data["approval"]["value"] == "deny"
+    assert (workspace / "blocked.txt").exists()
 
 
 @pytest.mark.asyncio
 async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    doomed = workspace / "doomed.txt"
+    doomed.write_text("delete me", encoding="utf-8")
     home = tmp_path / "home"
     app = create_app(home=home, provider_name="fake", workspace=workspace)
     fallback = home / "agents" / "agent.yaml"
@@ -443,11 +569,11 @@ async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
     app.approval_runtime.provider = StaticApprovalProvider("deny")
     core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
 
-    result = await _execute(app, core, "terminal", {"command": "printf yes"})
+    result = await _execute(app, core, "terminal", {"command": "rm doomed.txt"})
 
     assert result.is_error is False
-    assert "yes" in result.content
     assert result.data["executionStarted"] is True
+    assert not doomed.exists()
 
 
 @pytest.mark.asyncio

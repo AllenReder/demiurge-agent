@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.security.command_guard import CommandGuardDecision, review_command
 from demiurge.core import ApprovalInfo, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
@@ -461,6 +462,13 @@ class ToolRuntime:
         env_overlay = call.arguments.get("env") or {}
         if not isinstance(env_overlay, Mapping):
             return ToolResult(content="env must be an object", is_error=True)
+        command_guard = review_command(command)
+        if command_guard.action == "block":
+            return ToolResult(
+                content=f"terminal command blocked: {command_guard.reason}",
+                data={"executionStarted": False, "command_guard": asdict(command_guard)},
+                is_error=True,
+            )
         denied = await self._approval_for_command(
             call,
             core=core,
@@ -468,6 +476,7 @@ class ToolRuntime:
             cwd=cwd.relative,
             command=command,
             env_keys=sorted(str(key) for key in env_overlay.keys()),
+            command_guard=command_guard,
             emit_event=emit_event,
         )
         if denied:
@@ -1038,28 +1047,47 @@ class ToolRuntime:
         cwd: str,
         command: str,
         env_keys: list[str],
+        command_guard: CommandGuardDecision,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
-        policy = self._effective_approval_policy(
-            core,
-            tool_name=call.name,
-            capability_name="terminal.exec",
-            risk="critical",
-            default_auto=False,
-        )
+        if command_guard.action == "allow":
+            policy = self._safe_command_approval_policy(
+                core,
+                tool_name=call.name,
+                capability_name="terminal.exec",
+                risk=command_guard.risk,
+            )
+            auto_approve = policy != "deny"
+        else:
+            policy = self._effective_approval_policy(
+                core,
+                tool_name=call.name,
+                capability_name="terminal.exec",
+                risk=command_guard.risk,
+                default_auto=False,
+            )
+            auto_approve = policy == "auto"
+        summary = f"Run terminal command in {cwd}"
+        if command_guard.action != "allow":
+            summary = f"{summary}: {command_guard.reason}"
         request = ApprovalRequest(
             tool_name=call.name,
             tool_call_id=call.id,
             turn_id=turn.turn_id,
             capability="terminal.exec",
             action="exec",
-            risk="critical",
-            summary=f"Run terminal command in {cwd}",
+            risk=command_guard.risk,
+            summary=summary,
             target=cwd,
             command=command,
-            arguments_preview={"cwd": cwd, "command": command, "env_keys": env_keys},
-            cache_key=f"terminal:terminal.exec:{cwd}:{command}",
-            auto_approve=policy == "auto",
+            arguments_preview={
+                "cwd": cwd,
+                "command": command,
+                "env_keys": env_keys,
+                "command_guard": asdict(command_guard),
+            },
+            cache_key=f"terminal:terminal.exec:{command_guard.rule_key}",
+            auto_approve=auto_approve,
             policy=policy,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
@@ -1229,6 +1257,34 @@ class ToolRuntime:
         if global_policy:
             return global_policy
         return baseline
+
+    def _safe_command_approval_policy(
+        self,
+        core: LoadedCore,
+        *,
+        tool_name: str,
+        capability_name: str,
+        risk: str,
+    ) -> str:
+        global_policy = self._select_approval_policy(
+            self.global_approval,
+            tool_name=tool_name,
+            capability_name=capability_name,
+            risk=risk,
+        )
+        if global_policy == "deny":
+            return "deny"
+        if global_policy == "auto":
+            return "auto"
+        core_policy = self._select_approval_policy(
+            core.manifest.approval,
+            tool_name=tool_name,
+            capability_name=capability_name,
+            risk=risk,
+        )
+        if core_policy == "deny":
+            return "deny"
+        return "auto"
 
     def _select_approval_policy(
         self,
