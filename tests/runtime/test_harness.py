@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import Any
+
 import pytest
 import yaml
 
@@ -6,6 +9,41 @@ from demiurge.security.approval import StaticApprovalProvider
 from demiurge.runtime.interactions import InteractionInbound
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.util import write_json
+
+
+@dataclass(slots=True)
+class _HarnessMcpTool:
+    name: str
+    description: str = ""
+    inputSchema: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
+
+
+@dataclass(slots=True)
+class _HarnessMcpBlock:
+    type: str
+    text: str
+
+
+@dataclass(slots=True)
+class _HarnessMcpResult:
+    content: list[Any]
+    structuredContent: Any | None = None
+    isError: bool = False
+
+
+class _HarnessMcpConnection:
+    def __init__(self):
+        self.calls = []
+
+    async def list_tools(self):
+        return [_HarnessMcpTool(name="lookup", description="Look up MCP data.")]
+
+    async def call_tool(self, name, arguments, *, timeout_seconds):
+        self.calls.append((name, dict(arguments)))
+        return _HarnessMcpResult(content=[_HarnessMcpBlock(type="text", text="from mcp")])
+
+    async def close(self):
+        pass
 
 
 def _set_capabilities(app, *, capabilities: dict[str, dict]):
@@ -33,6 +71,12 @@ def _install_project_notes_skill(app):
         "Use this skill when project context matters.\n",
         encoding="utf-8",
     )
+
+
+def _install_mcp_server(app, server_id: str, content: str):
+    root = app.version_store.active_core_path("assistant") / "agent" / "mcp"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{server_id}.yaml").write_text(content, encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -73,6 +117,49 @@ async def test_fake_provider_read_file_tool_result_reaches_next_step(tmp_path):
     events = [event["type"] for event in app.runner.event_log.tail(20)]
     assert "approval.decided" in events
     assert "action.result" in events
+
+
+@pytest.mark.asyncio
+async def test_model_loop_executes_mcp_tool_and_returns_result_to_provider(tmp_path):
+    class McpCallingProvider:
+        def __init__(self):
+            self.requests = []
+
+        async def complete(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                assert any(tool.name == "docs__lookup" for tool in request.tools)
+                return LLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="mcp_1",
+                            name="docs__lookup",
+                            arguments={"q": "demo"},
+                        )
+                    ]
+                )
+            tool_text = next(message.content for message in request.messages if message.role == "tool")
+            return LLMResponse(content=f"mcp result visible: {'from mcp' in tool_text}")
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _set_capabilities(app, capabilities={"mcp.call:docs": {}})
+    _install_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+    )
+    connection = _HarnessMcpConnection()
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    app.runner.provider = McpCallingProvider()
+
+    result = await app.runner.run_turn("use mcp")
+
+    assert result.tool_results[0].call.name == "docs__lookup"
+    assert result.tool_results[0].result.content == "from mcp"
+    assert connection.calls == [("lookup", {"q": "demo"})]
+    assert _delivery_texts(result)[0] == "mcp result visible: True"
 
 
 @pytest.mark.asyncio

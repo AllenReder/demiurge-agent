@@ -67,6 +67,23 @@ Control tools:
 - `rollback_core`: request rollback to the previous stable version or a
   specified version.
 
+## MCP Tools
+
+Agent cores may expose MCP tools by adding server declarations under
+`agent/mcp/*.yaml` and setting `slots.mcp: agent/mcp` in the concrete core
+`agent.yaml`. MCP is agent-bound; do not put MCP server declarations in the
+global fallback `agents/agent.yaml`.
+
+The first MCP surface supports stdio and streamable HTTP server tools. The host
+connects to the server, lists tools, exposes them as namespaced model tools such
+as `docs__lookup`, and calls the original MCP tool when selected by the model.
+MCP resources, prompts, OAuth, dynamic discovery, and CLI management commands
+are not part of this first surface.
+
+MCP calls use the same registry, event logging, capability checks, and approval
+runtime as other host tools. Each server defaults to capability
+`mcp.call:<server_id>` unless its YAML file sets `capability`.
+
 ## Removed Tool Names
 
 These old public tool names are no longer available:

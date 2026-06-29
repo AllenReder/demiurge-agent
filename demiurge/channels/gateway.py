@@ -52,3 +52,6 @@ async def _run_gateway(app: Any) -> None:
     finally:
         if scheduler is not None:
             await scheduler.stop()
+        close = getattr(app, "close", None)
+        if close is not None:
+            await close()

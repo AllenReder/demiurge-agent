@@ -15,6 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.security.command_guard import CommandGuardDecision, review_command
@@ -52,13 +53,30 @@ class ToolRuntime:
         workspace: WorkspaceScope | None = None,
         approval_runtime: ApprovalRuntime | None = None,
         global_approval: ApprovalInfo | None = None,
+        mcp_runtime: McpRuntime | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
         self.workspace = workspace or WorkspaceScope(Path.cwd())
         self.approval_runtime = approval_runtime or ApprovalRuntime()
         self.global_approval = global_approval or ApprovalInfo()
+        self.mcp_runtime = mcp_runtime
         self._processes: dict[str, BackgroundProcessRecord] = {}
+
+    async def prepare_for_turn(
+        self,
+        core: LoadedCore,
+        turn: TurnContext,
+        *,
+        emit_event: EventEmitter | None = None,
+    ) -> None:
+        if self.mcp_runtime is None or not core.mcp_servers:
+            return
+        await self.mcp_runtime.prepare_for_turn(core, turn, emit_event=emit_event)
+
+    async def close(self) -> None:
+        if self.mcp_runtime is not None:
+            await self.mcp_runtime.close()
 
     def registry_for(self, core: LoadedCore) -> list[ToolRegistryEntry]:
         entries: list[ToolRegistryEntry] = []
@@ -102,6 +120,26 @@ class ToolRuntime:
                 self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
             if entry.enabled:
                 entries.append(entry)
+        if self.mcp_runtime is not None:
+            for tool in self.mcp_runtime.entries_for(core):
+                entry = ToolRegistryEntry(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=tool.input_schema or {"type": "object", "properties": {}},
+                    source="mcp",
+                    slot_path=tool.relative_path,
+                    risk=self._normalize_risk(tool.risk),
+                    capability=tool.capability,
+                    approval_policy=self._normalize_approval_policy(tool.approval_policy),
+                    model_output_policy="content",
+                    display_policy="summary",
+                    enabled=True,
+                )
+                configured = core.manifest.tools.metadata.get(tool.name)
+                if configured:
+                    self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
+                if entry.enabled:
+                    entries.append(entry)
         return entries
 
     def _apply_metadata(
@@ -155,16 +193,29 @@ class ToolRuntime:
                     emit_event=emit_event,
                 )
             slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
-            if not slot:
+            if slot:
+                return await self._execute_authored(
+                    slot,
+                    call,
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    output_factory=output_factory,
+                )
+            mcp_tool = self.mcp_runtime.tool_info(call.name) if self.mcp_runtime is not None else None
+            if mcp_tool is not None:
+                if call.name not in visible_tools:
+                    return ToolResult(content=f"MCP tool is not allowed: {call.name}", is_error=True)
+                return await self._execute_mcp(
+                    mcp_tool,
+                    call,
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    emit_event=emit_event,
+                )
+            else:
                 return ToolResult(content=f"tool not found: {call.name}", is_error=True)
-            return await self._execute_authored(
-                slot,
-                call,
-                core=core,
-                turn=turn,
-                capability=capability,
-                output_factory=output_factory,
-            )
         except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
 
@@ -224,6 +275,35 @@ class ToolRuntime:
         if call.name == "tools_list":
             return self._tools_list(core)
         return ToolResult(content=f"unsupported builtin tool: {call.name}", is_error=True)
+
+    async def _execute_mcp(
+        self,
+        tool: McpToolInfo,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult:
+        if self.mcp_runtime is None:
+            return ToolResult(content="MCP runtime is not configured", is_error=True, data={"executionStarted": False})
+        entry = next((item for item in self.registry_for(core) if item.name == call.name), None)
+        capability_name = (entry.capability if entry is not None else None) or tool.capability
+        risk = (entry.risk if entry is not None else None) or tool.risk
+        capability.require(capability_name)
+        denied = await self._approval_for_mcp(
+            call,
+            core=core,
+            turn=turn,
+            tool=tool,
+            capability_name=capability_name,
+            risk=risk,
+            emit_event=emit_event,
+        )
+        if denied:
+            return denied
+        return await self.mcp_runtime.call_tool(tool, call.arguments)
 
     async def _read_file(
         self,
@@ -1134,6 +1214,48 @@ class ToolRuntime:
             return None
         return ToolResult(
             content=f"approval denied: extract URL {url}",
+            data={"executionStarted": False, "approval": asdict(decision)},
+            is_error=True,
+        )
+
+    async def _approval_for_mcp(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        tool: McpToolInfo,
+        capability_name: str,
+        risk: str,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        policy = self._effective_approval_policy(
+            core,
+            tool_name=call.name,
+            capability_name=capability_name,
+            risk=risk,
+            default_auto=tool.approval_policy == "auto",
+        )
+        target = f"{tool.server_id}/{tool.server_tool_name}"
+        request = ApprovalRequest(
+            tool_name=call.name,
+            tool_call_id=call.id,
+            turn_id=turn.turn_id,
+            capability=capability_name,
+            action="mcp.call",
+            risk=risk,
+            summary=f"Call MCP tool {target}",
+            target=target,
+            arguments_preview=dict(call.arguments),
+            cache_key=f"{call.name}:{capability_name}:mcp.call:{target}",
+            auto_approve=policy == "auto",
+            policy=policy,
+        )
+        decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
+        if decision.allowed:
+            return None
+        return ToolResult(
+            content=f"approval denied: MCP tool {target}",
             data={"executionStarted": False, "approval": asdict(decision)},
             is_error=True,
         )

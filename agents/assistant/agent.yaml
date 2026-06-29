@@ -39,6 +39,7 @@ slots:
   output: agent/output
   tools: agent/tools
   skills: agent/skills
+  mcp: agent/mcp
 tools:
   toolsets:
     - coding

@@ -207,6 +207,83 @@ class ScheduleManifestInfo(BaseModel):
         return normalized
 
 
+class McpToolFilterInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+
+    @field_validator("include", "exclude")
+    @classmethod
+    def _tool_filter_list(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+
+class McpServerManifestInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    transport: Literal["stdio", "streamable_http"] = "stdio"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    tools: McpToolFilterInfo = Field(default_factory=McpToolFilterInfo)
+    risk: Literal["low", "medium", "high", "critical"] = "medium"
+    approval_policy: Literal["auto", "prompt", "deny"] = "prompt"
+    capability: str | None = None
+    connect_timeout_seconds: float = Field(default=30, gt=0)
+    timeout_seconds: float = Field(default=60, gt=0)
+    supports_parallel_tool_calls: bool = False
+
+    @field_validator("command", "cwd", "url", "capability", mode="before")
+    @classmethod
+    def _optional_string(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("args", mode="before")
+    @classmethod
+    def _args(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        return [str(item) for item in value]
+
+    @field_validator("env", "headers", mode="before")
+    @classmethod
+    def _string_map(cls, value: Any) -> Any:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return value
+        return {str(key): str(item) for key, item in value.items()}
+
+    @model_validator(mode="after")
+    def _transport_requires_launch_config(self) -> "McpServerManifestInfo":
+        if self.transport == "stdio" and not self.command:
+            raise ValueError("stdio MCP server requires command")
+        if self.transport == "streamable_http":
+            if not self.url:
+                raise ValueError("streamable_http MCP server requires url")
+            if not self.url.startswith(("http://", "https://")):
+                raise ValueError("streamable_http MCP server url must start with http:// or https://")
+        return self
+
+
 class CoreManifest(BaseModel):
     schema_version: int = 1
     agent: AgentInfo
@@ -296,6 +373,23 @@ class ScheduleDefinition:
 
 
 @dataclass(slots=True)
+class McpServerDefinition:
+    server_id: str
+    path: Path
+    relative_path: str
+    manifest: McpServerManifestInfo
+    raw_manifest: dict[str, Any]
+
+    @property
+    def enabled(self) -> bool:
+        return self.manifest.enabled
+
+    @property
+    def capability(self) -> str:
+        return self.manifest.capability or f"mcp.call:{self.server_id}"
+
+
+@dataclass(slots=True)
 class LoadedCore:
     root: Path
     manifest_path: Path
@@ -309,6 +403,7 @@ class LoadedCore:
     tool_slots: list[SlotDefinition]
     skills: list[SkillDefinition]
     schedules: list[ScheduleDefinition]
+    mcp_servers: list[McpServerDefinition]
 
     @property
     def core_id(self) -> str:
@@ -374,6 +469,10 @@ class CoreLoader:
             core_root,
             manifest.slots.get("schedules") or (surface_root / "schedules").relative_to(core_root).as_posix(),
         )
+        mcp_servers = self._discover_mcp_servers(
+            core_root,
+            manifest.slots.get("mcp") or (surface_root / "mcp").relative_to(core_root).as_posix(),
+        )
         self._reject_duplicate_ids(input_slots + output_slots + tool_slots)
         self._reject_duplicate_skills(skills)
         self._validate_io_modules(input_slots, output_slots)
@@ -393,6 +492,7 @@ class CoreLoader:
             tool_slots=tool_slots,
             skills=skills,
             schedules=schedules,
+            mcp_servers=mcp_servers,
         )
 
     def _load_soul(self, core_root: Path, manifest: CoreManifest, surface_root: Path) -> str:
@@ -620,6 +720,46 @@ class CoreLoader:
                 )
             )
         return schedules
+
+    def _discover_mcp_servers(self, core_root: Path, configured: str | None) -> list[McpServerDefinition]:
+        if not configured:
+            return []
+        mcp_root = require_relative_path(core_root / configured, core_root)
+        if not mcp_root.exists():
+            return []
+        if not mcp_root.is_dir():
+            raise CoreLoadError(f"MCP root is not a directory: {mcp_root}")
+        servers: list[McpServerDefinition] = []
+        seen: dict[str, str] = {}
+        for path in sorted(mcp_root.iterdir(), key=lambda item: item.name):
+            if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            server_id = path.stem
+            rel = path.relative_to(core_root).as_posix()
+            prior = seen.get(server_id)
+            if prior:
+                raise CoreLoadError(f"duplicate MCP server id {server_id}: {prior}, {rel}")
+            seen[server_id] = rel
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError as exc:
+                raise CoreLoadError(f"invalid MCP server yaml: {rel}: {exc}") from exc
+            if not isinstance(raw, dict):
+                raise CoreLoadError(f"invalid MCP server yaml: {rel}: expected mapping")
+            try:
+                manifest = McpServerManifestInfo.model_validate(raw)
+            except ValidationError as exc:
+                raise CoreLoadError(f"invalid MCP server {rel}: {exc}") from exc
+            servers.append(
+                McpServerDefinition(
+                    server_id=server_id,
+                    path=require_relative_path(path, core_root),
+                    relative_path=rel,
+                    manifest=manifest,
+                    raw_manifest=raw,
+                )
+            )
+        return servers
 
     def _validate_io_modules(self, input_slots: list[SlotDefinition], output_slots: list[SlotDefinition]) -> None:
         self._validate_slots(input_slots, kind="input")

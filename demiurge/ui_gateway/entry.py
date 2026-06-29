@@ -53,22 +53,25 @@ async def async_main(argv: list[str] | None = None) -> None:
         await endpoint.write_event("interaction.error", {"message": str(exc), "source": "gateway_startup"})
         return
 
-    async for request in endpoint.iter_requests():
-        message_id = request.get("id")
-        method = str(request.get("method") or "")
-        params = request.get("params") if isinstance(request.get("params"), dict) else {}
-        try:
-            result = await _dispatch(bridge, method, params)
-        except Exception as exc:
-            print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
-            await endpoint.write_error(message_id, str(exc)) if message_id is not None else await endpoint.write_event(
-                "interaction.error", {"message": str(exc), "source": "gateway_dispatch", "method": method}
-            )
-            continue
-        if message_id is not None:
-            await endpoint.write_result(message_id, result)
-        if bridge.should_exit:
-            return
+    try:
+        async for request in endpoint.iter_requests():
+            message_id = request.get("id")
+            method = str(request.get("method") or "")
+            params = request.get("params") if isinstance(request.get("params"), dict) else {}
+            try:
+                result = await _dispatch(bridge, method, params)
+            except Exception as exc:
+                print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+                await endpoint.write_error(message_id, str(exc)) if message_id is not None else await endpoint.write_event(
+                    "interaction.error", {"message": str(exc), "source": "gateway_dispatch", "method": method}
+                )
+                continue
+            if message_id is not None:
+                await endpoint.write_result(message_id, result)
+            if bridge.should_exit:
+                return
+    finally:
+        await app.close()
 
 
 async def _dispatch(bridge: TuiInteractionBridge, method: str, params: dict[str, Any]) -> Any:

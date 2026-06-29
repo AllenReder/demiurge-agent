@@ -22,6 +22,7 @@ slots:
   soul: agent/SOUL.md
   input: agent/input
   output: agent/output
+  mcp: agent/mcp
   tools: agent/tools
   skills: agent/skills
 tools:
