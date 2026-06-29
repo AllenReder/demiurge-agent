@@ -17,4 +17,3 @@ def execute(ctx, args):
         model_output=content,
         display_output=tool_display_output(result),
     )
-
