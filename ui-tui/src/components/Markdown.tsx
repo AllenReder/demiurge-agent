@@ -1,7 +1,7 @@
 import { Box, Text } from "ink"
 import { Lexer, type Token, type Tokens } from "marked"
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react"
-import { displayWidth, padEndColumns, truncateEnd, wrapText } from "../lib/terminal"
+import { displayWidth, padEndColumns, truncateEnd } from "../lib/terminal"
 import { highlightCode, normalizeLanguage, type HighlightedLine } from "./highlight"
 import { colors } from "./theme"
 
@@ -14,7 +14,7 @@ type MarkdownProps = {
 export function Markdown(props: MarkdownProps) {
   const tokens = useMemo(() => Lexer.lex(props.text, { gfm: true }), [props.text])
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={props.columns}>
       {tokens.map((token, index) => (
         <Block key={index} columns={props.columns} marginTop={!(props.flushTop && index === 0)} token={token} />
       ))}
@@ -28,7 +28,7 @@ function Block(props: { columns: number; marginTop?: boolean; token: Token }) {
   if (token.type === "space" || token.type === "def") return null
   if (token.type === "heading") {
     return (
-      <Box marginTop={marginTop}>
+      <Box marginTop={marginTop} width={props.columns}>
         <Text bold color={colors.text}>
           {token.depth <= 2 ? "▌ " : "· "}
           <Inline tokens={token.tokens} />
@@ -38,7 +38,7 @@ function Block(props: { columns: number; marginTop?: boolean; token: Token }) {
   }
   if (token.type === "paragraph") {
     return (
-      <Box marginTop={marginTop}>
+      <Box marginTop={marginTop} width={props.columns}>
         <Text color={colors.text} wrap="wrap">
           <Inline tokens={token.tokens} />
         </Text>
@@ -52,7 +52,7 @@ function Block(props: { columns: number; marginTop?: boolean; token: Token }) {
         <Text color={colors.border}>│ </Text>
         <Box flexDirection="column" width={Math.max(1, props.columns - 2)}>
           {(token.tokens ?? []).map((child, index) => (
-            <Block key={index} columns={Math.max(1, props.columns - 2)} token={child} />
+            <Block key={index} columns={Math.max(1, props.columns - 2)} marginTop={index > 0} token={child} />
           ))}
         </Box>
       </Box>
@@ -75,7 +75,7 @@ function Block(props: { columns: number; marginTop?: boolean; token: Token }) {
     )
   }
   return (
-    <Box marginTop={marginTop}>
+    <Box marginTop={marginTop} width={props.columns}>
       <Text color={colors.text}>{plainText(token)}</Text>
     </Box>
   )
@@ -140,9 +140,7 @@ function ListBlock(props: { columns: number; marginTop?: number; token: Tokens.L
     <Box flexDirection="column" marginTop={props.marginTop ?? 1}>
       {props.token.items.map((item, index) => {
         const marker = props.token.ordered ? `${start + index}.` : item.task ? (item.checked ? "☑" : "☐") : "•"
-        const firstToken = item.tokens[0]
-        const inlineTokens =
-          item.tokens.length === 1 && firstToken?.type === "text" && "tokens" in firstToken && Array.isArray(firstToken.tokens) ? firstToken.tokens : undefined
+        const { inlineTokens, remaining } = splitListItem(item.tokens)
         return (
           <Box key={index} flexDirection="row">
             <Box width={4}>
@@ -153,15 +151,27 @@ function ListBlock(props: { columns: number; marginTop?: number; token: Tokens.L
                 <Text color={colors.text} wrap="wrap">
                   <Inline tokens={inlineTokens} />
                 </Text>
-              ) : (
-                item.tokens.map((child, childIndex) => <Block key={childIndex} columns={Math.max(1, props.columns - 4)} token={child} />)
-              )}
+              ) : null}
+              {remaining.map((child, childIndex) => (
+                <Block key={childIndex} columns={Math.max(1, props.columns - 4)} marginTop={childIndex > 0} token={child} />
+              ))}
             </Box>
           </Box>
         )
       })}
     </Box>
   )
+}
+
+function splitListItem(tokens: Token[]): { inlineTokens: Token[] | undefined; remaining: Token[] } {
+  let firstContentIndex = 0
+  while (tokens[firstContentIndex]?.type === "checkbox") firstContentIndex += 1
+  const firstToken = tokens[firstContentIndex]
+  if (!firstToken) return { inlineTokens: undefined, remaining: [] }
+  if ((firstToken.type === "text" || firstToken.type === "paragraph") && "tokens" in firstToken && Array.isArray(firstToken.tokens)) {
+    return { inlineTokens: firstToken.tokens, remaining: tokens.slice(firstContentIndex + 1) }
+  }
+  return { inlineTokens: undefined, remaining: tokens.slice(firstContentIndex) }
 }
 
 function TableBlock(props: { columns: number; marginTop?: number; token: Tokens.Table }) {
@@ -223,22 +233,67 @@ function CodeBlock(props: { code: string; columns: number; lang?: string; margin
   }, [props.code, props.lang])
 
   const visibleLines: HighlightedLine[] = lines ?? props.code.split("\n").map((line) => [{ content: line }])
+  const innerColumns = Math.max(1, props.columns - 2)
+  const textColumns = Math.max(1, innerColumns - 2)
+  const wrappedLines = visibleLines.flatMap((line) => wrapHighlightedLine(line, textColumns))
   return (
-    <Box flexDirection="column" marginTop={props.marginTop ?? 1} paddingLeft={2}>
-      {lang ? <Text color={colors.muted}>─ {lang}</Text> : null}
-      {visibleLines.map((line, index) => (
-        <Text key={index} color={colors.text}>
-          {line.length
-            ? line.map((token, tokenIndex) => (
-                <Text key={tokenIndex} color={token.color}>
-                  {token.content}
-                </Text>
-              ))
-            : " "}
-        </Text>
-      ))}
+    <Box flexDirection="column" marginTop={props.marginTop ?? 1} paddingLeft={2} width={props.columns}>
+      {lang ? (
+        <Box backgroundColor={colors.codeBg} paddingX={1} width={innerColumns}>
+          <Text bold color={colors.muted}>
+            {lang}
+          </Text>
+        </Box>
+      ) : null}
+      <Box backgroundColor={colors.codeBg} flexDirection="column" paddingX={1} width={innerColumns}>
+        {wrappedLines.map((line, index) => (
+          <Text key={index} color={colors.text}>
+            {line.length
+              ? line.map((token, tokenIndex) => (
+                  <Text key={tokenIndex} color={token.color}>
+                    {token.content}
+                  </Text>
+                ))
+              : " "}
+          </Text>
+        ))}
+      </Box>
     </Box>
   )
+}
+
+function wrapHighlightedLine(line: HighlightedLine, columns: number): HighlightedLine[] {
+  const width = Math.max(1, columns)
+  if (!line.length) return [[]]
+  const wrapped: HighlightedLine[] = []
+  let current: HighlightedLine = []
+  let currentWidth = 0
+
+  function pushCurrent() {
+    wrapped.push(current)
+    current = []
+    currentWidth = 0
+  }
+
+  for (const token of line) {
+    let chunk = ""
+    for (const char of [...token.content]) {
+      const charWidth = displayWidth(char)
+      if (currentWidth > 0 && currentWidth + charWidth > width) {
+        if (chunk) {
+          current.push({ ...token, content: chunk })
+          chunk = ""
+        }
+        pushCurrent()
+      }
+      chunk += char
+      currentWidth += charWidth
+    }
+    if (chunk) current.push({ ...token, content: chunk })
+  }
+
+  if (current.length || !wrapped.length) pushCurrent()
+  return wrapped
 }
 
 function cellText(cell: Tokens.TableCell): string {

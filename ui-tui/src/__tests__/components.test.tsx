@@ -8,6 +8,7 @@ import { MessageBlock, ProgressBlock, ToolBlock, Transcript } from "../component
 import { initialStatus } from "../app/state"
 import { themedColors } from "../components/theme"
 import { applySlashSuggestion, exactSlashCommand, slashSuggestions, slashTokenAtCursor } from "../lib/slash"
+import { displayWidth } from "../lib/terminal"
 
 afterEach(() => cleanup())
 
@@ -130,6 +131,44 @@ describe("Ink TUI components", () => {
     expect(markdown.lastFrame()).toContain("const ok")
   })
 
+  it("keeps complex list content attached to markers and renders compact code fences", () => {
+    const markdown = render(
+      <Markdown
+        columns={54}
+        text={[
+          "memory 工具用于**跨会话持久化存储信息**，让你不用每次重复告诉我同样的事情。",
+          "",
+          "## 基本参数",
+          "",
+          "- **target**: 存储位置，二选一",
+          "  - `memory` - 环境/项目/工具相关的技术性笔记",
+          "  - `user` - 你的个人资料、偏好、习惯",
+          "",
+          "1. **单次操作** (`action` 参数)",
+          "- [x] 已支持 task list",
+          "",
+          "```json",
+          "{\"target\":\"user\",\"operations\":[{\"action\":\"add\",\"content\":\"用户喜欢简洁的回答，且这一行足够长需要换行\"}]}",
+          "```",
+        ].join("\n")}
+      />,
+    )
+    const frame = markdown.lastFrame() ?? ""
+    const lines = frame.split("\n")
+    const targetLine = lines.find((line) => line.includes("target") && line.includes("存储位置")) ?? ""
+    const nestedMemoryLine = lines.find((line) => line.includes("memory") && line.includes("环境/项目")) ?? ""
+    const jsonLine = lines.find((line) => line.trim() === "json") ?? ""
+
+    expect(targetLine).toContain("•")
+    expect(targetLine).not.toContain("**target**")
+    expect(nestedMemoryLine).toContain("•")
+    expect(jsonLine).toBeTruthy()
+    expect(frame).not.toContain("─ json")
+    expect(frame).toContain('"target"')
+    expect(lines.some((line) => line.includes("用户喜欢简洁的回答"))).toBe(true)
+    expect(lines.every((line) => displayWidth(line) <= 54)).toBe(true)
+  })
+
   it("renders narrow markdown tables as vertical key/value blocks", () => {
     const table = render(<Markdown columns={24} text={"| very long name | description |\n| --- | --- |\n| read_file | read workspace text |"} />)
     expect(table.lastFrame()).toContain("very long name:")
@@ -167,6 +206,11 @@ describe("Ink TUI components", () => {
     expect(progressIndex).toBe(0)
     expect(lines[progressIndex + 1]).toBe("")
     expect(lines[lines.length - 1]).toBe("")
+  })
+
+  it("keeps progress text plain instead of parsing markdown", () => {
+    const progress = render(<ProgressBlock columns={80} text="Working on **markdown** output" />)
+    expect(progress.lastFrame()).toContain("**markdown**")
   })
 
   it("renders prompt and approval selection hints", () => {
