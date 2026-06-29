@@ -230,4 +230,5 @@ class ToolContext:
     slot_id: str
     slot_path: str
     capability: CapabilityClient
+    output: Any = None
     workspace: Any = None

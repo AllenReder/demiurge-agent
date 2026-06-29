@@ -139,6 +139,7 @@ class ToolRuntime:
         turn: TurnContext,
         capability: CapabilityFacade,
         emit_event: EventEmitter | None = None,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         try:
             visible_tools = {entry.name for entry in self.registry_for(core)}
@@ -155,7 +156,14 @@ class ToolRuntime:
             slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
             if not slot:
                 return ToolResult(content=f"tool not found: {call.name}", is_error=True)
-            return await self._execute_authored(slot, call, core=core, turn=turn, capability=capability)
+            return await self._execute_authored(
+                slot,
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                output_factory=output_factory,
+            )
         except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
 
@@ -1160,18 +1168,24 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         func = load_slot_callable(slot)
+        output = output_factory(slot) if output_factory is not None else None
         ctx = ToolContext(
             turn=turn,
             slot_id=slot.slot_id,
             slot_path=slot.relative_path,
             capability=capability,
+            output=output,
             workspace=self.workspace.root,
         )
         value = func(ctx, call.arguments)
         if inspect.isawaitable(value):
             value = await value
+        flush_slot_end = getattr(output, "flush_slot_end", None)
+        if callable(flush_slot_end):
+            flush_slot_end()
         if isinstance(value, ToolResult):
             return value
         if isinstance(value, dict):

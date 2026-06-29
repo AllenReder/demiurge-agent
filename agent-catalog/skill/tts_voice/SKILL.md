@@ -6,5 +6,5 @@ category: audio
 
 # TTS Voice
 
-Use `tts_synthesize` when the user explicitly asks for a speech audio artifact.
-Provide concise text to synthesize and report the generated artifact path.
+Use `text_to_speech` when the user explicitly asks for a speech audio artifact.
+Provide concise text to synthesize. The tool sends the generated audio directly.

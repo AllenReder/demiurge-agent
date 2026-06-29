@@ -17,10 +17,8 @@ from demiurge.packages import (
     PackageOperationError,
     default_catalog_root,
 )
-from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
-from demiurge.sdk import AgentInput, TurnContext
-from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.approval import ApprovalDecision
 from demiurge.ui_gateway import TuiInteractionBridge
 
 
@@ -58,6 +56,25 @@ class _EventSink:
             for delivery in payload.get("deliveries", []):
                 values.append(delivery.get("text") or delivery.get("fallback_text") or "")
         return "\n".join(values)
+
+
+class _RecordingBridge:
+    def __init__(self):
+        self.outbounds = []
+
+    async def deliver(self, outbound):
+        self.outbounds.append(outbound)
+        outbound.mark_delivered()
+
+    async def prompt_user(self, prompt):
+        return ""
+
+    async def request_approval(self, request):
+        return ApprovalDecision("deny", "test bridge")
+
+    @property
+    def deliveries(self):
+        return [delivery for outbound in self.outbounds for delivery in outbound.deliveries]
 
 
 def _mock_minimax_http(
@@ -145,7 +162,8 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert config["audio_setting"] == {}
     assert "\\u8BED" not in config_text
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_output", "tts_minimax"]
+    assert pipeline["serial"] == ["base_output"]
+    assert pipeline["parallel"] == ["tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["schema_version"] == 2
     assert registry["installed"][0]["package_id"] == "minimax_tts"
@@ -159,6 +177,7 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert not (core_path / "agent" / "lib" / "tts_minimax").exists()
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_output"]
+    assert pipeline["parallel"] == []
     assert not (core_path / "packages.yaml").exists()
 
 
@@ -307,7 +326,8 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert installed["preview"] is False
     assert installed["package_id"] == "minimax_tts"
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
-    assert (home / "agents" / "assistant" / "agent" / "tools" / "tts_synthesize").exists()
+    assert (home / "agents" / "assistant" / "agent" / "tools" / "text_to_speech").exists()
+    assert not (home / "agents" / "assistant" / "agent" / "tools" / "tts_synthesize").exists()
     assert (home / "agents" / "tts_summarizer" / "agent.yaml").exists()
 
     main(["--home", str(home), "package", "uninstall", "minimax_tts", "--core", "assistant", "--preview", "--json"])
@@ -393,12 +413,15 @@ async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_pat
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     _manager(app).install(core_id="assistant", package_id="minimax_tts")
     calls = _mock_minimax_http(monkeypatch)
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="hello voice", source="local", conversation_key="pkg:test")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="hello voice", source="local", conversation_key="pkg:test"),
+        bridge=bridge,
     )
+    await app.runner.drain_background_tasks()
 
-    audio_block = next(block for delivery in result.deliveries for block in delivery.blocks if block.get("type") == "audio")
+    audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
     assert audio_block["artifact"]["media_type"] == "audio/mpeg"
     assert audio_block["artifact"]["metadata"]["provider"] == "tts_minimax"
     assert calls[0]["json"]["stream"] is False
@@ -407,7 +430,6 @@ async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_pat
     assert "hello voice" in calls[0]["json"]["text"]
     assert (workspace / ".demiurge-tts").exists()
     assert next(workspace.glob(".demiurge-tts/*.mp3")).read_bytes() == b"MINIMAX-AUDIO"
-    result.mark_delivered()
 
 
 @pytest.mark.asyncio
@@ -417,46 +439,59 @@ async def test_minimax_summary_mode_uses_child_result_then_parent_delivers_audio
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     _manager(app).install(core_id="assistant", package_id="minimax_tts", option_answers={"mode": "summary"})
     calls = _mock_minimax_http(monkeypatch)
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="summarize voice", source="local", conversation_key="pkg:test")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="summarize voice", source="local", conversation_key="pkg:test"),
+        bridge=bridge,
     )
+    await app.runner.drain_background_tasks()
 
     audio_delivery = next(
-        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+        delivery for delivery in bridge.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
     )
     assert audio_delivery.history_policy == "transient"
     assert "[fake] [fake] summarize voice" in calls[0]["json"]["text"]
     assert next(iter(workspace.glob(".demiurge-tts/*.mp3"))).read_bytes() == b"MINIMAX-AUDIO"
-    result.mark_delivered()
 
 
 @pytest.mark.asyncio
 async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    script = tmp_path / "tts_tool.json"
+    script.write_text(
+        json.dumps(
+            [
+                {"tool_calls": [{"id": "tts_tool", "name": "text_to_speech", "arguments": {"text": "tool voice"}}]},
+                {"content": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"enable_tool": True})
     calls = _mock_minimax_http(monkeypatch)
-    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
 
-    result = await app.tool_runtime.execute(
-        ToolCall(name="tts_synthesize", arguments={"text": "tool voice"}, id="tts_tool"),
-        core=core,
-        turn=TurnContext(
-            session_id="test",
-            turn_id="turn-tool",
-            core_id=core.core_id,
-            core_version=core.version,
-            user_input=AgentInput(content="tool"),
-            state={},
-        ),
-        capability=CapabilityFacade(core),
+    result = await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="make tool voice", source="local", conversation_key="pkg:test")
     )
 
-    assert result.is_error is False
+    assert (app.version_store.active_core_path("assistant") / "agent" / "tools" / "text_to_speech").exists()
+    assert not (app.version_store.active_core_path("assistant") / "agent" / "tools" / "tts_synthesize").exists()
     assert "tool voice" in calls[0]["json"]["text"]
+    audio_delivery = next(
+        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+    )
+    assert audio_delivery.history_policy == "transient"
+    assert audio_delivery.metadata["slot"] == "agent/tools/text_to_speech"
+    assert result.tool_results[0].call.name == "text_to_speech"
+    assert result.tool_results[0].result.content == "sent audio"
+    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    tool_message = next(message for message in messages if message.role == "tool")
+    assert tool_message.content == "Sent speech audio to the user."
+    assert tool_message.model_visible is True
     assert next(workspace.glob(".demiurge-tts/*-tool.mp3")).read_bytes() == b"MINIMAX-AUDIO"
 
 
@@ -475,15 +510,17 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
         response_audio="https://cdn.example.test/audio.mp3",
         downloads={"https://cdn.example.test/audio.mp3": b"URL-AUDIO"},
     )
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="hello url voice", source="local", conversation_key="pkg:test")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="hello url voice", source="local", conversation_key="pkg:test"),
+        bridge=bridge,
     )
+    await app.runner.drain_background_tasks()
 
     assert calls[0]["json"]["output_format"] == "url"
     assert next(workspace.glob(".demiurge-tts/*.mp3")).read_bytes() == b"URL-AUDIO"
-    assert any(block.get("type") == "audio" for delivery in result.deliveries for block in delivery.blocks)
-    result.mark_delivered()
+    assert any(block.get("type") == "audio" for delivery in bridge.deliveries for block in delivery.blocks)
 
 
 @pytest.mark.asyncio
@@ -499,18 +536,20 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
             "data": {},
         },
     )
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="hello failure", source="local", conversation_key="pkg:test")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="hello failure", source="local", conversation_key="pkg:test"),
+        bridge=bridge,
     )
+    await app.runner.drain_background_tasks()
 
-    assert result.deliveries
-    assert not any(block.get("type") == "audio" for delivery in result.deliveries for block in delivery.blocks)
+    assert bridge.deliveries
+    assert not any(block.get("type") == "audio" for delivery in bridge.deliveries for block in delivery.blocks)
     assert any(
         event["type"] == "module.failed" and event["slot"] == "agent/output/tts_minimax"
         for event in app.runner.event_log.tail(50)
     )
-    result.mark_delivered()
 
 
 def _write_test_catalog(root: Path) -> None:

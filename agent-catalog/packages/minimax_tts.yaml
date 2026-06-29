@@ -38,8 +38,7 @@ components:
     source: tts_minimax
     target: agent/output/tts_minimax
     pipeline:
-      group: serial
-      after: base_output
+      group: parallel
     config:
       provider: tts_minimax
       base_url: https://api.minimaxi.com/v1/t2a_v2
@@ -73,8 +72,8 @@ components:
       mode: summary
   - id: tts_tool
     kind: tool
-    source: tts_synthesize
-    target: agent/tools/tts_synthesize
+    source: text_to_speech
+    target: agent/tools/text_to_speech
     when:
       enable_tool: true
     config:

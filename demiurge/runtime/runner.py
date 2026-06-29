@@ -153,19 +153,27 @@ class ModuleToolClient:
     def __init__(
         self,
         *,
+        parent: "SessionTurnStepRunner",
         tool_runtime: ToolRuntime,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         slot_path: str,
+        interaction_metadata: Mapping[str, Any],
+        interaction_bridge: InteractionBridge | None,
         emit_event: Callable[..., dict[str, Any]],
+        items: list[InteractionItem],
     ):
+        self.parent = parent
         self.tool_runtime = tool_runtime
         self.core = core
         self.turn = turn
         self.capability = capability
         self.slot_path = slot_path
+        self.interaction_metadata = dict(interaction_metadata)
+        self.interaction_bridge = interaction_bridge
         self.emit_event = emit_event
+        self.items = items
 
     async def call(self, name: str, arguments: Mapping[str, Any] | None = None):
         self.capability.require(f"tool.call:{name}", slot_path=self.slot_path)
@@ -175,6 +183,14 @@ class ModuleToolClient:
             turn=self.turn,
             capability=self.capability,
             emit_event=self.emit_event,
+            output_factory=lambda slot: self.parent._module_io_client(
+                slot,
+                turn=self.turn,
+                capability=self.capability,
+                interaction_metadata=self.interaction_metadata,
+                interaction_bridge=self.interaction_bridge,
+                items=self.items,
+            ),
         )
 
 
@@ -464,6 +480,7 @@ class ModuleIOClient:
         schedule: Callable[[InteractionItem], None],
         route: DeliveryRouteContext | None = None,
         background: bool = False,
+        items: list[InteractionItem] | None = None,
     ):
         self.home = home
         self.session_id = session_id
@@ -474,7 +491,7 @@ class ModuleIOClient:
         self.schedule = schedule
         self.route = route
         self.background = background
-        self.items: list[InteractionItem] = []
+        self.items: list[InteractionItem] = items if items is not None else []
         self.slot_end_items: list[InteractionItem] = []
 
     def send(
@@ -520,6 +537,11 @@ class ModuleIOClient:
             else:
                 self.slot_end_items.append(item)
         return DeliveryHandle(delivery_id=request.delivery_id)
+
+    def flush_slot_end(self) -> None:
+        for item in self.slot_end_items:
+            self.schedule(item)
+        self.slot_end_items.clear()
 
     def send_text(
         self,
@@ -1256,13 +1278,23 @@ class SessionTurnStepRunner:
                 )
                 terminated = False
                 for call in response.tool_calls:
+                    tool_items: list[InteractionItem] = []
                     result = await self.tool_runtime.execute(
                         call,
                         core=core,
                         turn=turn,
                         capability=capability,
                         emit_event=self.event_log.emit,
+                        output_factory=lambda slot: self._module_io_client(
+                            slot,
+                            turn=turn,
+                            capability=capability,
+                            interaction_metadata=interaction_metadata,
+                            interaction_bridge=get_current_bridge(),
+                            items=tool_items,
+                        ),
                     )
+                    items.extend(tool_items)
                     record = ToolExecutionRecord(call=call, result=result)
                     tool_records.append(record)
                     turn_messages.append(
@@ -1737,6 +1769,7 @@ class SessionTurnStepRunner:
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
         background: bool = False,
+        items: list[InteractionItem] | None = None,
     ) -> ModuleIOClient:
         route = self._delivery_route_context(turn, slot, interaction_metadata)
         commit = lambda request: self._commit_module_delivery_request(
@@ -1760,6 +1793,7 @@ class SessionTurnStepRunner:
             schedule=schedule,
             route=route,
             background=background,
+            items=items,
         )
 
     def _commit_module_delivery_request(
@@ -2076,6 +2110,7 @@ class SessionTurnStepRunner:
         contributions: list[ContextContribution],
         background: bool = False,
     ) -> list[InteractionItem]:
+        items: list[InteractionItem] = []
         io_client = self._module_io_client(
             slot,
             turn=turn,
@@ -2083,6 +2118,7 @@ class SessionTurnStepRunner:
             interaction_metadata=interaction_metadata,
             interaction_bridge=interaction_bridge,
             background=background,
+            items=items,
         )
         ctx = InputContext(
             turn=turn,
@@ -2107,12 +2143,16 @@ class SessionTurnStepRunner:
                 emit_event=self.event_log.emit,
             ),
             tools=ModuleToolClient(
+                parent=self,
                 tool_runtime=self.tool_runtime,
                 core=core,
                 turn=turn,
                 capability=capability,
                 slot_path=slot.relative_path,
+                interaction_metadata=interaction_metadata,
+                interaction_bridge=interaction_bridge,
                 emit_event=self.event_log.emit,
+                items=items,
             ),
             skills=ModuleSkillClient(
                 envelope=envelope,
@@ -2245,6 +2285,7 @@ class SessionTurnStepRunner:
         result_client: ModuleResultClient,
         background: bool = False,
     ) -> list[InteractionItem]:
+        items: list[InteractionItem] = []
         io_client = self._module_io_client(
             slot,
             turn=turn,
@@ -2252,6 +2293,7 @@ class SessionTurnStepRunner:
             interaction_metadata=interaction_metadata,
             interaction_bridge=interaction_bridge,
             background=background,
+            items=items,
         )
         ctx = OutputContext(
             turn=turn,
@@ -2277,12 +2319,16 @@ class SessionTurnStepRunner:
                 emit_event=self.event_log.emit,
             ),
             tools=ModuleToolClient(
+                parent=self,
                 tool_runtime=self.tool_runtime,
                 core=core,
                 turn=turn,
                 capability=capability,
                 slot_path=slot.relative_path,
+                interaction_metadata=interaction_metadata,
+                interaction_bridge=interaction_bridge,
                 emit_event=self.event_log.emit,
+                items=items,
             ),
             result=result_client,
         )

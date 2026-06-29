@@ -37,9 +37,15 @@ async def execute(ctx, args):
         "media_type": synthesis.media_type,
         "metadata": synthesis.metadata,
     }
+    ctx.output.send_audio(
+        synthesis.path,
+        media_type=synthesis.media_type,
+        artifact_metadata=synthesis.metadata,
+        history_policy="transient",
+    )
     return ToolResult(
-        content=f"generated audio: {synthesis.path}",
+        content="sent audio",
         data=data,
-        model_output=f"Generated audio artifact at {synthesis.path}",
-        display_output=f"audio: {synthesis.path}",
+        model_output="Sent speech audio to the user.",
+        display_output="sent audio",
     )

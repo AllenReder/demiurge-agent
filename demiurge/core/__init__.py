@@ -377,6 +377,7 @@ class CoreLoader:
         self._reject_duplicate_ids(input_slots + output_slots + tool_slots)
         self._reject_duplicate_skills(skills)
         self._validate_io_modules(input_slots, output_slots)
+        self._validate_slots(tool_slots, kind="tool")
         self._validate_schedules(manifest, schedules, input_slots=input_slots, output_slots=output_slots)
 
         return LoadedCore(

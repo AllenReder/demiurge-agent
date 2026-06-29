@@ -440,6 +440,198 @@ async def test_tool_step_transcript_persists_and_output_history_sees_current_tur
 
 
 @pytest.mark.asyncio
+async def test_authored_tool_can_send_transient_audio_without_history(tmp_path):
+    agents = _copy_agents(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "voice.mp3").write_bytes(b"AUDIO")
+    _write_module(
+        agents,
+        "assistant/agent/tools/voice_sender/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    ctx.output.send_audio('voice.mp3', media_type='audio/mpeg', history_policy='transient')\n"
+        "    return ToolResult(content='sent audio')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/tools/voice_sender/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Send test audio.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_pipeline(agents, "output", serial=["base_output"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, workspace=workspace)
+    app.runner.provider = RecordingProvider(
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="voice_1", name="voice_sender", arguments={})]),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    result = await app.runner.run_turn("make voice")
+
+    audio_delivery = next(
+        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+    )
+    assert audio_delivery.history_policy == "transient"
+    assert audio_delivery.metadata["slot"] == "agent/tools/voice_sender"
+    assert audio_delivery.metadata["phase"] == "tool"
+    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    assert [(message.role, message.content, message.model_visible) for message in messages] == [
+        ("user", "make voice", True),
+        ("assistant", "", True),
+        ("tool", "sent audio", True),
+        ("assistant", "done", True),
+    ]
+    assert not any(message.role == "assistant" and "artifact:" in message.content for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_tool_output_uses_slot_default_history_policy_when_omitted(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/tools/default_sender/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    ctx.output.send_text('default policy')\n"
+        "    return ToolResult(content='default ok')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/tools/default_sender/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Send text with slot default policy.\n"
+        "history_policy: model_hidden\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_pipeline(agents, "output", serial=[])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="default_1", name="default_sender", arguments={})]),
+            LLMResponse(content=""),
+        ]
+    )
+
+    result = await app.runner.run_turn("default policy")
+
+    delivery = next(delivery for delivery in result.deliveries if delivery.text == "default policy")
+    assert delivery.history_policy == "model_hidden"
+    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    assistant_delivery = next(
+        message for message in messages if message.role == "assistant" and message.content == "default policy"
+    )
+    assert assistant_delivery.visible is True
+    assert assistant_delivery.model_visible is False
+    tool_message = next(message for message in messages if message.role == "tool")
+    assert tool_message.content == "default ok"
+    assert tool_message.model_visible is True
+
+
+@pytest.mark.asyncio
+async def test_tool_slot_end_delivery_schedules_after_tool_returns(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/tools/slot_end_sender/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    ctx.output.send_text('slot end delivery', history_policy='transient', delivery='slot_end')\n"
+        "    return ToolResult(content='slot end ok')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/tools/slot_end_sender/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Send text at tool slot end.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_pipeline(agents, "output", serial=[])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(
+        responses=[
+            LLMResponse(tool_calls=[ToolCall(id="slot_end_1", name="slot_end_sender", arguments={})]),
+            LLMResponse(content=""),
+        ]
+    )
+    bridge = RecordingBridge()
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="slot end", source="local", conversation_key="local:slot-end"),
+        bridge=bridge,
+    )
+    await app.runner.drain_background_tasks()
+
+    delivered = [
+        delivery.text
+        for outbound in bridge.outbounds
+        for delivery in outbound.deliveries
+    ]
+    assert "slot end delivery" in delivered
+
+
+@pytest.mark.asyncio
+async def test_module_tool_call_collects_tool_deliveries_in_current_turn(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/tools/nested_sender/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    ctx.output.send_text('nested delivery', history_policy='transient')\n"
+        "    return ToolResult(content='nested result')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/tools/nested_sender/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Send nested text.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/tool_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.tools.call('nested_sender')\n"
+        "    ctx.output.send_text('parent saw ' + result.content, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/tool_probe/slot.yaml",
+        _slot_text(capabilities=["tool.call:nested_sender"]),
+    )
+    _write_pipeline(agents, "output", serial=["tool_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="parent base")
+
+    result = await app.runner.run_turn("hello")
+
+    assert _delivery_texts(result) == ["nested delivery", "parent saw nested result"]
+    assert result.deliveries[0].metadata["slot"] == "agent/tools/nested_sender"
+    assert result.deliveries[0].metadata["phase"] == "tool"
+    assert result.deliveries[1].metadata["slot"] == "agent/output/tool_probe"
+    assert result.deliveries[1].metadata["phase"] == "output"
+
+
+@pytest.mark.asyncio
 async def test_runtime_max_model_steps_limits_tool_loop(tmp_path):
     agents = _copy_agents(tmp_path)
     manifest_path = agents / "assistant" / "agent.yaml"

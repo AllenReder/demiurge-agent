@@ -93,6 +93,13 @@ semantics, output shape, and tradeoffs. Approval and risk details are runtime
 metadata; they are visible to UI and logs but should not pollute model-facing
 capability descriptions.
 
+Authored tools can call `ctx.output.send_text(...)` and media/file `send_*`
+methods to deliver user-visible output through the host. These deliveries use
+the same artifact registration, channel routing, and `history_policy` behavior
+as input/output modules. The returned `ToolResult` remains the model-facing
+tool result and is written as a hidden, model-visible `role="tool"` transcript
+message.
+
 ## Output Shaping
 
 Tools can return full structured `data`, truncated `model_output`, and separate

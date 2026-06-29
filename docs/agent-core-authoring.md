@@ -204,6 +204,14 @@ an extra delivery capability declaration. Higher-risk host APIs such as tool
 calls, state writes, agent calls, evolution, and rollback still require their
 own capabilities.
 
+Authored tools also receive `ctx.output.send_text(...)`, media/file `send_*`,
+`progress(...)`, and `notice(...)`. In a tool, `ctx.output` is delivery-only and
+does not expose `content`; `ctx.output.content` belongs only to output modules.
+If a tool `send_*` call omits `history_policy`, the host uses that tool slot's
+`slot.yaml` default. The tool's `ToolResult` is still written separately as a
+model-visible `role="tool"` transcript entry, even when a delivery uses
+`history_policy="transient"`.
+
 Each slot directory is loaded as an isolated package. `module.py` may use
 private helpers in the same directory, but should import them relatively:
 
