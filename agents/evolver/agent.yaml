@@ -20,6 +20,7 @@ slots:
   input: agent/input
   output: agent/output
   tools: agent/tools
+  mcp: agent/mcp
 tools:
   toolsets: []
 capabilities:

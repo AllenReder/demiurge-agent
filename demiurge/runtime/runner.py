@@ -1231,6 +1231,7 @@ class SessionTurnStepRunner:
         turn_messages: list[LLMMessage] = [LLMMessage(role="user", content=user_text)]
         tool_records: list[ToolExecutionRecord] = []
         items: list[InteractionItem] = list(input_items)
+        await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
         available_tools = self.tool_runtime.definitions_for(core)
 
         final_output = ""

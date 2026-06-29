@@ -41,7 +41,9 @@ def test_loader_discovers_source_agent_slots():
     assert [slot.slot_id for slot in core.tool_slots] == ["echo"]
     assert core.skills == []
     assert core.schedules == []
+    assert core.mcp_servers == []
     assert core.manifest.slots["soul"] == "agent/SOUL.md"
+    assert core.manifest.slots["mcp"] == "agent/mcp"
     assert "demiurge assistant" in core.soul
 
 
@@ -123,6 +125,77 @@ def test_loader_schedule_root_can_be_overridden_by_slots(tmp_path):
     core = CoreLoader().load(target)
 
     assert [schedule.relative_path for schedule in core.schedules] == ["custom/schedules/hourly.yaml"]
+
+
+def test_loader_discovers_mcp_server_defaults_and_filters(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    mcp_dir = target / "agent" / "mcp"
+    mcp_dir.mkdir()
+    (mcp_dir / "docs.yaml").write_text(
+        "transport: stdio\n"
+        "command: node\n"
+        "args:\n"
+        "  - server.js\n"
+        "env:\n"
+        "  API_TOKEN: ${DOCS_TOKEN}\n"
+        "tools:\n"
+        "  include:\n"
+        "    - search_docs\n",
+        encoding="utf-8",
+    )
+
+    core = CoreLoader().load(target)
+
+    assert [server.server_id for server in core.mcp_servers] == ["docs"]
+    server = core.mcp_servers[0]
+    assert server.relative_path == "agent/mcp/docs.yaml"
+    assert server.manifest.transport == "stdio"
+    assert server.manifest.command == "node"
+    assert server.manifest.args == ["server.js"]
+    assert server.manifest.env == {"API_TOKEN": "${DOCS_TOKEN}"}
+    assert server.manifest.tools.include == ["search_docs"]
+    assert server.manifest.risk == "medium"
+    assert server.manifest.approval_policy == "prompt"
+    assert server.capability == "mcp.call:docs"
+
+
+def test_loader_discovers_streamable_http_mcp_server(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    mcp_dir = target / "agent" / "mcp"
+    mcp_dir.mkdir()
+    (mcp_dir / "remote.yaml").write_text(
+        "transport: streamable_http\n"
+        "url: https://example.test/mcp\n"
+        "headers:\n"
+        "  Authorization: Bearer ${REMOTE_TOKEN}\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+
+    core = CoreLoader().load(target)
+
+    server = core.mcp_servers[0]
+    assert server.server_id == "remote"
+    assert server.manifest.transport == "streamable_http"
+    assert server.manifest.url == "https://example.test/mcp"
+    assert server.manifest.headers["Authorization"] == "Bearer ${REMOTE_TOKEN}"
+    assert server.manifest.approval_policy == "auto"
+
+
+def test_loader_rejects_invalid_mcp_server(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    mcp_dir = target / "agent" / "mcp"
+    mcp_dir.mkdir()
+    (mcp_dir / "bad.yaml").write_text("transport: stdio\n", encoding="utf-8")
+
+    with pytest.raises(CoreLoadError, match="invalid MCP server"):
+        CoreLoader().load(target)
 
 
 def test_loader_keeps_disabled_schedules(tmp_path):

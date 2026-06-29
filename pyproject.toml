@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
   "croniter>=6.2.2",
+  "mcp>=1.11,<2",
   "openai>=1.90,<3",
   "prompt_toolkit>=3.0,<4",
   "pydantic>=2.8,<3",

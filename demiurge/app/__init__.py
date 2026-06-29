@@ -14,6 +14,7 @@ from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime
 from demiurge.gates import GateRunner
+from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
@@ -105,6 +106,9 @@ class DemiurgeApp:
     @property
     def agents_root(self) -> Path:
         return self.version_store.agents_root
+
+    async def close(self) -> None:
+        await self.tool_runtime.close()
 
     def status(self) -> dict[str, object]:
         pointer = self.version_store.active_pointer(self.runner.core_id)
@@ -201,11 +205,13 @@ def create_app(
         fake_script=fake_script,
     )
     gate_runner = GateRunner(project_root=project_root)
+    mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
     tool_runtime = ToolRuntime(
         version_store,
         workspace=workspace_scope,
         approval_runtime=approval_runtime,
         global_approval=fallback.approval,
+        mcp_runtime=mcp_runtime,
     )
     evolution_runtime = EvolutionRuntime(version_store=version_store, gate_runner=gate_runner)
     tool_runtime.evolution_runtime = evolution_runtime

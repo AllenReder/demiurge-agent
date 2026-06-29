@@ -13,6 +13,7 @@ safest path is to modify a runtime core after initialization:
     tools/
     skills/      # optional; the default assistant starts empty
     schedules/   # optional cron declarations
+    mcp/         # optional MCP server declarations
 ```
 
 The repository-level `agents/assistant/` directory is the source template.
@@ -47,6 +48,10 @@ such as `base_input` and `base_output` by convention only.
 `agent/schedules/*.yaml` files are optional cron declarations. The host-owned
 scheduler starts a fresh session for each trigger and runs one normal turn with
 the input/output module lists declared by that schedule.
+
+`agent/mcp/*.yaml` files are optional MCP server declarations. They belong to
+the concrete core because they change the tools visible to that core. The host
+owns MCP transports, subprocesses, logs, session state, and tool execution.
 
 The model-step budget for a single turn belongs in the concrete core
 `agent.yaml`:
@@ -234,6 +239,65 @@ from .tts_minimax.synthesizer import synthesize_to_file
 Keep `agent/lib/` code behind the slot or tool APIs that call it. The host still
 owns provider calls, tool scheduling, capabilities, state, sessions, and
 delivery boundaries.
+
+## MCP Servers
+
+MCP servers are declared as YAML files under the active core's `agent/mcp/`
+directory. Missing or empty `agent/mcp/` means no MCP tools are exposed.
+
+`~/.demiurge/agents/assistant/agent/mcp/docs.yaml`:
+
+```yaml
+enabled: true
+transport: stdio
+command: npx
+args:
+  - -y
+  - "@modelcontextprotocol/server-filesystem"
+  - .
+env: {}
+cwd: null
+
+tools:
+  include: []
+  exclude: []
+
+risk: medium
+approval_policy: prompt
+capability: null
+connect_timeout_seconds: 30
+timeout_seconds: 60
+supports_parallel_tool_calls: false
+```
+
+For streamable HTTP servers:
+
+```yaml
+enabled: true
+transport: streamable_http
+url: "https://example.com/mcp"
+headers:
+  Authorization: "Bearer ${MCP_EXAMPLE_TOKEN}"
+```
+
+Only `env` and `headers` support `${ENV_VAR}` interpolation. If a referenced
+environment variable is missing, that server is skipped for the turn and the
+host emits an MCP diagnostic event.
+
+MCP tool names are exposed to the model as
+`<safe_server_name>__<safe_tool_name>`. The host calls the original MCP tool
+name on the original server. MCP tool calls require a capability, defaulting to
+`mcp.call:<server_id>`, so the concrete core must declare it:
+
+```yaml
+capabilities:
+  defaults:
+    mcp.call:docs: {}
+```
+
+The first MCP implementation exposes server tools only. MCP resources, prompts,
+OAuth, dynamic discovery, and CLI management commands are not part of the first
+core-YAML surface.
 
 ## Structured Results With `ctx.result`
 
