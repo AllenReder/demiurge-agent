@@ -1,6 +1,6 @@
 # Configure a Provider
 
-demiurge currently supports the fake provider and an OpenAI-compatible Chat
+Demiurge currently supports the fake provider and an OpenAI-compatible Chat
 Completions provider. Provider selection is host-owned; agent cores can provide
 defaults, but authored modules do not call model APIs directly.
 
@@ -69,6 +69,6 @@ key source. It must not print the API key value.
 - Missing API key: set `DEMIURGE_API_KEY` or pass `--api-key`.
 - Wrong endpoint: set `DEMIURGE_BASE_URL` or pass `--base-url`.
 - Provider error after startup: verify the model name and endpoint outside
-  demiurge, then rerun with the same env values.
+  Demiurge, then rerun with the same env values.
 
 See [../operations/troubleshooting.md](../operations/troubleshooting.md).

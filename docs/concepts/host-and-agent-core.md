@@ -1,6 +1,6 @@
 # Host and Agent Core
 
-demiurge separates the stable runtime harness from the authored agent surface.
+Demiurge separates the stable runtime harness from the authored agent surface.
 This boundary is the main design rule for using and extending the framework.
 
 ## Mental Model

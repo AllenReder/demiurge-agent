@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/demiurge-icon-rounded.png" alt="demiurge icon" width="112">
+  <img src="docs/assets/demiurge-icon-rounded.png" alt="Demiurge icon" width="112">
 </p>
 
-<h1 align="center">demiurge</h1>
+<h1 align="center">Demiurge</h1>
 
 <p align="center">
   <strong>Build self-evolving agents with independent Agent Cores, modular capabilities, and installable capability packages.</strong>
@@ -23,13 +23,13 @@
   <a href="docs/concepts/security-model.md">Security</a>
 </p>
 
-`demiurge` is a Python agent framework for building self-evolving agents. Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.
+Demiurge is a Python agent framework for building self-evolving agents. Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.
 
 The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, keeping capability evolution inside a clear runtime boundary.
 
 Status: **alpha / developer preview**. APIs, runtime layout, and authoring contracts may still change.
 
-## Why demiurge?
+## Why Demiurge?
 
 | Capability | What it means |
 | --- | --- |
@@ -93,13 +93,13 @@ See [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md)
 
 ## Evolution Boundary
 
-demiurge treats an agent core as a versionable filesystem surface. The intended evolution path is to propose candidate core changes, evaluate them with tests or runtime checks, then promote or roll them back through the host.
+Demiurge treats an agent core as a versionable filesystem surface. The intended evolution path is to propose candidate core changes, evaluate them with tests or runtime checks, then promote or roll them back through the host.
 
 Authored slots should not bypass host-owned controls for dependency changes, dangerous capabilities, production state mutation, provider calls, or tool execution. This keeps agent behavior open to iteration without making the runtime loop itself self-modifying.
 
 ## Configure a Real Provider
 
-demiurge uses an OpenAI-compatible Chat Completions interface:
+Demiurge uses an OpenAI-compatible Chat Completions interface:
 
 ```bash
 export DEMIURGE_MODEL_NAME="gpt-5.4-mini"
@@ -180,4 +180,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-demiurge's design has been informed by [OpenClaw](https://github.com/openclaw/openclaw), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Eve](https://github.com/vercel/eve), and [OpenCode](https://github.com/anomalyco/opencode).
+Demiurge's design has been informed by [OpenClaw](https://github.com/openclaw/openclaw), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Eve](https://github.com/vercel/eve), and [OpenCode](https://github.com/anomalyco/opencode).

@@ -1,13 +1,13 @@
 ---
 slug: /
 sidebar_position: 0
-title: demiurge Manual
-description: Production-oriented documentation for demiurge, a Python agent framework for self-evolving agents with modular capabilities and capability packages.
+title: Demiurge Manual
+description: Production-oriented documentation for Demiurge, a Python agent framework for self-evolving agents with modular capabilities and capability packages.
 ---
 
-# demiurge Manual
+# Demiurge Manual
 
-demiurge is a Python agent framework for building self-evolving agents.
+Demiurge is a Python agent framework for building self-evolving agents.
 Independent Agent Cores carry identity and boundaries, while modular design and
 capability package management make tools, IO, skills, and child cores
 installable, composable, and iterative.

@@ -1,6 +1,6 @@
 # Architecture
 
-This page maps the current demiurge implementation for contributors.
+This page maps the current Demiurge implementation for contributors.
 
 ## System Overview
 

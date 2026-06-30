@@ -62,7 +62,7 @@ const copy: Record<string, Copy> = {
     ],
     flowTitle: 'The core boundary',
     flowBody:
-      'demiurge is built around one rule: agent cores can evolve quickly, but risky effects stay behind host controls.',
+      'Demiurge is built around one rule: agent cores can evolve quickly, but risky effects stay behind host controls.',
     flowItems: [
       'User or channel input enters the host runner.',
       'Input modules add current-turn context.',
@@ -104,7 +104,7 @@ const copy: Record<string, Copy> = {
       },
     ],
     flowTitle: '核心边界',
-    flowBody: 'demiurge 的核心规则是：agent core 可以快速演进，但危险效果必须经过 host 控制。',
+    flowBody: 'Demiurge 的核心规则是：agent core 可以快速演进，但危险效果必须经过 host 控制。',
     flowItems: [
       '用户或 channel input 进入 host runner。',
       'input modules 添加当前 turn context。',
@@ -143,7 +143,7 @@ function HomepageHeader() {
           </div>
           <p className="hero__note">{text.alpha}</p>
         </div>
-        <div className="corePreview" aria-label="demiurge agent core layout">
+        <div className="corePreview" aria-label="Demiurge agent core layout">
           <div className="corePreview__header">
             <img src={logoUrl} alt="" className="corePreview__logo" />
             <span>{text.previewLabel}</span>
@@ -233,7 +233,7 @@ export default function Home(): JSX.Element {
   const {i18n} = useDocusaurusContext();
   const text = copy[i18n.currentLocale] ?? copy.en;
   return (
-    <Layout title="demiurge" description={text.subtitle}>
+    <Layout title="Demiurge" description={text.subtitle}>
       <HomepageHeader />
       <main>
         <Pillars />

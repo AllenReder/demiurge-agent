@@ -86,7 +86,7 @@ provider, model source, and session path.
 
 ## 4. Use a Real Provider
 
-demiurge uses an OpenAI-compatible Chat Completions provider:
+Demiurge uses an OpenAI-compatible Chat Completions provider:
 
 ```bash
 export DEMIURGE_MODEL_NAME="gpt-4.1-mini"

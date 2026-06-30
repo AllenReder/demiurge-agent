@@ -1,6 +1,6 @@
 # Configuration
 
-demiurge separates host configuration, global fallback agent configuration, and
+Demiurge separates host configuration, global fallback agent configuration, and
 concrete core configuration.
 
 ## Host Runtime Config

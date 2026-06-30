@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/demiurge-icon-rounded.png" alt="demiurge icon" width="112">
+  <img src="docs/assets/demiurge-icon-rounded.png" alt="Demiurge icon" width="112">
 </p>
 
-<h1 align="center">demiurge</h1>
+<h1 align="center">Demiurge</h1>
 
 <p align="center">
   <strong>自由打造会自我进化的 Agent。</strong>
@@ -23,13 +23,13 @@
   <a href="docs/concepts/security-model.md">安全模型</a>
 </p>
 
-`demiurge` 是一个用于打造会自我进化的 Agent 的 Python agent framework。独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。
+Demiurge 是一个用于打造会自我进化的 Agent 的 Python agent framework。独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。
 
 host 负责 session、turn、provider 调用、工具、审批、状态、delivery、promotion 和 rollback，让能力进化始终发生在清晰的 runtime 边界内。
 
 状态：**alpha / developer preview**。API、runtime 布局和 authoring contract 仍可能变化。
 
-## 为什么是 demiurge？
+## 为什么是 Demiurge？
 
 | 能力 | 含义 |
 | --- | --- |
@@ -93,13 +93,13 @@ MCP servers 可以通过 `agent/mcp/*.yaml` 声明。core 拥有这些声明；M
 
 ## 进化边界
 
-demiurge 把 agent core 当作可版本化的文件系统 surface。预期的进化路径是：先提出候选 core 变更，用测试或 runtime check 评估，再由 host 负责 promote 或 rollback。
+Demiurge 把 agent core 当作可版本化的文件系统 surface。预期的进化路径是：先提出候选 core 变更，用测试或 runtime check 评估，再由 host 负责 promote 或 rollback。
 
 authored slots 不应绕过 host 对 dependency change、危险 capability、production state mutation、provider 调用或工具执行的控制。这样 agent 行为可以持续迭代，但 runtime loop 本身不会变成随意自修改的对象。
 
 ## 配置真实 Provider
 
-demiurge 使用 OpenAI-compatible Chat Completions 接口：
+Demiurge 使用 OpenAI-compatible Chat Completions 接口：
 
 ```bash
 export DEMIURGE_MODEL_NAME="gpt-5.4-mini"
@@ -180,4 +180,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## 鸣谢
 
-demiurge 的设计受到 [OpenClaw](https://github.com/openclaw/openclaw)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)、[Eve](https://github.com/vercel/eve) 和 [OpenCode](https://github.com/anomalyco/opencode) 的启发。
+Demiurge 的设计受到 [OpenClaw](https://github.com/openclaw/openclaw)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)、[Eve](https://github.com/vercel/eve) 和 [OpenCode](https://github.com/anomalyco/opencode) 的启发。

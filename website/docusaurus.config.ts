@@ -2,7 +2,7 @@ import type {Config} from '@docusaurus/types';
 import type {Options as ClassicPresetOptions, ThemeConfig} from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'demiurge',
+  title: 'Demiurge',
   tagline: 'Build self-evolving agents with independent Agent Cores, modular capabilities, and installable capability packages.',
   favicon: 'img/demiurge-icon-rounded.png',
 
@@ -70,9 +70,9 @@ const config: Config = {
   themeConfig: {
     image: 'img/demiurge-icon-1024.png',
     navbar: {
-      title: 'demiurge',
+      title: 'Demiurge',
       logo: {
-        alt: 'demiurge logo',
+        alt: 'Demiurge logo',
         src: 'img/demiurge-icon-rounded.png',
       },
       items: [
@@ -153,7 +153,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} demiurge contributors.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Demiurge contributors.`,
     },
     prism: {
       additionalLanguages: ['bash', 'python', 'yaml'],

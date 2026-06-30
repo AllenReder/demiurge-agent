@@ -1,6 +1,6 @@
 # Security Model
 
-demiurge's current safety layer is application-level control. It is not a
+Demiurge's current safety layer is application-level control. It is not a
 container sandbox and does not provide per-core Python environments by default.
 
 ## Workspace Scope

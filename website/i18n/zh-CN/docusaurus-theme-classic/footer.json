@@ -44,7 +44,7 @@
     "description": "The label of footer link with label=Releases linking to /docs/releases/0.2.0"
   },
   "copyright": {
-    "message": "Copyright © 2026 demiurge contributors.",
+    "message": "Copyright © 2026 Demiurge contributors.",
     "description": "The footer copyright"
   }
 }
