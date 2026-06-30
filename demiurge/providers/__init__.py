@@ -109,10 +109,10 @@ class FakeProvider:
 
 class OpenAICompatibleProvider:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self.api_key = api_key
+        self.base_url = base_url
         if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for the OpenAI-compatible provider")
+            raise RuntimeError("API key is required for the OpenAI-compatible provider")
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         from openai import AsyncOpenAI

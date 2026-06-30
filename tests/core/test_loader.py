@@ -14,11 +14,7 @@ def test_loader_discovers_source_agent_slots():
     assert core.version == "0001"
     assert core.manifest.model.provider == "auto"
     assert core.manifest.model.model_name is None
-    assert core.manifest.model.model_name_env == "DEMIURGE_MODEL_NAME"
-    assert core.manifest.model.base_url is None
-    assert core.manifest.model.base_url_env == "DEMIURGE_BASE_URL"
-    assert core.manifest.model.api_key is None
-    assert core.manifest.model.api_key_env == "DEMIURGE_API_KEY"
+    assert core.manifest.model.model_options == {}
     assert core.manifest.runtime.max_model_steps == 90
     assert core.manifest.runtime.workspace is None
     assert sorted(core.manifest.channels) == ["email", "matrix", "mattermost", "slack", "telegram", "webhook"]
@@ -61,11 +57,7 @@ def test_loader_discovers_evolver_source_agent():
     assert core.manifest.runtime.max_model_steps == 90
     assert core.manifest.runtime.workspace is None
     assert core.manifest.model.model_name is None
-    assert core.manifest.model.model_name_env == "DEMIURGE_EVOLVER_MODEL_NAME"
-    assert core.manifest.model.base_url is None
-    assert core.manifest.model.base_url_env == "DEMIURGE_EVOLVER_BASE_URL"
-    assert core.manifest.model.api_key is None
-    assert core.manifest.model.api_key_env == "DEMIURGE_EVOLVER_API_KEY"
+    assert core.manifest.model.model_options == {}
     assert [slot.slot_id for slot in core.input_slots] == ["base_input"]
     assert [slot.slot_id for slot in core.input_pipeline.serial] == ["base_input"]
     assert [slot.slot_id for slot in core.output_slots] == ["base_output"]

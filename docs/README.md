@@ -109,12 +109,10 @@ uv run demiurge init
 uv run demiurge --provider fake
 ```
 
-For a real model, use an OpenAI-compatible endpoint and keep secrets in
-environment variables:
+For a real model, create a host provider profile:
 
 ```bash
-export DEMIURGE_MODEL_NAME="gpt-4.1-mini"
-export DEMIURGE_API_KEY="..."
+uv run demiurge setup
 uv run demiurge --provider openai
 ```
 

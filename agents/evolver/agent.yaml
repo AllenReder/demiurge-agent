@@ -11,11 +11,6 @@ runtime:
 model:
   provider: auto
   model_name: null
-  model_name_env: "DEMIURGE_EVOLVER_MODEL_NAME"
-  base_url: null
-  base_url_env: "DEMIURGE_EVOLVER_BASE_URL"
-  api_key: null
-  api_key_env: "DEMIURGE_EVOLVER_API_KEY"
   model_options: {}
 ui:
   tool_display: null

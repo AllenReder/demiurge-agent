@@ -11,6 +11,8 @@ from demiurge.channels.gateway import GatewayConfigError, run_gateway
 from demiurge.diagnostics.doctor import DoctorReport, DoctorRuntime
 from demiurge.packages import PackageCatalog, PackageManager, PackageOperationPreview, default_catalog_root
 from demiurge.package_wizard import run_package_wizard
+from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS_BY_ID
+from demiurge.setup_cli import handle_setup_command
 from demiurge.storage import VersionStore
 from demiurge.ui.tui import run_tui_from_args
 from demiurge.util import default_home
@@ -21,10 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--home", type=Path, default=default_home(), help="Runtime home directory")
     parser.add_argument("--core", default=None, help="Core id to run")
     parser.add_argument("--agents-root", type=Path, default=None, help="Source agents root override")
-    parser.add_argument("--provider", default="auto", choices=["auto", "fake", "openai", "openai-compatible"])
-    parser.add_argument("--model", default=None, help="Model override for real providers")
-    parser.add_argument("--base-url", default=None, help="OpenAI-compatible provider base URL override")
-    parser.add_argument("--api-key", default=None, help="OpenAI-compatible provider API key override")
+    parser.add_argument("--provider", default="auto", help="Provider profile id, auto, or fake")
+    parser.add_argument("--model", default=None, help="Model override")
     parser.add_argument("--fake-script", type=Path, default=None, help="Fake provider script JSON")
     parser.add_argument("--workspace", type=Path, default=None, help="Workspace root for file and terminal tools")
     parser.add_argument("--session", default=None, help="Session id to create or resume")
@@ -92,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     update_parser.add_argument("--ref", default=None, help="Optional branch, tag, or commit to check out before syncing")
     update_parser.add_argument("--skip-init-check", action="store_true", help="Skip read-only runtime/source drift check")
+    _add_setup_parser(subparsers)
     gateway_parser = subparsers.add_parser("gateway", help="Run enabled external channels for the selected core")
     _add_gateway_args(gateway_parser)
     return parser
@@ -166,6 +167,10 @@ def main(argv: list[str] | None = None) -> None:
             print("runtime check: skipped")
         return
 
+    if args.command == "setup":
+        handle_setup_command(args)
+        return
+
     if args.command == "gateway":
         _apply_host_config_defaults(args)
         app = create_app(
@@ -174,8 +179,6 @@ def main(argv: list[str] | None = None) -> None:
             agents_root=args.agents_root,
             provider_name=args.provider,
             model=args.model,
-            base_url=args.base_url,
-            api_key=args.api_key,
             fake_script=args.fake_script,
             workspace=args.workspace,
             tool_display=args.tool_display,
@@ -197,10 +200,8 @@ def _add_gateway_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="Runtime home directory")
     parser.add_argument("--core", default=argparse.SUPPRESS, help="Core id to run")
     parser.add_argument("--agents-root", type=Path, default=argparse.SUPPRESS, help="Source agents root override")
-    parser.add_argument("--provider", default=argparse.SUPPRESS, choices=["auto", "fake", "openai", "openai-compatible"])
-    parser.add_argument("--model", default=argparse.SUPPRESS, help="Model override for real providers")
-    parser.add_argument("--base-url", default=argparse.SUPPRESS, help="OpenAI-compatible provider base URL override")
-    parser.add_argument("--api-key", default=argparse.SUPPRESS, help="OpenAI-compatible provider API key override")
+    parser.add_argument("--provider", default=argparse.SUPPRESS, help="Provider profile id, auto, or fake")
+    parser.add_argument("--model", default=argparse.SUPPRESS, help="Model override")
     parser.add_argument("--fake-script", type=Path, default=argparse.SUPPRESS, help="Fake provider script JSON")
     parser.add_argument("--workspace", type=Path, default=argparse.SUPPRESS, help="Workspace root for file and terminal tools")
     parser.add_argument("--session", default=argparse.SUPPRESS, help="Session id to create or resume")
@@ -211,6 +212,56 @@ def _add_gateway_args(parser: argparse.ArgumentParser) -> None:
         choices=["quiet", "summary", "full"],
         help="Gateway tool call display level",
     )
+
+
+def _add_setup_parser(subparsers: argparse._SubParsersAction) -> None:
+    setup_parser = subparsers.add_parser("setup", help="Configure provider profiles and core model defaults")
+    setup_subparsers = setup_parser.add_subparsers(dest="setup_command")
+
+    status_parser = setup_subparsers.add_parser("status", help="Show provider setup status")
+    status_parser.add_argument("--core", default=None, help="Runtime core id to inspect")
+    status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    providers_parser = setup_subparsers.add_parser("providers", help="Manage provider profiles")
+    provider_subparsers = providers_parser.add_subparsers(dest="provider_command")
+    provider_list = provider_subparsers.add_parser("list", help="List configured provider profiles")
+    provider_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    provider_show = provider_subparsers.add_parser("show", help="Show one provider profile")
+    provider_show.add_argument("provider_id", help="Provider profile id")
+    provider_show.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    for command in ("add", "edit"):
+        provider_edit = provider_subparsers.add_parser(command, help=f"{command.title()} a provider profile")
+        provider_edit.add_argument("provider_id", help="Provider profile id")
+        provider_edit.add_argument(
+            "--preset",
+            choices=sorted(BUILTIN_PROVIDER_PRESETS_BY_ID),
+            default=None,
+            help="Built-in provider preset to start from",
+        )
+        provider_edit.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
+        provider_edit.add_argument("--api-key-env", default=None, help="Environment variable containing the API key")
+        provider_edit.add_argument("--api-key", default=None, help="Direct API key value")
+        provider_edit.add_argument("--write-env", action="store_true", help="Write --api-key into <home>/.env")
+        provider_edit.add_argument("--set-default", action="store_true", help="Use this profile as the host default")
+        provider_edit.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    provider_remove = provider_subparsers.add_parser("remove", help="Remove a provider profile")
+    provider_remove.add_argument("provider_id", help="Provider profile id")
+    provider_remove.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    provider_default = provider_subparsers.add_parser("set-default", help="Set the host default provider profile")
+    provider_default.add_argument("provider_id", help="Provider profile id")
+    provider_default.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    provider_test = provider_subparsers.add_parser("test", help="Run an explicit live provider test")
+    provider_test.add_argument("provider_id", help="Provider profile id")
+    provider_test.add_argument("--model", default=None, help="Model name to test")
+    provider_test.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    model_parser = setup_subparsers.add_parser("model", help="Manage core model defaults")
+    model_subparsers = model_parser.add_subparsers(dest="model_command")
+    model_set = model_subparsers.add_parser("set", help="Set model.provider and model.model_name in a runtime core")
+    model_set.add_argument("--core", required=True, help="Runtime core id")
+    model_set.add_argument("--provider", required=True, help="Provider profile id or fake")
+    model_set.add_argument("--model", required=True, help="Model name")
+    model_set.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
 
 def _host_config_or_default(home: Path) -> HostConfig:

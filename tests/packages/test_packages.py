@@ -294,7 +294,10 @@ def test_install_summary_mode_copies_child_core_and_config(tmp_path):
     core_path = app.version_store.active_core_path("assistant")
     child_core = app.version_store.active_core_path("tts_summarizer")
     assert (child_core / "agent.yaml").exists()
-    assert yaml.safe_load((child_core / "agent.yaml").read_text())["agent"]["id"] == "tts_summarizer"
+    child_manifest = yaml.safe_load((child_core / "agent.yaml").read_text())
+    assert child_manifest["agent"]["id"] == "tts_summarizer"
+    for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
+        assert key not in child_manifest["model"]
     config = yaml.safe_load((core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text())
     assert config["summarizer_core"] == "tts_summarizer"
     assert "summarizer_context" not in config

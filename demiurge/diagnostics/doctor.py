@@ -8,7 +8,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from demiurge.app import load_host_config
 from demiurge.core import AgentFallbackConfig, CoreLoadError, CoreLoader, LoadedCore
+from demiurge.env_file import load_runtime_env
 from demiurge.storage import VersionStore
 
 
@@ -73,7 +75,9 @@ class DoctorRuntime:
             source_agents_root=str(self.source_agents_root),
             core_id=self.core_id,
         )
+        load_runtime_env(self.home)
         self._check_source_root(report)
+        self._check_provider_envs(report)
         self._check_fallback(report)
         for core_id in dict.fromkeys([self.core_id, "assistant", "evolver"]):
             self._check_core(report, core_id)
@@ -126,7 +130,6 @@ class DoctorRuntime:
                     remediation="Run `uv run demiurge init --refresh global` after reviewing your local config.",
                 )
             )
-        self._check_model_envs(report, "runtime global fallback", runtime.model)
 
     def _load_fallback(
         self,
@@ -173,7 +176,6 @@ class DoctorRuntime:
         self._compare_slot_ids(report, core_id, "tools", source.tool_slots, runtime.tool_slots)
         self._compare_skills(report, core_id, source, runtime)
         self._check_ui(report, core_id, runtime)
-        self._check_model_envs(report, f"runtime {core_id}", runtime.manifest.model)
 
     def _load_core(
         self,
@@ -324,21 +326,30 @@ class DoctorRuntime:
                 )
             )
 
-    def _check_model_envs(self, report: DoctorReport, label: str, model: Any) -> None:
-        for attr in ("model_name_env", "base_url_env", "api_key_env"):
-            env_name = getattr(model, attr, None)
-            direct_attr = attr.removesuffix("_env")
-            if not env_name or getattr(model, direct_attr, None):
-                continue
-            if os.environ.get(env_name):
+    def _check_provider_envs(self, report: DoctorReport) -> None:
+        try:
+            host_config = load_host_config(self.home / "config.yaml")[0]
+        except ValueError as exc:
+            report.findings.append(
+                DoctorFinding(
+                    severity="error",
+                    code="host_config.invalid",
+                    message=f"host config is invalid: {self.home / 'config.yaml'}",
+                    details={"error": str(exc)},
+                    remediation="Fix config.yaml or rerun `uv run demiurge init` after backing up local changes.",
+                )
+            )
+            return
+        for provider_id, profile in sorted(host_config.providers.profiles.items()):
+            if profile.api_key or not profile.api_key_env or os.environ.get(profile.api_key_env):
                 continue
             report.findings.append(
                 DoctorFinding(
                     severity="warning",
                     code="provider.env_missing",
-                    message=f"{label} references unset environment variable `{env_name}`",
-                    details={"field": attr, "env": env_name},
-                    remediation=f"Export {env_name}=... or configure a direct value if appropriate.",
+                    message=f"provider `{provider_id}` references unset environment variable `{profile.api_key_env}`",
+                    details={"provider": provider_id, "field": "api_key_env", "env": profile.api_key_env},
+                    remediation=f"Set {profile.api_key_env}=... in the shell or {self.home / '.env'}.",
                 )
             )
 

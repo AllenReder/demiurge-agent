@@ -10,6 +10,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 
+from demiurge.env_file import load_runtime_env
+from demiurge.provider_presets import get_provider_preset
 from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime
@@ -62,6 +64,60 @@ class HostDebugConfig(BaseModel):
     show_system_prompt: StrictBool = False
 
 
+class HostProviderProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    adapter: Literal["openai-compatible"] = "openai-compatible"
+    base_url: str
+    api_key_env: str | None = None
+    api_key: str | None = None
+
+    @field_validator("base_url", "api_key_env", "api_key", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            return None if info.field_name != "base_url" else value
+        if not isinstance(value, str):
+            raise ValueError(f"providers profile {info.field_name} must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return None if info.field_name != "base_url" else normalized
+        return normalized
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, value: str) -> str:
+        if not value:
+            raise ValueError("providers profile base_url must not be empty")
+        if not re.fullmatch(r"https?://\S+", value):
+            raise ValueError("providers profile base_url must be an http(s) URL")
+        return value.rstrip("/")
+
+
+class HostProvidersConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    default: str | None = None
+    profiles: dict[str, HostProviderProfile] = Field(default_factory=dict)
+
+    @field_validator("default", mode="before")
+    @classmethod
+    def _default(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("providers.default must be a string")
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("profiles")
+    @classmethod
+    def _profiles(cls, value: dict[str, HostProviderProfile]) -> dict[str, HostProviderProfile]:
+        for profile_id in value:
+            _validate_provider_id(profile_id)
+        return value
+
+
 class HostConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -69,6 +125,18 @@ class HostConfig(BaseModel):
     channel: HostChannelConfig = Field(default_factory=HostChannelConfig)
     ui: HostUiConfig = Field(default_factory=HostUiConfig)
     debug: HostDebugConfig = Field(default_factory=HostDebugConfig)
+    providers: HostProvidersConfig = Field(default_factory=HostProvidersConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedProviderConfig:
+    provider_id: str
+    provider_source: str
+    adapter: str
+    base_url: str | None
+    base_url_source: str | None
+    api_key: str | None
+    api_key_source: str | None
 
 
 @dataclass(slots=True)
@@ -85,10 +153,12 @@ class DemiurgeApp:
     source_agents_root: Path
     runner: SessionTurnStepRunner
     provider_name: str
+    provider_source: str
     model_name: str
+    model_name_source: str
     base_url: str | None
-    base_url_override: str | None
-    api_key_override_provided: bool
+    base_url_source: str | None
+    api_key_source: str | None
     tool_display: str
     tool_display_source: str
     channel_busy_mode: str
@@ -115,9 +185,6 @@ class DemiurgeApp:
         pointer = self.version_store.active_pointer(self.runner.core_id)
         core = self.core_loader.load(self.version_store.active_core_path(self.runner.core_id))
         fallback = load_agent_fallback(self.version_store.fallback_config_path)
-        model_name, model_source = resolve_model_name(core.manifest.model, fallback.model, override=self.runner.model_override)
-        base_url, base_url_source = resolve_base_url(core.manifest.model, fallback.model, override=self.base_url_override)
-        api_key_source = "cli" if self.api_key_override_provided else resolve_api_key(core.manifest.model, fallback.model)[1]
         tool_display, tool_display_source = resolve_tool_display(
             core.manifest.ui,
             fallback.ui,
@@ -131,11 +198,12 @@ class DemiurgeApp:
             "source_agents_root": str(self.source_agents_root),
             "workspace": str(self.workspace.root),
             "provider": self.provider_name,
-            "model": model_name,
-            "model_source": model_source,
-            "base_url": base_url,
-            "base_url_source": base_url_source or "not configured",
-            "api_key": api_key_source or "not configured",
+            "provider_source": self.provider_source,
+            "model": self.model_name,
+            "model_source": self.model_name_source,
+            "base_url": self.base_url,
+            "base_url_source": self.base_url_source or "not configured",
+            "api_key": self.api_key_source or "not configured",
             "tool_display": tool_display,
             "tool_display_source": tool_display_source,
             "channel_busy_mode": self.channel_busy_mode,
@@ -169,7 +237,6 @@ def create_app(
     core_id: str | None = None,
     provider_name: str = "auto",
     model: str | None = None,
-    base_url: str | None = None,
     api_key: str | None = None,
     fake_script: Path | None = None,
     workspace: Path | None = None,
@@ -181,6 +248,7 @@ def create_app(
 ) -> DemiurgeApp:
     project_root = project_root or Path.cwd().resolve()
     home = ensure_dir((home or default_home()).resolve())
+    load_runtime_env(home)
     host_config_path = home / "config.yaml"
     host_config, host_sources = load_host_config(host_config_path)
     resolved_core_id = core_id or host_config.runtime.default_core or "assistant"
@@ -202,16 +270,17 @@ def create_app(
     )
     workspace_scope = WorkspaceScope(workspace_root)
     fallback = load_agent_fallback(version_store.fallback_config_path)
-    resolved_model, _ = resolve_model_name(active_core.manifest.model, fallback.model, override=model)
-    resolved_base_url, _ = resolve_base_url(active_core.manifest.model, fallback.model, override=base_url)
-    resolved_api_key, _ = resolve_api_key(active_core.manifest.model, fallback.model, override=api_key)
+    resolved_model, resolved_model_source = resolve_model_name(active_core.manifest.model, fallback.model, override=model)
+    provider_config = resolve_provider_config(
+        host_config,
+        active_core.manifest.model,
+        fallback.model,
+        override=provider_name,
+        api_key_override=api_key,
+    )
     resolved_tool_display, tool_display_source = resolve_tool_display(active_core.manifest.ui, fallback.ui, override=tool_display)
     provider, resolved_provider_name = create_provider(
-        provider_name=provider_name,
-        model_info=active_core.manifest.model,
-        fallback_model_info=fallback.model,
-        base_url=resolved_base_url,
-        api_key=resolved_api_key,
+        provider_config=provider_config,
         fake_script=fake_script,
     )
     gate_runner = GateRunner(project_root=project_root)
@@ -252,10 +321,12 @@ def create_app(
         source_agents_root=source_agents,
         runner=runner,
         provider_name=resolved_provider_name,
+        provider_source=provider_config.provider_source,
         model_name=resolved_model,
-        base_url=resolved_base_url,
-        base_url_override=base_url,
-        api_key_override_provided=api_key is not None,
+        model_name_source=resolved_model_source,
+        base_url=provider_config.base_url,
+        base_url_source=provider_config.base_url_source,
+        api_key_source=provider_config.api_key_source,
         tool_display=resolved_tool_display,
         tool_display_source=tool_display_source,
         channel_busy_mode=host_config.channel.busy_mode,
@@ -281,6 +352,7 @@ def init_runtime(
     reason: str = "init",
 ) -> dict[str, object]:
     resolved_home = ensure_dir((home or default_home()).resolve())
+    load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     host_config_path = resolved_home / "config.yaml"
     host_config_created = write_default_host_config_if_missing(host_config_path)
@@ -316,6 +388,7 @@ def refresh_runtime(
     reason: str = "refresh",
 ) -> dict[str, object]:
     resolved_home = ensure_dir((home or default_home()).resolve())
+    load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     version_store = VersionStore(resolved_home)
     refreshed: dict[str, object] = {
@@ -392,13 +465,13 @@ def load_host_config(path: Path) -> tuple[HostConfig, dict[str, str]]:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
-            f"ui.user_theme_color, and debug.show_system_prompt: {exc}"
+            f"ui.user_theme_color, debug.show_system_prompt, and providers.*: {exc}"
         ) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
-            f"ui.user_theme_color, and debug.show_system_prompt: {exc}"
+            f"ui.user_theme_color, debug.show_system_prompt, and providers.*: {exc}"
         ) from exc
     return config, _host_config_sources(raw)
 
@@ -419,7 +492,20 @@ def default_host_config_dict() -> dict[str, object]:
         "debug": {
             "show_system_prompt": False,
         },
+        "providers": {
+            "default": None,
+            "profiles": {},
+        },
     }
+
+
+def write_host_config(path: Path, config: HostConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(host_config_to_dict(config), sort_keys=False), encoding="utf-8")
+
+
+def host_config_to_dict(config: HostConfig) -> dict[str, object]:
+    return config.model_dump(mode="python", exclude_none=False)
 
 
 def write_default_host_config_if_missing(path: Path) -> bool:
@@ -440,10 +526,17 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
         ("ui", "demiurge_theme_color"),
         ("ui", "user_theme_color"),
         ("debug", "show_system_prompt"),
+        ("providers", "default"),
     ):
         raw_section = raw.get(section)
         if isinstance(raw_section, dict) and key in raw_section:
             sources[f"{section}.{key}"] = f"config.yaml:{section}.{key}"
+    raw_profiles = raw.get("providers", {}).get("profiles") if isinstance(raw.get("providers"), dict) else None
+    if isinstance(raw_profiles, dict):
+        for profile_id, profile in raw_profiles.items():
+            if isinstance(profile, dict):
+                for key in profile:
+                    sources[f"providers.profiles.{profile_id}.{key}"] = f"config.yaml:providers.profiles.{profile_id}.{key}"
     return sources
 
 
@@ -485,29 +578,120 @@ def _resolve_workspace(
 
 def create_provider(
     *,
-    provider_name: str,
-    model_info: ModelInfo | None = None,
-    fallback_model_info: ModelInfo | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
+    provider_config: ResolvedProviderConfig,
     fake_script: Path | None = None,
 ) -> tuple[Provider, str]:
-    configured_provider = (
-        (model_info.provider if model_info else None)
-        or (fallback_model_info.provider if fallback_model_info else None)
-        or "auto"
-    )
-    configured_base_url = base_url or resolve_base_url(model_info, fallback_model_info)[0]
-    configured_api_key, _ = resolve_api_key(model_info, fallback_model_info, override=api_key)
-    if provider_name == "auto":
-        provider_name = configured_provider
-    if provider_name == "auto":
-        provider_name = "openai" if configured_api_key else "fake"
-    if provider_name == "fake":
+    if provider_config.provider_id == "fake":
         return FakeProvider(fake_script), "fake"
-    if provider_name in {"openai", "openai-compatible"}:
-        return OpenAICompatibleProvider(api_key=configured_api_key, base_url=configured_base_url), "openai"
-    raise ValueError(f"unknown provider: {provider_name}")
+    if provider_config.adapter == "openai-compatible":
+        return (
+            OpenAICompatibleProvider(api_key=provider_config.api_key, base_url=provider_config.base_url),
+            provider_config.provider_id,
+        )
+    raise ValueError(f"unknown provider adapter: {provider_config.adapter}")
+
+
+def resolve_provider_config(
+    host_config: HostConfig,
+    model_info: ModelInfo | None = None,
+    fallback_model_info: ModelInfo | None = None,
+    *,
+    override: str | None = None,
+    api_key_override: str | None = None,
+) -> ResolvedProviderConfig:
+    provider_id, provider_source = resolve_provider_id(
+        host_config,
+        model_info,
+        fallback_model_info,
+        override=override,
+    )
+    if provider_id == "fake":
+        return ResolvedProviderConfig(
+            provider_id="fake",
+            provider_source=provider_source,
+            adapter="fake",
+            base_url=None,
+            base_url_source=None,
+            api_key=None,
+            api_key_source=None,
+        )
+    profile, profile_source = resolve_host_provider_profile(host_config, provider_id)
+    api_key, api_key_source = resolve_profile_api_key(
+        profile,
+        provider_id=provider_id,
+        profile_source=profile_source,
+        override=api_key_override,
+    )
+    return ResolvedProviderConfig(
+        provider_id=provider_id,
+        provider_source=provider_source,
+        adapter=profile.adapter,
+        base_url=profile.base_url,
+        base_url_source=f"{profile_source}.base_url",
+        api_key=api_key,
+        api_key_source=api_key_source,
+    )
+
+
+def resolve_provider_id(
+    host_config: HostConfig,
+    model_info: ModelInfo | None = None,
+    fallback_model_info: ModelInfo | None = None,
+    *,
+    override: str | None = None,
+) -> tuple[str, str]:
+    override = _normalize_provider_id(override)
+    if override and override != "auto":
+        return override, "cli"
+    for item, source in (
+        (model_info, "agent.yaml:model.provider"),
+        (fallback_model_info, "agents/agent.yaml:model.provider"),
+    ):
+        configured = _normalize_provider_id(item.provider if item else None)
+        if configured and configured != "auto":
+            return configured, source
+    default_provider = _normalize_provider_id(host_config.providers.default)
+    if default_provider:
+        return default_provider, "config.yaml:providers.default"
+    return "fake", "default"
+
+
+def resolve_host_provider_profile(host_config: HostConfig, provider_id: str) -> tuple[HostProviderProfile, str]:
+    provider_id = _normalize_provider_id(provider_id) or ""
+    _validate_provider_id(provider_id)
+    profile = host_config.providers.profiles.get(provider_id)
+    if profile:
+        return profile, f"config.yaml:providers.profiles.{provider_id}"
+    preset = get_provider_preset(provider_id)
+    if preset:
+        return (
+            HostProviderProfile(
+                adapter="openai-compatible",
+                base_url=preset.base_url,
+                api_key_env=preset.api_key_env,
+                api_key=None,
+            ),
+            f"builtin:{provider_id}",
+        )
+    raise ValueError(f"unknown provider profile: {provider_id}")
+
+
+def resolve_profile_api_key(
+    profile: HostProviderProfile,
+    *,
+    provider_id: str,
+    profile_source: str = "config.yaml:providers.profile",
+    override: str | None = None,
+) -> tuple[str | None, str | None]:
+    if override:
+        return override, "cli"
+    if profile.api_key_env:
+        value = _env_value(profile.api_key_env)
+        if value:
+            return value, f"env:{profile.api_key_env}"
+    if profile.api_key:
+        return profile.api_key, f"{profile_source}.api_key"
+    return None, None
 
 
 def resolve_model_name(
@@ -522,54 +706,9 @@ def resolve_model_name(
         (model_info, "agent.yaml:model"),
         (fallback_model_info, "agents/agent.yaml:model"),
     ):
-        value, source = _value_from_model_info(
-            item,
-            env_attr="model_name_env",
-            direct_attr="model_name",
-            prefix=prefix,
-        )
-        if value:
-            return value, source
-    value = os.environ.get("DEMIURGE_MODEL_NAME")
-    if value:
-        return value, "env:DEMIURGE_MODEL_NAME"
+        if item and item.model_name:
+            return item.model_name, f"{prefix}.model_name"
     return "fake/demo", "default"
-
-
-def resolve_base_url(
-    model_info: ModelInfo | None,
-    fallback_model_info: ModelInfo | None = None,
-    *,
-    override: str | None = None,
-) -> tuple[str | None, str | None]:
-    if override:
-        return override, "cli"
-    return _resolve_model_value(
-        model_info,
-        fallback_model_info,
-        env_attr="base_url_env",
-        direct_attr="base_url",
-        standard_env="OPENAI_BASE_URL",
-        default_value=None,
-    )
-
-
-def resolve_api_key(
-    model_info: ModelInfo | None,
-    fallback_model_info: ModelInfo | None = None,
-    *,
-    override: str | None = None,
-) -> tuple[str | None, str | None]:
-    if override:
-        return override, "cli"
-    return _resolve_model_value(
-        model_info,
-        fallback_model_info,
-        env_attr="api_key_env",
-        direct_attr="api_key",
-        standard_env="OPENAI_API_KEY",
-        default_value=None,
-    )
 
 
 def resolve_model_options(model_info: ModelInfo | None, fallback_model_info: ModelInfo | None = None) -> dict[str, Any]:
@@ -606,53 +745,20 @@ def _normalize_tool_display(value: str, *, source: str) -> str:
     return normalized
 
 
-def _resolve_model_value(
-    model_info: ModelInfo | None,
-    fallback_model_info: ModelInfo | None,
-    *,
-    env_attr: str | None,
-    direct_attr: str,
-    standard_env: str | None,
-    default_value: str | None,
-) -> tuple[str | None, str | None]:
-    value, source = _value_from_model_info(model_info, env_attr=env_attr, direct_attr=direct_attr, prefix="agent.yaml:model")
-    if value:
-        return value, source
-    value, source = _value_from_model_info(
-        fallback_model_info,
-        env_attr=env_attr,
-        direct_attr=direct_attr,
-        prefix="agents/agent.yaml:model",
-    )
-    if value:
-        return value, source
-    if standard_env:
-        value = os.environ.get(standard_env)
-        if value:
-            return value, f"env:{standard_env}"
-    if default_value is not None:
-        return default_value, "default"
-    return None, None
+def _normalize_provider_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower().replace("_", "-")
+    return normalized or None
 
 
-def _value_from_model_info(
-    model_info: ModelInfo | None,
-    *,
-    env_attr: str | None,
-    direct_attr: str,
-    prefix: str,
-) -> tuple[str | None, str | None]:
-    if model_info is None:
-        return None, None
-    if env_attr:
-        env_name = getattr(model_info, env_attr)
-        value = _env_value(env_name)
-        if value:
-            return value, f"env:{env_name}"
-    value = getattr(model_info, direct_attr)
-    if value:
-        return value, f"{prefix}.{direct_attr}"
-    return None, None
+def _validate_provider_id(value: str) -> None:
+    if value in {"", "auto"}:
+        raise ValueError("provider profile id must not be empty or auto")
+    if value == "fake":
+        return
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", value):
+        raise ValueError(f"invalid provider profile id: {value}")
 
 
 def _env_value(name: str | None) -> str | None:

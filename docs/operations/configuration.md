@@ -24,6 +24,9 @@ ui:
   user_theme_color: 9cc9ff
 debug:
   show_system_prompt: false
+providers:
+  default: null
+  profiles: {}
 ```
 
 This file is not an agent core and not the global fallback agent config.
@@ -33,6 +36,25 @@ host sends each assembled system prompt to the active channel immediately before
 the provider call. The delivery is transient and is not written to
 `messages.jsonl`, but it can expose sensitive instructions, memory, bootstrap
 context, or other system context to the channel.
+
+## Provider Profiles
+
+Provider connection details are host-owned:
+
+```yaml
+providers:
+  default: deepseek
+  profiles:
+    deepseek:
+      adapter: openai-compatible
+      base_url: https://api.deepseek.com
+      api_key_env: DEEPSEEK_API_KEY
+      api_key: null
+```
+
+`api_key_env` reads from `~/.demiurge/.env` first, then the shell environment.
+If both `api_key_env` and direct `api_key` are present, the environment value
+wins. Use `demiurge setup` to create and inspect these profiles.
 
 ## Runtime Home
 
@@ -87,9 +109,13 @@ Concrete agent cores configure core-owned runtime behavior:
 runtime:
   max_model_steps: 90
   workspace: /path/to/project
+model:
+  provider: deepseek
+  model_name: deepseek-v4-flash
 ```
 
 `max_model_steps` supports `1..90`. The default and hard limit are both `90`.
+Provider endpoints and API keys do not belong in concrete core config.
 
 ## Success Check
 
@@ -97,7 +123,7 @@ runtime:
 uv run demiurge --provider fake
 ```
 
-Use `/status` to inspect config sources for home, workspace, model, API key,
+Use `/status` to inspect config sources for home, workspace, provider, model, API key,
 tool display, UI settings, and debug switches.
 
 ## Reference

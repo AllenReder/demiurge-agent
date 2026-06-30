@@ -1,6 +1,9 @@
 import pytest
+import yaml
 
 from demiurge import cli
+from demiurge import setup_cli
+from demiurge.providers import LLMResponse
 from demiurge.ui import tui_launcher
 
 
@@ -130,6 +133,171 @@ def test_gateway_subcommand_reports_config_error(monkeypatch, tmp_path):
 def test_cli_help_does_not_expose_channel_flag():
     removed_flag = "--" + "channel"
     assert removed_flag not in cli.build_parser().format_help()
+
+
+def test_cli_help_does_not_expose_root_base_url_or_api_key():
+    help_text = cli.build_parser().format_help()
+
+    assert "--base-url" not in help_text
+    assert "--api-key" not in help_text
+
+
+def test_setup_provider_add_writes_host_config(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "deepseek",
+            "--preset",
+            "deepseek",
+            "--set-default",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"provider": "deepseek"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["default"] == "deepseek"
+    assert raw["providers"]["profiles"]["deepseek"]["base_url"] == "https://api.deepseek.com"
+    assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_setup_provider_write_env_keeps_secret_out_of_config(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "custom-one",
+            "--base-url",
+            "https://custom.example.test/v1",
+            "--api-key-env",
+            "CUSTOM_ONE_API_KEY",
+            "--api-key",
+            "secret-value",
+            "--write-env",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"api_key_source": "env:CUSTOM_ONE_API_KEY"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["profiles"]["custom-one"]["api_key"] is None
+    assert 'CUSTOM_ONE_API_KEY="secret-value"' in (home / ".env").read_text(encoding="utf-8")
+
+
+def test_setup_provider_edit_preserves_existing_fields(tmp_path):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "custom-one",
+            "--base-url",
+            "https://custom.example.test/v1",
+            "--api-key-env",
+            "CUSTOM_ONE_API_KEY",
+        ]
+    )
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "edit",
+            "custom-one",
+            "--api-key-env",
+            "CUSTOM_TWO_API_KEY",
+        ]
+    )
+
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    profile = raw["providers"]["profiles"]["custom-one"]
+    assert profile["base_url"] == "https://custom.example.test/v1"
+    assert profile["api_key_env"] == "CUSTOM_TWO_API_KEY"
+
+
+def test_setup_provider_status_reports_direct_key_when_env_missing(monkeypatch):
+    monkeypatch.delenv("CUSTOM_ONE_API_KEY", raising=False)
+    profile = setup_cli.HostProviderProfile(
+        base_url="https://custom.example.test/v1",
+        api_key_env="CUSTOM_ONE_API_KEY",
+        api_key="direct-secret",
+    )
+
+    assert setup_cli.provider_profile_dict(profile)["api_key_source"] == "config.yaml:providers.profile.api_key"
+
+
+def test_setup_model_set_updates_runtime_core_without_legacy_model_keys(tmp_path):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "model",
+            "set",
+            "--core",
+            "assistant",
+            "--provider",
+            "deepseek",
+            "--model",
+            "deepseek-v4-flash",
+            "--json",
+        ]
+    )
+
+    raw = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))
+    assert raw["model"]["provider"] == "deepseek"
+    assert raw["model"]["model_name"] == "deepseek-v4-flash"
+    for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
+        assert key not in raw["model"]
+
+
+def test_setup_provider_test_is_explicit_and_mockable(monkeypatch, tmp_path, capsys):
+    home = tmp_path / "home"
+    (home).mkdir()
+    (home / "config.yaml").write_text(
+        "providers:\n"
+        "  profiles:\n"
+        "    local:\n"
+        "      base_url: https://local.example.test/v1\n"
+        "      api_key: direct-key\n",
+        encoding="utf-8",
+    )
+
+    class FakeProvider:
+        async def complete(self, request):
+            assert request.model == "test-model"
+            return LLMResponse(content="ok")
+
+    def fake_create_provider(**kwargs):
+        return FakeProvider(), kwargs["provider_config"].provider_id
+
+    monkeypatch.setattr(setup_cli, "create_provider", fake_create_provider)
+
+    cli.main(["--home", str(home), "setup", "providers", "test", "local", "--model", "test-model", "--json"])
+
+    output = capsys.readouterr().out
+    assert '"ok": true' in output
+    assert '"response": "ok"' in output
 
 
 def test_update_uses_default_managed_checkout(monkeypatch, tmp_path, capsys):

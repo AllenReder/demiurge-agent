@@ -99,22 +99,23 @@ authored slots 不应绕过 host 对 dependency change、危险 capability、pro
 
 ## 配置真实 Provider
 
-Demiurge 使用 OpenAI-compatible Chat Completions 接口：
+Demiurge 把 provider 连接细节保存在 host config。使用 setup 向导创建
+provider profile，并设置当前 core 的模型：
 
 ```bash
-export DEMIURGE_MODEL_NAME="gpt-5.4-mini"
-export DEMIURGE_BASE_URL="https://api.openai.com/v1"
-export DEMIURGE_API_KEY="..."
-~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider openai
+~/.demiurge/demiurge-agent/.venv/bin/demiurge setup
 ```
 
-也可以用临时 CLI 覆盖：
+也可以使用脚本化命令：
 
 ```bash
-uv run demiurge --provider openai --model deepseek-v4-flash --base-url https://example.com/v1 --api-key "$DEMIURGE_API_KEY"
+uv run demiurge setup providers add openai --preset openai --set-default
+uv run demiurge setup model set --core assistant --provider openai --model gpt-4.1-mini
+uv run demiurge --provider openai
 ```
 
-真实密钥应放在环境变量里。`/status` 只显示密钥来源，不显示密钥值。
+密钥可以放在 `~/.demiurge/.env`、环境变量或 host config 明文字段中。
+`/status` 只显示密钥来源，不显示密钥值。
 
 ## External Gateway
 

@@ -21,6 +21,7 @@ def test_init_runtime_copies_fallback_assistant_and_evolver(tmp_path):
         "channel": {"busy_mode": "interrupt"},
         "ui": {"user_message_align": "left", "demiurge_theme_color": "ff9afc", "user_theme_color": "9cc9ff"},
         "debug": {"show_system_prompt": False},
+        "providers": {"default": None, "profiles": {}},
     }
     assert (home / "agents" / "agent.yaml").exists()
     assert (home / "agents" / "assistant" / "agent.yaml").exists()

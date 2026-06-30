@@ -24,11 +24,6 @@ Example:
 model:
   provider: auto
   model_name: null
-  model_name_env: DEMIURGE_MODEL_NAME
-  base_url: null
-  base_url_env: DEMIURGE_BASE_URL
-  api_key: null
-  api_key_env: DEMIURGE_API_KEY
   model_options: {}
 ui:
   tool_display: summary
@@ -94,6 +89,22 @@ dependencies:
 `runtime.workspace` is optional. Relative paths resolve from the runtime core
 directory. It is mainly for gateway, Telegram, scheduler, and other non-local
 channel runs.
+
+## Model Fields
+
+Core model config selects a host provider profile and model name:
+
+```yaml
+model:
+  provider: deepseek
+  model_name: deepseek-v4-flash
+  model_options: {}
+```
+
+`model.provider` is a provider profile id from host config, or `auto`/`fake`.
+`model.model_name` is a free-form provider model id. Provider endpoints and API
+keys belong in `~/.demiurge/config.yaml` provider profiles, not in
+`agent.yaml`.
 
 ## Channel Fields
 

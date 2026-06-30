@@ -60,8 +60,6 @@ def _gateway_config(args: argparse.Namespace) -> dict[str, Any]:
         "agents_root": path_value(args.agents_root),
         "provider": args.provider,
         "model": args.model,
-        "base_url": args.base_url,
-        "api_key": args.api_key,
         "fake_script": path_value(args.fake_script),
         "workspace": path_value(args.workspace),
         "workspace_fallback": path_value(Path.cwd().resolve()),

@@ -2,19 +2,25 @@
 
 ## Startup Uses the Fake Provider
 
-`--provider auto` falls back to fake defaults when no real provider values are
-resolved. Set `DEMIURGE_MODEL_NAME`, `DEMIURGE_BASE_URL`, and
-`DEMIURGE_API_KEY`, or pass CLI overrides.
+`--provider auto` falls back to fake defaults when no core provider or host
+default provider is configured. Run:
+
+```bash
+uv run demiurge setup status --json
+uv run demiurge setup providers list --json
+```
+
+Then set a default provider profile or pass `--provider <profile>` explicitly.
 
 ## Missing API Key
 
-Use environment variables:
+Check the selected profile's `api_key_env`:
 
 ```bash
-export DEMIURGE_API_KEY="..."
-uv run demiurge --provider openai
+uv run demiurge setup providers show deepseek --json
 ```
 
+Set the key in the shell, `~/.demiurge/.env`, or a direct `api_key` field.
 `/status` prints the key source, not the key value.
 
 ## File Tools Cannot Access a Path

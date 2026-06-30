@@ -86,22 +86,23 @@ provider, model source, and session path.
 
 ## 4. Use a Real Provider
 
-Demiurge uses an OpenAI-compatible Chat Completions provider:
+Demiurge stores provider connection details in host config. The interactive
+setup command can create a provider profile and write secrets to
+`~/.demiurge/.env`:
 
 ```bash
-export DEMIURGE_MODEL_NAME="gpt-4.1-mini"
-export DEMIURGE_BASE_URL="https://api.openai.com/v1"
-export DEMIURGE_API_KEY="..."
+uv run demiurge setup
+```
+
+Scripted setup is also available:
+
+```bash
+uv run demiurge setup providers add openai --preset openai --set-default
+uv run demiurge setup model set --core assistant --provider openai --model gpt-4.1-mini
 uv run demiurge --provider openai
 ```
 
-Temporary CLI overrides are also supported:
-
-```bash
-uv run demiurge --provider openai --model gpt-4.1-mini --api-key "$DEMIURGE_API_KEY"
-```
-
-Keep real secrets in environment variables. `/status` shows secret sources, not
+`/status` shows provider, model, endpoint, and API key sources without printing
 secret values. See [configure-provider.md](configure-provider.md).
 
 ## 5. Choose a Workspace

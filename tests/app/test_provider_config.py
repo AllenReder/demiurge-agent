@@ -1,169 +1,141 @@
+import pytest
+
 from demiurge.app import (
+    HostConfig,
+    HostProviderProfile,
     create_app,
     create_provider,
-    resolve_api_key,
-    resolve_base_url,
     resolve_model_name,
     resolve_model_options,
+    resolve_profile_api_key,
+    resolve_provider_config,
     resolve_tool_display,
 )
 from demiurge.core import ModelInfo, UiInfo
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider
 
 
-def test_create_provider_uses_core_base_url(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    provider, name = create_provider(
-        provider_name="auto",
-        model_info=ModelInfo(
-            provider="openai-compatible",
-            model_name="custom-model",
-            base_url="https://llm.example.test/v1",
-        ),
+def _host_config_with_profile(
+    provider_id: str = "deepseek",
+    *,
+    base_url: str = "https://llm.example.test/v1",
+    api_key_env: str | None = "DEMIURGE_TEST_API_KEY",
+    api_key: str | None = None,
+    default: str | None = None,
+) -> HostConfig:
+    return HostConfig(
+        providers={
+            "default": default,
+            "profiles": {
+                provider_id: {
+                    "base_url": base_url,
+                    "api_key_env": api_key_env,
+                    "api_key": api_key,
+                }
+            },
+        }
     )
 
-    assert name == "openai"
+
+def test_create_provider_uses_host_profile_base_url_and_key(monkeypatch):
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    config = _host_config_with_profile()
+    resolved = resolve_provider_config(config, ModelInfo(provider="deepseek", model_name="custom-model"))
+
+    provider, name = create_provider(provider_config=resolved)
+
+    assert name == "deepseek"
     assert isinstance(provider, OpenAICompatibleProvider)
     assert provider.base_url == "https://llm.example.test/v1"
+    assert provider.api_key == "test-key"
+    assert resolved.api_key_source == "env:DEMIURGE_TEST_API_KEY"
 
 
 def test_cli_provider_choice_overrides_core_provider(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    provider, name = create_provider(
-        provider_name="fake",
-        model_info=ModelInfo(
-            provider="openai-compatible",
-            model_name="custom-model",
-            base_url="https://llm.example.test/v1",
-        ),
-    )
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    config = _host_config_with_profile()
+    resolved = resolve_provider_config(config, ModelInfo(provider="deepseek"), override="fake")
+
+    provider, name = create_provider(provider_config=resolved)
 
     assert name == "fake"
     assert isinstance(provider, FakeProvider)
 
 
-def test_create_provider_uses_fallback_provider_when_core_provider_is_empty():
-    provider, name = create_provider(
-        provider_name="auto",
-        model_info=ModelInfo(),
-        fallback_model_info=ModelInfo(provider="fake"),
-    )
+def test_host_default_provider_is_used_when_core_provider_is_auto(monkeypatch):
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    config = _host_config_with_profile(default="deepseek")
+    resolved = resolve_provider_config(config, ModelInfo(provider="auto"))
 
+    assert resolved.provider_id == "deepseek"
+    assert resolved.provider_source == "config.yaml:providers.default"
+
+
+def test_auto_provider_without_default_falls_back_to_fake():
+    resolved = resolve_provider_config(HostConfig(), ModelInfo())
+    provider, name = create_provider(provider_config=resolved)
+
+    assert resolved.provider_id == "fake"
     assert name == "fake"
     assert isinstance(provider, FakeProvider)
 
 
-def test_base_url_argument_overrides_core_base_url(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    provider, _ = create_provider(
-        provider_name="openai",
-        model_info=ModelInfo(
-            provider="openai-compatible",
-            model_name="custom-model",
-            base_url="https://core.example.test/v1",
-        ),
-        base_url="https://cli.example.test/v1",
-    )
+def test_builtin_provider_profile_can_be_selected_with_standard_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    resolved = resolve_provider_config(HostConfig(), ModelInfo(provider="openai"))
 
+    provider, name = create_provider(provider_config=resolved)
+
+    assert name == "openai"
     assert isinstance(provider, OpenAICompatibleProvider)
-    assert provider.base_url == "https://cli.example.test/v1"
+    assert provider.base_url == "https://api.openai.com/v1"
+    assert provider.api_key == "openai-key"
+    assert resolved.base_url_source == "builtin:openai.base_url"
 
 
-def test_model_base_url_and_api_key_env_resolution(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_MODEL", "env-model")
-    monkeypatch.setenv("DEMIURGE_TEST_BASE_URL", "https://env.example.test/v1")
+def test_env_api_key_wins_over_direct_api_key(monkeypatch):
+    profile = HostProviderProfile(
+        base_url="https://direct.example.test/v1",
+        api_key_env="DEMIURGE_TEST_API_KEY",
+        api_key="direct-key",
+    )
     monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "env-key")
-    info = ModelInfo(
-        provider="openai-compatible",
-        model_name="direct-model",
-        model_name_env="DEMIURGE_TEST_MODEL",
-        base_url="https://direct.example.test/v1",
-        base_url_env="DEMIURGE_TEST_BASE_URL",
-        api_key="direct-key",
-        api_key_env="DEMIURGE_TEST_API_KEY",
-    )
 
-    assert resolve_model_name(info) == ("env-model", "env:DEMIURGE_TEST_MODEL")
-    assert resolve_base_url(info) == ("https://env.example.test/v1", "env:DEMIURGE_TEST_BASE_URL")
-    assert resolve_api_key(info) == ("env-key", "env:DEMIURGE_TEST_API_KEY")
+    assert resolve_profile_api_key(profile, provider_id="test") == ("env-key", "env:DEMIURGE_TEST_API_KEY")
 
-
-def test_direct_values_are_used_when_env_names_are_unset(monkeypatch):
-    monkeypatch.delenv("DEMIURGE_TEST_MODEL", raising=False)
-    monkeypatch.delenv("DEMIURGE_TEST_BASE_URL", raising=False)
     monkeypatch.delenv("DEMIURGE_TEST_API_KEY", raising=False)
-    info = ModelInfo(
-        provider="openai-compatible",
-        model_name="direct-model",
-        model_name_env="DEMIURGE_TEST_MODEL",
-        base_url="https://direct.example.test/v1",
-        base_url_env="DEMIURGE_TEST_BASE_URL",
-        api_key="direct-key",
-        api_key_env="DEMIURGE_TEST_API_KEY",
+    assert resolve_profile_api_key(profile, provider_id="test") == ("direct-key", "config.yaml:providers.profile.api_key")
+
+
+def test_cli_api_key_override_wins_over_profile_values(monkeypatch):
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "env-key")
+    config = _host_config_with_profile(api_key="direct-key")
+    resolved = resolve_provider_config(
+        config,
+        ModelInfo(provider="deepseek"),
+        api_key_override="cli-key",
     )
 
-    assert resolve_model_name(info) == ("direct-model", "agent.yaml:model.model_name")
-    assert resolve_base_url(info) == ("https://direct.example.test/v1", "agent.yaml:model.base_url")
-    assert resolve_api_key(info) == ("direct-key", "agent.yaml:model.api_key")
+    assert resolved.api_key == "cli-key"
+    assert resolved.api_key_source == "cli"
 
 
-def test_cli_overrides_model_base_url_and_api_key(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
-    info = ModelInfo(
-        provider="openai-compatible",
-        model_name="direct-model",
-        base_url="https://direct.example.test/v1",
-        api_key="direct-key",
-    )
-
-    assert resolve_model_name(info, override="cli-model") == ("cli-model", "cli")
-    assert resolve_base_url(info, override="https://cli.example.test/v1") == ("https://cli.example.test/v1", "cli")
-    assert resolve_api_key(info, override="cli-key") == ("cli-key", "cli")
-
-
-def test_fallback_model_config_is_used_when_core_value_is_empty(monkeypatch):
-    monkeypatch.delenv("DEMIURGE_TEST_MODEL", raising=False)
-    monkeypatch.delenv("DEMIURGE_FALLBACK_MODEL", raising=False)
-    core = ModelInfo(model_name_env="DEMIURGE_TEST_MODEL", model_options={"temperature": 0.1})
-    fallback = ModelInfo(
-        model_name="fallback-model",
-        model_name_env="DEMIURGE_FALLBACK_MODEL",
-        base_url="https://fallback.example.test/v1",
-        api_key="fallback-key",
-        model_options={"temperature": 0.7, "max_tokens": 512},
-    )
+def test_fallback_model_config_is_used_when_core_value_is_empty():
+    core = ModelInfo(model_options={"temperature": 0.1})
+    fallback = ModelInfo(model_name="fallback-model", model_options={"temperature": 0.7, "max_tokens": 512})
 
     assert resolve_model_name(core, fallback) == ("fallback-model", "agents/agent.yaml:model.model_name")
-    assert resolve_base_url(core, fallback) == ("https://fallback.example.test/v1", "agents/agent.yaml:model.base_url")
-    assert resolve_api_key(core, fallback) == ("fallback-key", "agents/agent.yaml:model.api_key")
     assert resolve_model_options(core, fallback) == {"temperature": 0.1, "max_tokens": 512}
 
 
-def test_fallback_env_value_wins_over_fallback_direct_value(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_FALLBACK_MODEL", "fallback-env-model")
-    core = ModelInfo()
-    fallback = ModelInfo(model_name="fallback-direct-model", model_name_env="DEMIURGE_FALLBACK_MODEL")
-
-    assert resolve_model_name(core, fallback) == ("fallback-env-model", "env:DEMIURGE_FALLBACK_MODEL")
-
-
-def test_core_direct_value_wins_over_fallback(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_FALLBACK_MODEL", "fallback-env-model")
+def test_core_direct_model_value_wins_over_fallback():
     core = ModelInfo(model_name="core-model")
-    fallback = ModelInfo(model_name_env="DEMIURGE_FALLBACK_MODEL", model_name="fallback-direct-model")
+    fallback = ModelInfo(model_name="fallback-direct-model")
 
     assert resolve_model_name(core, fallback) == ("core-model", "agent.yaml:model.model_name")
 
 
-def test_standard_model_env_is_used_before_internal_fallback(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_MODEL_NAME", "standard-env-model")
-
-    assert resolve_model_name(ModelInfo(), ModelInfo()) == ("standard-env-model", "env:DEMIURGE_MODEL_NAME")
-
-
-def test_model_name_falls_back_to_internal_fake_model(monkeypatch):
-    monkeypatch.delenv("DEMIURGE_MODEL_NAME", raising=False)
-
+def test_model_name_falls_back_to_internal_fake_model():
     assert resolve_model_name(ModelInfo(), ModelInfo()) == ("fake/demo", "default")
 
 
@@ -184,25 +156,29 @@ def test_tool_display_resolution_uses_core_then_fallback_then_default():
 
 
 def test_tool_display_rejects_invalid_config_value():
-    try:
+    with pytest.raises(ValueError, match="invalid tool_display"):
         resolve_tool_display(UiInfo(tool_display="loud"), UiInfo())
-    except ValueError as exc:
-        assert "invalid tool_display" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
 
 
-def test_create_app_exposes_source_agent_model_env_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEMIURGE_MODEL_NAME", "env-assistant-model")
-    monkeypatch.setenv("DEMIURGE_BASE_URL", "https://env.example.test/v1")
-    app = create_app(home=tmp_path / "home", provider_name="fake")
+def test_create_app_loads_runtime_env_file_over_shell_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "shell-key")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text('DEMIURGE_TEST_API_KEY="file-key"\n', encoding="utf-8")
+    (home / "config.yaml").write_text(
+        "providers:\n"
+        "  default: deepseek\n"
+        "  profiles:\n"
+        "    deepseek:\n"
+        "      base_url: https://env.example.test/v1\n"
+        "      api_key_env: DEMIURGE_TEST_API_KEY\n",
+        encoding="utf-8",
+    )
 
-    status = app.status()
+    app = create_app(home=home)
 
-    assert status["model"] == "env-assistant-model"
-    assert status["model_source"] == "env:DEMIURGE_MODEL_NAME"
-    assert status["base_url"] == "https://env.example.test/v1"
-    assert status["base_url_source"] == "env:DEMIURGE_BASE_URL"
-    assert status["fallback_config"].endswith("agents/agent.yaml")
-    assert status["tool_display"] == "summary"
-    assert status["tool_display_source"] == "agents/agent.yaml:ui.tool_display"
+    assert app.provider_name == "deepseek"
+    assert app.base_url == "https://env.example.test/v1"
+    assert app.api_key_source == "env:DEMIURGE_TEST_API_KEY"
+    assert isinstance(app.runner.provider, OpenAICompatibleProvider)
+    assert app.runner.provider.api_key == "file-key"

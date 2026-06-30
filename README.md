@@ -104,22 +104,23 @@ Authored slots should not bypass host-owned controls for dependency changes, dan
 
 ## Configure a Real Provider
 
-Demiurge uses an OpenAI-compatible Chat Completions interface:
+Demiurge stores provider connection details in host config. Run the setup
+wizard to create a provider profile and set the active core model:
 
 ```bash
-export DEMIURGE_MODEL_NAME="gpt-5.4-mini"
-export DEMIURGE_BASE_URL="https://api.openai.com/v1"
-export DEMIURGE_API_KEY="..."
-~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider openai
+~/.demiurge/demiurge-agent/.venv/bin/demiurge setup
 ```
 
-Temporary CLI overrides also work:
+Scripted setup is available too:
 
 ```bash
-uv run demiurge --provider openai --model deepseek-v4-flash --base-url https://example.com/v1 --api-key "$DEMIURGE_API_KEY"
+uv run demiurge setup providers add openai --preset openai --set-default
+uv run demiurge setup model set --core assistant --provider openai --model gpt-4.1-mini
+uv run demiurge --provider openai
 ```
 
-Keep real secrets in environment variables. `/status` shows secret sources, not secret values.
+Secrets may live in `~/.demiurge/.env`, environment variables, or direct host
+config values. `/status` shows secret sources, not secret values.
 
 ## External Gateway
 

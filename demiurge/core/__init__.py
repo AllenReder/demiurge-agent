@@ -68,13 +68,10 @@ class RuntimeInfo(BaseModel):
 
 
 class ModelInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str | None = None
     model_name: str | None = None
-    model_name_env: str | None = None
-    base_url: str | None = None
-    base_url_env: str | None = None
-    api_key: str | None = None
-    api_key_env: str | None = None
     model_options: dict[str, Any] = Field(default_factory=dict)
 
 

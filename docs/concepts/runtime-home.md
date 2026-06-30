@@ -7,6 +7,7 @@ The runtime home is the live local state root. The default is `~/.demiurge`.
 ```text
 ~/.demiurge/
   config.yaml
+  .env
   agents/
     agent.yaml
     assistant/
@@ -22,7 +23,8 @@ The runtime home is the live local state root. The default is `~/.demiurge`.
 
 | Path | Owner | Purpose |
 | --- | --- | --- |
-| `config.yaml` | Host | Local host preferences such as default core, busy mode, TUI colors, and debug switches. |
+| `config.yaml` | Host | Local host preferences and provider profiles. |
+| `.env` | Host/user | Runtime environment values such as provider API keys; loaded before provider resolution. |
 | `agents/agent.yaml` | User/runtime | Global fallback agent config; not a concrete agent core. |
 | `agents/<core>/` | User/runtime | Live agent cores. |
 | `registry/` | Host | Active version pointers and previous stable versions. |
