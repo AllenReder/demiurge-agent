@@ -97,7 +97,9 @@ channel runs.
 
 ## Channel Fields
 
-Current external channel support is Telegram:
+External channel configs live under `channels.<name>`. Supported names are
+`telegram`, `webhook`, `slack`, `mattermost`, `matrix`, and `email`. Each channel
+is disabled by default and should read secrets from environment variables.
 
 ```yaml
 channels:
@@ -107,7 +109,47 @@ channels:
     allowed_users: [123456789]
     allowed_chats: []
     reply_to_mode: "off"
+  webhook:
+    enabled: false
+    token_env: DEMIURGE_WEBHOOK_TOKEN
+    host: 127.0.0.1
+    port: 8765
+    path: /demiurge
+    delivery_targets: {}
+  slack:
+    enabled: false
+    bot_token_env: SLACK_BOT_TOKEN
+    signing_secret_env: SLACK_SIGNING_SECRET
+    host: 127.0.0.1
+    port: 8766
+    path: /slack/events
+    allowed_channels: []
+  mattermost:
+    enabled: false
+    base_url: https://mattermost.example.com
+    token_env: MATTERMOST_BOT_TOKEN
+    webhook_token_env: MATTERMOST_WEBHOOK_TOKEN
+    allowed_channels: []
+  matrix:
+    enabled: false
+    homeserver_url: https://matrix.example.org
+    access_token_env: MATRIX_ACCESS_TOKEN
+    user_id: "@demiurge:example.org"
+    allowed_rooms: []
+  email:
+    enabled: false
+    smtp_host: smtp.example.com
+    imap_host: imap.example.com
+    smtp_username_env: DEMIURGE_SMTP_USERNAME
+    smtp_password_env: DEMIURGE_SMTP_PASSWORD
+    imap_username_env: DEMIURGE_IMAP_USERNAME
+    imap_password_env: DEMIURGE_IMAP_PASSWORD
+    allowed_senders: []
+    allowed_recipients: []
 ```
+
+Schedules use `delivery.mode: telegram` plus `chat_id` for Telegram, or
+`delivery.mode: <channel>` plus `target` for the other external channels.
 
 ## Boundary
 

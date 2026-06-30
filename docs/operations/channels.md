@@ -33,11 +33,52 @@ Useful commands:
 uv run demiurge gateway --core assistant
 ```
 
-Gateway mode starts enabled external channels for the selected core. It errors
-when none are enabled.
+Gateway mode starts every enabled external channel for the selected core. It
+errors when none are enabled.
 
-Current external channel implementation supports Telegram. See
-[telegram.md](telegram.md).
+Supported external channels:
+
+| Channel | Transport | Notes |
+| --- | --- | --- |
+| Telegram | Bot API long polling | Richest support, including private-chat approvals and media delivery. |
+| Webhook | Local HTTP JSON endpoint | Generic integration surface for custom UIs, automations, and services. |
+| Slack | Events API / slash-command HTTP endpoint + Web API | Requires a public endpoint and Slack signing-secret verification. |
+| Mattermost | Slash/outgoing webhook endpoint + REST or incoming webhook | Requires webhook-token validation. |
+| Matrix | Client-Server REST `/sync` polling | Plain text only; encrypted rooms are not supported. |
+| Email | IMAP polling + SMTP replies | Plain text only; attachments are ignored. |
+
+Each channel is disabled by default. Enable channels in the concrete core's
+`agent.yaml` under `channels`:
+
+```yaml
+channels:
+  webhook:
+    enabled: true
+    token_env: DEMIURGE_WEBHOOK_TOKEN
+    host: 127.0.0.1
+    port: 8765
+    path: /demiurge
+```
+
+Run the gateway after exporting the configured secrets:
+
+```bash
+export DEMIURGE_WEBHOOK_TOKEN="..."
+uv run demiurge gateway --core assistant
+```
+
+HTTP webhook-based channels bind a local server. Use a reverse proxy or tunnel
+outside Demiurge when a platform needs to reach the endpoint from the public
+Internet. Put TLS and public ingress controls at that layer.
+
+See also:
+
+- [telegram.md](telegram.md)
+- [webhook.md](webhook.md)
+- [slack.md](slack.md)
+- [mattermost.md](mattermost.md)
+- [matrix.md](matrix.md)
+- [email.md](email.md)
 
 ## Busy Behavior
 
@@ -47,7 +88,32 @@ Interactive channels can choose how to handle input while a turn is running:
 - `queue`: new input is queued.
 
 Initial behavior comes from host config `channel.busy_mode`. TUI can change the
-current process with `/busy`.
+current process with `/busy`. External text channels also support `/busy`,
+`/status`, `/new`, `/stop`, `/queue`, `/sessions`, `/resume`, `/tools`,
+`/skills`, and `/skill` where the platform can send text back.
+
+## Scheduled Delivery
+
+Schedules can deliver locally or to an enabled external channel. Telegram keeps
+its compatibility field:
+
+```yaml
+delivery:
+  mode: telegram
+  chat_id: 123456789
+```
+
+Other channels use `target`:
+
+```yaml
+delivery:
+  mode: matrix
+  target: "!room:example.org"
+```
+
+The target must pass the channel allowlist/config validation. For example,
+Matrix targets must be present in `allowed_rooms` when that list is configured,
+and email targets must be present in `allowed_recipients` when configured.
 
 ## Delivery Semantics
 
@@ -56,16 +122,30 @@ registers artifacts, records events, and routes output to the current channel.
 
 See [../reference/history-policy-and-delivery.md](../reference/history-policy-and-delivery.md).
 
+## Security Defaults
+
+- New channels are disabled until explicitly configured.
+- Secrets should be read from environment variables.
+- Webhook-style channels verify bearer tokens, HMAC signatures, or shared
+  webhook tokens before accepting input.
+- Generic webhook callback URLs must use HTTPS and reject private, loopback,
+  link-local, multicast, reserved, unresolved, and redirect targets unless
+  `allow_private_callback_urls: true` is explicitly set for a trusted local
+  deployment.
+- Telegram private chats support interactive approvals. Other external channels
+  fail closed for approval-required actions until platform-specific private
+  approval UX is implemented.
+
 ## Success Check
 
 ```bash
 uv run demiurge --provider fake
 ```
 
-Then run `/status` and `/events`. For Telegram, run the gateway and send a
-message from an allowed user.
+Then run `/status` and `/events`. For external channels, run the gateway and send
+a message from an allowed sender/source.
 
 ## Boundary
 
-Agent modules should not call TUI, Telegram, or other channel SDKs directly.
-Use `ctx.input` and `ctx.output` delivery methods.
+Agent modules should not call TUI, Telegram, Slack, Matrix, email, or other
+channel SDKs directly. Use `ctx.input` and `ctx.output` delivery methods.

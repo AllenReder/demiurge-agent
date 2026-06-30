@@ -34,6 +34,76 @@ channels:
     send_typing: true
     rich_messages: true
     reply_to_mode: "off"
+  webhook:
+    enabled: false
+    host: 127.0.0.1
+    port: 8765
+    path: /demiurge
+    token_env: "DEMIURGE_WEBHOOK_TOKEN"
+    token: null
+    allow_unauthenticated: false
+    callback_url_env: null
+    callback_url: null
+    allow_private_callback_urls: false
+    allowed_sources: []
+    delivery_targets: {}
+  slack:
+    enabled: false
+    bot_token_env: "SLACK_BOT_TOKEN"
+    bot_token: null
+    signing_secret_env: "SLACK_SIGNING_SECRET"
+    signing_secret: null
+    host: 127.0.0.1
+    port: 8766
+    path: /slack/events
+    bot_user_id: null
+    app_mentions_only: true
+    allowed_teams: []
+    allowed_channels: []
+    allowed_users: []
+  mattermost:
+    enabled: false
+    base_url: null
+    token_env: "MATTERMOST_BOT_TOKEN"
+    token: null
+    incoming_webhook_url_env: null
+    incoming_webhook_url: null
+    webhook_token_env: "MATTERMOST_WEBHOOK_TOKEN"
+    webhook_token: null
+    host: 127.0.0.1
+    port: 8767
+    path: /mattermost
+    allowed_channels: []
+    allowed_users: []
+  matrix:
+    enabled: false
+    homeserver_url: null
+    access_token_env: "MATRIX_ACCESS_TOKEN"
+    access_token: null
+    user_id: null
+    allowed_rooms: []
+    poll_timeout: 30
+  email:
+    enabled: false
+    smtp_host: null
+    smtp_port: 587
+    smtp_starttls: true
+    smtp_username_env: "DEMIURGE_SMTP_USERNAME"
+    smtp_password_env: "DEMIURGE_SMTP_PASSWORD"
+    smtp_username: null
+    smtp_password: null
+    imap_host: null
+    imap_port: 993
+    imap_username_env: "DEMIURGE_IMAP_USERNAME"
+    imap_password_env: "DEMIURGE_IMAP_PASSWORD"
+    imap_username: null
+    imap_password: null
+    mailbox: INBOX
+    from_address: null
+    allowed_senders: []
+    allowed_recipients: []
+    trust_from_headers: false
+    poll_interval: 30
 slots:
   soul: agent/SOUL.md
   input: agent/input

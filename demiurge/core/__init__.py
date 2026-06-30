@@ -84,10 +84,23 @@ class UiInfo(BaseModel):
     tool_display: str | None = None
 
 
-class TelegramChannelConfig(BaseModel):
+class ChannelBaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    type: str | None = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _optional_type(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip().lower().replace("-", "_")
+        return text or None
+
+
+class TelegramChannelConfig(ChannelBaseConfig):
+    type: Literal["telegram"] | None = None
     bot_token_env: str | None = None
     bot_token: str | None = None
     bot_username: str | None = None
@@ -100,6 +113,137 @@ class TelegramChannelConfig(BaseModel):
     send_typing: bool = True
     rich_messages: bool = True
     reply_to_mode: Literal["off", "first", "all"] = "off"
+
+
+class WebhookChannelConfig(ChannelBaseConfig):
+    type: Literal["webhook"] | None = None
+    host: str = "127.0.0.1"
+    port: int = Field(default=8765, ge=1, le=65535)
+    path: str = "/demiurge"
+    token_env: str | None = "DEMIURGE_WEBHOOK_TOKEN"
+    token: str | None = None
+    allow_unauthenticated: bool = False
+    callback_url_env: str | None = None
+    callback_url: str | None = None
+    allow_private_callback_urls: bool = False
+    allowed_sources: list[str] = Field(default_factory=list)
+    delivery_targets: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        normalized = value.strip() or "/demiurge"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
+
+
+class SlackChannelConfig(ChannelBaseConfig):
+    type: Literal["slack"] | None = None
+    bot_token_env: str | None = "SLACK_BOT_TOKEN"
+    bot_token: str | None = None
+    signing_secret_env: str | None = "SLACK_SIGNING_SECRET"
+    signing_secret: str | None = None
+    host: str = "127.0.0.1"
+    port: int = Field(default=8766, ge=1, le=65535)
+    path: str = "/slack/events"
+    bot_user_id: str | None = None
+    app_mentions_only: bool = True
+    allowed_teams: list[str] = Field(default_factory=list)
+    allowed_channels: list[str] = Field(default_factory=list)
+    allowed_users: list[str] = Field(default_factory=list)
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        normalized = value.strip() or "/slack/events"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
+
+
+class MattermostChannelConfig(ChannelBaseConfig):
+    type: Literal["mattermost"] | None = None
+    base_url: str | None = None
+    token_env: str | None = "MATTERMOST_BOT_TOKEN"
+    token: str | None = None
+    incoming_webhook_url_env: str | None = None
+    incoming_webhook_url: str | None = None
+    webhook_token_env: str | None = "MATTERMOST_WEBHOOK_TOKEN"
+    webhook_token: str | None = None
+    host: str = "127.0.0.1"
+    port: int = Field(default=8767, ge=1, le=65535)
+    path: str = "/mattermost"
+    allowed_channels: list[str] = Field(default_factory=list)
+    allowed_users: list[str] = Field(default_factory=list)
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        normalized = value.strip() or "/mattermost"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
+
+
+class MatrixChannelConfig(ChannelBaseConfig):
+    type: Literal["matrix"] | None = None
+    homeserver_url: str | None = None
+    access_token_env: str | None = "MATRIX_ACCESS_TOKEN"
+    access_token: str | None = None
+    user_id: str | None = None
+    allowed_rooms: list[str] = Field(default_factory=list)
+    poll_timeout: int = Field(default=30, ge=1)
+
+
+class EmailChannelConfig(ChannelBaseConfig):
+    type: Literal["email"] | None = None
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_starttls: bool = True
+    smtp_username_env: str | None = "DEMIURGE_SMTP_USERNAME"
+    smtp_password_env: str | None = "DEMIURGE_SMTP_PASSWORD"
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    imap_host: str | None = None
+    imap_port: int = Field(default=993, ge=1, le=65535)
+    imap_username_env: str | None = "DEMIURGE_IMAP_USERNAME"
+    imap_password_env: str | None = "DEMIURGE_IMAP_PASSWORD"
+    imap_username: str | None = None
+    imap_password: str | None = None
+    mailbox: str = "INBOX"
+    from_address: str | None = None
+    allowed_senders: list[str] = Field(default_factory=list)
+    allowed_recipients: list[str] = Field(default_factory=list)
+    trust_from_headers: bool = False
+    poll_interval: int = Field(default=30, ge=1)
+
+
+class UnknownChannelConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    type: str | None = None
+
+
+ChannelConfig = (
+    TelegramChannelConfig
+    | WebhookChannelConfig
+    | SlackChannelConfig
+    | MattermostChannelConfig
+    | MatrixChannelConfig
+    | EmailChannelConfig
+    | UnknownChannelConfig
+)
+
+_CHANNEL_CONFIG_MODELS: dict[str, type[BaseModel]] = {
+    "telegram": TelegramChannelConfig,
+    "webhook": WebhookChannelConfig,
+    "slack": SlackChannelConfig,
+    "mattermost": MattermostChannelConfig,
+    "matrix": MatrixChannelConfig,
+    "email": EmailChannelConfig,
+}
 
 
 class ApprovalInfo(BaseModel):
@@ -171,14 +315,48 @@ class ScheduleModulesInfo(BaseModel):
 class ScheduleDeliveryInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["local", "telegram"] = "local"
+    mode: str = "local"
+    channel: str | None = None
+    target: str | None = None
     chat_id: StrictInt | None = None
 
+    @field_validator("mode", "channel", mode="before")
+    @classmethod
+    def _channel_name(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip().lower().replace("-", "_")
+        return text or None
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def _target(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
     @model_validator(mode="after")
-    def _telegram_requires_target(self) -> "ScheduleDeliveryInfo":
+    def _delivery_target(self) -> "ScheduleDeliveryInfo":
+        if not self.mode:
+            self.mode = "local"
+        if self.mode == "local":
+            return self
         if self.mode == "telegram" and self.chat_id is None:
             raise ValueError("telegram schedule delivery requires chat_id")
+        if self.mode != "telegram" and self.target is None:
+            raise ValueError(f"{self.mode} schedule delivery requires target")
         return self
+
+    @property
+    def channel_name(self) -> str:
+        return self.channel or self.mode
+
+    @property
+    def delivery_target(self) -> str | None:
+        if self.chat_id is not None:
+            return str(self.chat_id)
+        return self.target
 
 
 class ScheduleManifestInfo(BaseModel):
@@ -303,13 +481,36 @@ class CoreManifest(BaseModel):
     runtime: RuntimeInfo = Field(default_factory=RuntimeInfo)
     model: ModelInfo = Field(default_factory=ModelInfo)
     ui: UiInfo = Field(default_factory=UiInfo)
-    channels: dict[str, TelegramChannelConfig] = Field(default_factory=dict)
+    channels: dict[str, ChannelConfig] = Field(default_factory=dict)
     slots: dict[str, str] = Field(default_factory=dict)
     tools: ToolsInfo = Field(default_factory=ToolsInfo)
     approval: ApprovalInfo = Field(default_factory=ApprovalInfo)
     capabilities: dict[str, Any] = Field(default_factory=dict)
     dependencies: DependencyInfo = Field(default_factory=DependencyInfo)
     tests: TestsInfo = Field(default_factory=TestsInfo)
+
+    @field_validator("channels", mode="before")
+    @classmethod
+    def _channels(cls, value: Any) -> Any:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return value
+        parsed: dict[str, BaseModel] = {}
+        for raw_name, raw_config in value.items():
+            name = str(raw_name).strip().lower().replace("-", "_")
+            if not name:
+                raise ValueError("channel names must not be empty")
+            config_data = raw_config or {}
+            if not isinstance(config_data, dict):
+                raise ValueError(f"channels.{name} must be a mapping")
+            channel_type = str(config_data.get("type") or name).strip().lower().replace("-", "_")
+            model = _CHANNEL_CONFIG_MODELS.get(channel_type)
+            if model is None:
+                parsed[name] = UnknownChannelConfig.model_validate({**config_data, "type": channel_type})
+                continue
+            parsed[name] = model.model_validate({**config_data, "type": channel_type})
+        return parsed
 
 
 @dataclass(slots=True)
@@ -840,8 +1041,8 @@ class CoreLoader:
         for schedule in schedules:
             self._validate_schedule_modules(schedule, "input", schedule.modules.input, input_ids)
             self._validate_schedule_modules(schedule, "output", schedule.modules.output, output_ids)
-            if schedule.delivery.mode == "telegram":
-                self._validate_telegram_schedule_delivery(manifest, schedule)
+            if schedule.delivery.mode != "local":
+                self._validate_channel_schedule_delivery(manifest, schedule)
 
     def _validate_schedule_modules(
         self,
@@ -862,16 +1063,17 @@ class CoreLoader:
                     f"unknown {kind} schedule module {module_id}: {schedule.relative_path}"
                 )
 
-    def _validate_telegram_schedule_delivery(self, manifest: CoreManifest, schedule: ScheduleDefinition) -> None:
-        config = manifest.channels.get("telegram")
+    def _validate_channel_schedule_delivery(self, manifest: CoreManifest, schedule: ScheduleDefinition) -> None:
+        channel = schedule.delivery.channel_name
+        config = manifest.channels.get(channel)
         if config is None:
-            raise CoreLoadError(f"telegram schedule delivery requires channels.telegram: {schedule.relative_path}")
-        chat_id = schedule.delivery.chat_id
-        if chat_id not in set(config.allowed_users) and chat_id not in set(config.allowed_chats):
-            raise CoreLoadError(
-                f"telegram schedule delivery target is not allowed by channels.telegram allowlist: "
-                f"{schedule.relative_path}"
-            )
+            raise CoreLoadError(f"{channel} schedule delivery requires channels.{channel}: {schedule.relative_path}")
+        try:
+            from demiurge.channels.registry import validate_schedule_target
+
+            validate_schedule_target(channel, config, schedule.delivery)
+        except Exception as exc:
+            raise CoreLoadError(f"{channel} schedule delivery invalid for {schedule.relative_path}: {exc}") from exc
 
     def _validate_slots(self, slots: list[SlotDefinition], *, kind: str) -> None:
         for slot in slots:

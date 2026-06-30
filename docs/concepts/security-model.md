@@ -51,11 +51,22 @@ Interactive approvals:
 
 ## Channel Trust
 
-Telegram is deny-by-default:
+External channels are disabled by default and must authenticate inbound traffic
+before it reaches the runtime:
 
-- Private chats require sender `from.id` in `allowed_users`.
-- Groups require both sender `from.id` and `chat.id` to be allowed.
-- Unauthorized callbacks do not resolve `clarify` choices or approvals.
+- Telegram private chats require sender `from.id` in `allowed_users`.
+- Telegram groups require both sender `from.id` and `chat.id` to be allowed.
+- Webhook requests require a bearer/shared token unless explicitly configured as
+  unauthenticated for a trusted local deployment.
+- Slack requests require signing-secret HMAC verification and timestamp checks.
+- Mattermost requests require a shared webhook token.
+- Matrix uses the configured access token and optional `allowed_rooms`.
+- Email uses mailbox trust plus optional `allowed_senders` and
+  `allowed_recipients`.
+
+Unauthorized callbacks do not resolve `clarify` choices or approvals. Telegram
+private chats support interactive approvals; other external channels currently
+fail closed for approval-required actions.
 
 ## Configuration
 
