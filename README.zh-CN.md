@@ -110,7 +110,7 @@ provider profile，并设置当前 core 的模型：
 
 ```bash
 uv run demiurge setup providers add openai --preset openai --set-default
-uv run demiurge setup model set --core assistant --provider openai --model gpt-4.1-mini
+uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
 uv run demiurge --provider openai
 ```
 

@@ -227,6 +227,9 @@ def test_domestic_provider_presets_use_latest_flagship_defaults():
     assert get_provider_preset("deepseek").suggested_model == "deepseek-v4-pro"
     assert get_provider_preset("moonshot").suggested_model == "kimi-k2.7-code"
     assert get_provider_preset("minimax").suggested_model == "MiniMax-M3"
+    assert get_provider_preset("minimax-cn").base_url == "https://api.minimaxi.com/v1"
+    assert get_provider_preset("minimax-cn").api_key_env == "MINIMAX_CN_API_KEY"
+    assert get_provider_preset("minimax-cn").suggested_model == "MiniMax-M3"
     assert get_provider_preset("dashscope").suggested_model == "qwen3.7-max"
     assert get_provider_preset("zai").suggested_model == "glm-5.2"
     assert get_provider_preset("siliconflow").suggested_model is None

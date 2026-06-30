@@ -19,7 +19,7 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="OpenAI",
         base_url="https://api.openai.com/v1",
         api_key_env="OPENAI_API_KEY",
-        suggested_model="gpt-4.1-mini",
+        suggested_model="gpt-5.5",
     ),
     ProviderPreset(
         preset_id="deepseek",
@@ -40,6 +40,13 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="MiniMax",
         base_url="https://api.minimax.io/v1",
         api_key_env="MINIMAX_API_KEY",
+        suggested_model="MiniMax-M3",
+    ),
+    ProviderPreset(
+        preset_id="minimax-cn",
+        label="MiniMax-CN",
+        base_url="https://api.minimaxi.com/v1",
+        api_key_env="MINIMAX_CN_API_KEY",
         suggested_model="MiniMax-M3",
     ),
     ProviderPreset(
@@ -68,7 +75,7 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="OpenRouter",
         base_url="https://openrouter.ai/api/v1",
         api_key_env="OPENROUTER_API_KEY",
-        suggested_model="openai/gpt-5.2",
+        suggested_model="openai/gpt-5.5",
     ),
 )
 
