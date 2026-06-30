@@ -251,6 +251,7 @@ def test_install_summary_mode_copies_child_core_and_config(tmp_path):
     assert yaml.safe_load((child_core / "agent.yaml").read_text())["agent"]["id"] == "tts_summarizer"
     config = yaml.safe_load((core_path / "agent" / "output" / "tts_minimax" / "config.yaml").read_text())
     assert config["summarizer_core"] == "tts_summarizer"
+    assert "summarizer_context" not in config
 
 
 def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):

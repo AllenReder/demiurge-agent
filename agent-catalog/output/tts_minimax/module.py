@@ -27,7 +27,6 @@ async def process(ctx):
         summary = await ctx.agents.run(
             str(summarizer_core),
             text,
-            context=str(config.get("summarizer_context") or "Summarize this assistant reply for short TTS."),
         )
         result = summary.result
         if isinstance(result, dict) and result.get("text"):

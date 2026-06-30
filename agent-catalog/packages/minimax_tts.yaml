@@ -62,7 +62,6 @@ components:
           mode: summary
         config:
           summarizer_core: tts_summarizer
-          summarizer_context: Summarize this assistant reply into short spoken text for TTS.
           summary: MiniMax summarized TTS audio
   - id: tts_summarizer
     kind: core
