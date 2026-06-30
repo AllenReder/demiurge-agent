@@ -34,6 +34,9 @@ serial:
 
 Bootstrap pipelines are serial-only.
 
+Bootstrap slots can be hand-authored or installed by package recipes with
+`kind: bootstrap`.
+
 `agent/bootstrap/session_context/slot.yaml`:
 
 ```yaml

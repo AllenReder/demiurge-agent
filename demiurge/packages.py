@@ -24,10 +24,11 @@ class PackageOperationError(RuntimeError):
 
 REDACTED_SECRET = "<redacted>"
 OPTION_TYPES = {"string", "bool", "choice", "path", "secret"}
-COMPONENT_KINDS = {"input", "output", "tool", "skill", "lib", "core"}
-CORE_LOCAL_KINDS = {"input", "output", "tool", "skill", "lib"}
-PIPELINE_KINDS = {"input", "output"}
+COMPONENT_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib", "core"}
+CORE_LOCAL_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib"}
+PIPELINE_KINDS = {"bootstrap", "input", "output"}
 DEFAULT_TARGET_ROOTS = {
+    "bootstrap": "agent/bootstrap",
     "input": "agent/input",
     "output": "agent/output",
     "tool": "agent/tools",
@@ -795,6 +796,8 @@ class PackageManager:
     def _validate_pipeline_insert(self, core_path: Path, operation: Mapping[str, Any]) -> None:
         kind = str(operation["kind"])
         slot_id = str(operation["slot_id"])
+        config = operation.get("pipeline") if isinstance(operation.get("pipeline"), Mapping) else {}
+        self._validate_pipeline_config(kind, config)
         pipeline = self._read_pipeline(core_path, kind)
         if slot_id in set(pipeline.get("serial") or []) | set(pipeline.get("parallel") or []):
             raise PackageOperationError(f"{kind} pipeline already contains slot: {slot_id}")
@@ -803,9 +806,8 @@ class PackageManager:
         kind = str(operation["kind"])
         slot_id = str(operation["slot_id"])
         config = operation.get("pipeline") if isinstance(operation.get("pipeline"), Mapping) else {}
+        self._validate_pipeline_config(kind, config)
         group = str(config.get("group") or "serial")
-        if group not in {"serial", "parallel"}:
-            raise PackageOperationError(f"invalid pipeline group: {group}")
         pipeline = self._read_pipeline(core_path, kind)
         values = list(pipeline.get(group) or [])
         after = config.get("after")
@@ -834,8 +836,12 @@ class PackageManager:
     def _read_pipeline(self, core_path: Path, kind: str) -> dict[str, list[str]]:
         path = core_path / "agent" / kind / "pipeline.yaml"
         raw = _read_yaml_mapping(path)
+        groups = self._pipeline_groups(kind)
+        unknown_keys = sorted(set(raw) - set(groups))
+        if unknown_keys:
+            raise PackageOperationError(f"invalid {kind} pipeline key(s): {', '.join(unknown_keys)}")
         result: dict[str, list[str]] = {}
-        for group in ("serial", "parallel"):
+        for group in groups:
             values = raw.get(group) or []
             if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
                 raise PackageOperationError(f"invalid {kind} pipeline {group}: expected list of slot ids")
@@ -844,13 +850,24 @@ class PackageManager:
 
     def _write_pipeline(self, core_path: Path, kind: str, pipeline: Mapping[str, list[str]]) -> None:
         path = core_path / "agent" / kind / "pipeline.yaml"
+        data = {"serial": pipeline.get("serial") or []}
+        if "parallel" in self._pipeline_groups(kind):
+            data["parallel"] = pipeline.get("parallel") or []
         path.write_text(
             yaml.safe_dump(
-                {"serial": pipeline.get("serial") or [], "parallel": pipeline.get("parallel") or []},
+                data,
                 sort_keys=False,
             ),
             encoding="utf-8",
         )
+
+    def _pipeline_groups(self, kind: str) -> tuple[str, ...]:
+        return ("serial",) if kind == "bootstrap" else ("serial", "parallel")
+
+    def _validate_pipeline_config(self, kind: str, config: Mapping[str, Any]) -> None:
+        group = str(config.get("group") or "serial")
+        if group not in self._pipeline_groups(kind):
+            raise PackageOperationError(f"invalid {kind} pipeline group: {group}")
 
     def _normalize_option_value(
         self,

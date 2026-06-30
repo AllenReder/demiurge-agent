@@ -47,6 +47,7 @@ The built-in catalog lives in:
 ```text
 agent-catalog/
   catalog.yaml
+  bootstrap/  # when bootstrap components are present
   input/
   output/
   tool/
@@ -58,6 +59,7 @@ agent-catalog/
 
 Supported component kinds:
 
+- `bootstrap`
 - `input`
 - `output`
 - `tool`
@@ -66,14 +68,15 @@ Supported component kinds:
 - `core`
 
 Package recipes select components, collect options, write component config, and
-optionally edit input/output pipelines.
+optionally edit bootstrap/input/output pipelines. Bootstrap pipelines are
+serial-only.
 
 ## Built-In Packages
 
 `memory_basic` installs:
 
 - `agent/lib/memory_basic`
-- `agent/input/memory_context`
+- `agent/bootstrap/memory_basic`
 - `agent/tools/memory`
 
 It stores user data outside package-owned component targets:

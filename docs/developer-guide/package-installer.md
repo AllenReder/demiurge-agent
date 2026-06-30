@@ -32,8 +32,8 @@ Preview does not write files.
 ## Install Flow
 
 Install copies components into the active runtime core, writes optional
-`config.yaml` files, inserts input/output pipeline entries, installs child cores
-when requested, and records ownership in:
+`config.yaml` files, inserts bootstrap/input/output pipeline entries, installs
+child cores when requested, and records ownership in:
 
 ```text
 ~/.demiurge/agents/<core>/packages.yaml
@@ -49,6 +49,6 @@ and keeps reused shared targets until the final referencing package is removed.
 
 ## Boundary
 
-Package recipes can install files and edit input/output pipelines. They do not
-run migrations, install host dependencies, edit `uv.lock`, or create git
-commits.
+Package recipes can install files and edit bootstrap/input/output pipelines.
+Bootstrap pipelines are serial-only. Recipes do not run migrations, install host
+dependencies, edit `uv.lock`, or create git commits.

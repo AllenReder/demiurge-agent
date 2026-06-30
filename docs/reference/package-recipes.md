@@ -54,6 +54,7 @@ Secret option values may be written to target component config, but
 
 | Kind | Target |
 | --- | --- |
+| `bootstrap` | `agent/bootstrap/<slot_id>` |
 | `input` | `agent/input/<slot_id>` |
 | `output` | `agent/output/<slot_id>` |
 | `tool` | `agent/tools/<tool_id>` |
@@ -73,7 +74,8 @@ Config values can reference options with `${options.<id>}`.
 - Component sources cannot be symlinks.
 - Existing target paths are rejected unless reused by another installed package
   with the same source and target.
-- Pipeline edits are allowed only for input/output components.
+- Pipeline edits are allowed only for bootstrap/input/output components.
+- Bootstrap pipeline edits are serial-only.
 
 ## Boundary
 

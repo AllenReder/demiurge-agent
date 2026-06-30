@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .memory_basic.store import load_or_create_session_snapshot, snapshot_blocks
+from .memory_basic.store import MemoryStore, load_memory_config
 
 
 MEMORY_GUIDANCE = (
@@ -9,15 +9,17 @@ MEMORY_GUIDANCE = (
     "details, environment facts, project conventions, and tool or workflow "
     "lessons. Do not save task progress, temporary todos, completed-work logs, "
     "raw data dumps, or reusable procedures that belong in skills. Current "
-    "memory is a frozen session snapshot; writes affect future sessions."
+    "memory is frozen into the session bootstrap context; writes affect future "
+    "sessions."
 )
 
 
 def process(ctx):
-    ctx.input.add("system", MEMORY_GUIDANCE)
-    snapshot = load_or_create_session_snapshot(__file__, ctx.input.session_root)
-    blocks = snapshot_blocks(snapshot)
+    config = load_memory_config(__file__)
+    store = MemoryStore.from_config(config)
+    ctx.bootstrap.add(MEMORY_GUIDANCE)
+    blocks = store.context_blocks()
     for target in ("memory", "user"):
         block = blocks.get(target)
         if block:
-            ctx.input.add("system", block)
+            ctx.bootstrap.add(block)

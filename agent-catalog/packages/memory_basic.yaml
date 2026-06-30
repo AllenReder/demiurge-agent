@@ -14,18 +14,15 @@ components:
       storage:
         relative_to: core_root
         path: memory
-      snapshot:
-        mode: session
       limits:
         memory_chars: 2200
         user_chars: 1375
-  - id: memory_context
-    kind: input
-    source: memory_context
-    target: agent/input/memory_context
+  - id: memory_basic
+    kind: bootstrap
+    source: memory_basic
+    target: agent/bootstrap/memory_basic
     pipeline:
-      group: serial
-      before: base_input
+      after: session_context
   - id: memory_tool
     kind: tool
     source: memory

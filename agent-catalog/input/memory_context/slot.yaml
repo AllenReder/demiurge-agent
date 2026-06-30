@@ -1,5 +1,0 @@
-entrypoint: module:process
-description: Injects a frozen per-session snapshot of basic local memory into the current model request.
-failure_policy: soft
-history_policy: transient
-capabilities: []

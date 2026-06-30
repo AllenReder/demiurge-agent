@@ -130,10 +130,10 @@ def test_builtin_catalog_lists_memory_basic_package():
 
     package = catalog.packages["memory_basic"]
     assert {"memory", "context"}.issubset(package.tags)
-    assert {component.kind for component in package.components} == {"lib", "input", "tool"}
+    assert {component.kind for component in package.components} == {"lib", "bootstrap", "tool"}
     assert [component.component_id for component in package.components] == [
         "memory_lib",
-        "memory_context",
+        "memory_basic",
         "memory_tool",
     ]
 
@@ -147,16 +147,16 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     core_path = app.version_store.active_core_path("assistant")
     assert result.registry_path == core_path / "packages.yaml"
     assert (core_path / "agent" / "lib" / "memory_basic" / "store.py").exists()
-    assert (core_path / "agent" / "input" / "memory_context" / "module.py").exists()
+    assert (core_path / "agent" / "bootstrap" / "memory_basic" / "module.py").exists()
     assert (core_path / "agent" / "tools" / "memory" / "module.py").exists()
     assert not (core_path / "agent" / "skills" / "memory_policy").exists()
     assert not (core_path / "memory").exists()
     config = yaml.safe_load((core_path / "agent" / "lib" / "memory_basic" / "config.yaml").read_text())
     assert config["storage"] == {"relative_to": "core_root", "path": "memory"}
-    assert config["snapshot"]["mode"] == "session"
+    assert "snapshot" not in config
     assert config["limits"] == {"memory_chars": 2200, "user_chars": 1375}
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"][:2] == ["memory_context", "base_input"]
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline["serial"] == ["session_context", "memory_basic"]
     slot = yaml.safe_load((core_path / "agent" / "tools" / "memory" / "slot.yaml").read_text())
     assert slot["risk"] == "medium"
     assert slot["approval_policy"] == "auto"
@@ -171,12 +171,12 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     removed = manager.uninstall(core_id="assistant", package_id="memory_basic")
 
     assert removed.action == "uninstall"
-    assert not (core_path / "agent" / "input" / "memory_context").exists()
+    assert not (core_path / "agent" / "bootstrap" / "memory_basic").exists()
     assert not (core_path / "agent" / "tools" / "memory").exists()
     assert not (core_path / "agent" / "lib" / "memory_basic").exists()
     assert (memory_dir / "USER.md").read_text(encoding="utf-8") == "User prefers concise Chinese replies."
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_input"]
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline["serial"] == ["session_context"]
 
 
 def test_catalog_rejects_component_source_escape(tmp_path):
@@ -333,6 +333,59 @@ def test_shared_lib_source_is_reused_and_pruned_last(tmp_path):
 
     manager.uninstall(core_id="assistant", package_id="second")
     assert not (core_path / "agent" / "lib" / "shared").exists()
+
+
+def test_install_and_uninstall_bootstrap_package_updates_serial_pipeline(tmp_path):
+    catalog_root = tmp_path / "catalog"
+    _write_bootstrap_catalog(catalog_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, catalog_root)
+
+    result = manager.install(core_id="assistant", package_id="bootstrap_before")
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert result.components[0]["kind"] == "bootstrap"
+    assert result.components[0]["target"] == "agent/bootstrap/before_session"
+    assert (core_path / "agent" / "bootstrap" / "before_session" / "module.py").exists()
+    config = yaml.safe_load((core_path / "agent" / "bootstrap" / "before_session" / "config.yaml").read_text())
+    assert config["label"] == "before"
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline == {"serial": ["before_session", "session_context"]}
+
+    removed = manager.uninstall(core_id="assistant", package_id="bootstrap_before")
+
+    assert removed.action == "uninstall"
+    assert not (core_path / "agent" / "bootstrap" / "before_session").exists()
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline == {"serial": ["session_context"]}
+
+
+def test_bootstrap_pipeline_after_ordering(tmp_path):
+    catalog_root = tmp_path / "catalog"
+    _write_bootstrap_catalog(catalog_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, catalog_root)
+
+    manager.install(core_id="assistant", package_id="bootstrap_after")
+
+    core_path = app.version_store.active_core_path("assistant")
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline == {"serial": ["session_context", "after_session"]}
+
+
+def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
+    catalog_root = tmp_path / "catalog"
+    _write_bootstrap_catalog(catalog_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, catalog_root)
+
+    with pytest.raises(PackageOperationError, match="invalid bootstrap pipeline group: parallel"):
+        manager.preview_install(core_id="assistant", package_id="bootstrap_parallel")
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert not (core_path / "agent" / "bootstrap" / "parallel_session").exists()
+    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
+    assert pipeline == {"serial": ["session_context"]}
 
 
 def test_cli_package_list_and_install(tmp_path, capsys):
@@ -663,6 +716,62 @@ def _write_shared_lib_catalog(root: Path) -> None:
             "    target: agent/lib/shared\n",
             encoding="utf-8",
         )
+
+
+def _write_bootstrap_catalog(root: Path) -> None:
+    (root / "packages").mkdir(parents=True)
+    for component in ("before_session", "after_session", "parallel_session"):
+        slot = root / "bootstrap" / component
+        slot.mkdir(parents=True)
+        (slot / "slot.yaml").write_text(
+            "entrypoint: module:process\n"
+            "description: test bootstrap\n"
+            "failure_policy: soft\n"
+            "capabilities:\n"
+            "  []\n",
+            encoding="utf-8",
+        )
+        (slot / "module.py").write_text("def process(ctx):\n    ctx.bootstrap.add('test bootstrap')\n", encoding="utf-8")
+    (root / "catalog.yaml").write_text("id: bootstrap_catalog\nname: Bootstrap\n", encoding="utf-8")
+    (root / "packages" / "bootstrap_before.yaml").write_text(
+        "id: bootstrap_before\n"
+        "tags:\n"
+        "  - bootstrap\n"
+        "components:\n"
+        "  - id: before_session\n"
+        "    kind: bootstrap\n"
+        "    source: before_session\n"
+        "    pipeline:\n"
+        "      before: session_context\n"
+        "    config:\n"
+        "      label: before\n",
+        encoding="utf-8",
+    )
+    (root / "packages" / "bootstrap_after.yaml").write_text(
+        "id: bootstrap_after\n"
+        "tags:\n"
+        "  - bootstrap\n"
+        "components:\n"
+        "  - id: after_session\n"
+        "    kind: bootstrap\n"
+        "    source: after_session\n"
+        "    pipeline:\n"
+        "      group: serial\n"
+        "      after: session_context\n",
+        encoding="utf-8",
+    )
+    (root / "packages" / "bootstrap_parallel.yaml").write_text(
+        "id: bootstrap_parallel\n"
+        "tags:\n"
+        "  - bootstrap\n"
+        "components:\n"
+        "  - id: parallel_session\n"
+        "    kind: bootstrap\n"
+        "    source: parallel_session\n"
+        "    pipeline:\n"
+        "      group: parallel\n",
+        encoding="utf-8",
+    )
 
 
 class _FakePrompt:

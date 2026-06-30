@@ -8,7 +8,7 @@ description: >-
   belong in a skill. Use action=list with target=all when the user asks to view,
   list, inspect, or confirm what is currently stored in memory; list is read-only,
   does not save or delete anything, and does not refresh the current session's
-  frozen memory snapshot. Make multiple changes in one operations batch when
+  bootstrap memory context. Make multiple changes in one operations batch when
   possible; batch writes are all-or-nothing against the final character budget.
 input_schema:
   type: object

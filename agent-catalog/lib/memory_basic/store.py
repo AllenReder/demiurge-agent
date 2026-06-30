@@ -23,14 +23,10 @@ except ImportError:  # pragma: no cover - Unix fallback
 
 
 ENTRY_DELIMITER = "\n§\n"
-SNAPSHOT_FILENAME = "memory_basic_snapshot.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "storage": {
         "relative_to": "core_root",
         "path": "memory",
-    },
-    "snapshot": {
-        "mode": "session",
     },
     "limits": {
         "memory_chars": 2200,
@@ -81,25 +77,6 @@ def load_memory_config(slot_file: str | Path) -> dict[str, Any]:
     return config
 
 
-def load_or_create_session_snapshot(slot_file: str | Path, session_root: str | Path) -> dict[str, Any]:
-    config = load_memory_config(slot_file)
-    snapshot_path = Path(session_root) / SNAPSHOT_FILENAME
-    loaded = _load_json_mapping(snapshot_path)
-    if loaded:
-        return loaded
-    store = MemoryStore.from_config(config)
-    snapshot = store.snapshot()
-    _write_json_atomic(snapshot_path, snapshot)
-    return snapshot
-
-
-def snapshot_blocks(snapshot: Mapping[str, Any]) -> dict[str, str]:
-    blocks = snapshot.get("blocks")
-    if not isinstance(blocks, Mapping):
-        return {}
-    return {str(key): str(value) for key, value in blocks.items() if value}
-
-
 class MemoryStore:
     def __init__(self, *, core_root: Path, storage_dir: Path, memory_char_limit: int, user_char_limit: int) -> None:
         self.core_root = core_root
@@ -120,23 +97,15 @@ class MemoryStore:
             user_char_limit=_positive_int(limits.get("user_chars"), 1375),
         )
 
-    def snapshot(self) -> dict[str, Any]:
+    def context_blocks(self) -> dict[str, str]:
         blocks: dict[str, str] = {}
         for target in ("memory", "user"):
             entries = self.read_entries(target, create=True)
-            sanitized = self._sanitize_entries_for_snapshot(entries, target)
+            sanitized = self._sanitize_entries_for_context(entries, target)
             block = self.render_block(target, sanitized)
             if block:
                 blocks[target] = block
-        return {
-            "schema_version": 1,
-            "storage_dir": str(self.storage_dir),
-            "limits": {
-                "memory_chars": self.memory_char_limit,
-                "user_chars": self.user_char_limit,
-            },
-            "blocks": blocks,
-        }
+        return blocks
 
     def apply_tool_args(self, args: Mapping[str, Any]) -> dict[str, Any]:
         target = str(args.get("target") or "memory").strip()
@@ -356,7 +325,7 @@ class MemoryStore:
         separator = "=" * max(12, len(header))
         return f"{separator}\n{header}\n{separator}\n{content}"
 
-    def _sanitize_entries_for_snapshot(self, entries: list[str], target: str) -> list[str]:
+    def _sanitize_entries_for_context(self, entries: list[str], target: str) -> list[str]:
         filename = TARGET_FILENAMES[target]
         sanitized: list[str] = []
         for entry in entries:
@@ -553,18 +522,6 @@ def _write_text_atomic(path: Path, content: str) -> None:
         raise
 
 
-def _write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
-    _write_text_atomic(path, json.dumps(dict(data), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-
-
-def _load_json_mapping(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return dict(loaded) if isinstance(loaded, Mapping) else {}
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
