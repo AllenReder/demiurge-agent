@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 
 from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, CoreLoader, ModelInfo, UiInfo
@@ -56,12 +56,19 @@ class HostChannelConfig(BaseModel):
     busy_mode: Literal["interrupt", "queue"] = "interrupt"
 
 
+class HostDebugConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    show_system_prompt: StrictBool = False
+
+
 class HostConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runtime: HostRuntimeConfig = Field(default_factory=HostRuntimeConfig)
     channel: HostChannelConfig = Field(default_factory=HostChannelConfig)
     ui: HostUiConfig = Field(default_factory=HostUiConfig)
+    debug: HostDebugConfig = Field(default_factory=HostDebugConfig)
 
 
 @dataclass(slots=True)
@@ -92,6 +99,8 @@ class DemiurgeApp:
     demiurge_theme_color_source: str
     user_theme_color: str
     user_theme_color_source: str
+    debug_show_system_prompt: bool
+    debug_show_system_prompt_source: str
     host_config_path: Path
     fallback_config_path: Path
 
@@ -137,6 +146,8 @@ class DemiurgeApp:
             "demiurge_theme_color_source": self.demiurge_theme_color_source,
             "user_theme_color": self.user_theme_color,
             "user_theme_color_source": self.user_theme_color_source,
+            "debug_show_system_prompt": self.debug_show_system_prompt,
+            "debug_show_system_prompt_source": self.debug_show_system_prompt_source,
             "approval_mode": self.approval_runtime.mode,
             "approval_cached_allows": self.approval_runtime.cached_allow_count,
             "session_id": self.runner.session_id,
@@ -226,6 +237,7 @@ def create_app(
         model_resolver=lambda core_model: resolve_model_name(core_model, fallback.model, override=model)[0],
         provider_name=resolved_provider_name,
         workspace=str(workspace_scope.root),
+        show_system_prompt=host_config.debug.show_system_prompt,
     )
     return DemiurgeApp(
         home=home,
@@ -254,6 +266,8 @@ def create_app(
         demiurge_theme_color_source=host_sources.get("ui.demiurge_theme_color", "default"),
         user_theme_color=host_config.ui.user_theme_color,
         user_theme_color_source=host_sources.get("ui.user_theme_color", "default"),
+        debug_show_system_prompt=host_config.debug.show_system_prompt,
+        debug_show_system_prompt_source=host_sources.get("debug.show_system_prompt", "default"),
         host_config_path=host_config_path,
         fallback_config_path=version_store.fallback_config_path,
     )
@@ -377,12 +391,14 @@ def load_host_config(path: Path) -> tuple[HostConfig, dict[str, str]]:
     except ValidationError as exc:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
-            f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, and ui.user_theme_color: {exc}"
+            f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
+            f"ui.user_theme_color, and debug.show_system_prompt: {exc}"
         ) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
-            f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, and ui.user_theme_color: {exc}"
+            f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
+            f"ui.user_theme_color, and debug.show_system_prompt: {exc}"
         ) from exc
     return config, _host_config_sources(raw)
 
@@ -399,6 +415,9 @@ def default_host_config_dict() -> dict[str, object]:
             "user_message_align": "left",
             "demiurge_theme_color": "ff9afc",
             "user_theme_color": "9cc9ff",
+        },
+        "debug": {
+            "show_system_prompt": False,
         },
     }
 
@@ -420,6 +439,7 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
         ("ui", "user_message_align"),
         ("ui", "demiurge_theme_color"),
         ("ui", "user_theme_color"),
+        ("debug", "show_system_prompt"),
     ):
         raw_section = raw.get(section)
         if isinstance(raw_section, dict) and key in raw_section:

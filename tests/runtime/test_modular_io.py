@@ -117,6 +117,10 @@ def _delivery_texts(result) -> list[str]:
     return [delivery.text for delivery in result.deliveries]
 
 
+def _bridge_deliveries(bridge: RecordingBridge):
+    return [delivery for outbound in bridge.outbounds for delivery in outbound.deliveries]
+
+
 @pytest.mark.asyncio
 async def test_input_serial_appends_user_fragments_and_transient_system(tmp_path):
     agents = _copy_agents(tmp_path)
@@ -151,6 +155,91 @@ async def test_input_serial_appends_user_fragments_and_transient_system(tmp_path
     assert [message.role for message in history] == ["user", "assistant"]
     assert history[0].content == "FIRST\n\nhello"
     assert all(message.role != "system" for message in history)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_debug_disabled_by_default(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_pipeline(agents, "output", serial=["base_output"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+    bridge = RecordingBridge()
+    runtime = InteractionRuntime(app.runner)
+
+    await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), bridge=bridge)
+    await app.runner.drain_background_tasks()
+
+    deliveries = _bridge_deliveries(bridge)
+    assert all(delivery.metadata.get("debug") != "system_prompt" for delivery in deliveries)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/bootstrap/boot/module.py",
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('BOOT SYSTEM')\n",
+    )
+    _write_slot(agents, "assistant/agent/bootstrap/boot/slot.yaml", _slot_text())
+    (agents / "assistant" / "agent" / "bootstrap" / "pipeline.yaml").write_text("serial:\n  - boot\n", encoding="utf-8")
+    _write_module(
+        agents,
+        "assistant/agent/input/debug_system/module.py",
+        "def process(ctx):\n"
+        "    ctx.input.add('system', 'TURN SYSTEM')\n",
+    )
+    _write_slot(agents, "assistant/agent/input/debug_system/slot.yaml", _slot_text())
+    _write_pipeline(agents, "input", serial=["debug_system", "base_input"])
+    _write_pipeline(agents, "output", serial=["base_output"])
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("debug:\n  show_system_prompt: true\n", encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+    bridge = RecordingBridge()
+    runtime = InteractionRuntime(app.runner)
+
+    await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), bridge=bridge)
+    await app.runner.drain_background_tasks()
+
+    deliveries = _bridge_deliveries(bridge)
+    debug_delivery = next(delivery for delivery in deliveries if delivery.metadata.get("debug") == "system_prompt")
+    assert deliveries.index(debug_delivery) == 0
+    assert debug_delivery.kind == "notice"
+    assert debug_delivery.history_policy == "transient"
+    assert debug_delivery.metadata["role"] == "system"
+    assert "# System prompt debug" in debug_delivery.text
+    assert "BOOT SYSTEM" in debug_delivery.text
+    assert "TURN SYSTEM" in debug_delivery.text
+    assert "hello" not in debug_delivery.text
+    assert "main" not in debug_delivery.text
+    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    assert all("BOOT SYSTEM" not in message.content for message in messages)
+    assert all("TURN SYSTEM" not in message.content for message in messages)
+    assert all(message.role != "system" for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_debug_delivers_once_per_model_step(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_pipeline(agents, "output", serial=["base_output"])
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("debug:\n  show_system_prompt: true\n", encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", agents_root=agents)
+    app.runner.provider = ToolCallingProvider()
+    bridge = RecordingBridge()
+    runtime = InteractionRuntime(app.runner)
+
+    await runtime.handle(InteractionInbound(channel="tui", text="tools_list", source="local"), bridge=bridge)
+    await app.runner.drain_background_tasks()
+
+    debug_deliveries = [delivery for delivery in _bridge_deliveries(bridge) if delivery.metadata.get("debug") == "system_prompt"]
+    assert len(debug_deliveries) == 2
+    assert f"step: {app.runner.display_turns[-1]['turn_id']}_step_1" in debug_deliveries[0].text
+    assert f"step: {app.runner.display_turns[-1]['turn_id']}_step_2" in debug_deliveries[1].text
 
 
 @pytest.mark.asyncio

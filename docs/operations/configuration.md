@@ -22,9 +22,17 @@ ui:
   user_message_align: left
   demiurge_theme_color: ff9afc
   user_theme_color: 9cc9ff
+debug:
+  show_system_prompt: false
 ```
 
 This file is not an agent core and not the global fallback agent config.
+
+`debug.show_system_prompt` is a local troubleshooting switch. When enabled, the
+host sends each assembled system prompt to the active channel immediately before
+the provider call. The delivery is transient and is not written to
+`messages.jsonl`, but it can expose sensitive instructions, memory, bootstrap
+context, or other system context to the channel.
 
 ## Runtime Home
 
@@ -90,7 +98,7 @@ uv run demiurge --provider fake
 ```
 
 Use `/status` to inspect config sources for home, workspace, model, API key,
-tool display, and UI settings.
+tool display, UI settings, and debug switches.
 
 ## Reference
 

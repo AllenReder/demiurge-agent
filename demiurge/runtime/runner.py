@@ -1149,6 +1149,7 @@ class SessionTurnStepRunner:
         provider_name: str | None = None,
         workspace: str | None = None,
         initial_core_path: Path | None = None,
+        show_system_prompt: bool = False,
     ):
         self.home = home
         self.version_store = version_store
@@ -1162,6 +1163,7 @@ class SessionTurnStepRunner:
         self.provider_name = provider_name
         self.workspace = workspace
         self.initial_core_path = initial_core_path
+        self.show_system_prompt = show_system_prompt
         self.session_store = SessionStore(home)
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
@@ -1259,9 +1261,17 @@ class SessionTurnStepRunner:
                 tools=[tool.name for tool in available_tools],
                 **interaction_metadata,
             )
+            messages = self._build_messages(core, context, turn_messages, turn_id=turn_id, step_id=step_id)
+            await self._maybe_deliver_system_prompt_debug(
+                messages,
+                turn=turn,
+                step_id=step_id,
+                interaction_metadata=interaction_metadata,
+                interaction_bridge=get_current_bridge(),
+            )
             request = LLMRequest(
                 model=self._resolve_model_name(core),
-                messages=self._build_messages(core, context, turn_messages, turn_id=turn_id, step_id=step_id),
+                messages=messages,
                 tools=available_tools,
                 metadata={"turn_id": turn_id, "step_id": step_id},
             )
@@ -1563,6 +1573,116 @@ class SessionTurnStepRunner:
             total_chars=sum(len(message.content or "") for message in assembled.messages),
         )
         return assembled.messages
+
+    async def _maybe_deliver_system_prompt_debug(
+        self,
+        messages: list[LLMMessage],
+        *,
+        turn: TurnContext,
+        step_id: str,
+        interaction_metadata: dict[str, Any],
+        interaction_bridge: InteractionBridge | None,
+    ) -> None:
+        if not self.show_system_prompt:
+            return
+        system_messages = [
+            message
+            for message in messages
+            if message.role == "system" and (message.content or "").strip()
+        ]
+        if not system_messages:
+            self.event_log.emit(
+                "debug.system_prompt.skipped",
+                turn_id=turn.turn_id,
+                step_id=step_id,
+                reason="no_system_messages",
+                **interaction_metadata,
+            )
+            return
+
+        bridge = interaction_bridge or get_current_bridge()
+        channel = interaction_metadata.get("channel")
+        if bridge is None or not channel:
+            self.event_log.emit(
+                "debug.system_prompt.skipped",
+                turn_id=turn.turn_id,
+                step_id=step_id,
+                reason="no_active_interaction_bridge",
+                system_messages=len(system_messages),
+                total_chars=sum(len(message.content or "") for message in system_messages),
+                **interaction_metadata,
+            )
+            return
+
+        text = self._format_system_prompt_debug(system_messages, turn_id=turn.turn_id, step_id=step_id)
+        metadata = {
+            "role": "system",
+            "debug": "system_prompt",
+            "level": "info",
+            "history_policy": "transient",
+            "delivery": "immediate",
+            "delivery_status": "pending",
+            "system_messages": len(system_messages),
+        }
+        delivery = InteractionDelivery(
+            type="text",
+            kind="notice",
+            text=text,
+            fallback_text=text,
+            blocks=[{"type": "text", "text": text, "metadata": {"debug": "system_prompt"}}],
+            payload={"type": "text", "text": text},
+            visible=True,
+            history_policy="transient",
+            metadata=metadata,
+        )
+        item = InteractionItem.delivery_item(delivery)
+        outbound = InteractionOutbound(
+            channel=str(channel),
+            items=[item],
+            session_id=self.session_id,
+            turn_id=turn.turn_id,
+            metadata=dict(interaction_metadata),
+        )
+        try:
+            await bridge.deliver(outbound)
+            item.set_dispatch_status("delivered")
+            self.event_log.emit(
+                "debug.system_prompt.delivered",
+                turn_id=turn.turn_id,
+                step_id=step_id,
+                system_messages=len(system_messages),
+                total_chars=sum(len(message.content or "") for message in system_messages),
+                **interaction_metadata,
+            )
+        except Exception as exc:
+            item.set_dispatch_status("failed")
+            self.event_log.emit(
+                "debug.system_prompt.failed",
+                turn_id=turn.turn_id,
+                step_id=step_id,
+                error=str(exc),
+                system_messages=len(system_messages),
+                total_chars=sum(len(message.content or "") for message in system_messages),
+                **interaction_metadata,
+            )
+
+    def _format_system_prompt_debug(self, messages: list[LLMMessage], *, turn_id: str, step_id: str) -> str:
+        sections = [
+            "# System prompt debug",
+            "",
+            f"turn: {turn_id}",
+            f"step: {step_id}",
+        ]
+        for index, message in enumerate(messages, start=1):
+            sections.extend(
+                [
+                    "",
+                    f"## System message {index}",
+                    "",
+                    message.content or "",
+                ]
+            )
+        return "\n".join(sections).strip()
 
     def _build_skill_index(self, core: LoadedCore) -> str:
         return self.context_assembler._build_skill_index(core)
@@ -2006,6 +2126,7 @@ class SessionTurnStepRunner:
             model_resolver=self.model_resolver,
             provider_name=self.provider_name,
             workspace=self.workspace,
+            show_system_prompt=self.show_system_prompt,
         )
         result = await child_runner.run_turn(raw_input, injected_system_context=context)
         return AgentRunResult(

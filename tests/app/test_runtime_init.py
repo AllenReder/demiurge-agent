@@ -20,6 +20,7 @@ def test_init_runtime_copies_fallback_assistant_and_evolver(tmp_path):
         "runtime": {"default_core": "assistant"},
         "channel": {"busy_mode": "interrupt"},
         "ui": {"user_message_align": "left", "demiurge_theme_color": "ff9afc", "user_theme_color": "9cc9ff"},
+        "debug": {"show_system_prompt": False},
     }
     assert (home / "agents" / "agent.yaml").exists()
     assert (home / "agents" / "assistant" / "agent.yaml").exists()
@@ -142,6 +143,7 @@ def test_host_config_defaults_user_message_align_left_without_file(tmp_path):
     assert config.ui.user_message_align == "left"
     assert config.ui.demiurge_theme_color == "#ff9afc"
     assert config.ui.user_theme_color == "#9cc9ff"
+    assert config.debug.show_system_prompt is False
     assert sources == {}
     assert app.user_message_align == "left"
     assert app.user_message_align_source == "default"
@@ -149,6 +151,9 @@ def test_host_config_defaults_user_message_align_left_without_file(tmp_path):
     assert app.demiurge_theme_color_source == "default"
     assert app.user_theme_color == "#9cc9ff"
     assert app.user_theme_color_source == "default"
+    assert app.debug_show_system_prompt is False
+    assert app.debug_show_system_prompt_source == "default"
+    assert app.runner.show_system_prompt is False
     assert app.workspace.root == (home / "workspace").resolve()
     assert (home / "workspace").is_dir()
     assert not (home / "config.yaml").exists()
@@ -180,6 +185,20 @@ def test_create_app_reads_host_config_theme_colors(tmp_path):
     assert app.user_theme_color_source == "config.yaml:ui.user_theme_color"
     assert app.status()["demiurge_theme_color"] == "#ffaacc"
     assert app.status()["user_theme_color"] == "#aabbcc"
+
+
+def test_create_app_reads_host_config_debug_show_system_prompt(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("debug:\n  show_system_prompt: true\n", encoding="utf-8")
+
+    app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
+
+    assert app.debug_show_system_prompt is True
+    assert app.debug_show_system_prompt_source == "config.yaml:debug.show_system_prompt"
+    assert app.runner.show_system_prompt is True
+    assert app.status()["debug_show_system_prompt"] is True
+    assert app.status()["debug_show_system_prompt_source"] == "config.yaml:debug.show_system_prompt"
 
 
 def test_create_app_uses_host_config_default_core_and_channel_busy_mode(tmp_path):
@@ -255,6 +274,7 @@ def test_create_app_workspace_fallback_overrides_core_manifest(tmp_path):
         ("ui:\n  demiurge_theme_color: pink\n", "ui.demiurge_theme_color"),
         ("ui:\n  user_theme_color: '#12'\n", "ui.user_theme_color"),
         ("ui:\n  user_theme_color: '#gggggg'\n", "ui.user_theme_color"),
+        ("debug:\n  show_system_prompt: 'yes'\n", "debug.show_system_prompt"),
     ],
 )
 def test_create_app_rejects_invalid_host_config_values(tmp_path, content, field):

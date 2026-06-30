@@ -363,6 +363,7 @@ class SchedulerService:
             model_resolver=self.app.runner.model_resolver,
             provider_name=self.app.runner.provider_name,
             workspace=self.app.runner.workspace,
+            show_system_prompt=self.app.runner.show_system_prompt,
         )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:

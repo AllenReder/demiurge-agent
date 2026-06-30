@@ -1294,6 +1294,7 @@ def _runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
             model_resolver=app.runner.model_resolver,
             provider_name=app.runner.provider_name,
             workspace=app.runner.workspace,
+            show_system_prompt=app.runner.show_system_prompt,
         )
         return InteractionRuntime(runner)
 
