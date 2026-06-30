@@ -1,0 +1,71 @@
+name: Design change
+description: Propose a runtime, authoring, package, or architecture boundary change.
+title: "design: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for changes that affect project boundaries, runtime layout, agent core authoring, package behavior, safety policy, provider behavior, state, promotion, or release flow.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What current limitation or confusion does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible behavior or authoring contract after the change.
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Main boundary affected
+      multiple: true
+      options:
+        - Host harness
+        - Agent core authored surface
+        - Runtime home layout
+        - CLI or configuration
+        - Tool runtime or approvals
+        - Provider adapter
+        - State, promotion, or rollback
+        - Package recipes or installer
+        - Documentation or release process
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What simpler or narrower options should be considered?
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration impact
+      description: Note breaking changes, runtime layout changes, config/schema changes, or why migration support is not needed.
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependency impact
+      description: Note any new or changed Python, Node, system, or provider dependency. Write "none" if there are none.
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation impact
+      description: Which README or docs pages would need updates?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This proposal keeps provider calls, tool execution, state mutation, promotion, and rollback host-owned unless it explicitly explains otherwise.
+          required: true

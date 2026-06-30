@@ -1,0 +1,55 @@
+name: Feature request
+description: Request a user-visible capability or workflow improvement.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: user-need
+    attributes:
+      label: User need
+      description: What are you trying to do, and why is the current behavior insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: desired-behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the workflow or result you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - CLI
+        - TUI
+        - Provider setup
+        - Agent core authoring
+        - Package management
+        - Tools or approvals
+        - Runtime home or sessions
+        - Telegram or external channels
+        - Documentation
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: current-workaround
+    attributes:
+      label: Current workaround
+      description: If you have one, describe how you handle this today.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Links, examples, constraints, or related issues.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This is a user-visible request, not only an internal refactor.
+          required: true
