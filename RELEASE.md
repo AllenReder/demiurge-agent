@@ -42,8 +42,9 @@ git diff --check
 ## Version and Tag Flow
 
 1. Update `pyproject.toml` version.
-2. Update release notes with user-visible changes, breaking changes, known
-   limitations, and verification commands.
+2. Add or update `docs/releases/<version>.md` with user-visible changes,
+   breaking changes, known limitations, and verification commands. Keep this
+   checklist accurate when the release process changes.
 3. Rebuild artifacts with `uv build`.
 4. Run `scripts/smoke_wheel_install.sh` against the built wheel.
 5. Create a signed or annotated tag when possible:

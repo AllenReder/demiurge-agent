@@ -86,7 +86,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Releases',
       collapsed: true,
-      items: ['releases/0.2.0'],
+      items: ['releases/0.3.0', 'releases/0.2.0'],
     },
   ],
 };

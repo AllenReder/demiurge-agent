@@ -2,7 +2,7 @@
   <img src="docs/assets/demiurge-icon-rounded.png" alt="Demiurge icon" width="112">
 </p>
 
-<h1 align="center">Demiurge</h1>
+<h1 align="center">Demiurge - 德谬歌</h1>
 
 <p align="center">
   <strong>自由打造会自我进化的 Agent。</strong>

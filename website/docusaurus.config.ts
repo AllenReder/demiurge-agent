@@ -148,7 +148,7 @@ const config: Config = {
             },
             {
               label: 'Releases',
-              to: '/docs/releases/0.2.0',
+              to: '/docs/releases/0.3.0',
             },
           ],
         },
