@@ -1,0 +1,81 @@
+# Package Recipe Reference
+
+Package recipes live under:
+
+```text
+agent-catalog/packages/<package_id>.yaml
+```
+
+They describe installable component sets for runtime cores.
+
+## Recipe Shape
+
+```yaml
+schema_version: 2
+id: minimax_tts
+name: MiniMax TTS
+summary: Generate speech audio with MiniMax.
+tags:
+  - audio
+  - tts
+options:
+  - id: mode
+    type: choice
+    description: Choose direct or summary mode.
+    default: direct
+    choices:
+      - value: direct
+        description: Generate speech from the assistant reply.
+      - value: summary
+        description: Summarize before generating speech.
+components:
+  - id: tts_output
+    kind: output
+    source: tts_minimax
+    target: agent/output/tts_minimax
+    pipeline:
+      group: parallel
+```
+
+## Option Types
+
+Supported types:
+
+- `string`
+- `bool`
+- `choice`
+- `path`
+- `secret`
+
+Secret option values may be written to target component config, but
+`packages.yaml` records only `<redacted>`.
+
+## Component Kinds
+
+| Kind | Target |
+| --- | --- |
+| `input` | `agent/input/<slot_id>` |
+| `output` | `agent/output/<slot_id>` |
+| `tool` | `agent/tools/<tool_id>` |
+| `skill` | `agent/skills/<skill_id>` |
+| `lib` | `agent/lib/<name>` |
+| `core` | another runtime active core |
+
+## Conditions and Config
+
+`when` includes or skips a component based on resolved option values.
+`config_when` conditionally merges extra config into a component config.
+Config values can reference options with `${options.<id>}`.
+
+## Validation Rules
+
+- Component sources must stay inside the catalog.
+- Component sources cannot be symlinks.
+- Existing target paths are rejected unless reused by another installed package
+  with the same source and target.
+- Pipeline edits are allowed only for input/output components.
+
+## Boundary
+
+Recipes describe runtime file installation. They do not install Python
+dependencies or edit the host uv lock.

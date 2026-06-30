@@ -15,10 +15,10 @@
 
 <p align="center">
   <a href="docs/README.md">Docs</a> ·
-  <a href="docs/quickstart.md">Quickstart</a> ·
-  <a href="docs/agent-core-authoring.md">Authoring</a> ·
-  <a href="docs/channels.md">Channels</a> ·
-  <a href="docs/security.md">Security</a>
+  <a href="docs/getting-started/quickstart.md">Quickstart</a> ·
+  <a href="docs/authoring/agent-core-layout.md">Authoring</a> ·
+  <a href="docs/operations/channels.md">Channels</a> ·
+  <a href="docs/concepts/security-model.md">Security</a>
 </p>
 
 `demiurge` is a local-first Python agent harness. The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, while each agent core stays as an inspectable `agent.yaml + agent/` authored surface.
@@ -86,7 +86,7 @@ IO modules are core-local extension points for input shaping and output delivery
 
 MCP servers can be declared with `agent/mcp/*.yaml`. The core owns those declarations, while the host owns MCP transports, tool execution, capability checks, approvals, and logging.
 
-See [docs/agents.md](docs/agents.md), [docs/agent-core-authoring.md](docs/agent-core-authoring.md), [docs/tools.md](docs/tools.md), and [docs/channels.md](docs/channels.md) for the full authoring model.
+See [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md), [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md), [docs/authoring/input-modules.md](docs/authoring/input-modules.md), and [docs/operations/channels.md](docs/operations/channels.md) for the full authoring model.
 
 ## Evolution Boundary
 
@@ -161,10 +161,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow.
 | Page | Purpose |
 | --- | --- |
 | [docs/README.md](docs/README.md) | User documentation index. |
-| [docs/quickstart.md](docs/quickstart.md) | Install, initialize runtime home, and start the TUI. |
-| [docs/agent-core-authoring.md](docs/agent-core-authoring.md) | Author IO modules and customize runtime agent cores. |
-| [docs/channels.md](docs/channels.md) | Local TUI and Telegram gateway behavior. |
-| [docs/security.md](docs/security.md) | Workspace scope, approvals, and channel trust boundaries. |
+| [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | Install, initialize runtime home, and start the TUI. |
+| [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | Host-owned harness and agent-core authored-surface boundary. |
+| [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md) | Agent core layout and authored module roots. |
+| [docs/operations/channels.md](docs/operations/channels.md) | Local TUI and Telegram gateway behavior. |
+| [docs/concepts/security-model.md](docs/concepts/security-model.md) | Workspace scope, approvals, and channel trust boundaries. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development and verification workflow. |
 | [RELEASE.md](RELEASE.md) | Release checklist. |
 
