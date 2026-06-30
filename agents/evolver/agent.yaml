@@ -6,7 +6,10 @@ agent:
   summary: "Host-managed seed evolver core. v1 EvolutionRuntime applies structured file ops."
 runtime:
   language: python
+  python: null
   surface_root: agent
+  max_model_steps: 90
+  workspace: null
 model:
   provider: auto
   model_name: null
@@ -15,14 +18,26 @@ model:
   base_url_env: "DEMIURGE_EVOLVER_BASE_URL"
   api_key: null
   api_key_env: "DEMIURGE_EVOLVER_API_KEY"
+  model_options: {}
+ui:
+  tool_display: null
+channels: {}
 slots:
   soul: agent/SOUL.md
   input: agent/input
   output: agent/output
   tools: agent/tools
+  skills: agent/skills
+  schedules: agent/schedules
   mcp: agent/mcp
 tools:
   toolsets: []
+  metadata: {}
+approval:
+  default: null
+  tools: {}
+  capabilities: {}
+  risks: {}
 capabilities:
   defaults: {}
 dependencies:
