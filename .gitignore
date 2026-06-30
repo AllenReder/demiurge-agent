@@ -1,6 +1,8 @@
 # Local agent/runtime context
 AGENTS.md
+CLAUDE.md
 .agents/
+.claude/
 .temp/
 .demiurge/
 
