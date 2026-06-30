@@ -752,6 +752,12 @@ def _normalize_provider_id(value: str | None) -> str | None:
     return normalized or None
 
 
+def normalize_provider_profile_id(value: str | None) -> str:
+    normalized = _normalize_provider_id(value) or ""
+    _validate_provider_id(normalized)
+    return normalized
+
+
 def _validate_provider_id(value: str) -> None:
     if value in {"", "auto"}:
         raise ValueError("provider profile id must not be empty or auto")

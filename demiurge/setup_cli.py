@@ -20,6 +20,7 @@ from demiurge.app import (
     ensure_runtime_defaults,
     load_agent_fallback,
     load_host_config,
+    normalize_provider_profile_id,
     resolve_host_provider_profile,
     resolve_model_name,
     resolve_profile_api_key,
@@ -155,7 +156,7 @@ class SetupWizard:
         preset_id = self.prompt.select("Provider preset", choices)
         preset = get_provider_preset(preset_id)
         default_id = preset.preset_id if preset else "custom"
-        provider_id = self.prompt.input("Profile id", default=default_id).strip()
+        provider_id = _normalize_setup_provider_id(self.prompt.input("Profile id", default=default_id))
         default_base_url = preset.base_url if preset else "http://localhost:11434/v1"
         default_env = preset.api_key_env if preset else f"{provider_id.upper().replace('-', '_')}_API_KEY"
         base_url = self.prompt.input("Base URL", default=default_base_url).strip()
@@ -269,6 +270,7 @@ def write_provider_profile(
     profile: HostProviderProfile,
     set_default: bool = False,
 ) -> dict[str, object]:
+    provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
     profiles = dict(host_config.providers.profiles)
     profiles[provider_id] = profile
@@ -281,6 +283,7 @@ def write_provider_profile(
 
 
 def set_default_provider(context: SetupContext, provider_id: str) -> dict[str, object]:
+    provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
     if provider_id != "fake":
         resolve_host_provider_profile(host_config, provider_id)
@@ -291,6 +294,7 @@ def set_default_provider(context: SetupContext, provider_id: str) -> dict[str, o
 
 
 def remove_provider_profile(context: SetupContext, provider_id: str) -> dict[str, object]:
+    provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
     if provider_id not in host_config.providers.profiles:
         raise SystemExit(f"provider profile not found: {provider_id}")
@@ -305,6 +309,7 @@ def remove_provider_profile(context: SetupContext, provider_id: str) -> dict[str
 
 
 def set_core_model(context: SetupContext, *, core_id: str, provider_id: str, model_name: str) -> dict[str, object]:
+    provider_id = _normalize_setup_provider_id(provider_id)
     if provider_id != "fake":
         resolve_host_provider_profile(load_host_config(context.host_config_path)[0], provider_id)
     ensure_runtime_defaults(context.version_store, context.agents_root, requested_core_id=core_id)
@@ -346,14 +351,16 @@ def _handle_provider_command(context: SetupContext, args: argparse.Namespace) ->
         _print_result(data, as_json=getattr(args, "json", False))
         return
     if args.provider_command == "show":
-        profile, _ = resolve_host_provider_profile(host_config, args.provider_id)
-        _print_result({"provider": args.provider_id, "profile": provider_profile_dict(profile)}, as_json=args.json)
+        provider_id = _normalize_setup_provider_id(args.provider_id)
+        profile, _ = resolve_host_provider_profile(host_config, provider_id)
+        _print_result({"provider": provider_id, "profile": provider_profile_dict(profile)}, as_json=args.json)
         return
     if args.provider_command in {"add", "edit"}:
+        provider_id = _normalize_setup_provider_id(args.provider_id)
         existing_profile = None
         if args.provider_command == "edit":
             try:
-                existing_profile = resolve_host_provider_profile(host_config, args.provider_id)[0]
+                existing_profile = resolve_host_provider_profile(host_config, provider_id)[0]
             except ValueError:
                 existing_profile = None
         profile = provider_profile_from_args(args, existing=existing_profile)
@@ -361,7 +368,7 @@ def _handle_provider_command(context: SetupContext, args: argparse.Namespace) ->
             profile.api_key = None
             upsert_env_value(runtime_env_path(context.home), args.api_key_env, args.api_key)
             load_runtime_env(context.home)
-        data = write_provider_profile(context, provider_id=args.provider_id, profile=profile, set_default=args.set_default)
+        data = write_provider_profile(context, provider_id=provider_id, profile=profile, set_default=args.set_default)
         _print_result(data, as_json=args.json)
         return
     if args.provider_command == "remove":
@@ -384,6 +391,7 @@ def _handle_model_command(context: SetupContext, args: argparse.Namespace) -> No
 
 
 def _test_provider(context: SetupContext, provider_id: str, *, model: str | None = None) -> dict[str, object]:
+    provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
     profile, _ = resolve_host_provider_profile(host_config, provider_id)
     preset = get_provider_preset(provider_id)
@@ -406,6 +414,13 @@ def _test_provider(context: SetupContext, provider_id: str, *, model: str | None
         "ok": True,
         "response": response.content[:200],
     }
+
+
+def _normalize_setup_provider_id(value: str | None) -> str:
+    try:
+        return normalize_provider_profile_id(value)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
 
 def _print_result(data: dict[str, object], *, as_json: bool) -> None:

@@ -168,6 +168,34 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
     assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
 
 
+def test_setup_provider_add_normalizes_profile_id(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "CustomAPI",
+            "--base-url",
+            "https://llm.example.test/v1",
+            "--api-key-env",
+            "CUSTOM_API_KEY",
+            "--set-default",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"provider": "customapi"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["default"] == "customapi"
+    assert raw["providers"]["profiles"]["customapi"]["base_url"] == "https://llm.example.test/v1"
+    assert "CustomAPI" not in raw["providers"]["profiles"]
+
+
 def test_setup_provider_write_env_keeps_secret_out_of_config(tmp_path, capsys):
     home = tmp_path / "home"
 
@@ -252,12 +280,25 @@ def test_setup_model_set_updates_runtime_core_without_legacy_model_keys(tmp_path
             "--home",
             str(home),
             "setup",
+            "providers",
+            "add",
+            "CustomAPI",
+            "--base-url",
+            "https://llm.example.test/v1",
+        ]
+    )
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
             "model",
             "set",
             "--core",
             "assistant",
             "--provider",
-            "deepseek",
+            "CustomAPI",
             "--model",
             "deepseek-v4-flash",
             "--json",
@@ -265,7 +306,7 @@ def test_setup_model_set_updates_runtime_core_without_legacy_model_keys(tmp_path
     )
 
     raw = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))
-    assert raw["model"]["provider"] == "deepseek"
+    assert raw["model"]["provider"] == "customapi"
     assert raw["model"]["model_name"] == "deepseek-v4-flash"
     for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
         assert key not in raw["model"]
