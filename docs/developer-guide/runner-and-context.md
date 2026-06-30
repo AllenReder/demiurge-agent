@@ -32,6 +32,12 @@ ensure session
   -> return TurnResult
 ```
 
+For channel turns, the provider step may use provider response streaming when
+the active bridge and default persistent `base_output` path can display it. The
+runner still owns request construction, streamed tool-call delta assembly, tool
+execution, and final output delivery; agent cores do not call provider streaming
+APIs or channel renderers directly.
+
 ## Context Layers
 
 `ContextAssembler` builds provider messages in this order:
