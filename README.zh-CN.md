@@ -5,7 +5,7 @@
 <h1 align="center">demiurge</h1>
 
 <p align="center">
-  <strong>一个本地优先、IO 可拓展、面向 Agent Core 受控进化的 Python agent framework。</strong>
+  <strong>自由打造会自我进化的 Agent。</strong>
 </p>
 
 <p align="center">
@@ -14,6 +14,8 @@
 </p>
 
 <p align="center">
+  <a href="https://allenreder.github.io/demiurge-agent/">网站</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/docs/">文档站</a> ·
   <a href="docs/README.md">文档</a> ·
   <a href="docs/getting-started/quickstart.md">快速开始</a> ·
   <a href="docs/authoring/agent-core-layout.md">Core 编写</a> ·
@@ -21,9 +23,9 @@
   <a href="docs/concepts/security-model.md">安全模型</a>
 </p>
 
-`demiurge` 是一个 local-first 的 Python agent harness。host 负责 session、turn、provider 调用、工具、审批、状态、delivery、promotion 和 rollback；每个 agent core 则保持为可检查、可修改的 `agent.yaml + agent/` authored surface。
+`demiurge` 是一个用于打造会自我进化的 Agent 的 Python agent framework。独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。
 
-这个边界让 runtime 保持稳定，同时让 IO modules、skills、schedules 和候选 core 变更能在清晰边界内持续演进。
+host 负责 session、turn、provider 调用、工具、审批、状态、delivery、promotion 和 rollback，让能力进化始终发生在清晰的 runtime 边界内。
 
 状态：**alpha / developer preview**。API、runtime 布局和 authoring contract 仍可能变化。
 
@@ -35,6 +37,7 @@
 | 受控进化 | Core 变更以文件为边界，天然可 diff、可测试，并通过 host 拥有的版本控制进行 promote 或 rollback。 |
 | Host-owned harness | Provider 调用、工具执行、审批、状态写入、session 和 delivery 始终处在稳定 runtime 边界内。 |
 | Authored surface | Agent 行为存在于可读文件中：`SOUL.md`、skills、tools、schedules、IO modules、可选 MCP declarations、tests 和可选 code slots。 |
+| 能力包管理 | 可复用的 tools、IO modules、skills、libraries 和子 Core 可以通过 package recipes 安装进 runtime agent core。 |
 | Local-first runtime | live cores、sessions、配置和 workspace 默认放在本机 `~/.demiurge` 下。 |
 
 ## 快速开始
@@ -160,6 +163,8 @@ cd ..
 
 | 页面 | 内容 |
 | --- | --- |
+| [项目网站](https://allenreder.github.io/demiurge-agent/) | 公开项目首页和托管文档站入口。 |
+| [托管文档](https://allenreder.github.io/demiurge-agent/docs/) | GitHub Pages 上的手册版本。 |
 | [docs/README.md](docs/README.md) | 用户文档入口。 |
 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | 安装、初始化 runtime home 和启动 TUI。 |
 | [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | host-owned harness 和 agent-core authored surface 边界。 |

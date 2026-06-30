@@ -55,7 +55,6 @@ event logging, and output shaping.
 | --- | --- |
 | `append_file` | `write_file` or `patch` |
 | `delete_path` | No first-stage dangerous delete tool |
-| `web_search` | No built-in replacement; use `web_extract` for direct URL extraction |
 
 ## Output Shaping
 

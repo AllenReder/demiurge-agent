@@ -5,7 +5,7 @@
 <h1 align="center">demiurge</h1>
 
 <p align="center">
-  <strong>Local-first Python agent framework for modular IO and controlled agent-core evolution.</strong>
+  <strong>Build self-evolving agents with independent Agent Cores, modular capabilities, and installable capability packages.</strong>
 </p>
 
 <p align="center">
@@ -14,6 +14,8 @@
 </p>
 
 <p align="center">
+  <a href="https://allenreder.github.io/demiurge-agent/">Website</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/docs/">Docs Site</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/getting-started/quickstart.md">Quickstart</a> ·
   <a href="docs/authoring/agent-core-layout.md">Authoring</a> ·
@@ -21,9 +23,9 @@
   <a href="docs/concepts/security-model.md">Security</a>
 </p>
 
-`demiurge` is a local-first Python agent harness. The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, while each agent core stays as an inspectable `agent.yaml + agent/` authored surface.
+`demiurge` is a Python agent framework for building self-evolving agents. Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.
 
-That split keeps the runtime stable while letting IO modules, skills, schedules, and candidate core changes evolve inside a clear boundary.
+The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, keeping capability evolution inside a clear runtime boundary.
 
 Status: **alpha / developer preview**. APIs, runtime layout, and authoring contracts may still change.
 
@@ -35,6 +37,7 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Controlled evolution | Core changes are designed to be file-backed, diffable, testable, and promotable through host-owned version controls. |
 | Host-owned harness | Provider calls, tool execution, approvals, state writes, sessions, and delivery stay under a stable runtime boundary. |
 | Authored surface | Agent behavior lives in readable files: `SOUL.md`, skills, tools, schedules, IO modules, optional MCP declarations, tests, and optional code slots. |
+| Capability packages | Reusable tools, IO modules, skills, libraries, and child cores can be installed into runtime agent cores through package recipes. |
 | Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
 
 ## Quickstart
@@ -160,6 +163,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow.
 
 | Page | Purpose |
 | --- | --- |
+| [Project website](https://allenreder.github.io/demiurge-agent/) | Public project homepage and hosted documentation site. |
+| [Hosted docs](https://allenreder.github.io/demiurge-agent/docs/) | GitHub Pages version of the manual. |
 | [docs/README.md](docs/README.md) | User documentation index. |
 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | Install, initialize runtime home, and start the TUI. |
 | [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | Host-owned harness and agent-core authored-surface boundary. |

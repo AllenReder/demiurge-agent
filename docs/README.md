@@ -1,8 +1,20 @@
+---
+slug: /
+sidebar_position: 0
+title: demiurge Manual
+description: Production-oriented documentation for demiurge, a Python agent framework for self-evolving agents with modular capabilities and capability packages.
+---
+
 # demiurge Manual
 
-demiurge is a local-first Python agent harness. The host owns the runtime loop,
-provider calls, tools, approvals, state, delivery, promotion, and rollback.
-Each agent core is an inspectable authored surface: `agent.yaml + agent/`.
+demiurge is a Python agent framework for building self-evolving agents.
+Independent Agent Cores carry identity and boundaries, while modular design and
+capability package management make tools, IO, skills, and child cores
+installable, composable, and iterative.
+
+The host owns the runtime loop, provider calls, tools, approvals, state,
+delivery, promotion, and rollback. Capability evolution stays inside this clear
+runtime boundary.
 
 This manual is organized as a production tool guide. Start with a running
 agent, then learn the host/core boundary, then author modules and operate the
