@@ -8,6 +8,10 @@ export type TranscriptItem =
       role: Role
       text: string
       metadata?: Record<string, unknown>
+      message_id?: string
+      part_id?: string
+      turn_id?: string
+      stream_status?: "streaming" | "complete" | "cancelled"
     }
   | {
       id: string
@@ -58,6 +62,10 @@ export type StatusState = {
   pending_prompts: number
   pending_approvals: number
   last_error: string
+  activity: string
+  activity_started_at: number
+  work_started_at: number
+  work_elapsed_ms: number
 }
 
 export type PromptPanel =

@@ -131,6 +131,20 @@ class InteractionBridge(Protocol):
         ...
 
 
+class InteractionStreamBridge(Protocol):
+    async def stream_activity(self, payload: dict[str, Any]) -> None:
+        ...
+
+    async def stream_message_updated(self, payload: dict[str, Any]) -> None:
+        ...
+
+    async def stream_message_part_updated(self, payload: dict[str, Any]) -> None:
+        ...
+
+    async def stream_message_part_delta(self, payload: dict[str, Any]) -> None:
+        ...
+
+
 _CURRENT_BRIDGE: contextvars.ContextVar[InteractionBridge | None] = contextvars.ContextVar(
     "demiurge_interaction_bridge",
     default=None,

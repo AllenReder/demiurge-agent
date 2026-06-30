@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 
 @dataclass(slots=True)
@@ -46,6 +46,21 @@ class LLMResponse:
     raw: Any | None = None
 
 
+@dataclass(slots=True)
+class LLMStreamEvent:
+    type: str
+    text: str = ""
+    tool_call_index: int | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments_delta: str = ""
+    raw: Any | None = None
+
+
+class LLMStreamUnsupported(RuntimeError):
+    pass
+
+
 class Provider(Protocol):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         ...
@@ -79,6 +94,34 @@ class FakeProvider:
             tool_text = next((msg.content for msg in reversed(current_turn_tail) if msg.role == "tool"), "")
             return LLMResponse(content=f"[fake] tool result received: {tool_text}")
         return LLMResponse(content=f"[fake] {user_text}")
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        if self.index >= len(self.responses):
+            raise LLMStreamUnsupported("fake provider has no scripted stream response")
+        item = self.responses[self.index]
+        chunks = item.get("stream_chunks")
+        if not isinstance(chunks, list) or any(not isinstance(chunk, str) for chunk in chunks):
+            raise LLMStreamUnsupported("fake provider response does not define stream_chunks")
+        self.index += 1
+        yield LLMStreamEvent(type="start", raw=item)
+        for chunk in chunks:
+            if chunk:
+                yield LLMStreamEvent(type="text_delta", text=chunk, raw=item)
+        if item.get("stream_error"):
+            raise RuntimeError(str(item["stream_error"]))
+        for idx, call in enumerate(item.get("tool_calls", []), start=0):
+            if not isinstance(call, dict):
+                continue
+            arguments = call.get("arguments", {})
+            yield LLMStreamEvent(
+                type="tool_call_delta",
+                tool_call_index=idx,
+                tool_call_id=str(call.get("id") or f"fake_tool_call_{idx + 1}"),
+                tool_name=str(call.get("name") or ""),
+                tool_arguments_delta=json.dumps(arguments),
+                raw=item,
+            )
+        yield LLMStreamEvent(type="finish", raw=item)
 
     def _last_user_message(self, messages: list[LLMMessage]) -> tuple[int, str]:
         for index in range(len(messages) - 1, -1, -1):
@@ -133,6 +176,37 @@ class OpenAICompatibleProvider:
                 arguments = {"_raw": call.function.arguments or ""}
             calls.append(ToolCall(id=call.id, name=call.function.name, arguments=arguments))
         return LLMResponse(content=message.content or "", tool_calls=calls, raw=response.model_dump())
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+        stream = await client.chat.completions.create(
+            model=request.model,
+            messages=[self._to_openai_message(message) for message in request.messages],
+            tools=[self._to_openai_tool(tool) for tool in request.tools] or None,
+            stream=True,
+        )
+        yield LLMStreamEvent(type="start")
+        async for chunk in stream:
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                continue
+            delta = choice.delta
+            for call in delta.tool_calls or []:
+                function = call.function
+                yield LLMStreamEvent(
+                    type="tool_call_delta",
+                    tool_call_index=call.index,
+                    tool_call_id=call.id,
+                    tool_name=function.name if function else None,
+                    tool_arguments_delta=(function.arguments if function else None) or "",
+                    raw=chunk.model_dump(),
+                )
+            text = delta.content or ""
+            if text:
+                yield LLMStreamEvent(type="text_delta", text=text, raw=chunk.model_dump())
+        yield LLMStreamEvent(type="finish")
 
     def _to_openai_message(self, message: LLMMessage) -> dict[str, Any]:
         if message.role == "assistant" and message.tool_calls:

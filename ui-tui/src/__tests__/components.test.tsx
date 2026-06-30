@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render } from "ink-testing-library"
 import { Composer, shouldInsertNewline } from "../components/Composer"
-import { Footer } from "../components/Footer"
+import { ActivityBar, Footer } from "../components/Footer"
 import { Markdown } from "../components/Markdown"
 import { PromptPanel } from "../components/PromptPanel"
 import { MessageBlock, ProgressBlock, ToolBlock, Transcript } from "../components/Transcript"
@@ -10,7 +10,10 @@ import { themedColors } from "../components/theme"
 import { applySlashSuggestion, exactSlashCommand, slashSuggestions, slashTokenAtCursor } from "../lib/slash"
 import { displayWidth } from "../lib/terminal"
 
-afterEach(() => cleanup())
+afterEach(() => {
+  vi.restoreAllMocks()
+  cleanup()
+})
 
 describe("Ink TUI components", () => {
   it("renders user block and assistant markdown flow", () => {
@@ -36,6 +39,36 @@ describe("Ink TUI components", () => {
     expect(theme.userBubble).toBe("#20242e")
     expect(theme.success).toBe("#7ee787")
     expect(theme.system).toBe("#d2a8ff")
+  })
+
+  it("renders activity as a visible standalone status bar", () => {
+    const bar = render(
+      <ActivityBar
+        columns={80}
+        now={9_000}
+        status={{
+          ...initialStatus,
+          activity: "waiting for model",
+          activity_started_at: 2_000,
+          status: "running",
+          work_started_at: 1_000,
+        }}
+      />,
+    )
+    expect(bar.lastFrame()).toContain("Working 8s")
+    expect(bar.lastFrame()).toContain("Waiting for model")
+  })
+
+  it("hides activity while work timing is paused", () => {
+    const bar = render(<ActivityBar columns={80} status={{ ...initialStatus, status: "running", work_elapsed_ms: 5_000, work_started_at: 0 }} />)
+    expect(bar.lastFrame()).toBe("")
+  })
+
+  it("does not flash zero when work timing resumes", () => {
+    vi.spyOn(Date, "now").mockReturnValue(20_000)
+    const bar = render(<ActivityBar columns={80} status={{ ...initialStatus, status: "running", work_started_at: 10_000 }} />)
+    expect(bar.lastFrame()).toContain("Working 10s")
+    expect(bar.lastFrame()).not.toContain("Working 0s")
   })
 
   it("aligns user message blocks from host UI preference", () => {

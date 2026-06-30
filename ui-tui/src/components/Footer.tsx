@@ -1,7 +1,25 @@
 import { Box, Text } from "ink"
+import { useEffect, useState } from "react"
 import type { StatusState } from "../types"
 import { displayWidth, truncateMiddle } from "../lib/terminal"
 import { colors, type ThemeColors } from "./theme"
+
+export function ActivityBar(props: { colors?: ThemeColors; columns: number; now?: number; status: StatusState }) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (props.now !== undefined || !props.status.work_started_at) return
+    const timer = setInterval(() => setTick((value) => value + 1), 1000)
+    return () => clearInterval(timer)
+  }, [props.now, props.status.work_started_at])
+  if (!props.status.work_started_at) return null
+  const theme = props.colors ?? colors
+  const text = workingLabel(props.status, props.now ?? Date.now())
+  return (
+    <Box paddingX={1} width={props.columns}>
+      <Text color={theme.warning}>{truncateMiddle(text, Math.max(8, props.columns - 2))}</Text>
+    </Box>
+  )
+}
 
 export function Footer(props: { colors?: ThemeColors; columns: number; status: StatusState }) {
   const theme = props.colors ?? colors
@@ -30,6 +48,21 @@ export function Footer(props: { colors?: ThemeColors; columns: number; status: S
       <Text color={props.status.status === "running" ? theme.warning : colors.muted}>{truncateMiddle(right, maxRight)}</Text>
     </Box>
   )
+}
+
+function workingLabel(status: StatusState, now: number): string {
+  const parts = [`Working ${formatElapsed(now - status.work_started_at)}`]
+  if (status.activity === "waiting for model" && status.activity_started_at) {
+    parts.push("Waiting for model")
+  }
+  return parts.join(" · ")
+}
+
+function formatElapsed(value: number): string {
+  const elapsed = Math.max(0, Math.floor(value / 1000))
+  const minutes = Math.floor(elapsed / 60)
+  const seconds = elapsed % 60
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`
 }
 
 function providerLabel(status: StatusState): string {
