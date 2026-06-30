@@ -21,9 +21,12 @@ export function App(props: { client: GatewayClient }) {
 
   useEffect(() => {
     const flushDeltas = () => {
+      if (deltaTimer.current !== null) {
+        clearTimeout(deltaTimer.current)
+        deltaTimer.current = null
+      }
       const events = pendingDeltas.current
       pendingDeltas.current = []
-      deltaTimer.current = null
       if (!events.length) return
       setState((current) => events.reduce(reduceGatewayEvent, current))
     }
