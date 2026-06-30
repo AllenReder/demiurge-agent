@@ -40,6 +40,21 @@ uv run demiurge gateway --core assistant
 
 Use numeric Telegram ids. Do not use usernames for authorization.
 
+## Reliability
+
+The gateway clears any stale Telegram webhook before polling. This avoids a
+previous webhook registration preventing `getUpdates` from receiving messages.
+
+Transient connection errors are retried with bounded backoff. Telegram `429`
+responses honor the server `retry_after` value. Telegram `409 Conflict` usually
+means another gateway instance is using the same bot token, or an old long-poll
+connection has not expired yet; the gateway waits and retries a few times before
+failing clearly.
+
+Do not run multiple gateway processes with the same Telegram bot token. This
+implementation keeps the standard-library `urllib` transport and does not add
+Hermes-style `httpx` fallback IP routing.
+
 ## Approvals
 
 Telegram private chats support approval prompts with inline buttons:

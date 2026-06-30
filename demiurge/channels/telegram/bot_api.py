@@ -1,12 +1,46 @@
 from __future__ import annotations
 
+import http.client
 import json
 import mimetypes
 import os
+import random
+import socket
+import ssl
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+
+_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
+_SAFE_RETRY_METHODS = {"getUpdates", "getFile", "deleteWebhook", "sendChatAction"}
+
+
+class TelegramApiError(RuntimeError):
+    def __init__(
+        self,
+        method: str,
+        error_code: int | None,
+        description: str,
+        parameters: dict[str, Any] | None = None,
+    ):
+        self.method = method
+        self.error_code = error_code
+        self.description = description
+        self.parameters = dict(parameters or {})
+        super().__init__(f"telegram {method} failed ({error_code}): {description}")
+
+    @property
+    def retry_after(self) -> float | None:
+        value = self.parameters.get("retry_after")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
 
 class TelegramBotApi:
     def __init__(self, token: str, *, base_url: str = "https://api.telegram.org"):
@@ -17,9 +51,16 @@ class TelegramBotApi:
         params: dict[str, Any] = {"timeout": timeout, "allowed_updates": json.dumps(["message", "callback_query"])}
         if offset is not None:
             params["offset"] = offset
-        data = self._request("getUpdates", params)
+        data = self._request("getUpdates", params, retry_policy="safe")
         result = data.get("result", [])
         return result if isinstance(result, list) else []
+
+    def delete_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
+        return self._request(
+            "deleteWebhook",
+            {"drop_pending_updates": "true" if drop_pending_updates else "false"},
+            retry_policy="safe",
+        )
 
     def send_message(
         self,
@@ -83,7 +124,7 @@ class TelegramBotApi:
         return self._request("sendRichMessage", params)
 
     def send_chat_action(self, *, chat_id: int | str, action: str = "typing") -> dict[str, Any]:
-        return self._request("sendChatAction", {"chat_id": chat_id, "action": action})
+        return self._request("sendChatAction", {"chat_id": chat_id, "action": action}, retry_policy="safe")
 
     def send_photo(
         self,
@@ -179,13 +220,22 @@ class TelegramBotApi:
     def set_my_commands(self, commands: list[dict[str, str]]) -> dict[str, Any]:
         return self._request("setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)})
 
-    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _request(self, method: str, params: dict[str, Any], *, retry_policy: str | None = None) -> dict[str, Any]:
         url = f"{self.base_url}/bot{self.token}/{method}"
         body = urllib.parse.urlencode(params).encode("utf-8")
         request = urllib.request.Request(url, data=body, method="POST")
         timeout = max(int(params.get("timeout", 5)) + 5, 10)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            response = self._urlopen_with_retry(
+                request,
+                timeout,
+                method=method,
+                retry_policy=retry_policy or self._retry_policy_for_method(method),
+            )
+        except urllib.error.HTTPError as exc:
+            raise self._api_error_from_http_error(method, exc) from exc
+        with response:
+            return self._parse_response(method, response.read())
 
     def _send_media(
         self,
@@ -249,5 +299,81 @@ class TelegramBotApi:
             method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            response = self._urlopen_with_retry(request, 30, method=method, retry_policy="send")
+        except urllib.error.HTTPError as exc:
+            raise self._api_error_from_http_error(method, exc) from exc
+        with response:
+            return self._parse_response(method, response.read())
+
+    def _parse_response(self, method: str, payload: bytes) -> dict[str, Any]:
+        data = json.loads(payload.decode("utf-8"))
+        if isinstance(data, dict) and data.get("ok") is False:
+            error_code = data.get("error_code")
+            raise TelegramApiError(
+                method,
+                int(error_code) if isinstance(error_code, int) else None,
+                str(data.get("description") or "telegram api error"),
+                data.get("parameters") if isinstance(data.get("parameters"), dict) else None,
+            )
+        return data
+
+    def _api_error_from_http_error(self, method: str, exc: urllib.error.HTTPError) -> Exception:
+        try:
+            return self._api_error_from_payload(method, exc.read())
+        except Exception:
+            return exc
+
+    def _api_error_from_payload(self, method: str, payload: bytes) -> TelegramApiError:
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict) or data.get("ok") is not False:
+            raise ValueError("telegram error payload was not an ok=false object")
+        error_code = data.get("error_code")
+        return TelegramApiError(
+            method,
+            int(error_code) if isinstance(error_code, int) else None,
+            str(data.get("description") or "telegram api error"),
+            data.get("parameters") if isinstance(data.get("parameters"), dict) else None,
+        )
+
+    def _urlopen_with_retry(
+        self,
+        request: urllib.request.Request,
+        timeout: int | float,
+        *,
+        method: str,
+        retry_policy: str,
+    ):
+        delays = _RETRY_DELAYS_SECONDS if retry_policy in {"safe", "send"} else ()
+        for attempt in range(len(delays) + 1):
+            try:
+                return urllib.request.urlopen(request, timeout=timeout)
+            except urllib.error.HTTPError:
+                raise
+            except _TRANSIENT_TRANSPORT_ERRORS as exc:
+                if attempt >= len(delays):
+                    raise
+                if retry_policy == "send" and _looks_like_response_timeout(exc):
+                    raise
+                delay = delays[attempt] + random.uniform(0, 0.1)
+                time.sleep(delay)
+
+        raise RuntimeError(f"telegram {method} retry loop exited unexpectedly")
+
+    def _retry_policy_for_method(self, method: str) -> str:
+        return "safe" if method in _SAFE_RETRY_METHODS else "send"
+
+
+_TRANSIENT_TRANSPORT_ERRORS = (
+    urllib.error.URLError,
+    ssl.SSLError,
+    TimeoutError,
+    ConnectionError,
+    socket.timeout,
+    http.client.RemoteDisconnected,
+)
+
+
+def _looks_like_response_timeout(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "read timed out" in text or "write timed out" in text or "readtimeout" in text or "writetimeout" in text

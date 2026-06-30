@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import io
 import json
 import shutil
+import urllib.error
 
 import pytest
 import yaml
@@ -12,6 +14,7 @@ from demiurge import cli
 from demiurge.app import create_app, source_agents_root
 from demiurge.channels.gateway import build_enabled_gateway_channels
 from demiurge.channels.telegram import (
+    TelegramApiError,
     TelegramBotApi,
     TelegramInteractionBridge,
     _should_thread_reply,
@@ -271,6 +274,27 @@ class FakeApi:
         return {"ok": True}
 
 
+class PollingFakeApi(FakeApi):
+    def __init__(self, outcomes):
+        super().__init__()
+        self.outcomes = list(outcomes)
+        self.get_updates_calls = []
+        self.delete_webhook_calls = []
+
+    def delete_webhook(self, *, drop_pending_updates=False):
+        self.delete_webhook_calls.append({"drop_pending_updates": drop_pending_updates})
+        return {"ok": True, "result": True}
+
+    def get_updates(self, *, offset=None, timeout=30):
+        self.get_updates_calls.append({"offset": offset, "timeout": timeout})
+        if not self.outcomes:
+            return []
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 def test_telegram_bot_api_send_audio_uploads_local_file(tmp_path, monkeypatch):
     audio_path = tmp_path / "voice.mp3"
     audio_path.write_bytes(b"MP3DATA")
@@ -341,6 +365,125 @@ def test_telegram_bot_api_send_voice_uploads_local_file(tmp_path, monkeypatch):
     assert b'name="voice"; filename="voice.ogg"' in body
     assert b"Content-Type: audio/ogg" in body
     assert b"OGGDATA" in body
+
+
+def test_telegram_bot_api_retries_transient_urlopen_error(monkeypatch):
+    attempts = []
+    sleeps = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"ok": True, "result": []}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        attempts.append({"request": request, "timeout": timeout})
+        if len(attempts) == 1:
+            raise urllib.error.URLError("temporary reset")
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr("random.uniform", lambda start, end: 0)
+
+    result = TelegramBotApi("token").get_updates(timeout=1)
+
+    assert result == []
+    assert len(attempts) == 2
+    assert attempts[0]["request"].full_url == "https://api.telegram.org/bottoken/getUpdates"
+    assert sleeps == [0.5]
+
+
+def test_telegram_bot_api_does_not_retry_http_error(monkeypatch):
+    attempts = []
+
+    def fake_urlopen(request, timeout):
+        attempts.append(request)
+        raise urllib.error.HTTPError(request.full_url, 502, "bad gateway", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: (_ for _ in ()).throw(AssertionError("should not sleep")))
+
+    with pytest.raises(urllib.error.HTTPError):
+        TelegramBotApi("token").get_updates(timeout=1)
+
+    assert len(attempts) == 1
+
+
+def test_telegram_bot_api_raises_structured_api_error(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 3",
+                    "parameters": {"retry_after": 3},
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
+
+    with pytest.raises(TelegramApiError) as exc_info:
+        TelegramBotApi("token").get_updates(timeout=1)
+
+    error = exc_info.value
+    assert error.method == "getUpdates"
+    assert error.error_code == 429
+    assert error.retry_after == 3.0
+    assert "Too Many Requests" in error.description
+
+
+def test_telegram_bot_api_converts_http_error_body_to_api_error(monkeypatch):
+    payload = json.dumps(
+        {
+            "ok": False,
+            "error_code": 409,
+            "description": "Conflict: terminated by other getUpdates request",
+        }
+    ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 409, "Conflict", hdrs=None, fp=io.BytesIO(payload))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(TelegramApiError) as exc_info:
+        TelegramBotApi("token").get_updates(timeout=1)
+
+    error = exc_info.value
+    assert error.method == "getUpdates"
+    assert error.error_code == 409
+    assert "Conflict" in error.description
+
+
+def test_telegram_bot_api_delete_webhook_wire_shape():
+    class RecordingApi(TelegramBotApi):
+        def __init__(self):
+            super().__init__("token")
+            self.calls = []
+
+        def _request(self, method, params, *, retry_policy=None):
+            self.calls.append((method, params, retry_policy))
+            return {"ok": True, "result": True}
+
+    api = RecordingApi()
+
+    result = api.delete_webhook(drop_pending_updates=False)
+
+    assert result["ok"] is True
+    assert api.calls == [("deleteWebhook", {"drop_pending_updates": "false"}, "safe")]
 
 
 def _message(text, *, chat_type="private", chat_id=1, user_id=42, message_id=10, **extra):
@@ -526,6 +669,107 @@ async def test_telegram_access_policy_allows_private_user():
     await state.active_task
 
     assert runner.texts == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_run_forever_recovers_from_transient_polling_error():
+    runner = FakeRunner()
+    api = PollingFakeApi([urllib.error.URLError("temporary reset"), [_message("hello", chat_id=123, user_id=42)]])
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+    )
+    bridge._polling_network_base_delay = 0
+    bridge._polling_network_max_delay = 0
+
+    task = asyncio.create_task(bridge.run_forever())
+    try:
+        await _wait_until(lambda: runner.texts == ["hello"])
+        state = bridge._conversations["telegram:123"]
+        if state.active_task is not None:
+            await state.active_task
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert api.delete_webhook_calls == [{"drop_pending_updates": False}]
+    assert len(api.get_updates_calls) >= 2
+    assert bridge._polling_network_error_count == 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_run_forever_waits_out_polling_conflict():
+    runner = FakeRunner()
+    api = PollingFakeApi(
+        [
+            TelegramApiError("getUpdates", 409, "Conflict: terminated by other getUpdates request"),
+            [_message("hello", chat_id=123, user_id=42)],
+        ]
+    )
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+    )
+    bridge._polling_conflict_base_delay = 0
+    bridge._polling_conflict_step_delay = 0
+
+    task = asyncio.create_task(bridge.run_forever())
+    try:
+        await _wait_until(lambda: runner.texts == ["hello"])
+        state = bridge._conversations["telegram:123"]
+        if state.active_task is not None:
+            await state.active_task
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert len(api.get_updates_calls) >= 2
+    assert bridge._polling_conflict_count == 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_run_forever_honors_retry_after(monkeypatch):
+    runner = FakeRunner()
+    api = PollingFakeApi(
+        [
+            TelegramApiError("getUpdates", 429, "Too Many Requests", {"retry_after": 2.5}),
+            [_message("hello", chat_id=123, user_id=42)],
+        ]
+    )
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+    )
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr("demiurge.channels.telegram.bridge.asyncio.sleep", fake_sleep)
+
+    task = asyncio.create_task(bridge.run_forever())
+    try:
+        await _wait_until(lambda: runner.texts == ["hello"])
+        state = bridge._conversations["telegram:123"]
+        if state.active_task is not None:
+            await state.active_task
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert 2.5 in sleeps
+    assert len(api.get_updates_calls) >= 2
 
 
 @pytest.mark.asyncio

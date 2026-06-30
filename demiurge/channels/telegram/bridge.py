@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import http.client
 import json
 import logging
 import os
 import re
+import socket
+import ssl
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -23,7 +27,7 @@ from demiurge.runtime.interactions import InteractionDelivery, InteractionInboun
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
-from demiurge.channels.telegram.bot_api import TelegramBotApi
+from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
     _needs_rich_telegram_rendering,
     _strip_mdv2,
@@ -58,6 +62,11 @@ class TelegramPendingApproval:
 
 
 TELEGRAM_APPROVAL_TIMEOUT_SECONDS = 600
+TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS = 1.0
+TELEGRAM_POLL_NETWORK_MAX_DELAY_SECONDS = 30.0
+TELEGRAM_POLL_CONFLICT_BASE_DELAY_SECONDS = 15.0
+TELEGRAM_POLL_CONFLICT_STEP_DELAY_SECONDS = 10.0
+TELEGRAM_POLL_CONFLICT_MAX_RETRIES = 5
 
 
 def _normalize_tool_display(value: str | None) -> str:
@@ -127,6 +136,13 @@ class TelegramInteractionBridge:
         self.unauthorized_response = unauthorized_response
         self.approval_timeout_seconds = approval_timeout_seconds
         self.tool_display = _normalize_tool_display(tool_display)
+        self._polling_network_error_count = 0
+        self._polling_conflict_count = 0
+        self._polling_network_base_delay = TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS
+        self._polling_network_max_delay = TELEGRAM_POLL_NETWORK_MAX_DELAY_SECONDS
+        self._polling_conflict_base_delay = TELEGRAM_POLL_CONFLICT_BASE_DELAY_SECONDS
+        self._polling_conflict_step_delay = TELEGRAM_POLL_CONFLICT_STEP_DELAY_SECONDS
+        self._polling_conflict_max_retries = TELEGRAM_POLL_CONFLICT_MAX_RETRIES
         self._rich_messages_disabled = False
         self.offset: int | None = None
         self._pending_choices: dict[str, list[str]] = {}
@@ -170,9 +186,21 @@ class TelegramInteractionBridge:
         )
 
     async def run_forever(self) -> None:
+        await self.clear_webhook()
         await self.register_commands()
         while True:
-            updates = await asyncio.to_thread(self.api.get_updates, offset=self.offset, timeout=self.poll_timeout)
+            try:
+                updates = await asyncio.to_thread(self.api.get_updates, offset=self.offset, timeout=self.poll_timeout)
+            except TelegramApiError as exc:
+                if await self._handle_polling_api_error(exc):
+                    continue
+                raise
+            except Exception as exc:
+                if _is_transient_telegram_transport_error(exc):
+                    await self._handle_polling_network_error(exc)
+                    continue
+                raise
+            self._reset_polling_error_counts()
             for update in updates:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
@@ -180,6 +208,14 @@ class TelegramInteractionBridge:
                 await self.handle_update(update)
             if not updates:
                 await asyncio.sleep(0.2)
+
+    async def clear_webhook(self) -> None:
+        if not hasattr(self.api, "delete_webhook"):
+            return
+        try:
+            await asyncio.to_thread(self.api.delete_webhook, drop_pending_updates=False)
+        except Exception as exc:
+            logger.warning("telegram deleteWebhook failed before polling startup: %s", exc)
 
     async def register_commands(self) -> None:
         if not self.register_commands_enabled or not hasattr(self.api, "set_my_commands"):
@@ -189,6 +225,56 @@ class TelegramInteractionBridge:
             await asyncio.to_thread(self.api.set_my_commands, commands)
         except Exception as exc:
             logger.warning("telegram setMyCommands failed: %s", exc)
+
+    async def _handle_polling_api_error(self, exc: TelegramApiError) -> bool:
+        if exc.error_code == 409:
+            self._polling_conflict_count += 1
+            if self._polling_conflict_count > self._polling_conflict_max_retries:
+                raise RuntimeError(
+                    "telegram polling conflict did not clear; another gateway may be using this bot token"
+                ) from exc
+            delay = self._polling_conflict_delay()
+            logger.warning(
+                "telegram getUpdates conflict (%d/%d), retrying in %.1fs: %s",
+                self._polling_conflict_count,
+                self._polling_conflict_max_retries,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+            return True
+
+        retry_after = exc.retry_after
+        if exc.error_code == 429 and retry_after is not None:
+            delay = max(0.0, retry_after)
+            logger.warning("telegram getUpdates rate limited, retrying in %.1fs: %s", delay, exc)
+            await asyncio.sleep(delay)
+            return True
+
+        return False
+
+    async def _handle_polling_network_error(self, exc: Exception) -> None:
+        self._polling_network_error_count += 1
+        delay = min(
+            self._polling_network_base_delay * (2 ** max(0, self._polling_network_error_count - 1)),
+            self._polling_network_max_delay,
+        )
+        logger.warning(
+            "telegram getUpdates transient network error (%d), retrying in %.1fs: %s",
+            self._polling_network_error_count,
+            delay,
+            exc,
+        )
+        await asyncio.sleep(delay)
+
+    def _polling_conflict_delay(self) -> float:
+        return self._polling_conflict_base_delay + (
+            max(0, self._polling_conflict_count - 1) * self._polling_conflict_step_delay
+        )
+
+    def _reset_polling_error_counts(self) -> None:
+        self._polling_network_error_count = 0
+        self._polling_conflict_count = 0
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         callback = update.get("callback_query")
@@ -1312,6 +1398,22 @@ def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
 def _is_markdown_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "parse" in message or "markdown" in message or "entity" in message
+
+
+def _is_transient_telegram_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    return isinstance(
+        exc,
+        (
+            urllib.error.URLError,
+            ssl.SSLError,
+            TimeoutError,
+            ConnectionError,
+            socket.timeout,
+            http.client.RemoteDisconnected,
+        ),
+    )
 
 
 def _is_rich_capability_error(exc: Exception) -> bool:

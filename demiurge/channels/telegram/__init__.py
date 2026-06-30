@@ -3,7 +3,7 @@ from .bridge import (
     _should_thread_reply,
     build_telegram_gateway_bridge,
 )
-from .bot_api import TelegramBotApi
+from .bot_api import TelegramApiError, TelegramBotApi
 from .formatting import (
     format_telegram_markdown_v2,
     split_telegram_message,
@@ -12,6 +12,7 @@ from .formatting import (
 
 __all__ = [
     "TelegramBotApi",
+    "TelegramApiError",
     "TelegramInteractionBridge",
     "_should_thread_reply",
     "build_telegram_gateway_bridge",
