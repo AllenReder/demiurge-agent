@@ -1,10 +1,10 @@
 # Summary
 
-- 
+<!-- Briefly describe the change. -->
 
 ## Behavior Changes
 
-- 
+<!-- List user-visible behavior changes, or write "None". -->
 
 ## Documentation
 
@@ -26,4 +26,3 @@ List the commands you ran and the result.
 - [ ] Breaking changes are absent, or they are called out in the summary.
 - [ ] Secrets, API keys, tokens, and private local paths are not included.
 - [ ] Generated assets are updated when source assets changed.
-
