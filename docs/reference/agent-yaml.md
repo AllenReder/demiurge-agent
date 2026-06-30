@@ -97,7 +97,7 @@ Core model config selects a host provider profile and model name:
 ```yaml
 model:
   provider: deepseek
-  model_name: deepseek-v4-flash
+  model_name: deepseek-v4-pro
   model_options: {}
 ```
 

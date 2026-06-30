@@ -111,7 +111,7 @@ runtime:
   workspace: /path/to/project
 model:
   provider: deepseek
-  model_name: deepseek-v4-flash
+  model_name: deepseek-v4-pro
 ```
 
 `max_model_steps` supports `1..90`. The default and hard limit are both `90`.

@@ -9,7 +9,7 @@ class ProviderPreset:
     label: str
     base_url: str
     api_key_env: str
-    suggested_model: str
+    suggested_model: str | None
     adapter: str = "openai-compatible"
 
 
@@ -26,14 +26,14 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="DeepSeek",
         base_url="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
-        suggested_model="deepseek-v4-flash",
+        suggested_model="deepseek-v4-pro",
     ),
     ProviderPreset(
         preset_id="moonshot",
         label="Kimi/Moonshot",
         base_url="https://api.moonshot.ai/v1",
         api_key_env="MOONSHOT_API_KEY",
-        suggested_model="kimi-k2.6",
+        suggested_model="kimi-k2.7-code",
     ),
     ProviderPreset(
         preset_id="minimax",
@@ -47,7 +47,7 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="Alibaba DashScope/百炼",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key_env="DASHSCOPE_API_KEY",
-        suggested_model="qwen-plus",
+        suggested_model="qwen3.7-max",
     ),
     ProviderPreset(
         preset_id="zai",
@@ -61,7 +61,7 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         label="SiliconFlow",
         base_url="https://api.siliconflow.cn/v1",
         api_key_env="SILICONFLOW_API_KEY",
-        suggested_model="Qwen/Qwen2.5-72B-Instruct",
+        suggested_model=None,
     ),
     ProviderPreset(
         preset_id="openrouter",

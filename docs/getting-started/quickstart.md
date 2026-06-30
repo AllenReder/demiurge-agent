@@ -87,8 +87,8 @@ provider, model source, and session path.
 ## 4. Use a Real Provider
 
 Demiurge stores provider connection details in host config. The interactive
-setup command can create a provider profile and write secrets to
-`~/.demiurge/.env`:
+setup command can create a provider profile, write secrets to
+`~/.demiurge/.env`, and set the active core model:
 
 ```bash
 uv run demiurge setup

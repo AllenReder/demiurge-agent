@@ -1,8 +1,12 @@
+from io import StringIO
+
 import pytest
 import yaml
+from rich.console import Console
 
 from demiurge import cli
 from demiurge import setup_cli
+from demiurge.provider_presets import get_provider_preset
 from demiurge.providers import LLMResponse
 from demiurge.ui import tui_launcher
 
@@ -168,6 +172,66 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
     assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
 
 
+def test_setup_wizard_add_provider_sets_core_model_with_preset_default(tmp_path):
+    home = tmp_path / "home"
+    context = setup_cli.load_setup_context(home)
+    prompt = _FakeSetupPrompt(
+        selections=["add-provider", "deepseek", "exit"],
+        inputs=["", "", "", "", "", ""],
+        confirms=[True],
+    )
+
+    setup_cli.run_setup_wizard(
+        context,
+        console=Console(file=StringIO()),
+        prompt=prompt,
+    )
+
+    host_config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    core_model = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))["model"]
+    assert host_config["providers"]["default"] == "deepseek"
+    assert core_model["provider"] == "deepseek"
+    assert core_model["model_name"] == "deepseek-v4-pro"
+    assert prompt.input_defaults[-1] == "deepseek-v4-pro"
+
+
+def test_setup_wizard_custom_provider_requires_explicit_model(tmp_path):
+    home = tmp_path / "home"
+    context = setup_cli.load_setup_context(home)
+    prompt = _FakeSetupPrompt(
+        selections=["add-provider", "custom", "exit"],
+        inputs=[
+            "CustomAPI",
+            "https://llm.example.test/v1",
+            "CUSTOM_API_KEY",
+            "",
+            "",
+            "custom-model",
+        ],
+        confirms=[False],
+    )
+
+    setup_cli.run_setup_wizard(
+        context,
+        console=Console(file=StringIO()),
+        prompt=prompt,
+    )
+
+    core_model = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))["model"]
+    assert core_model["provider"] == "customapi"
+    assert core_model["model_name"] == "custom-model"
+    assert prompt.input_defaults[-1] is None
+
+
+def test_domestic_provider_presets_use_latest_flagship_defaults():
+    assert get_provider_preset("deepseek").suggested_model == "deepseek-v4-pro"
+    assert get_provider_preset("moonshot").suggested_model == "kimi-k2.7-code"
+    assert get_provider_preset("minimax").suggested_model == "MiniMax-M3"
+    assert get_provider_preset("dashscope").suggested_model == "qwen3.7-max"
+    assert get_provider_preset("zai").suggested_model == "glm-5.2"
+    assert get_provider_preset("siliconflow").suggested_model is None
+
+
 def test_setup_provider_add_normalizes_profile_id(tmp_path, capsys):
     home = tmp_path / "home"
 
@@ -300,14 +364,14 @@ def test_setup_model_set_updates_runtime_core_without_legacy_model_keys(tmp_path
             "--provider",
             "CustomAPI",
             "--model",
-            "deepseek-v4-flash",
+            "custom-model",
             "--json",
         ]
     )
 
     raw = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))
     assert raw["model"]["provider"] == "customapi"
-    assert raw["model"]["model_name"] == "deepseek-v4-flash"
+    assert raw["model"]["model_name"] == "custom-model"
     for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
         assert key not in raw["model"]
 
@@ -339,6 +403,37 @@ def test_setup_provider_test_is_explicit_and_mockable(monkeypatch, tmp_path, cap
     output = capsys.readouterr().out
     assert '"ok": true' in output
     assert '"response": "ok"' in output
+
+
+class _FakeSetupPrompt:
+    def __init__(
+        self,
+        *,
+        selections: list[str] | None = None,
+        inputs: list[str] | None = None,
+        confirms: list[bool] | None = None,
+    ) -> None:
+        self.selections = list(selections or [])
+        self.inputs = list(inputs or [])
+        self.confirms = list(confirms or [])
+        self.input_defaults: list[str | None] = []
+
+    def select(self, title, choices, *, default_index=0):
+        if self.selections:
+            return self.selections.pop(0)
+        return choices[default_index].value
+
+    def confirm(self, message, *, default=False):
+        if self.confirms:
+            return self.confirms.pop(0)
+        return default
+
+    def input(self, message, *, default=None, secret=False):
+        self.input_defaults.append(default)
+        if not self.inputs:
+            return default or ""
+        value = self.inputs.pop(0)
+        return default or "" if value == "" else value
 
 
 def test_update_uses_default_managed_checkout(monkeypatch, tmp_path, capsys):

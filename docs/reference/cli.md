@@ -50,8 +50,8 @@ uv run demiurge setup providers add deepseek --preset deepseek --set-default
 uv run demiurge setup providers edit deepseek --base-url https://api.deepseek.com
 uv run demiurge setup providers remove deepseek
 uv run demiurge setup providers set-default deepseek
-uv run demiurge setup providers test deepseek --model deepseek-v4-flash
-uv run demiurge setup model set --core assistant --provider deepseek --model deepseek-v4-flash
+uv run demiurge setup providers test deepseek --model deepseek-v4-pro
+uv run demiurge setup model set --core assistant --provider deepseek --model deepseek-v4-pro
 ```
 
 Configures host-owned provider profiles and core model defaults. Provider

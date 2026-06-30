@@ -26,8 +26,10 @@ uv run demiurge setup
 
 The setup menu can create provider profiles for OpenAI, DeepSeek,
 Kimi/Moonshot, MiniMax, Alibaba DashScope/百炼, Zhipu/Z.ai, SiliconFlow,
-OpenRouter, or a custom OpenAI-compatible endpoint. Model names are free-form:
-the presets provide editable suggestions, not a maintained model catalog.
+OpenRouter, or a custom OpenAI-compatible endpoint. After saving a profile, the
+wizard immediately asks which core and model name should use it. Model names are
+free-form: the presets provide editable suggestions, not a maintained model
+catalog.
 
 ## Scripted Setup
 
@@ -73,7 +75,7 @@ Core model defaults live in the concrete core:
 ```yaml
 model:
   provider: deepseek
-  model_name: deepseek-v4-flash
+  model_name: deepseek-v4-pro
   model_options: {}
 ```
 
@@ -117,7 +119,7 @@ uv run demiurge setup providers list --json
 Run an explicit live provider test only when you want to make a network call:
 
 ```bash
-uv run demiurge setup providers test deepseek --model deepseek-v4-flash
+uv run demiurge setup providers test deepseek --model deepseek-v4-pro
 ```
 
 Then use `/status` in the TUI. It should show the provider profile, model,

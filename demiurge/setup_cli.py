@@ -32,7 +32,7 @@ from demiurge.app import (
 from demiurge.core import CoreLoader, ModelInfo
 from demiurge.env_file import load_runtime_env, runtime_env_path, upsert_env_value
 from demiurge.package_wizard import PromptToolkitPackagePrompt, SelectChoice
-from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, get_provider_preset
+from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, ProviderPreset, get_provider_preset
 from demiurge.providers import LLMMessage, LLMRequest
 from demiurge.storage import VersionStore
 from demiurge.util import default_home
@@ -173,6 +173,7 @@ class SetupWizard:
             load_runtime_env(self.context.home)
         self.context.host_config = load_host_config(self.context.host_config_path)[0]
         self.console.print(f"saved provider profile {provider_id}")
+        self._set_core_model_for_provider(provider_id, preset=preset)
 
     def _set_default_provider(self) -> None:
         profiles = provider_profile_ids(self.context.host_config)
@@ -188,10 +189,23 @@ class SetupWizard:
         core_id = self.prompt.input("Core id", default=self.context.host_config.runtime.default_core or "assistant").strip()
         profiles = ["fake"] + provider_profile_ids(self.context.host_config)
         provider_id = self.prompt.select("Provider", [SelectChoice(item, item) for item in profiles])
-        preset = get_provider_preset(provider_id)
-        model_name = self.prompt.input("Model", default=preset.suggested_model if preset else "fake/demo").strip()
+        model_name = self._prompt_model_name(provider_id, preset=get_provider_preset(provider_id))
         result = set_core_model(self.context, core_id=core_id, provider_id=provider_id, model_name=model_name)
         self.console.print(f"updated {result['core']} model")
+
+    def _set_core_model_for_provider(self, provider_id: str, *, preset: ProviderPreset | None) -> None:
+        core_id = self.prompt.input("Core id", default=self.context.host_config.runtime.default_core or "assistant").strip()
+        model_name = self._prompt_model_name(provider_id, preset=preset)
+        result = set_core_model(self.context, core_id=core_id, provider_id=provider_id, model_name=model_name)
+        self.console.print(f"updated {result['core']} model")
+
+    def _prompt_model_name(self, provider_id: str, *, preset: ProviderPreset | None) -> str:
+        default = _suggested_model_for_provider(provider_id, preset=preset)
+        while True:
+            model_name = self.prompt.input("Model", default=default).strip()
+            if model_name:
+                return model_name
+            self.console.print("Model is required.")
 
     def _print_status(self, data: dict[str, object]) -> None:
         provider_table = Table(title="Provider Profiles")
@@ -310,6 +324,9 @@ def remove_provider_profile(context: SetupContext, provider_id: str) -> dict[str
 
 def set_core_model(context: SetupContext, *, core_id: str, provider_id: str, model_name: str) -> dict[str, object]:
     provider_id = _normalize_setup_provider_id(provider_id)
+    model_name = model_name.strip()
+    if not model_name:
+        raise SystemExit("model name is required")
     if provider_id != "fake":
         resolve_host_provider_profile(load_host_config(context.host_config_path)[0], provider_id)
     ensure_runtime_defaults(context.version_store, context.agents_root, requested_core_id=core_id)
@@ -395,7 +412,7 @@ def _test_provider(context: SetupContext, provider_id: str, *, model: str | None
     host_config = load_host_config(context.host_config_path)[0]
     profile, _ = resolve_host_provider_profile(host_config, provider_id)
     preset = get_provider_preset(provider_id)
-    test_model = model or (preset.suggested_model if preset else "provider-test")
+    test_model = model or _suggested_model_for_provider(provider_id, preset=preset) or "provider-test"
     provider_config = resolve_provider_config(
         host_config,
         ModelInfo(provider=provider_id, model_name=test_model),
@@ -421,6 +438,14 @@ def _normalize_setup_provider_id(value: str | None) -> str:
         return normalize_provider_profile_id(value)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
+
+
+def _suggested_model_for_provider(provider_id: str, *, preset: ProviderPreset | None) -> str | None:
+    if provider_id == "fake":
+        return "fake/demo"
+    if preset is not None:
+        return preset.suggested_model
+    return None
 
 
 def _print_result(data: dict[str, object], *, as_json: bool) -> None:
