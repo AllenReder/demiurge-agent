@@ -33,14 +33,7 @@ export function Transcript(props: { colors?: ThemeColors; columns: number; items
   )
 }
 
-export function MessageBlock(props: {
-  colors?: ThemeColors
-  columns?: number
-  gap?: boolean
-  role: Role
-  text: string
-  userMessageAlign?: UserMessageAlign
-}) {
+export function MessageBlock(props: { colors?: ThemeColors; columns?: number; gap?: boolean; role: Role; text: string; userMessageAlign?: UserMessageAlign }) {
   const columns = Math.max(32, props.columns ?? 100)
   const theme = props.colors ?? colors
   if (props.role === "user") return <UserMessage align={props.userMessageAlign ?? "left"} colors={theme} columns={columns} gap={props.gap} text={props.text} />

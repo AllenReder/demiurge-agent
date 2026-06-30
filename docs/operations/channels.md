@@ -14,15 +14,10 @@ uv run demiurge --provider fake
 The TUI uses the launch directory as the default workspace unless `--workspace`
 or `DEMIURGE_WORKSPACE` is set.
 
-When the selected provider supports response streaming, the TUI shows assistant
-text incrementally for the default passthrough output path. This is an automatic
-runner behavior, not a host config switch. Streaming is used only for channel
-turns whose output pipeline is the default persistent `base_output` path; custom
-output pipelines continue through the normal complete-response path. Tool-call
-deltas are assembled by the host runner and still execute through the regular
-tool runtime. If a stream fails after partial output reaches the TUI, Demiurge
-marks the streamed part as cancelled and does not issue a second fallback model
-request.
+User-visible assistant output reaches the TUI through output-module deliveries
+such as `ctx.output.send_text(...)`. The TUI does not render provider token
+deltas directly, so custom output modules remain the single delivery boundary
+for text, artifacts, audio, and notices.
 
 Useful commands:
 

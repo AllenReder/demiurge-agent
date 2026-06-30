@@ -32,11 +32,9 @@ ensure session
   -> return TurnResult
 ```
 
-For channel turns, the provider step may use provider response streaming when
-the active bridge and default persistent `base_output` path can display it. The
-runner still owns request construction, streamed tool-call delta assembly, tool
-execution, and final output delivery; agent cores do not call provider streaming
-APIs or channel renderers directly.
+Provider responses are completed before output modules run. User-visible text
+is delivered by output modules through the host IO surface; the runner does not
+send provider token deltas directly to channels.
 
 ## Context Layers
 

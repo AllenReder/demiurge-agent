@@ -1,6 +1,4 @@
 import asyncio
-import contextlib
-import time
 from pathlib import Path
 
 import pytest
@@ -100,113 +98,6 @@ async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     received = next(event for event in app.runner.event_log.tail(30) if event["type"] == "message.received")
     assert received["channel"] == "tui"
     assert received["source"] == "local"
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_streams_text_parts_for_passthrough_core_without_tools(tmp_path):
-    script = tmp_path / "stream-script.json"
-    write_json(script, [{"stream_chunks": ["hel", "lo"]}])
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", core_id="evolver", provider_name="fake", fake_script=script)
-    bridge = TuiInteractionBridge(app, emit=sink)
-
-    await bridge.submit("hello")
-    await bridge.wait_for_idle()
-
-    part_updates = sink.payloads("interaction.message.part.updated")
-    deltas = sink.payloads("interaction.message.part.delta")
-    assert part_updates
-    assert "".join(item["delta"] for item in deltas) == "hello"
-    assert part_updates[-1]["part"]["text"] == "hello"
-    assert part_updates[-1]["part"]["metadata"]["status"] == "complete"
-    assert "hello" in sink.texts()
-    assert "Worked for" in sink.texts()
-    assert any(payload.get("work_started_at") for payload in sink.payloads("interaction.activity"))
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_batches_small_stream_chunks_into_multi_line_blocks(tmp_path):
-    script = tmp_path / "stream-script.json"
-    write_json(script, [{"stream_chunks": ["one", "\n", "two", "\n", "three", "\n", "four"]}])
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", core_id="evolver", provider_name="fake", fake_script=script)
-    bridge = TuiInteractionBridge(app, emit=sink)
-
-    await bridge.submit("hello")
-    await bridge.wait_for_idle()
-
-    deltas = [item["delta"] for item in sink.payloads("interaction.message.part.delta")]
-    assert deltas == ["one\ntwo\nthree\n", "four"]
-    assert "one\ntwo\nthree\nfour" in sink.texts()
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_streams_direct_text_even_when_request_has_tools(tmp_path):
-    script = tmp_path / "stream-script.json"
-    write_json(script, [{"content": "complete only", "stream_chunks": ["streamed with tools"]}])
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
-    bridge = TuiInteractionBridge(app, emit=sink)
-
-    await bridge.submit("hello")
-    await bridge.wait_for_idle()
-
-    assert sink.payloads("interaction.message.part.updated")
-    assert "".join(item["delta"] for item in sink.payloads("interaction.message.part.delta")) == "streamed with tools"
-    assert "streamed with tools" in sink.texts()
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_streamed_tool_call_enters_tool_flow(tmp_path):
-    script = tmp_path / "stream-script.json"
-    write_json(
-        script,
-        [
-            {
-                "stream_chunks": ["checking"],
-                "tool_calls": [{"id": "call_1", "name": "tools_list", "arguments": {}}],
-            },
-            {"stream_chunks": ["after tool"]},
-        ],
-    )
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
-    bridge = TuiInteractionBridge(app, emit=sink)
-
-    await bridge.submit("please use tools_list")
-    await bridge.wait_for_idle()
-
-    assert "checking" in sink.texts()
-    assert "after tool" in sink.texts()
-    tool_payloads = [payload for payload in sink.payloads("interaction.deliver") if payload.get("tool_results")]
-    assert tool_payloads
-    assert tool_payloads[0]["tool_results"][0]["name"] == "tools_list"
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_stream_failure_after_delta_does_not_fallback_to_second_request(tmp_path):
-    script = tmp_path / "stream-script.json"
-    write_json(
-        script,
-        [
-            {"stream_chunks": ["partial"], "stream_error": "stream failed"},
-            {"content": "fallback complete"},
-        ],
-    )
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", core_id="evolver", provider_name="fake", fake_script=script)
-    bridge = TuiInteractionBridge(app, emit=sink)
-
-    await bridge.submit("hello")
-    await bridge.wait_for_idle()
-
-    part_updates = sink.payloads("interaction.message.part.updated")
-    assert part_updates[-1]["part"]["text"] == "partial"
-    assert part_updates[-1]["part"]["metadata"] == {"status": "cancelled", "reason": "stream_failed"}
-    assert "fallback complete" not in sink.texts()
-    errors = sink.payloads("interaction.error")
-    assert errors
-    assert "stream failed" in errors[-1]["message"]
 
 
 @pytest.mark.asyncio
@@ -397,46 +288,6 @@ async def test_tui_bridge_approval_request_round_trip(tmp_path):
 
     decision = await task
     assert decision.value == "always_allow_for_session"
-
-
-@pytest.mark.asyncio
-async def test_tui_bridge_pauses_work_timer_while_waiting_for_approval(tmp_path):
-    sink = EventSink()
-    app = create_app(home=tmp_path / "home", provider_name="fake")
-    bridge = TuiInteractionBridge(app, emit=sink)
-    bridge._running_task = asyncio.create_task(asyncio.sleep(10))
-    bridge._work_started_at_ms = int(time.time() * 1000) - 5000
-    request = ApprovalRequest(
-        tool_name="terminal",
-        tool_call_id="call_1",
-        turn_id="turn_1",
-        capability="terminal.exec",
-        action="exec",
-        risk="critical",
-        summary="Run command",
-        command="printf hello",
-    )
-
-    try:
-        task = asyncio.create_task(bridge.request_approval(request))
-        await _wait_for(lambda: bool(sink.payloads("interaction.approval.request")))
-        paused = sink.payloads("interaction.activity")[-1]
-
-        assert paused["work_started_at"] == 0
-        assert paused["work_elapsed_ms"] >= 4000
-
-        await bridge.reply_approval(sink.payloads("interaction.approval.request")[-1]["approval_id"], "1")
-        decision = await task
-
-        resumed = sink.payloads("interaction.activity")[-1]
-        assert decision.value == "allow"
-        assert resumed["work_started_at"] > 0
-        assert resumed["work_elapsed_ms"] >= paused["work_elapsed_ms"]
-    finally:
-        bridge._running_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await bridge._running_task
-        bridge._running_task = None
 
 
 @pytest.mark.asyncio
