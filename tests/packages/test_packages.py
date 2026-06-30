@@ -128,6 +128,61 @@ def _mock_minimax_http(
     return calls
 
 
+def _mock_provider_tts_http(
+    monkeypatch,
+    *,
+    provider: str,
+    audio: bytes | None = None,
+    response: bytes | None = None,
+) -> list[dict[str, object]]:
+    env_by_provider = {
+        "openai": "DEMIURGE_OPENAI_API_KEY",
+        "xai": "DEMIURGE_XAI_API_KEY",
+        "gemini": "DEMIURGE_GEMINI_API_KEY",
+    }
+    monkeypatch.setenv(env_by_provider[provider], f"test-{provider}-key")
+    calls: list[dict[str, object]] = []
+    audio = audio or f"{provider.upper()}-AUDIO".encode("utf-8")
+    if response is None and provider == "gemini":
+        response = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "audio/L16",
+                                        "data": __import__("base64").b64encode(audio).decode("ascii"),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ).encode("utf-8")
+    elif response is None:
+        response = audio
+
+    def fake_urlopen(request: Request, timeout=60):
+        payload = json.loads((request.data or b"{}").decode("utf-8")) if request.data else None
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "json": payload,
+                "authorization": request.get_header("Authorization"),
+                "content_type": request.get_header("Content-type") or request.get_header("Content-Type"),
+                "gemini_key": request.get_header("X-goog-api-key"),
+            }
+        )
+        return _FakeHTTPResponse(response or b"")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
 def test_builtin_catalog_lists_minimax_tts_package():
     catalog = PackageCatalog.load(default_catalog_root())
 
@@ -140,6 +195,30 @@ def test_builtin_catalog_lists_minimax_tts_package():
     assert mode.choice_descriptions["direct"]
     assert mode.choice_descriptions["summary"]
     assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "tool_id"),
+    [
+        ("tts_openai", "openai", "text_to_speech_openai"),
+        ("tts_xai", "xai", "text_to_speech_xai"),
+        ("tts_gemini", "gemini", "text_to_speech_gemini"),
+    ],
+)
+def test_builtin_catalog_lists_provider_tts_packages(package_id, provider, tool_id):
+    catalog = PackageCatalog.load(default_catalog_root())
+
+    package = catalog.packages[package_id]
+    assert {"audio", "tts", f"provider:{provider}"}.issubset(package.tags)
+    assert [option.option_id for option in package.options] == ["mode", "enable_tool", "api_key"]
+    assert package.options[0].choices == ["direct", "summary"]
+    assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
+    assert package.components[0].source == f"tts_{provider}"
+    output_components = [component for component in package.components if component.kind == "output"]
+    assert {component.source for component in output_components} == {f"tts_{provider}", f"tts_{provider}_summary"}
+    assert {component.target for component in output_components} == {f"agent/output/tts_{provider}"}
+    tool_component = next(component for component in package.components if component.kind == "tool")
+    assert tool_component.target == f"agent/tools/{tool_id}"
 
 
 def test_builtin_catalog_lists_memory_basic_package():
@@ -242,6 +321,43 @@ def test_catalog_rejects_component_source_escape(tmp_path):
         PackageCatalog.load(root)
 
 
+def test_catalog_rejects_top_level_component_source_symlink(tmp_path):
+    root = tmp_path / "catalog"
+    (root / "packages").mkdir(parents=True)
+    real = root / "output" / "real_voice"
+    real.mkdir(parents=True)
+    (real / "module.py").write_text("# real\n", encoding="utf-8")
+    (root / "output" / "voice_link").symlink_to(real, target_is_directory=True)
+    (root / "catalog.yaml").write_text("id: test\n", encoding="utf-8")
+    (root / "packages" / "bad.yaml").write_text(
+        "id: bad\n"
+        "components:\n"
+        "  - id: bad\n"
+        "    kind: output\n"
+        "    source: voice_link\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PackageCatalogError, match="component source cannot be a symlink"):
+        PackageCatalog.load(root)
+
+
+def test_install_ignores_python_bytecode_cache_from_component_source(tmp_path):
+    catalog_root = tmp_path / "catalog"
+    _write_test_catalog(catalog_root)
+    cache_dir = catalog_root / "output" / "first" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "module.cpython-311.pyc").write_bytes(b"cached bytecode")
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, catalog_root)
+
+    manager.install(core_id="assistant", package_id="first")
+
+    target = app.version_store.active_core_path("assistant") / "agent" / "output" / "shared_voice"
+    assert (target / "module.py").exists()
+    assert not (target / "__pycache__").exists()
+
+
 def test_install_and_uninstall_minimax_direct_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
@@ -283,6 +399,113 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert pipeline["serial"] == ["base_output"]
     assert pipeline["parallel"] == []
     assert not (core_path / "packages.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "env_name"),
+    [
+        ("tts_openai", "openai", "DEMIURGE_OPENAI_API_KEY"),
+        ("tts_xai", "xai", "DEMIURGE_XAI_API_KEY"),
+        ("tts_gemini", "gemini", "DEMIURGE_GEMINI_API_KEY"),
+    ],
+)
+def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id, provider, env_name):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    result = manager.install(core_id="assistant", package_id=package_id)
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert result.registry_path == core_path / "packages.yaml"
+    assert (core_path / "agent" / "lib" / f"tts_{provider}" / "synthesizer.py").exists()
+    assert (core_path / "agent" / "output" / f"tts_{provider}" / "module.py").exists()
+    assert not (core_path / "agent" / "tools" / f"text_to_speech_{provider}").exists()
+    lib_config = yaml.safe_load((core_path / "agent" / "lib" / f"tts_{provider}" / "config.yaml").read_text())
+    assert lib_config["provider"] == f"tts_{provider}"
+    assert lib_config["api_key_env"] == env_name
+    assert lib_config["api_key"] is None
+    assert lib_config["filename_template"] == f"{{turn_id}}-{provider}.{{format}}"
+    if provider == "openai":
+        assert lib_config["base_url"] == "https://api.openai.com/v1"
+        assert lib_config["endpoint"] == "/audio/speech"
+        assert lib_config["model"] == "gpt-4o-mini-tts"
+        assert lib_config["voice"] == "alloy"
+        assert lib_config["response_format"] == "mp3"
+        assert lib_config["fallback_envs"] == ["OPENAI_API_KEY"]
+    elif provider == "xai":
+        assert lib_config["base_url"] == "https://api.x.ai/v1"
+        assert lib_config["endpoint"] == "/tts"
+        assert lib_config["voice_id"] == "eve"
+        assert lib_config["language"] == "en"
+        assert lib_config["output_format"] == {"codec": "mp3"}
+        assert lib_config["fallback_envs"] == ["XAI_API_KEY"]
+    else:
+        assert lib_config["base_url"] == "https://generativelanguage.googleapis.com/v1beta"
+        assert lib_config["model"] == "gemini-2.5-flash-preview-tts"
+        assert lib_config["voice"] == "Kore"
+        assert lib_config["output_format"] == "wav"
+        assert lib_config["sample_rate"] == 24000
+        assert lib_config["fallback_envs"] == ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    output_config = yaml.safe_load((core_path / "agent" / "output" / f"tts_{provider}" / "config.yaml").read_text())
+    assert output_config["summarizer_core"] is None
+    assert f"{provider}" in output_config["summary"].lower()
+    assert output_config["max_text_length"] == (32000 if provider == "gemini" else 10000)
+    output_slot = yaml.safe_load((core_path / "agent" / "output" / f"tts_{provider}" / "slot.yaml").read_text())
+    assert output_slot["capabilities"] == ["network.fetch"]
+    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
+    assert pipeline["parallel"] == [f"tts_{provider}"]
+    registry = yaml.safe_load((core_path / "packages.yaml").read_text())
+    assert registry["installed"][0]["package_id"] == package_id
+    assert registry["installed"][0]["options"]["api_key"] is None
+
+    removed = manager.uninstall(core_id="assistant", package_id=package_id)
+
+    assert removed.action == "uninstall"
+    assert not (core_path / "agent" / "output" / f"tts_{provider}").exists()
+    assert not (core_path / "agent" / "lib" / f"tts_{provider}").exists()
+    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
+    assert pipeline["parallel"] == []
+
+
+def test_install_provider_tts_summary_reuses_shared_summarizer_core(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    manager.install(core_id="assistant", package_id="tts_openai", option_answers={"mode": "summary"})
+
+    core_path = app.version_store.active_core_path("assistant")
+    child_core = app.version_store.active_core_path("tts_summarizer")
+    assert (child_core / "agent.yaml").exists()
+    assert yaml.safe_load((child_core / "agent.yaml").read_text())["agent"]["id"] == "tts_summarizer"
+    config = yaml.safe_load((core_path / "agent" / "output" / "tts_openai" / "config.yaml").read_text())
+    assert config["summarizer_core"] == "tts_summarizer"
+    slot = yaml.safe_load((core_path / "agent" / "output" / "tts_openai" / "slot.yaml").read_text())
+    assert slot["capabilities"] == ["agents.run:tts_summarizer", "network.fetch"]
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "tool_id"),
+    [
+        ("tts_openai", "openai", "text_to_speech_openai"),
+        ("tts_xai", "xai", "text_to_speech_xai"),
+        ("tts_gemini", "gemini", "text_to_speech_gemini"),
+    ],
+)
+def test_install_provider_tts_optional_tool_is_provider_specific(tmp_path, package_id, provider, tool_id):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    manager.install(core_id="assistant", package_id=package_id, option_answers={"enable_tool": True})
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert (core_path / "agent" / "tools" / tool_id).exists()
+    assert not (core_path / "agent" / "tools" / "text_to_speech").exists()
+    tool_config = yaml.safe_load((core_path / "agent" / "tools" / tool_id / "config.yaml").read_text())
+    assert tool_config == {"filename_template": f"{{turn_id}}-{provider}-tool.{{format}}"}
+    skill_path = core_path / "agent" / "skills" / f"tts_voice_{provider}" / "SKILL.md"
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert f"name: tts_voice_{provider}" in skill_text
+    assert tool_id in skill_text
 
 
 def test_install_summary_mode_copies_child_core_and_config(tmp_path):
@@ -886,6 +1109,187 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
     assert calls[0]["json"]["output_format"] == "url"
     assert next(workspace.glob(".demiurge-tts/*.mp3")).read_bytes() == b"URL-AUDIO"
     assert any(block.get("type") == "audio" for delivery in bridge.deliveries for block in delivery.blocks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("package_id", "provider", "expected_bytes"),
+    [
+        ("tts_openai", "openai", b"OPENAI-AUDIO"),
+        ("tts_xai", "xai", b"XAI-AUDIO"),
+    ],
+)
+async def test_provider_tts_direct_mode_delivers_audio(tmp_path, monkeypatch, package_id, provider, expected_bytes):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id=package_id)
+    calls = _mock_provider_tts_http(monkeypatch, provider=provider, audio=expected_bytes)
+    bridge = _RecordingBridge()
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text=f"hello {provider} voice", source="local", conversation_key=f"pkg:{provider}"),
+        bridge=bridge,
+    )
+    await app.runner.drain_background_tasks()
+
+    audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
+    assert audio_block["artifact"]["media_type"] == "audio/mpeg"
+    assert audio_block["artifact"]["metadata"]["provider"] == f"tts_{provider}"
+    assert calls[0]["authorization"] == f"Bearer test-{provider}-key"
+    assert f"hello {provider} voice" in json.dumps(calls[0]["json"], ensure_ascii=False)
+    assert next(workspace.glob(f".demiurge-tts/*-{provider}.mp3")).read_bytes() == expected_bytes
+
+
+@pytest.mark.asyncio
+async def test_openai_tts_payload_uses_speech_endpoint(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="tts_openai")
+    calls = _mock_provider_tts_http(monkeypatch, provider="openai", audio=b"OPENAI-AUDIO")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="openai voice", source="local", conversation_key="pkg:openai")
+    )
+    await app.runner.drain_background_tasks()
+
+    assert calls[0]["url"] == "https://api.openai.com/v1/audio/speech"
+    assert calls[0]["json"]["model"] == "gpt-4o-mini-tts"
+    assert calls[0]["json"]["voice"] == "alloy"
+    assert calls[0]["json"]["response_format"] == "mp3"
+    assert calls[0]["json"]["input"] == "[fake] openai voice"
+
+
+@pytest.mark.asyncio
+async def test_xai_tts_payload_uses_provider_fields(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="tts_xai")
+    calls = _mock_provider_tts_http(monkeypatch, provider="xai", audio=b"XAI-AUDIO")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="xai voice", source="local", conversation_key="pkg:xai")
+    )
+    await app.runner.drain_background_tasks()
+
+    assert calls[0]["url"] == "https://api.x.ai/v1/tts"
+    assert calls[0]["json"]["text"] == "[fake] xai voice"
+    assert calls[0]["json"]["voice_id"] == "eve"
+    assert calls[0]["json"]["language"] == "en"
+    assert calls[0]["json"]["output_format"] == {"codec": "mp3"}
+    assert "speed" not in calls[0]["json"]
+    assert "optimize_streaming_latency" not in calls[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_tts_decodes_inline_audio_to_wav(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="tts_gemini")
+    calls = _mock_provider_tts_http(monkeypatch, provider="gemini", audio=b"\x01\x02\x03\x04")
+    bridge = _RecordingBridge()
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="gemini voice", source="local", conversation_key="pkg:gemini"),
+        bridge=bridge,
+    )
+    await app.runner.drain_background_tasks()
+
+    audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
+    assert audio_block["artifact"]["media_type"] == "audio/wav"
+    assert audio_block["artifact"]["metadata"]["provider"] == "tts_gemini"
+    assert calls[0]["authorization"] is None
+    assert calls[0]["gemini_key"] == "test-gemini-key"
+    assert calls[0]["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+    assert "test-gemini-key" not in calls[0]["url"]
+    generation_config = calls[0]["json"]["generationConfig"]
+    assert generation_config["responseModalities"] == ["AUDIO"]
+    assert generation_config["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] == "Kore"
+    wav_path = next(workspace.glob(".demiurge-tts/*-gemini.wav"))
+    wav_bytes = wav_path.read_bytes()
+    assert wav_bytes.startswith(b"RIFF")
+    assert b"WAVE" in wav_bytes[:16]
+
+
+@pytest.mark.asyncio
+async def test_provider_tts_summary_mode_reuses_tts_summarizer(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="tts_openai", option_answers={"mode": "summary"})
+    calls = _mock_provider_tts_http(monkeypatch, provider="openai", audio=b"OPENAI-AUDIO")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="summarize provider voice", source="local", conversation_key="pkg:openai")
+    )
+    await app.runner.drain_background_tasks()
+
+    assert calls[0]["json"]["input"] == "[fake] [fake] summarize provider voice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("package_id", "provider", "tool_id", "expected_suffix", "expected_bytes", "expected_media_type"),
+    [
+        ("tts_openai", "openai", "text_to_speech_openai", "openai-tool.mp3", b"OPENAI-AUDIO", "audio/mpeg"),
+        ("tts_xai", "xai", "text_to_speech_xai", "xai-tool.mp3", b"XAI-AUDIO", "audio/mpeg"),
+        ("tts_gemini", "gemini", "text_to_speech_gemini", "gemini-tool.wav", b"\x01\x02\x03\x04", "audio/wav"),
+    ],
+)
+async def test_provider_tts_tool_generates_audio_with_provider_specific_tool(
+    tmp_path,
+    monkeypatch,
+    package_id,
+    provider,
+    tool_id,
+    expected_suffix,
+    expected_bytes,
+    expected_media_type,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    script = tmp_path / "tts_tool.json"
+    script.write_text(
+        json.dumps(
+            [
+                {"tool_calls": [{"id": "tts_tool", "name": tool_id, "arguments": {"text": "tool voice"}}]},
+                {"content": ""},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id=package_id, option_answers={"enable_tool": True})
+    calls = _mock_provider_tts_http(monkeypatch, provider=provider, audio=expected_bytes)
+
+    result = await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="make provider voice", source="local", conversation_key=f"pkg:{provider}")
+    )
+
+    if provider == "openai":
+        request_text = calls[0]["json"]["input"]
+    elif provider == "xai":
+        request_text = calls[0]["json"]["text"]
+    else:
+        request_text = json.dumps(calls[0]["json"]["contents"], ensure_ascii=False)
+    assert "tool voice" in request_text
+    audio_delivery = next(
+        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+    )
+    audio_block = next(block for block in audio_delivery.blocks if block.get("type") == "audio")
+    assert audio_delivery.history_policy == "transient"
+    assert audio_delivery.metadata["slot"] == f"agent/tools/{tool_id}"
+    assert audio_block["artifact"]["media_type"] == expected_media_type
+    assert result.tool_results[0].call.name == tool_id
+    artifact_bytes = next(workspace.glob(f".demiurge-tts/*-{expected_suffix}")).read_bytes()
+    if provider == "gemini":
+        assert artifact_bytes.startswith(b"RIFF")
+        assert b"WAVE" in artifact_bytes[:16]
+    else:
+        assert artifact_bytes == expected_bytes
 
 
 @pytest.mark.asyncio

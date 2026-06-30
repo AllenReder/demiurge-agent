@@ -111,10 +111,27 @@ bootstrap context in future sessions:
 ~/.demiurge/agents/assistant/context/reseed.md
 ```
 
-`minimax_tts` installs `agent/lib/tts_minimax` and
-`agent/output/tts_minimax` by default. `enable_tool=true` adds
-`agent/tools/text_to_speech` and `agent/skills/tts_voice`; `mode=summary` also
-installs the `tts_summarizer` child core.
+TTS provider packages install `agent/lib/tts_<provider>` and
+`agent/output/tts_<provider>` by default. `mode=summary` also installs the shared
+`tts_summarizer` child core. `enable_tool=true` adds a provider-specific authored
+tool and voice skill so multiple TTS providers can coexist in one core:
+
+| Package | Default components | Optional tool |
+| --- | --- | --- |
+| `minimax_tts` | `agent/lib/tts_minimax`, `agent/output/tts_minimax` | `agent/tools/text_to_speech` |
+| `tts_openai` | `agent/lib/tts_openai`, `agent/output/tts_openai` | `agent/tools/text_to_speech_openai` |
+| `tts_xai` | `agent/lib/tts_xai`, `agent/output/tts_xai` | `agent/tools/text_to_speech_xai` |
+| `tts_gemini` | `agent/lib/tts_gemini`, `agent/output/tts_gemini` | `agent/tools/text_to_speech_gemini` |
+
+Provider secrets are optional package options and can also be read from
+environment variables. Prefer environment variables for non-plaintext storage:
+`api_key` option values are written into the installed runtime component's
+`agent/lib/tts_<provider>/config.yaml` so the component can run without host CLI
+state. Built-in provider-specific environment variables are
+`DEMIURGE_MINIMAX_API_KEY`, `DEMIURGE_OPENAI_API_KEY`, `DEMIURGE_XAI_API_KEY`,
+and `DEMIURGE_GEMINI_API_KEY`; provider-standard fallbacks include
+`OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, and `GOOGLE_API_KEY` where
+supported by the package.
 
 ## Success Check
 

@@ -1,0 +1,98 @@
+schema_version: 2
+id: tts_gemini
+name: Gemini TTS
+summary: Generate speech audio with Gemini speech synthesis, either directly or through a summarizer core.
+tags:
+  - audio
+  - tts
+  - provider:gemini
+options:
+  - id: mode
+    type: choice
+    prompt: TTS mode
+    description: Choose whether the output module speaks the final text directly or first runs a summarizer core.
+    default: direct
+    choices:
+      - value: direct
+        description: Generate speech from the assistant reply as-is.
+      - value: summary
+        description: Summarize the assistant reply before generating speech.
+  - id: enable_tool
+    type: bool
+    prompt: Add agent TTS tool
+    description: Also install an authored provider-specific tool so the agent can generate speech on demand.
+    default: false
+  - id: api_key
+    type: secret
+    prompt: Gemini API key
+    description: Optional direct Gemini API key; leave empty to read DEMIURGE_GEMINI_API_KEY.
+    required: false
+    default: null
+components:
+  - id: tts_lib
+    kind: lib
+    source: tts_gemini
+    target: agent/lib/tts_gemini
+    config:
+      provider: tts_gemini
+      base_url: https://generativelanguage.googleapis.com/v1beta
+      model: gemini-2.5-flash-preview-tts
+      voice: Kore
+      output_format: wav
+      sample_rate: 24000
+      channels: 1
+      sample_width: 2
+      output_dir: .demiurge-tts
+      filename_template: "{turn_id}-gemini.{format}"
+      media_type: audio/wav
+      api_key: ${options.api_key}
+      api_key_env: DEMIURGE_GEMINI_API_KEY
+      fallback_envs:
+        - GEMINI_API_KEY
+        - GOOGLE_API_KEY
+  - id: tts_output
+    kind: output
+    source: tts_gemini
+    target: agent/output/tts_gemini
+    when:
+      mode: direct
+    pipeline:
+      group: parallel
+    config:
+      summarizer_core: null
+      summary: Gemini TTS audio
+      max_text_length: 32000
+      strip_markdown: true
+  - id: tts_output_summary
+    kind: output
+    source: tts_gemini_summary
+    target: agent/output/tts_gemini
+    when:
+      mode: summary
+    pipeline:
+      group: parallel
+    config:
+      summarizer_core: tts_summarizer
+      summary: Gemini summarized TTS audio
+      max_text_length: 32000
+      strip_markdown: true
+  - id: tts_summarizer
+    kind: core
+    source: tts_summarizer
+    target_core_id: tts_summarizer
+    when:
+      mode: summary
+  - id: tts_tool
+    kind: tool
+    source: text_to_speech_gemini
+    target: agent/tools/text_to_speech_gemini
+    when:
+      enable_tool: true
+    config:
+      filename_template: "{turn_id}-gemini-tool.{format}"
+  - id: tts_voice_skill
+    kind: skill
+    source: tts_voice_gemini
+    target: agent/skills/tts_voice_gemini
+    when:
+      enable_tool: true

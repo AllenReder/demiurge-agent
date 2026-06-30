@@ -35,12 +35,14 @@ kinds:
 - `conversation_style`: input + skill package for per-turn communication hints.
 - `context_reseed`: output + bootstrap + skill + shared lib for bounded continuity
   notes across sessions, saved only when explicitly requested by default.
-- `minimax_tts`: shared lib + output + optional tool/skill/core package for speech
-  artifacts.
+- `minimax_tts`, `tts_openai`, `tts_xai`, and `tts_gemini`: shared lib + output
+  + optional provider-specific tool/skill/core package for speech artifacts.
 
 These packages are optional runtime-core overlays. They showcase composable
 agent-core modules without changing source templates or installing host Python
-dependencies.
+dependencies. For provider packages, prefer API-key environment variables for
+non-plaintext storage; direct `api_key` package-option values are written into
+the installed runtime component's `config.yaml`.
 
 ## Runtime State
 

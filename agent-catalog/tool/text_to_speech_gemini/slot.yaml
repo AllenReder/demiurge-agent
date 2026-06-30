@@ -1,0 +1,18 @@
+entrypoint: module:execute
+description: Generate and send a speech audio message from text using Gemini TTS.
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+      description: Text to synthesize and send as speech audio.
+  required:
+    - text
+  additionalProperties: false
+capability: network.fetch
+risk: medium
+approval_policy: prompt
+display_policy: summary
+model_output_policy: content
+capabilities:
+  - network.fetch

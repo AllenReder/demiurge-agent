@@ -41,9 +41,10 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
 
 The built-in `agent-catalog` includes optional packages such as local memory,
-conversation style hints, context reseed notes, and MiniMax speech output. They
-install into runtime cores as composable bootstrap/input/output/tool/skill/lib
-components rather than changing source templates.
+conversation style hints, context reseed notes, and provider-specific speech
+output for MiniMax, OpenAI, xAI, and Gemini. They install into runtime cores as
+composable bootstrap/input/output/tool/skill/lib components rather than changing
+source templates.
 
 ## Quickstart
 

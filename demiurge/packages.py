@@ -35,6 +35,7 @@ DEFAULT_TARGET_ROOTS = {
     "skill": "agent/skills",
     "lib": "agent/lib",
 }
+_COPYTREE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
 _OPTION_REF = re.compile(r"^\$\{options\.([A-Za-z0-9_-]+)\}$")
 _OPTION_REF_ANYWHERE = re.compile(r"\$\{options\.([A-Za-z0-9_-]+)\}")
 
@@ -359,6 +360,11 @@ class PackageCatalog:
         if source.is_absolute() or ".." in source.parts:
             raise PackageCatalogError(f"component source must stay inside the catalog: {component.source}")
         path = root / component.kind / source
+        current = root
+        for part in path.relative_to(root).parts:
+            current = current / part
+            if current.is_symlink():
+                raise PackageCatalogError(f"component source cannot be a symlink: {current}")
         if not path.exists():
             raise PackageCatalogError(f"component source not found: {path}")
         return require_relative_path(path, root)
@@ -634,7 +640,7 @@ class PackageManager:
             if operation["kind"] in PIPELINE_KINDS:
                 self._insert_pipeline_slot(core_path, operation)
             return self._component_record(operation)
-        shutil.copytree(source_path, target_path)
+        shutil.copytree(source_path, target_path, ignore=_COPYTREE_IGNORE)
         self._rewrite_core_id(target_path / "agent.yaml", str(operation["target_core_id"]))
         return self._component_record(operation)
 
@@ -690,7 +696,7 @@ class PackageManager:
 
     def _copy_component_source(self, source_path: Path, target_path: Path) -> None:
         if source_path.is_dir():
-            shutil.copytree(source_path, target_path)
+            shutil.copytree(source_path, target_path, ignore=_COPYTREE_IGNORE)
             return
         ensure_dir(target_path.parent)
         shutil.copy2(source_path, target_path)
