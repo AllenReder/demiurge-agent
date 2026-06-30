@@ -1,0 +1,62 @@
+schema_version: 2
+id: context_reseed
+name: Context Reseed
+summary: Keep a bounded continuity note and inject it as reference context at new session start.
+tags:
+  - bootstrap
+  - output
+  - context
+options:
+  - id: mode
+    type: choice
+    prompt: Reseed update mode
+    description: Choose whether every turn updates the reseed note or only turns that explicitly mention reseed/handoff/continuity notes.
+    default: explicit
+    choices:
+      - value: explicit
+        description: Update only when the user explicitly asks for a continuity or handoff note.
+      - value: auto
+        description: Update the bounded note after each assistant output.
+  - id: max_chars
+    type: string
+    prompt: Maximum reseed chars
+    description: Maximum characters to store and inject from the reseed note.
+    default: "1800"
+  - id: notice
+    type: bool
+    prompt: Show update notice
+    description: Emit a transient notice when the output module refreshes the note.
+    default: false
+components:
+  - id: context_reseed_lib
+    kind: lib
+    source: context_reseed
+    target: agent/lib/context_reseed
+    config:
+      storage:
+        relative_to: core_root
+        path: context/reseed.md
+      mode: ${options.mode}
+      max_chars: ${options.max_chars}
+      notice: ${options.notice}
+  - id: context_reseed_bootstrap
+    kind: bootstrap
+    source: context_reseed
+    target: agent/bootstrap/context_reseed
+    pipeline:
+      after: session_context
+  - id: context_reseed_output
+    kind: output
+    source: context_reseed
+    target: agent/output/context_reseed
+    pipeline:
+      group: serial
+      after: base_output
+    config:
+      mode: ${options.mode}
+      max_chars: ${options.max_chars}
+      notice: ${options.notice}
+  - id: context_reseed_skill
+    kind: skill
+    source: context_reseed
+    target: agent/skills/context_reseed

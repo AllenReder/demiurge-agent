@@ -40,6 +40,11 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Capability packages | Reusable tools, IO modules, skills, libraries, and child cores can be installed into runtime agent cores through package recipes. |
 | Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
 
+The built-in `agent-catalog` includes optional packages such as local memory,
+conversation style hints, context reseed notes, and MiniMax speech output. They
+install into runtime cores as composable bootstrap/input/output/tool/skill/lib
+components rather than changing source templates.
+
 ## Quickstart
 
 Managed install is the default path. It creates a runtime home, installs the managed checkout, and starts with the fake provider:

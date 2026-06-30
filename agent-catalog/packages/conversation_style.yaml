@@ -1,0 +1,49 @@
+schema_version: 2
+id: conversation_style
+name: Conversation Style
+summary: Add configurable per-turn communication style hints and a progressive style skill.
+tags:
+  - input
+  - skill
+  - communication
+options:
+  - id: style
+    type: choice
+    prompt: Reply style
+    description: Choose the default response depth and tone preference injected before each model request.
+    default: balanced
+    choices:
+      - value: concise
+        description: Short, scannable answers with only necessary context.
+      - value: balanced
+        description: Direct answer plus relevant reasoning and next steps.
+      - value: detailed
+        description: More explanation, caveats, and reproducible details.
+      - value: technical
+        description: Precise technical language with explicit assumptions and verification.
+  - id: channel_hint
+    type: bool
+    prompt: Add channel-aware hint
+    description: Add lightweight Telegram/TUI formatting hints when channel metadata is present.
+    default: true
+  - id: activate_skill
+    type: bool
+    prompt: Activate style skill
+    description: Load the packaged style skill automatically for each turn.
+    default: true
+components:
+  - id: conversation_style_input
+    kind: input
+    source: conversation_style
+    target: agent/input/conversation_style
+    pipeline:
+      group: serial
+      before: base_input
+    config:
+      style: ${options.style}
+      channel_hint: ${options.channel_hint}
+      activate_skill: ${options.activate_skill}
+  - id: conversation_style_skill
+    kind: skill
+    source: conversation_style
+    target: agent/skills/conversation_style

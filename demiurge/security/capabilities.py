@@ -39,7 +39,7 @@ class CapabilityFacade:
             for prefix in self._prefixes(capability):
                 if prefix in slot_caps:
                     return True
-            for slot in self.core.input_slots + self.core.output_slots + self.core.tool_slots:
+            for slot in self.core.bootstrap_slots + self.core.input_slots + self.core.output_slots + self.core.tool_slots:
                 if slot.relative_path == slot_path and capability in slot.capabilities:
                     return True
         defaults = caps.get("defaults", {}) or {}

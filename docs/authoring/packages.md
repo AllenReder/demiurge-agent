@@ -87,8 +87,34 @@ It stores user data outside package-owned component targets:
   MEMORY.md
 ```
 
-`minimax_tts` installs TTS output/tool components and may install a summarizer
-core depending on options.
+`conversation_style` installs:
+
+- `agent/input/conversation_style`
+- `agent/skills/conversation_style`
+
+It injects transient per-turn response style hints and can auto-load the packaged
+style skill. Options choose `concise`, `balanced`, `detailed`, or `technical`
+style, plus channel-aware hints.
+
+`context_reseed` installs:
+
+- `agent/lib/context_reseed`
+- `agent/bootstrap/context_reseed`
+- `agent/output/context_reseed`
+- `agent/skills/context_reseed`
+
+It writes a bounded continuity note outside package-owned component targets when
+explicitly requested by default, and injects that note as quoted, reference-only
+bootstrap context in future sessions:
+
+```text
+~/.demiurge/agents/assistant/context/reseed.md
+```
+
+`minimax_tts` installs `agent/lib/tts_minimax` and
+`agent/output/tts_minimax` by default. `enable_tool=true` adds
+`agent/tools/text_to_speech` and `agent/skills/tts_voice`; `mode=summary` also
+installs the `tts_summarizer` child core.
 
 ## Success Check
 

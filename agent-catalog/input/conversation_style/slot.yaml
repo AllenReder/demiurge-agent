@@ -1,0 +1,6 @@
+entrypoint: module:process
+description: Injects user-selected conversational style hints into each turn.
+failure_policy: soft
+history_policy: transient
+capabilities:
+  - skill.activate:conversation_style

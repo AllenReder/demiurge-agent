@@ -26,6 +26,22 @@ The package command supports list, install, and uninstall. It does not support
 reinstall, config edit, upgrade, rollback, git commits, or agent-callable
 package management.
 
+## Built-In Catalog Highlights
+
+The built-in catalog includes reusable examples for the main agent-core slot
+kinds:
+
+- `memory_basic`: bootstrap + tool + shared lib for durable local memory.
+- `conversation_style`: input + skill package for per-turn communication hints.
+- `context_reseed`: output + bootstrap + skill + shared lib for bounded continuity
+  notes across sessions, saved only when explicitly requested by default.
+- `minimax_tts`: shared lib + output + optional tool/skill/core package for speech
+  artifacts.
+
+These packages are optional runtime-core overlays. They showcase composable
+agent-core modules without changing source templates or installing host Python
+dependencies.
+
 ## Runtime State
 
 Install writes to the target runtime core and records package ownership in:

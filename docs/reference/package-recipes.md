@@ -60,7 +60,10 @@ Secret option values may be written to target component config, but
 | `tool` | `agent/tools/<tool_id>` |
 | `skill` | `agent/skills/<skill_id>` |
 | `lib` | `agent/lib/<name>` |
-| `core` | another runtime active core |
+| `core` | another runtime active core identified by `target_core_id` |
+
+For core-local component kinds, `target` is the runtime-core-relative path to
+write. For `kind: core`, use `target_core_id`; `target` is ignored.
 
 ## Conditions and Config
 
@@ -76,6 +79,26 @@ Config values can reference options with `${options.<id>}`.
   with the same source and target.
 - Pipeline edits are allowed only for bootstrap/input/output components.
 - Bootstrap pipeline edits are serial-only.
+
+## Recipe Examples
+
+`conversation_style` is a small input + skill recipe: it inserts an input module
+before `base_input`, writes option-backed `config.yaml`, and installs a
+progressive style skill.
+
+`context_reseed` combines lib + output + bootstrap + skill components: the output
+slot refreshes a bounded continuity note, while the bootstrap slot reads that
+note as reference-only session context.
+
+A core component recipe uses `target_core_id`:
+
+```yaml
+components:
+  - id: tts_summarizer
+    kind: core
+    source: tts_summarizer
+    target_core_id: tts_summarizer
+```
 
 ## Boundary
 
