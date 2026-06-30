@@ -5,9 +5,9 @@ agent:
   parent: null
   summary: "Summarizes assistant output into short spoken TTS text."
 runtime:
-  language: python
-  python: ">=3.11,<3.14"
   surface_root: agent
+  max_model_steps: 90
+  workspace: null
 model:
   provider: auto
   model_name: null
@@ -17,6 +17,8 @@ model:
   api_key: null
   api_key_env: "DEMIURGE_API_KEY"
   model_options: {}
+ui:
+  tool_display: null
 channels: {}
 slots:
   soul: agent/SOUL.md
@@ -27,6 +29,12 @@ slots:
   skills: agent/skills
 tools:
   toolsets: []
+  metadata: {}
+approval:
+  default: null
+  tools: {}
+  capabilities: {}
+  risks: {}
 capabilities:
   defaults: {}
 dependencies:
@@ -34,3 +42,5 @@ dependencies:
   allow_additional_dependencies: false
 tests:
   commands: []
+  smoke:
+    fake_llm_script: null
