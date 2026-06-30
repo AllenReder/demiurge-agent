@@ -30,7 +30,7 @@ const copy: Record<string, Copy> = {
     subtitle:
       'Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.',
     primary: 'Read the docs',
-    secondary: 'Start locally',
+    secondary: 'Quick Start',
     github: 'View on GitHub',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
@@ -79,7 +79,7 @@ const copy: Record<string, Copy> = {
     subtitle:
       '独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。',
     primary: '阅读文档',
-    secondary: '本地启动',
+    secondary: '快速上手',
     github: '查看 GitHub',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
     previewLabel: 'agent core surface',
