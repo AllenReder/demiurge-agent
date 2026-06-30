@@ -50,8 +50,6 @@ class AgentInfo(BaseModel):
 class RuntimeInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    language: str = "python"
-    python: str | None = None
     surface_root: str = "agent"
     max_model_steps: int = Field(default=90, ge=1, le=90)
     workspace: str | None = None

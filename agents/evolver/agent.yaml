@@ -5,8 +5,6 @@ agent:
   parent: null
   summary: "Host-managed seed evolver core. v1 EvolutionRuntime applies structured file ops."
 runtime:
-  language: python
-  python: null
   surface_root: agent
   max_model_steps: 90
   workspace: null
