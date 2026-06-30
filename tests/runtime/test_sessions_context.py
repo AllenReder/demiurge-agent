@@ -143,9 +143,9 @@ async def test_bootstrap_context_file_is_written_and_injected_after_skill_index(
         "current_turn",
     ]
     request_messages = provider.requests[0].messages
-    skill_index = next(index for index, message in enumerate(request_messages) if "## Skills" in message.content)
-    bootstrap_index = next(index for index, message in enumerate(request_messages) if message.content == "  BOOT  ")
-    assert bootstrap_index > skill_index
+    system_messages = [message for message in request_messages if message.role == "system"]
+    assert len(system_messages) == 1
+    assert system_messages[0].content.index("## Skills") < system_messages[0].content.index("  BOOT  ")
     assert all(message.role != "system" for message in app.runner.session_store.read_messages(session_id))
 
 
@@ -196,8 +196,8 @@ async def test_bootstrap_context_snapshot_is_reused_across_turns_and_resume(tmp_
     await second.runner.run_turn("third")
 
     assert first.runner.session_store.read_bootstrap_context(session_id) == "BOOT1"
-    assert any(message.content == "BOOT1" for message in second_provider.requests[0].messages)
-    assert all(message.content != "BOOT2" for message in second_provider.requests[0].messages)
+    assert any("BOOT1" in message.content for message in second_provider.requests[0].messages)
+    assert all("BOOT2" not in message.content for message in second_provider.requests[0].messages)
     events = second.runner.event_log.read_all()
     assert [event["type"] for event in events].count("bootstrap.started") == 1
 

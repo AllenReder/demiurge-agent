@@ -148,7 +148,9 @@ async def test_input_serial_appends_user_fragments_and_transient_system(tmp_path
     await app.runner.run_turn("hello")
 
     request_messages = provider.requests[0].messages
-    assert any(message.role == "system" and message.content == "SYS" for message in request_messages)
+    system_messages = [message for message in request_messages if message.role == "system"]
+    assert len(system_messages) == 1
+    assert "SYS" in system_messages[0].content
     current_user = [message for message in request_messages if message.role == "user"][-1]
     assert current_user.content == "FIRST\n\nhello\n\nTAIL"
     history = app.runner.session_store.read_messages(app.runner.session_id)
@@ -211,6 +213,8 @@ async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_
     assert debug_delivery.history_policy == "transient"
     assert debug_delivery.metadata["role"] == "system"
     assert "# System prompt debug" in debug_delivery.text
+    assert "## Final system prompt" in debug_delivery.text
+    assert "## System message" not in debug_delivery.text
     assert "BOOT SYSTEM" in debug_delivery.text
     assert "TURN SYSTEM" in debug_delivery.text
     assert "hello" not in debug_delivery.text

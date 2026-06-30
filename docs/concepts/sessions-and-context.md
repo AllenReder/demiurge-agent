@@ -37,8 +37,10 @@ Before each model call, the host assembles context in this order:
 7. Current turn messages and tool results.
 
 Each assembly writes a `context.assembled` event. `/trace` shows layer counts.
+Provider requests receive a single merged system message; system layers are
+joined in order with newlines and no added headings.
 If local host config enables `debug.show_system_prompt`, the host also sends the
-assembled system messages to the active channel before each provider call. That
+merged system prompt to the active channel before each provider call. That
 debug delivery is transient: it is visible in the channel but is not written to
 `messages.jsonl` and is not model-visible later.
 

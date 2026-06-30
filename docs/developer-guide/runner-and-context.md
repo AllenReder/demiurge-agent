@@ -46,6 +46,9 @@ ensure session
 8. input contributions with `pre_current_user` placement;
 9. current turn and `post_current_user` contributions.
 
+System layers are merged into one provider-facing `role="system"` message by
+joining their contents with newlines and no added headings.
+
 ## Tool Calls in History
 
 Assistant tool-call steps and tool results are written by the host so later

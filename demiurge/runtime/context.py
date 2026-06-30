@@ -54,8 +54,21 @@ class ContextAssembler:
             self._current_turn_layer(current_turn_messages, by_placement["post_current_user"]),
         ]
         active_layers = [layer for layer in layers if layer.messages]
-        messages = [message for layer in active_layers for message in layer.messages]
+        messages = self._merge_system_messages(
+            [message for layer in active_layers for message in layer.messages]
+        )
         return AssembledContext(messages=messages, layers=active_layers)
+
+    def _merge_system_messages(self, messages: list[LLMMessage]) -> list[LLMMessage]:
+        system_text = "\n".join(
+            message.content or ""
+            for message in messages
+            if message.role == "system" and (message.content or "").strip()
+        )
+        non_system = [message for message in messages if message.role != "system"]
+        if not system_text:
+            return non_system
+        return [LLMMessage(role="system", content=system_text), *non_system]
 
     def _core_soul_layer(self, core: LoadedCore) -> ContextLayer:
         messages = [LLMMessage(role="system", content=core.soul)] if core.soul else []

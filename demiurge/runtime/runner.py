@@ -1673,15 +1673,14 @@ class SessionTurnStepRunner:
             f"turn: {turn_id}",
             f"step: {step_id}",
         ]
-        for index, message in enumerate(messages, start=1):
-            sections.extend(
-                [
-                    "",
-                    f"## System message {index}",
-                    "",
-                    message.content or "",
-                ]
-            )
+        sections.extend(
+            [
+                "",
+                "## Final system prompt",
+                "",
+                "\n\n".join(message.content or "" for message in messages),
+            ]
+        )
         return "\n".join(sections).strip()
 
     def _build_skill_index(self, core: LoadedCore) -> str:
