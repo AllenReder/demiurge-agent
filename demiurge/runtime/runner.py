@@ -30,9 +30,10 @@ from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionItem,
     InteractionOutbound,
+    InteractionStreamBridge,
     get_current_bridge,
 )
-from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
+from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, LLMStreamUnsupported, Provider, ToolCall
 from demiurge.sdk import (
     AgentInput,
     AgentDeliverySummary,
@@ -1275,7 +1276,16 @@ class SessionTurnStepRunner:
                 tools=available_tools,
                 metadata={"turn_id": turn_id, "step_id": step_id},
             )
-            response = await self.provider.complete(request)
+            await self._emit_stream_activity(interaction_metadata, "waiting for model")
+            response = await self._complete_model_step(
+                request,
+                core=core,
+                turn=turn,
+                step_id=step_id,
+                interaction_metadata=interaction_metadata,
+                output_slots_override=output_slots_override,
+            )
+            await self._emit_stream_activity(interaction_metadata, "")
             if response.tool_calls:
                 assistant_step_message = LLMMessage(
                     role="assistant",
@@ -1443,6 +1453,239 @@ class SessionTurnStepRunner:
             agent_result=result_client.value,
             needs_user=needs_user,
         )
+
+    async def _emit_stream_activity(self, interaction_metadata: dict[str, Any], activity: str) -> None:
+        bridge = self._stream_bridge(interaction_metadata)
+        if bridge is None:
+            return
+        await bridge.stream_activity({"activity": activity})
+
+    async def _complete_model_step(
+        self,
+        request: LLMRequest,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        step_id: str,
+        interaction_metadata: dict[str, Any],
+        output_slots_override: list[SlotDefinition] | None,
+    ) -> LLMResponse:
+        if not self._can_stream_interaction_response(
+            core,
+            interaction_metadata=interaction_metadata,
+            output_slots_override=output_slots_override,
+        ):
+            return await self.provider.complete(request)
+        stream = getattr(self.provider, "stream", None)
+        if stream is None:
+            return await self.provider.complete(request)
+
+        bridge = self._stream_bridge(interaction_metadata)
+        if bridge is None:
+            return await self.provider.complete(request)
+
+        message_id = utc_id("stream_msg_")
+        part_id = utc_id("stream_part_")
+        started = False
+        emitted = False
+        content_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, str]] = {}
+        pending_delta: list[str] = []
+        last_delta_flush = asyncio.get_running_loop().time()
+
+        async def start_text_part() -> None:
+            nonlocal started, emitted
+            if started:
+                return
+            started = True
+            emitted = True
+            await bridge.stream_message_updated(
+                {
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "message": {
+                        "id": message_id,
+                        "session_id": self.session_id,
+                        "turn_id": turn.turn_id,
+                        "role": "assistant",
+                        "metadata": {"step_id": step_id, "streaming": True},
+                    },
+                }
+            )
+            await bridge.stream_message_part_updated(
+                {
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "step_id": step_id,
+                    "message_id": message_id,
+                    "part": {
+                        "id": part_id,
+                        "message_id": message_id,
+                        "session_id": self.session_id,
+                        "turn_id": turn.turn_id,
+                        "type": "text",
+                        "text": "",
+                        "metadata": {"status": "streaming"},
+                    },
+                }
+            )
+
+        async def flush_delta(*, force: bool = False) -> None:
+            nonlocal emitted, last_delta_flush
+            if not pending_delta:
+                return
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            text = "".join(pending_delta)
+            line_breaks = text.count("\n")
+            if not force and line_breaks < 3 and len(text) < 420 and now - last_delta_flush < 0.45:
+                return
+            pending_delta.clear()
+            last_delta_flush = now
+            emitted = True
+            await bridge.stream_message_part_delta(
+                {
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "message_id": message_id,
+                    "part_id": part_id,
+                    "field": "text",
+                    "delta": text,
+                }
+            )
+
+        async def cancel(reason: str) -> None:
+            if not started:
+                return
+            await bridge.stream_message_part_updated(
+                {
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "step_id": step_id,
+                    "message_id": message_id,
+                    "part": {
+                        "id": part_id,
+                        "message_id": message_id,
+                        "session_id": self.session_id,
+                        "turn_id": turn.turn_id,
+                        "type": "text",
+                        "text": "".join(content_parts),
+                        "metadata": {"status": "cancelled", "reason": reason},
+                    },
+                }
+            )
+
+        try:
+            async for event in stream(request):
+                if event.type == "start":
+                    continue
+                if event.type == "text_delta" and event.text:
+                    await start_text_part()
+                    await self._emit_stream_activity(interaction_metadata, "")
+                    content_parts.append(event.text)
+                    pending_delta.append(event.text)
+                    await flush_delta()
+                    continue
+                if event.type == "tool_call_delta":
+                    await flush_delta(force=True)
+                    await self._emit_stream_activity(interaction_metadata, "")
+                    index = event.tool_call_index if event.tool_call_index is not None else len(tool_call_parts)
+                    current = tool_call_parts.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    if event.tool_call_id:
+                        current["id"] = event.tool_call_id
+                    if event.tool_name:
+                        current["name"] = event.tool_name
+                    if event.tool_arguments_delta:
+                        current["arguments"] += event.tool_arguments_delta
+                    continue
+                if event.type == "finish":
+                    await flush_delta(force=True)
+                    break
+        except asyncio.CancelledError:
+            await cancel("interrupted")
+            raise
+        except LLMStreamUnsupported:
+            await cancel("stream_unsupported")
+            if emitted or content_parts or tool_call_parts:
+                raise
+            return await self.provider.complete(request)
+        except Exception:
+            await cancel("stream_failed")
+            if emitted or content_parts or tool_call_parts:
+                raise
+            return await self.provider.complete(request)
+
+        content = "".join(content_parts)
+        await flush_delta(force=True)
+        if started:
+            await bridge.stream_message_part_updated(
+                {
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "step_id": step_id,
+                    "message_id": message_id,
+                    "part": {
+                        "id": part_id,
+                        "message_id": message_id,
+                        "session_id": self.session_id,
+                        "turn_id": turn.turn_id,
+                        "type": "text",
+                        "text": content,
+                        "metadata": {"status": "complete"},
+                    },
+                }
+            )
+        tool_calls: list[ToolCall] = []
+        for index in sorted(tool_call_parts):
+            raw = tool_call_parts[index]
+            name = raw["name"].strip()
+            if not name:
+                continue
+            try:
+                arguments = json.loads(raw["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw["arguments"]}
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+            tool_calls.append(ToolCall(id=raw["id"] or f"tool_call_{index + 1}", name=name, arguments=arguments))
+        return LLMResponse(content=content, tool_calls=tool_calls)
+
+    def _stream_bridge(self, interaction_metadata: dict[str, Any]) -> InteractionStreamBridge | None:
+        if not interaction_metadata.get("channel"):
+            return None
+        bridge = get_current_bridge()
+        if bridge is None:
+            return None
+        required = (
+            "stream_activity",
+            "stream_message_updated",
+            "stream_message_part_updated",
+            "stream_message_part_delta",
+        )
+        if not all(hasattr(bridge, name) for name in required):
+            return None
+        return bridge  # type: ignore[return-value]
+
+    def _can_stream_interaction_response(
+        self,
+        core: LoadedCore,
+        *,
+        interaction_metadata: dict[str, Any],
+        output_slots_override: list[SlotDefinition] | None,
+    ) -> bool:
+        if not interaction_metadata.get("channel"):
+            return False
+        if output_slots_override is not None:
+            return False
+        pipeline = core.output_pipeline
+        if pipeline.parallel or len(pipeline.serial) != 1:
+            return False
+        slot = pipeline.serial[0]
+        if slot.slot_id != "base_output" or slot.entrypoint != "module:process":
+            return False
+        if slot.history_policy != "persist" or slot.capabilities:
+            return False
+        return slot.relative_path.endswith("/output/base_output")
 
     @property
     def _session_started(self) -> bool:

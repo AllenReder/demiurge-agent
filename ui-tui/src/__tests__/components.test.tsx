@@ -1,16 +1,44 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render } from "ink-testing-library"
+import { act } from "react"
+import { App } from "../App"
 import { Composer, shouldInsertNewline } from "../components/Composer"
-import { Footer } from "../components/Footer"
+import { ActivityBar, Footer } from "../components/Footer"
 import { Markdown } from "../components/Markdown"
 import { PromptPanel } from "../components/PromptPanel"
 import { MessageBlock, ProgressBlock, ToolBlock, Transcript } from "../components/Transcript"
 import { initialStatus } from "../app/state"
 import { themedColors } from "../components/theme"
+import type { GatewayClient } from "../gateway/client"
 import { applySlashSuggestion, exactSlashCommand, slashSuggestions, slashTokenAtCursor } from "../lib/slash"
 import { displayWidth } from "../lib/terminal"
+import type { GatewayEvent } from "../types"
 
-afterEach(() => cleanup())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  cleanup()
+})
+
+class FakeGatewayClient {
+  private handlers = new Set<(event: GatewayEvent) => void>()
+  start = vi.fn()
+  request = vi.fn().mockResolvedValue({})
+  shutdown = vi.fn()
+
+  onEvent(handler: (event: GatewayEvent) => void): () => void {
+    this.handlers.add(handler)
+    return () => this.handlers.delete(handler)
+  }
+
+  emit(event: GatewayEvent): void {
+    for (const handler of this.handlers) handler(event)
+  }
+
+  asClient(): GatewayClient {
+    return this as unknown as GatewayClient
+  }
+}
 
 describe("Ink TUI components", () => {
   it("renders user block and assistant markdown flow", () => {
@@ -36,6 +64,68 @@ describe("Ink TUI components", () => {
     expect(theme.userBubble).toBe("#20242e")
     expect(theme.success).toBe("#7ee787")
     expect(theme.system).toBe("#d2a8ff")
+  })
+
+  it("renders activity as a visible standalone status bar", () => {
+    const bar = render(
+      <ActivityBar
+        columns={80}
+        now={9_000}
+        status={{
+          ...initialStatus,
+          activity: "waiting for model",
+          activity_started_at: 2_000,
+          status: "running",
+          work_started_at: 1_000,
+        }}
+      />,
+    )
+    expect(bar.lastFrame()).toContain("Working 8s")
+    expect(bar.lastFrame()).toContain("Waiting for model")
+  })
+
+  it("hides activity while work timing is paused", () => {
+    const bar = render(<ActivityBar columns={80} status={{ ...initialStatus, status: "running", work_elapsed_ms: 5_000, work_started_at: 0 }} />)
+    expect(bar.lastFrame()).toBe("")
+  })
+
+  it("does not flash zero when work timing resumes", () => {
+    vi.spyOn(Date, "now").mockReturnValue(20_000)
+    const bar = render(<ActivityBar columns={80} status={{ ...initialStatus, status: "running", work_started_at: 10_000 }} />)
+    expect(bar.lastFrame()).toContain("Working 10s")
+    expect(bar.lastFrame()).not.toContain("Working 0s")
+  })
+
+  it("cancels pending stream delta timer when a non-delta event flushes immediately", () => {
+    vi.useFakeTimers()
+    const client = new FakeGatewayClient()
+    const app = render(<App client={client.asClient()} />)
+
+    act(() => {
+      client.emit({
+        event: "interaction.message.part.updated",
+        payload: {
+          turn_id: "turn_1",
+          message_id: "msg_1",
+          part: { id: "part_1", message_id: "msg_1", turn_id: "turn_1", type: "text", text: "", metadata: { status: "streaming" } },
+        },
+      })
+      client.emit({
+        event: "interaction.message.part.delta",
+        payload: { turn_id: "turn_1", message_id: "msg_1", part_id: "part_1", field: "text", delta: "hel" },
+      })
+    })
+    expect(vi.getTimerCount()).toBe(1)
+
+    act(() => {
+      client.emit({
+        event: "interaction.activity",
+        payload: { activity: "waiting for model", activity_started_at: 1_000, work_started_at: 0, work_elapsed_ms: 0 },
+      })
+    })
+
+    expect(app.lastFrame()).toContain("hel")
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it("aligns user message blocks from host UI preference", () => {

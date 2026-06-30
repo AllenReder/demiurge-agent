@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Awaitable, Callable
 
@@ -90,6 +91,8 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
+        self._work_started_at_ms = 0
+        self._work_elapsed_ms = 0
 
     @property
     def running(self) -> bool:
@@ -160,6 +163,29 @@ class TuiInteractionBridge:
             },
         )
 
+    async def stream_message_updated(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.updated", _json_safe(payload))
+
+    async def stream_message_part_updated(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.part.updated", _json_safe(payload))
+
+    async def stream_message_part_delta(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.part.delta", _json_safe(payload))
+
+    async def stream_activity(self, payload: dict[str, Any]) -> None:
+        activity = str(payload.get("activity") or "")
+        now_ms = int(time.time() * 1000)
+        elapsed_ms = self._current_work_elapsed_ms()
+        await self.emit(
+            "interaction.activity",
+            {
+                "activity": activity,
+                "activity_started_at": now_ms if activity else 0,
+                "work_started_at": self._work_started_at_ms,
+                "work_elapsed_ms": elapsed_ms,
+            },
+        )
+
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
         pending = await self._open_prompt(prompt, kind=str(prompt.metadata.get("kind") or "clarify"), wait=True)
         assert pending.future is not None
@@ -171,12 +197,16 @@ class TuiInteractionBridge:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ApprovalDecision] = loop.create_future()
         self._pending_approvals[approval_id] = future
+        self._pause_work_timer()
         await self.emit("interaction.approval.request", {"approval_id": approval_id, "request": asdict(request)})
+        await self.stream_activity({"activity": ""})
         await self._emit_status()
         try:
             return await future
         finally:
             self._pending_approvals.pop(approval_id, None)
+            self._resume_work_timer()
+            await self.stream_activity({"activity": ""})
             await self._emit_status()
 
     async def reply_approval(self, approval_id: str, value: str) -> dict[str, Any]:
@@ -278,7 +308,11 @@ class TuiInteractionBridge:
         return await handler(command.args)
 
     async def _run_message(self, text: str) -> None:
+        self._work_started_at_ms = int(time.time() * 1000)
+        self._work_elapsed_ms = 0
+        completed = False
         try:
+            await self.stream_activity({"activity": ""})
             await self.emit("interaction.message", {"role": "user", "text": text})
             result = await self.runtime.handle(
                 InteractionInbound(
@@ -291,15 +325,36 @@ class TuiInteractionBridge:
                 bridge=self,
             )
             await self.deliver(result)
+            completed = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = str(exc)
             await self.emit("interaction.error", {"message": str(exc), "source": "tui_bridge"})
         finally:
+            if completed and self._work_started_at_ms:
+                await self._emit_notice(f"Worked for {_format_elapsed_ms(self._current_work_elapsed_ms())}")
+            self._work_started_at_ms = 0
+            self._work_elapsed_ms = 0
+            await self.stream_activity({"activity": ""})
             self._running_task = None
             await self._emit_status()
             await self._drain_next_queued_input()
+
+    def _pause_work_timer(self) -> None:
+        if not self._work_started_at_ms:
+            return
+        self._work_elapsed_ms = int(time.time() * 1000) - self._work_started_at_ms
+        self._work_started_at_ms = 0
+
+    def _resume_work_timer(self) -> None:
+        if self._running_task is not None and not self._running_task.done():
+            self._work_started_at_ms = int(time.time() * 1000) - self._work_elapsed_ms
+
+    def _current_work_elapsed_ms(self) -> int:
+        if self._work_started_at_ms:
+            return int(time.time() * 1000) - self._work_started_at_ms
+        return self._work_elapsed_ms
 
     async def _drain_next_queued_input(self) -> None:
         if self.running or self._queued_inputs.empty() or self.should_exit:
@@ -853,6 +908,14 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _format_elapsed_ms(value: int) -> str:
+    seconds = max(0, int(round(value / 1000)))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def shorten_text(text: str, limit: int = 160) -> str:

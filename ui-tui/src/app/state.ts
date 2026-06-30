@@ -30,6 +30,10 @@ export const initialStatus: StatusState = {
   pending_prompts: 0,
   pending_approvals: 0,
   last_error: "",
+  activity: "",
+  activity_started_at: 0,
+  work_started_at: 0,
+  work_elapsed_ms: 0,
 }
 
 export function createInitialState(): AppState {
@@ -68,6 +72,18 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
   if (event === "interaction.status") {
     return { ...state, status: { ...state.status, ...statusFromPayload(payload) } }
   }
+  if (event === "interaction.activity") {
+    return {
+      ...state,
+      status: {
+        ...state.status,
+        activity: stringValue(payload.activity),
+        activity_started_at: numberValue(payload.activity_started_at),
+        work_started_at: numberValue(payload.work_started_at),
+        work_elapsed_ms: numberValue(payload.work_elapsed_ms),
+      },
+    }
+  }
   if (event === "interaction.message") {
     const role = stringValue(payload.role) === "user" ? "user" : "system"
     return appendItem(state, {
@@ -76,6 +92,54 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       role,
       text: stringValue(payload.text),
     })
+  }
+  if (event === "interaction.message.updated") {
+    return state
+  }
+  if (event === "interaction.message.part.updated") {
+    const part = recordValue(payload.part)
+    if (!part || stringValue(part.type) !== "text") return state
+    const partId = stringValue(part.id)
+    const messageId = stringValue(part.message_id) || stringValue(part.messageID) || stringValue(payload.message_id)
+    if (!partId || !messageId) return state
+    const metadata = recordValue(part.metadata) ?? {}
+    const status = streamStatusValue(metadata.status)
+    const text = stringValue(part.text)
+    const existingIndex = state.transcript.findIndex((item) => item.type === "message" && item.part_id === partId)
+    if (existingIndex >= 0) {
+      return updateItem(state, existingIndex, (item) =>
+        item.type === "message"
+          ? {
+              ...item,
+              text: text.length >= item.text.length ? text : item.text,
+              stream_status: status,
+              metadata: { ...(item.metadata ?? {}), ...metadata },
+            }
+          : item,
+      )
+    }
+    return appendItem(state, {
+      id: nextId(state, "message"),
+      type: "message",
+      role: "assistant",
+      text,
+      metadata,
+      message_id: messageId,
+      part_id: partId,
+      turn_id: stringValue(part.turn_id) || stringValue(part.turnID) || stringValue(payload.turn_id),
+      stream_status: status,
+    })
+  }
+  if (event === "interaction.message.part.delta") {
+    const partId = stringValue(payload.part_id) || stringValue(payload.partID)
+    const field = stringValue(payload.field)
+    const delta = stringValue(payload.delta)
+    if (!partId || field !== "text" || !delta) return state
+    const existingIndex = state.transcript.findIndex((item) => item.type === "message" && item.part_id === partId)
+    if (existingIndex < 0) return state
+    return updateItem(state, existingIndex, (item) =>
+      item.type === "message" && item.stream_status !== "cancelled" ? { ...item, text: item.text + delta } : item,
+    )
   }
   if (event === "interaction.deliver") {
     let next = state
@@ -112,6 +176,8 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
         })
       } else {
         const role = stringValue(metadata.role) === "system" ? "system" : "assistant"
+        const turnId = stringValue(payload.turn_id) || stringValue(metadata.turn_id)
+        if (role === "assistant" && turnId && hasMatchingCompletedStream(next, turnId, text)) continue
         next = appendItem(next, {
           id: nextId(next, "message"),
           type: "message",
@@ -186,8 +252,21 @@ function appendItem(state: AppState, item: TranscriptItem): AppState {
   return { ...state, transcript: [...state.transcript, item].slice(-500) }
 }
 
+function updateItem(state: AppState, index: number, update: (item: TranscriptItem) => TranscriptItem): AppState {
+  if (index < 0 || index >= state.transcript.length) return state
+  const transcript = state.transcript.slice()
+  transcript[index] = update(transcript[index])
+  return { ...state, transcript }
+}
+
 function nextId(state: AppState, prefix: string): string {
   return `${prefix}_${state.transcript.length + 1}`
+}
+
+function hasMatchingCompletedStream(state: AppState, turnId: string, text: string): boolean {
+  return state.transcript.some(
+    (item) => item.type === "message" && item.role === "assistant" && item.turn_id === turnId && item.stream_status === "complete" && item.text === text,
+  )
 }
 
 function statusFromPayload(payload: Record<string, unknown>): Partial<StatusState> {
@@ -223,6 +302,10 @@ function busyModeValue(value: unknown): "interrupt" | "queue" {
 
 function userMessageAlignValue(value: unknown): UserMessageAlign {
   return value === "right" ? "right" : "left"
+}
+
+function streamStatusValue(value: unknown): "streaming" | "complete" | "cancelled" {
+  return value === "complete" || value === "cancelled" ? value : "streaming"
 }
 
 function hexColorValue(value: unknown, fallback: string): string {
