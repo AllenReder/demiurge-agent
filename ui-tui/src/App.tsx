@@ -1,23 +1,44 @@
 import { Box, useApp, useInput, useStdout } from "ink"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { clearPrompt, createInitialState, reduceGatewayEvent, selectPromptChoice, toggleApprovalCommand } from "./app/state"
 import { submitComposer, submitPrompt } from "./app/actions"
 import { Transcript } from "./components/Transcript"
 import { Composer } from "./components/Composer"
-import { Footer } from "./components/Footer"
+import { ActivityBar, Footer } from "./components/Footer"
 import { PromptPanel } from "./components/PromptPanel"
 import { themedColors } from "./components/theme"
 import { GatewayClient } from "./gateway/client"
 import { clampColumns } from "./lib/terminal"
+import type { GatewayEvent } from "./types"
 
 export function App(props: { client: GatewayClient }) {
   const [state, setState] = useState(createInitialState)
+  const [now, setNow] = useState(Date.now)
+  const pendingDeltas = useRef<GatewayEvent[]>([])
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const app = useApp()
   const { stdout } = useStdout()
   const columns = clampColumns(stdout.columns)
 
   useEffect(() => {
+    const flushDeltas = () => {
+      const events = pendingDeltas.current
+      pendingDeltas.current = []
+      deltaTimer.current = null
+      if (!events.length) return
+      setState((current) => events.reduce(reduceGatewayEvent, current))
+    }
+    const scheduleDeltaFlush = () => {
+      if (deltaTimer.current !== null) return
+      deltaTimer.current = setTimeout(flushDeltas, 50)
+    }
     const unsubscribe = props.client.onEvent((event) => {
+      if (event.event === "interaction.message.part.delta") {
+        pendingDeltas.current.push(event)
+        scheduleDeltaFlush()
+        return
+      }
+      flushDeltas()
       setState((current) => reduceGatewayEvent(current, event))
       if (event.event === "channel.shutdown") app.exit()
     })
@@ -31,10 +52,21 @@ export function App(props: { client: GatewayClient }) {
       )
     })
     return () => {
+      if (deltaTimer.current !== null) {
+        clearTimeout(deltaTimer.current)
+        deltaTimer.current = null
+      }
+      pendingDeltas.current = []
       unsubscribe()
       props.client.shutdown()
     }
   }, [app, props.client])
+
+  useEffect(() => {
+    if (!state.status.work_started_at) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [state.status.activity, state.status.activity_started_at, state.status.work_started_at])
 
   const prompt = state.prompt
   useInput((input, key) => {
@@ -79,6 +111,7 @@ export function App(props: { client: GatewayClient }) {
     <Box flexDirection="column" minHeight={10} width={columns}>
       <Transcript colors={theme} columns={columns} items={items} userMessageAlign={state.status.user_message_align} />
       {prompt ? <PromptPanel colors={theme} columns={columns} prompt={prompt} /> : null}
+      <ActivityBar colors={theme} columns={columns} now={now} status={state.status} />
       <Composer
         colors={theme}
         columns={columns}
@@ -88,7 +121,7 @@ export function App(props: { client: GatewayClient }) {
           void submitComposer(props.client, value)
         }}
       />
-      <Footer colors={theme} columns={columns} status={state.status} />
+      <Footer colors={theme} columns={columns} now={now} status={state.status} />
     </Box>
   )
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Awaitable, Callable
 
@@ -90,6 +91,7 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
+        self._work_started_at_ms = 0
 
     @property
     def running(self) -> bool:
@@ -157,6 +159,26 @@ class TuiInteractionBridge:
                 "turn_id": outbound.turn_id,
                 "metadata": _json_safe(outbound.metadata),
                 "deliveries": [_delivery_dict(delivery) for delivery in deliveries],
+            },
+        )
+
+    async def emit_message_updated(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.updated", _json_safe(payload))
+
+    async def emit_message_part_updated(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.part.updated", _json_safe(payload))
+
+    async def emit_message_part_delta(self, payload: dict[str, Any]) -> None:
+        await self.emit("interaction.message.part.delta", _json_safe(payload))
+
+    async def emit_activity(self, activity: str) -> None:
+        now_ms = int(time.time() * 1000)
+        await self.emit(
+            "interaction.activity",
+            {
+                "activity": activity,
+                "activity_started_at": now_ms if activity else 0,
+                "work_started_at": self._work_started_at_ms,
             },
         )
 
@@ -278,7 +300,10 @@ class TuiInteractionBridge:
         return await handler(command.args)
 
     async def _run_message(self, text: str) -> None:
+        self._work_started_at_ms = int(time.time() * 1000)
+        completed = False
         try:
+            await self.emit_activity("")
             await self.emit("interaction.message", {"role": "user", "text": text})
             result = await self.runtime.handle(
                 InteractionInbound(
@@ -291,12 +316,17 @@ class TuiInteractionBridge:
                 bridge=self,
             )
             await self.deliver(result)
+            completed = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = str(exc)
             await self.emit("interaction.error", {"message": str(exc), "source": "tui_bridge"})
         finally:
+            if completed and self._work_started_at_ms:
+                await self._emit_notice(f"Worked for {_format_elapsed_ms(int(time.time() * 1000) - self._work_started_at_ms)}")
+            self._work_started_at_ms = 0
+            await self.emit_activity("")
             self._running_task = None
             await self._emit_status()
             await self._drain_next_queued_input()
@@ -853,6 +883,14 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _format_elapsed_ms(value: int) -> str:
+    seconds = max(0, int(round(value / 1000)))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def shorten_text(text: str, limit: int = 160) -> str:

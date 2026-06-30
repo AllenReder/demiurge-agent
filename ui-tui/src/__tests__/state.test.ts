@@ -39,6 +39,50 @@ describe("interaction reducer", () => {
     expect(state.transcript[0]).toMatchObject({ type: "progress", text: "Running tests", metadata: { step: "test" } })
   })
 
+  it("merges streamed message part deltas and deduplicates matching final delivery", () => {
+    let state = createInitialState()
+    state = reduceGatewayEvent(state, {
+      event: "interaction.message.part.updated",
+      payload: {
+        turn_id: "turn_1",
+        message_id: "msg_1",
+        part: { id: "part_1", message_id: "msg_1", turn_id: "turn_1", type: "text", text: "", metadata: { status: "streaming" } },
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.message.part.delta",
+      payload: { turn_id: "turn_1", message_id: "msg_1", part_id: "part_1", field: "text", delta: "hel" },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.message.part.delta",
+      payload: { turn_id: "turn_1", message_id: "msg_1", part_id: "part_1", field: "text", delta: "lo" },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.message.part.updated",
+      payload: {
+        turn_id: "turn_1",
+        message_id: "msg_1",
+        part: { id: "part_1", message_id: "msg_1", turn_id: "turn_1", type: "text", text: "hello", metadata: { status: "complete" } },
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.deliver",
+      payload: { turn_id: "turn_1", deliveries: [{ kind: "message", text: "hello", visible: true, metadata: {} }] },
+    })
+
+    expect(state.transcript).toHaveLength(1)
+    expect(state.transcript[0]).toMatchObject({ type: "message", role: "assistant", text: "hello", stream_status: "complete" })
+  })
+
+  it("ignores orphan streamed deltas", () => {
+    const state = reduceGatewayEvent(createInitialState(), {
+      event: "interaction.message.part.delta",
+      payload: { turn_id: "turn_1", message_id: "msg_1", part_id: "missing", field: "text", delta: "ignored" },
+    })
+
+    expect(state.transcript).toEqual([])
+  })
+
   it("tracks prompt selection", () => {
     let state = reduceGatewayEvent(createInitialState(), {
       event: "interaction.prompt.request",

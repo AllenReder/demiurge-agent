@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { cleanup, render } from "ink-testing-library"
 import { Composer, shouldInsertNewline } from "../components/Composer"
-import { Footer } from "../components/Footer"
+import { ActivityBar, Footer } from "../components/Footer"
 import { Markdown } from "../components/Markdown"
 import { PromptPanel } from "../components/PromptPanel"
 import { MessageBlock, ProgressBlock, ToolBlock, Transcript } from "../components/Transcript"
@@ -36,6 +36,19 @@ describe("Ink TUI components", () => {
     expect(theme.userBubble).toBe("#20242e")
     expect(theme.success).toBe("#7ee787")
     expect(theme.system).toBe("#d2a8ff")
+  })
+
+  it("renders activity as a visible standalone status bar", () => {
+    const bar = render(
+      <ActivityBar
+        columns={80}
+        now={4_000}
+        status={{ ...initialStatus, activity: "waiting for model", activity_started_at: 2_000, status: "running", work_started_at: 1_000 }}
+      />,
+    )
+    expect(bar.lastFrame()).toContain("Working 3s")
+    expect(bar.lastFrame()).toContain("Waiting for model")
+    expect(bar.lastFrame()).not.toContain("Waiting for model 2s")
   })
 
   it("aligns user message blocks from host UI preference", () => {

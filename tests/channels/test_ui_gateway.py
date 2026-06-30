@@ -101,6 +101,87 @@ async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_bridge_streams_text_parts_for_passthrough_core_without_tools(tmp_path):
+    script = tmp_path / "stream-script.json"
+    write_json(script, [{"stream_chunks": ["hel", "lo"]}])
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", core_id="evolver", provider_name="fake", fake_script=script)
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.submit("hello")
+    await bridge.wait_for_idle()
+
+    part_updates = sink.payloads("interaction.message.part.updated")
+    deltas = sink.payloads("interaction.message.part.delta")
+    assert part_updates
+    assert "".join(item["delta"] for item in deltas) == "hello"
+    assert part_updates[-1]["part"]["text"] == "hello"
+    assert part_updates[-1]["part"]["metadata"]["status"] == "complete"
+    assert "hello" in sink.texts()
+    assert "Worked for" in sink.texts()
+    assert any(payload.get("work_started_at") for payload in sink.payloads("interaction.activity"))
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_batches_small_stream_chunks_into_multi_line_blocks(tmp_path):
+    script = tmp_path / "stream-script.json"
+    write_json(script, [{"stream_chunks": ["one", "\n", "two", "\n", "three", "\n", "four"]}])
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", core_id="evolver", provider_name="fake", fake_script=script)
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.submit("hello")
+    await bridge.wait_for_idle()
+
+    deltas = [item["delta"] for item in sink.payloads("interaction.message.part.delta")]
+    assert deltas == ["one\ntwo\nthree\n", "four"]
+    assert "one\ntwo\nthree\nfour" in sink.texts()
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_streams_direct_text_even_when_request_has_tools(tmp_path):
+    script = tmp_path / "stream-script.json"
+    write_json(script, [{"content": "complete only", "stream_chunks": ["streamed with tools"]}])
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.submit("hello")
+    await bridge.wait_for_idle()
+
+    assert sink.payloads("interaction.message.part.updated")
+    assert "".join(item["delta"] for item in sink.payloads("interaction.message.part.delta")) == "streamed with tools"
+    assert "streamed with tools" in sink.texts()
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_streamed_tool_call_enters_tool_flow(tmp_path):
+    script = tmp_path / "stream-script.json"
+    write_json(
+        script,
+        [
+            {
+                "stream_chunks": ["checking"],
+                "tool_calls": [{"id": "call_1", "name": "tools_list", "arguments": {}}],
+            },
+            {"stream_chunks": ["after tool"]},
+        ],
+    )
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.submit("please use tools_list")
+    await bridge.wait_for_idle()
+
+    assert "checking" in sink.texts()
+    assert "after tool" in sink.texts()
+    tool_payloads = [payload for payload in sink.payloads("interaction.deliver") if payload.get("tool_results")]
+    assert tool_payloads
+    assert tool_payloads[0]["tool_results"][0]["name"] == "tools_list"
+
+
+@pytest.mark.asyncio
 async def test_tui_bridge_ready_includes_tui_slash_command_catalog(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
