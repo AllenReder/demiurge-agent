@@ -69,6 +69,7 @@ assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
+    ├── bootstrap/  # optional session-start context
     ├── input/
     ├── output/
     ├── tools/
@@ -79,7 +80,7 @@ assistant/
     └── tests/
 ```
 
-The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares its soul, skills, authored tools, channels, schedules, IO modules, optional MCP server tools, and optional code slots.
+The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares its soul, optional bootstrap context modules, skills, authored tools, channels, schedules, IO modules, optional MCP server tools, and optional code slots.
 
 IO modules are core-local extension points for input shaping and output delivery. They let a core adapt channel input, format responses, emit local artifacts, or route output while still going through host-owned capabilities and approvals.
 

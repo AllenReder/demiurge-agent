@@ -38,6 +38,10 @@ def test_loader_discovers_source_agent_slots():
     assert [slot.slot_id for slot in core.output_slots] == ["base_output"]
     assert [slot.slot_id for slot in core.output_pipeline.serial] == ["base_output"]
     assert [slot.slot_id for slot in core.output_pipeline.parallel] == []
+    assert core.bootstrap_enabled is False
+    assert core.bootstrap_slots == []
+    assert core.bootstrap_pipeline.serial == []
+    assert core.bootstrap_pipeline.parallel == []
     assert [slot.slot_id for slot in core.tool_slots] == ["echo"]
     assert core.skills == []
     assert core.schedules == []
@@ -63,6 +67,9 @@ def test_loader_discovers_evolver_source_agent():
     assert [slot.slot_id for slot in core.input_pipeline.serial] == ["base_input"]
     assert [slot.slot_id for slot in core.output_slots] == ["base_output"]
     assert [slot.slot_id for slot in core.output_pipeline.serial] == ["base_output"]
+    assert core.bootstrap_enabled is False
+    assert core.bootstrap_slots == []
+    assert core.bootstrap_pipeline.serial == []
     assert core.schedules == []
     assert core.manifest.slots["soul"] == "agent/SOUL.md"
     assert "demiurge evolver" in core.soul
@@ -355,6 +362,104 @@ def test_loader_requires_input_and_output_pipeline_files(tmp_path):
     (target / "agent" / "output" / "pipeline.yaml").unlink()
 
     with pytest.raises(CoreLoadError, match="missing output pipeline"):
+        CoreLoader().load(target)
+
+
+def test_loader_discovers_optional_bootstrap_serial_pipeline(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    bootstrap_dir = target / "agent" / "bootstrap"
+    slot_dir = bootstrap_dir / "session_context"
+    slot_dir.mkdir(parents=True)
+    (bootstrap_dir / "pipeline.yaml").write_text(
+        "serial:\n  - session_context\n",
+        encoding="utf-8",
+    )
+    (slot_dir / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        "description: test bootstrap\n"
+        "failure_policy: hard\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+
+    core = CoreLoader().load(target)
+
+    assert core.bootstrap_enabled is True
+    assert [slot.slot_id for slot in core.bootstrap_slots] == ["session_context"]
+    assert [slot.slot_id for slot in core.bootstrap_pipeline.serial] == ["session_context"]
+    assert core.bootstrap_pipeline.parallel == []
+
+
+def test_loader_rejects_bootstrap_parallel_key(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    bootstrap_dir = target / "agent" / "bootstrap"
+    bootstrap_dir.mkdir(parents=True)
+    (bootstrap_dir / "pipeline.yaml").write_text(
+        "serial: []\nparallel: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CoreLoadError, match="invalid bootstrap pipeline.yaml key"):
+        CoreLoader().load(target)
+
+
+def test_loader_rejects_unknown_bootstrap_pipeline_slot(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    bootstrap_dir = target / "agent" / "bootstrap"
+    bootstrap_dir.mkdir(parents=True)
+    (bootstrap_dir / "pipeline.yaml").write_text(
+        "serial:\n  - missing\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CoreLoadError, match="unknown bootstrap pipeline slot: missing"):
+        CoreLoader().load(target)
+
+
+def test_loader_rejects_duplicate_bootstrap_pipeline_slot(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    bootstrap_dir = target / "agent" / "bootstrap"
+    slot_dir = bootstrap_dir / "session_context"
+    slot_dir.mkdir(parents=True)
+    (bootstrap_dir / "pipeline.yaml").write_text(
+        "serial:\n  - session_context\n  - session_context\n",
+        encoding="utf-8",
+    )
+    (slot_dir / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        "failure_policy: soft\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CoreLoadError, match="duplicate bootstrap pipeline slot session_context"):
+        CoreLoader().load(target)
+
+
+def test_loader_rejects_invalid_bootstrap_failure_policy(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    bootstrap_dir = target / "agent" / "bootstrap"
+    slot_dir = bootstrap_dir / "bad_policy"
+    slot_dir.mkdir(parents=True)
+    (bootstrap_dir / "pipeline.yaml").write_text("serial:\n  - bad_policy\n", encoding="utf-8")
+    (slot_dir / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        "failure_policy: explode\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CoreLoadError, match="invalid bootstrap module failure_policy"):
         CoreLoader().load(target)
 
 

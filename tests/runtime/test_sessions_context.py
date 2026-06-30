@@ -1,6 +1,8 @@
+import shutil
+
 import pytest
 
-from demiurge.app import create_app
+from demiurge.app import create_app, source_agents_root
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.providers import LLMResponse, ToolCall
 
@@ -15,6 +17,43 @@ class EchoInspectingProvider:
             return LLMResponse(content="Summary of compacted historical turns.")
         user_text = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
         return LLMResponse(content=f"assistant: {user_text}")
+
+
+def _copy_agents(tmp_path):
+    target = tmp_path / "agents"
+    shutil.copytree(source_agents_root(), target)
+    return target
+
+
+def _write_bootstrap_module(agents, code, *, slot_id="session_context", failure_policy="soft", pipeline=True):
+    bootstrap_dir = agents / "assistant" / "agent" / "bootstrap"
+    slot_dir = bootstrap_dir / slot_id
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    if pipeline:
+        (bootstrap_dir / "pipeline.yaml").write_text(
+            f"serial:\n  - {slot_id}\n",
+            encoding="utf-8",
+        )
+    (slot_dir / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        f"failure_policy: {failure_policy}\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+    (slot_dir / "module.py").write_text(code, encoding="utf-8")
+
+
+def _write_skill(agents):
+    skill_dir = agents / "assistant" / "agent" / "skills"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "debugging.md").write_text(
+        "---\n"
+        "name: debugging\n"
+        "description: Debugging helper.\n"
+        "---\n\n"
+        "# Debugging\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.asyncio
@@ -75,6 +114,120 @@ async def test_context_assembler_emits_default_assistant_layers(tmp_path):
     ]
     assert all("## Skills (progressive loading)" not in message.content for message in request.messages)
     assert all("Project Notes" not in message.content for message in request.messages)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_file_is_written_and_injected_after_skill_index(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_skill(agents)
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('  BOOT  ')\n",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = EchoInspectingProvider()
+    app.runner.provider = provider
+
+    await app.runner.run_turn("hello")
+
+    session_id = app.runner.session_id
+    assert app.runner.session_store.bootstrap_context_path(session_id).read_text(encoding="utf-8") == "  BOOT  "
+    layer_event = next(event for event in app.runner.event_log.tail(20) if event["type"] == "context.assembled")
+    assert [layer["name"] for layer in layer_event["layers"]] == [
+        "core_soul",
+        "skill_index",
+        "bootstrap_context",
+        "current_turn",
+    ]
+    request_messages = provider.requests[0].messages
+    skill_index = next(index for index, message in enumerate(request_messages) if "## Skills" in message.content)
+    bootstrap_index = next(index for index, message in enumerate(request_messages) if message.content == "  BOOT  ")
+    assert bootstrap_index > skill_index
+    assert all(message.role != "system" for message in app.runner.session_store.read_messages(session_id))
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_snapshot_is_reused_across_turns_and_resume(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('BOOT1')\n",
+    )
+    home = tmp_path / "home"
+    first = create_app(home=home, provider_name="fake", agents_root=agents)
+    first_provider = EchoInspectingProvider()
+    first.runner.provider = first_provider
+
+    await first.runner.run_turn("first")
+    session_id = first.runner.session_id
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('BOOT2')\n",
+    )
+    await first.runner.run_turn("second")
+
+    second = create_app(home=home, provider_name="fake", agents_root=agents, session_id=session_id)
+    second_provider = EchoInspectingProvider()
+    second.runner.provider = second_provider
+    await second.runner.run_turn("third")
+
+    assert first.runner.session_store.read_bootstrap_context(session_id) == "BOOT1"
+    assert any(message.content == "BOOT1" for message in second_provider.requests[0].messages)
+    assert all(message.content != "BOOT2" for message in second_provider.requests[0].messages)
+    events = second.runner.event_log.read_all()
+    assert [event["type"] for event in events].count("bootstrap.started") == 1
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_soft_failure_creates_empty_snapshot_and_continues(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    raise RuntimeError('boom')\n",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = EchoInspectingProvider()
+    app.runner.provider = provider
+
+    await app.runner.run_turn("hello")
+
+    session_id = app.runner.session_id
+    assert app.runner.session_store.bootstrap_context_exists(session_id)
+    assert app.runner.session_store.read_bootstrap_context(session_id) == ""
+    layer_event = next(event for event in app.runner.event_log.tail(20) if event["type"] == "context.assembled")
+    assert "bootstrap_context" not in [layer["name"] for layer in layer_event["layers"]]
+    event_types = [event["type"] for event in app.runner.event_log.read_all()]
+    assert "bootstrap.module.failed" in event_types
+    assert "bootstrap.completed" in event_types
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_hard_failure_blocks_first_model_request_without_snapshot(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    raise RuntimeError('boom')\n",
+        failure_policy="hard",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = EchoInspectingProvider()
+    app.runner.provider = provider
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await app.runner.run_turn("hello")
+
+    session_id = app.runner.session_id
+    assert not app.runner.session_store.bootstrap_context_exists(session_id)
+    assert app.runner.session_store.read_messages(session_id) == []
+    assert provider.requests == []
+    event_types = [event["type"] for event in app.runner.event_log.read_all()]
+    assert "bootstrap.module.failed" in event_types
+    assert "bootstrap.failed" in event_types
 
 
 @pytest.mark.asyncio

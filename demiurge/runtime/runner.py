@@ -40,6 +40,7 @@ from demiurge.sdk import (
     AgentSpawnHandle,
     AgentToolSummary,
     ArtifactRef,
+    BootstrapContext,
     ContextContribution,
     DeliverEffect,
     EffectRequest,
@@ -269,6 +270,16 @@ class ModuleAgentsClient:
         if isinstance(context, str):
             return [context]
         return [str(item) for item in context if str(item).strip()]
+
+
+class ModuleBootstrapClient:
+    def __init__(self) -> None:
+        self.fragments: list[str] = []
+
+    def add(self, text: str) -> None:
+        content = str(text or "")
+        if content.strip():
+            self.fragments.append(content)
 
 
 class ModuleInputBuilder:
@@ -1180,9 +1191,11 @@ class SessionTurnStepRunner:
         self._resolve_session_for_interaction(core, interaction_metadata)
         input_slots_override = self._resolve_phase_slots(core, "input", input_slot_ids)
         output_slots_override = self._resolve_phase_slots(core, "output", output_slot_ids)
+        capability = CapabilityFacade(core)
         if not self._session_started:
             self.event_log.emit("session.started", core_id=core.core_id, core_version=core.version, **interaction_metadata)
             self._session_started_ids.add(self.session_id)
+        await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
 
         turn_id = utc_id("turn_")
         input_envelope = InputEnvelope(raw_text=text, metadata=interaction_metadata)
@@ -1198,7 +1211,6 @@ class SessionTurnStepRunner:
             state=state,
             metadata=interaction_metadata,
         )
-        capability = CapabilityFacade(core)
 
         self.event_log.emit(
             "turn.started",
@@ -1425,6 +1437,100 @@ class SessionTurnStepRunner:
     def _session_started(self) -> bool:
         return self.session_id in self._session_started_ids
 
+    async def _ensure_bootstrap_context(
+        self,
+        core: LoadedCore,
+        capability: CapabilityFacade,
+        *,
+        interaction_metadata: dict[str, Any],
+    ) -> None:
+        if not core.bootstrap_enabled:
+            return
+        if self.session_store.bootstrap_context_exists(self.session_id):
+            return
+
+        self.event_log.emit(
+            "bootstrap.started",
+            core_id=core.core_id,
+            core_version=core.version,
+            slots=[slot.slot_id for slot in core.bootstrap_pipeline.serial],
+            **interaction_metadata,
+        )
+        fragments: list[str] = []
+        try:
+            for slot in core.bootstrap_pipeline.serial:
+                self.event_log.emit(
+                    "bootstrap.module.started",
+                    core_id=core.core_id,
+                    core_version=core.version,
+                    slot=slot.relative_path,
+                    kind="bootstrap",
+                    **interaction_metadata,
+                )
+                client = ModuleBootstrapClient()
+                ctx = BootstrapContext(
+                    session_id=self.session_id,
+                    core_id=core.core_id,
+                    core_version=core.version,
+                    slot_id=slot.slot_id,
+                    slot_path=slot.relative_path,
+                    capability=capability,
+                    bootstrap=client,
+                )
+                try:
+                    value = await self._call_slot(slot, ctx)
+                    if value is not None:
+                        self.event_log.emit(
+                            "bootstrap.module.return_ignored",
+                            core_id=core.core_id,
+                            core_version=core.version,
+                            slot=slot.relative_path,
+                            kind="bootstrap",
+                            **interaction_metadata,
+                        )
+                    fragments.extend(client.fragments)
+                    self.event_log.emit(
+                        "bootstrap.module.completed",
+                        core_id=core.core_id,
+                        core_version=core.version,
+                        slot=slot.relative_path,
+                        kind="bootstrap",
+                        fragments=len(client.fragments),
+                        chars=sum(len(fragment) for fragment in client.fragments),
+                        **interaction_metadata,
+                    )
+                except Exception as exc:
+                    self.event_log.emit(
+                        "bootstrap.module.failed",
+                        core_id=core.core_id,
+                        core_version=core.version,
+                        slot=slot.relative_path,
+                        kind="bootstrap",
+                        error=str(exc),
+                        **interaction_metadata,
+                    )
+                    if slot.failure_policy == "hard":
+                        raise
+            content = "\n\n".join(fragments)
+            self.session_store.write_bootstrap_context(self.session_id, content)
+            self.event_log.emit(
+                "bootstrap.completed",
+                core_id=core.core_id,
+                core_version=core.version,
+                fragments=len(fragments),
+                chars=len(content),
+                **interaction_metadata,
+            )
+        except Exception as exc:
+            self.event_log.emit(
+                "bootstrap.failed",
+                core_id=core.core_id,
+                core_version=core.version,
+                error=str(exc),
+                **interaction_metadata,
+            )
+            raise
+
     def _build_messages(
         self,
         core: LoadedCore,
@@ -1443,6 +1549,7 @@ class SessionTurnStepRunner:
                 if message.turn_id != turn_id
             ],
             current_turn_messages=turn_messages,
+            bootstrap_context=self.session_store.read_bootstrap_context(self.session_id),
             compaction_summary=self.session_store.latest_compaction_summary(self.session_id),
         )
         self.event_log.emit(

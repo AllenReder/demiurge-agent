@@ -38,12 +38,14 @@ class ContextAssembler:
         context: list[ContextContribution],
         session_history: list[SessionMessage],
         current_turn_messages: list[LLMMessage],
+        bootstrap_context: str | None = None,
         compaction_summary: SessionMessage | None = None,
     ) -> AssembledContext:
         by_placement = self._group_contributions(context)
         layers = [
             self._core_soul_layer(core),
             self._skill_index_layer(core),
+            self._bootstrap_context_layer(bootstrap_context),
             self._context_contributions_layer(by_placement["system_context"], "system_context"),
             self._compaction_layer(compaction_summary),
             self._context_contributions_layer(by_placement["pre_history"], "pre_history"),
@@ -63,6 +65,11 @@ class ContextAssembler:
         content = self._build_skill_index(core)
         messages = [LLMMessage(role="system", content=content)] if content else []
         return ContextLayer("skill_index", messages)
+
+    def _bootstrap_context_layer(self, content: str | None) -> ContextLayer:
+        text = content or ""
+        messages = [LLMMessage(role="system", content=text)] if text.strip() else []
+        return ContextLayer("bootstrap_context", messages)
 
     def _group_contributions(self, context: list[ContextContribution]) -> dict[str, list[ContextContribution]]:
         grouped = {

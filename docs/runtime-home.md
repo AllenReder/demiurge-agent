@@ -29,6 +29,7 @@ Typical layout:
   sessions/
     <session_id>/
       session.json
+      bootstrap_context.md
       messages.jsonl
       events.jsonl
       artifacts/
@@ -55,7 +56,8 @@ Typical layout:
 - `registry/`: active version pointers for each core.
 - `runs/`: evolution candidates, gate results, and reports.
 - `scheduler/<core_id>/`: scheduler state, run log, and lock file.
-- `sessions/`: durable session metadata, messages, events, and artifacts.
+- `sessions/`: durable session metadata, optional bootstrap context, messages,
+  events, and artifacts.
 - `state/`: per-core runtime state and state proposal log.
 - `workspace/`: default tool workspace when no workspace override is set.
 

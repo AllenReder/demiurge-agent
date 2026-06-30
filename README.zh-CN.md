@@ -69,6 +69,7 @@ assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
+    ├── bootstrap/  # 可选 session-start context
     ├── input/
     ├── output/
     ├── tools/
@@ -79,7 +80,7 @@ assistant/
     └── tests/
 ```
 
-host 负责执行、provider 调用、工具、审批、状态、session 和 delivery。core 声明 soul、skills、authored tools、channels、schedules、IO modules、可选 MCP server tools 和可选 code slots。
+host 负责执行、provider 调用、工具、审批、状态、session 和 delivery。core 声明 soul、可选 bootstrap context modules、skills、authored tools、channels、schedules、IO modules、可选 MCP server tools 和可选 code slots。
 
 IO modules 是 core-local 的 input shaping 和 output delivery 扩展点。它们让 core 能适配 channel input、格式化回复、产生本地 artifact，或路由 output，同时仍经过宿主负责的 capabilities 和 approvals。
 

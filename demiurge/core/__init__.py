@@ -396,6 +396,9 @@ class LoadedCore:
     manifest: CoreManifest
     raw_manifest: dict[str, Any]
     soul: str
+    bootstrap_slots: list[SlotDefinition]
+    bootstrap_pipeline: PhasePipeline
+    bootstrap_enabled: bool
     input_slots: list[SlotDefinition]
     output_slots: list[SlotDefinition]
     input_pipeline: PhasePipeline
@@ -456,6 +459,9 @@ class CoreLoader:
             raise CoreLoadError(f"missing authored surface: {surface_root}")
 
         soul = self._load_soul(core_root, manifest, surface_root)
+        bootstrap_root = manifest.slots.get("bootstrap") or (surface_root / "bootstrap").relative_to(core_root).as_posix()
+        bootstrap_slots = self._discover_slot_dir(core_root, bootstrap_root, "bootstrap")
+        bootstrap_pipeline, bootstrap_enabled = self._load_bootstrap_pipeline(core_root, bootstrap_root, bootstrap_slots)
         input_slots = self._discover_slot_dir(core_root, manifest.slots.get("input"), "input")
         output_slots = self._discover_slot_dir(core_root, manifest.slots.get("output"), "output")
         input_pipeline = self._load_phase_pipeline(core_root, manifest.slots.get("input"), "input", input_slots)
@@ -473,8 +479,9 @@ class CoreLoader:
             core_root,
             manifest.slots.get("mcp") or (surface_root / "mcp").relative_to(core_root).as_posix(),
         )
-        self._reject_duplicate_ids(input_slots + output_slots + tool_slots)
+        self._reject_duplicate_ids(bootstrap_slots + input_slots + output_slots + tool_slots)
         self._reject_duplicate_skills(skills)
+        self._validate_slots(bootstrap_slots, kind="bootstrap")
         self._validate_io_modules(input_slots, output_slots)
         self._validate_slots(tool_slots, kind="tool")
         self._validate_schedules(manifest, schedules, input_slots=input_slots, output_slots=output_slots)
@@ -485,6 +492,9 @@ class CoreLoader:
             manifest=manifest,
             raw_manifest=raw_manifest,
             soul=soul,
+            bootstrap_slots=bootstrap_slots,
+            bootstrap_pipeline=bootstrap_pipeline,
+            bootstrap_enabled=bootstrap_enabled,
             input_slots=input_slots,
             output_slots=output_slots,
             input_pipeline=input_pipeline,
@@ -601,6 +611,45 @@ class CoreLoader:
             return resolved
 
         return PhasePipeline(serial=resolve_group("serial"), parallel=resolve_group("parallel"))
+
+    def _load_bootstrap_pipeline(
+        self,
+        core_root: Path,
+        configured: str | None,
+        slots: list[SlotDefinition],
+    ) -> tuple[PhasePipeline, bool]:
+        if not configured:
+            return PhasePipeline(), False
+        slot_root = require_relative_path(core_root / configured, core_root)
+        if not slot_root.exists():
+            return PhasePipeline(), False
+        pipeline_path = slot_root / "pipeline.yaml"
+        if not pipeline_path.exists():
+            raise CoreLoadError(f"missing bootstrap pipeline: {pipeline_path.relative_to(core_root).as_posix()}")
+        try:
+            raw = yaml.safe_load(pipeline_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise CoreLoadError(f"invalid bootstrap pipeline.yaml: {pipeline_path}: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise CoreLoadError("invalid bootstrap pipeline.yaml: expected mapping")
+        unknown_keys = sorted(set(raw) - {"serial"})
+        if unknown_keys:
+            raise CoreLoadError(f"invalid bootstrap pipeline.yaml key(s): {', '.join(unknown_keys)}")
+        values = raw.get("serial") or []
+        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+            raise CoreLoadError("invalid bootstrap pipeline.yaml serial: expected list of slot ids")
+        slots_by_id = {slot.slot_id: slot for slot in slots}
+        seen: set[str] = set()
+        resolved: list[SlotDefinition] = []
+        for slot_id in values:
+            if slot_id in seen:
+                raise CoreLoadError(f"duplicate bootstrap pipeline slot {slot_id}: serial")
+            seen.add(slot_id)
+            slot = slots_by_id.get(slot_id)
+            if slot is None:
+                raise CoreLoadError(f"unknown bootstrap pipeline slot: {slot_id}")
+            resolved.append(slot)
+        return PhasePipeline(serial=resolved, parallel=[]), True
 
     def _validate_toolsets(self, manifest: CoreManifest) -> None:
         unknown = sorted(set(manifest.tools.toolsets) - set(BUILTIN_TOOLSETS))

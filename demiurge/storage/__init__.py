@@ -122,6 +122,9 @@ class SessionStore:
     def messages_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "messages.jsonl"
 
+    def bootstrap_context_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "bootstrap_context.md"
+
     def exists(self, session_id: str) -> bool:
         return self.session_path(session_id).exists()
 
@@ -323,6 +326,20 @@ class SessionStore:
         if not path.exists():
             return []
         return [SessionMessage.from_dict(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def bootstrap_context_exists(self, session_id: str) -> bool:
+        return self.bootstrap_context_path(session_id).exists()
+
+    def read_bootstrap_context(self, session_id: str) -> str:
+        path = self.bootstrap_context_path(session_id)
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    def write_bootstrap_context(self, session_id: str, content: str) -> None:
+        path = self.bootstrap_context_path(session_id)
+        ensure_dir(path.parent)
+        path.write_text(content, encoding="utf-8")
 
     def message_count(self, session_id: str) -> int:
         return len(self.read_messages(session_id))

@@ -8,6 +8,7 @@ safest path is to modify a runtime core after initialization:
   agent.yaml
   agent/
     SOUL.md
+    bootstrap/  # optional session-start context modules
     input/
     output/
     tools/
@@ -34,7 +35,7 @@ Do not call channel SDKs or host internals directly from authored modules:
 - Do not write `messages.jsonl`, `events.jsonl`, or provider messages directly.
 - Do not send model requests directly.
 - Do not bypass host-injected clients such as `ctx.state`, `ctx.tools`,
-  `ctx.input`, or `ctx.output`.
+  `ctx.bootstrap`, `ctx.input`, or `ctx.output`.
 
 Every core must keep these files:
 
@@ -44,6 +45,11 @@ Every core must keep these files:
 Pipeline files define module order and concurrency. Module directory names do
 not have special `base` or `main` privileges. The default template uses names
 such as `base_input` and `base_output` by convention only.
+
+`agent/bootstrap/` is optional. If it exists, it must contain
+`agent/bootstrap/pipeline.yaml`. Bootstrap modules run once before the first
+model request in a session, write a session snapshot to
+`bootstrap_context.md`, and are reused on resume.
 
 `agent/schedules/*.yaml` files are optional cron declarations. The host-owned
 scheduler starts a fresh session for each trigger and runs one normal turn with
@@ -63,6 +69,62 @@ runtime:
 
 The default and host hard limit are both `90`; the supported range is `1..90`.
 Do not put this field in the root `agents/agent.yaml` fallback file.
+
+## Bootstrap Modules
+
+Bootstrap modules build session-stable system context. They are useful for
+context that should be fixed for a session instead of recalculated by input
+modules on every turn. The host runs the bootstrap serial pipeline before the
+first input pipeline in a session.
+
+Create the module directory:
+
+```bash
+mkdir -p ~/.demiurge/agents/assistant/agent/bootstrap
+mkdir -p ~/.demiurge/agents/assistant/agent/bootstrap/session_context
+```
+
+`~/.demiurge/agents/assistant/agent/bootstrap/pipeline.yaml`:
+
+```yaml
+serial:
+  - session_context
+```
+
+Bootstrap pipelines are serial-only. They do not support `parallel`.
+
+`~/.demiurge/agents/assistant/agent/bootstrap/session_context/slot.yaml`:
+
+```yaml
+entrypoint: module:process
+description: "Adds session-stable context."
+failure_policy: soft
+capabilities: []
+```
+
+`~/.demiurge/agents/assistant/agent/bootstrap/session_context/module.py`:
+
+```python
+def process(ctx):
+    ctx.bootstrap.add("Use this session context on every model request.")
+```
+
+The host joins successful module additions with blank lines and writes the
+exact generated context to
+`~/.demiurge/sessions/<session_id>/bootstrap_context.md`. It does not add
+headers, module markers, timestamps, or metadata. An empty generated context
+still creates an empty file so the session does not rerun bootstrap.
+
+`ctx.bootstrap.add(text)` only appends system context. It does not write
+`messages.jsonl`, does not create a user or assistant message, and does not
+expose delivery methods. Authored modules are trusted Python code in the
+host-shared environment, but dangerous effects should still go through
+host-owned capabilities and APIs rather than bypassing the harness.
+
+If a bootstrap module fails with `failure_policy: soft`, the host records the
+failure event and continues without that module's additions. With
+`failure_policy: hard`, the first model request is blocked and no bootstrap
+snapshot is written.
 
 ## Input Modules
 

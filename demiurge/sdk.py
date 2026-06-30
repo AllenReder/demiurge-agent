@@ -208,6 +208,19 @@ class InputContext:
 
 
 @dataclass(slots=True)
+class BootstrapContext:
+    """Context object injected into agent/bootstrap module process(ctx)."""
+
+    session_id: str
+    core_id: str
+    core_version: str
+    slot_id: str
+    slot_path: str
+    capability: CapabilityClient
+    bootstrap: Any
+
+
+@dataclass(slots=True)
 class OutputContext:
     """Context object injected into agent/output module process(ctx)."""
 
