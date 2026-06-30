@@ -18,7 +18,6 @@ This file stores local host preferences. It is not an agent core and not the glo
 ```yaml
 runtime:
   default_core: assistant
-  workspace: null
 channel:
   busy_mode: interrupt
 ui:
@@ -28,7 +27,6 @@ ui:
 ```
 
 - `runtime.default_core`: used when `--core` is omitted. Default: `assistant`.
-- `runtime.workspace`: used when neither `--workspace` nor `DEMIURGE_WORKSPACE` is set. If null, demiurge uses `<home>/workspace`.
 - `channel.busy_mode`: initial in-flight input behavior for interactive channels. Values: `interrupt` or `queue`.
 - `ui.user_message_align`: local TUI user message alignment. Values: `left` or `right`.
 - `ui.demiurge_theme_color`: local TUI demiurge identity/status color. Accepts `ff9afc`, `#ff9afc`, `fac`, or `#fac`.
@@ -38,20 +36,29 @@ Precedence:
 
 - `--core` overrides `runtime.default_core`.
 - `--workspace` overrides `DEMIURGE_WORKSPACE`.
-- `DEMIURGE_WORKSPACE` overrides `runtime.workspace`.
+- `DEMIURGE_WORKSPACE` overrides channel and core workspace defaults.
 - `/busy` changes only the current running channel process and does not write config.
 
 Invalid values fail startup and include the offending field path in the error.
 
 ## Workspace
 
-File and terminal tools can only access the configured workspace. The default is:
+File and terminal tools can only access the resolved workspace. Resolution depends on the launch surface:
 
-```text
-~/.demiurge/workspace
+- Local TUI (`uv run demiurge`) defaults to the directory where the command was launched.
+- External channel/gateway/scheduler runs use the current core's `agent.yaml` `runtime.workspace`; if unset, they use `<home>/workspace`.
+- `--workspace` and `DEMIURGE_WORKSPACE` override both local and core defaults.
+
+Core-configured workspaces belong in the concrete core `agent.yaml`:
+
+```yaml
+runtime:
+  workspace: /path/to/project
 ```
 
-Override it:
+Relative core workspace paths are resolved from the runtime core directory. Do not put `runtime.workspace` in `<home>/config.yaml`; it is not a supported host config field.
+
+Override per process:
 
 ```bash
 uv run demiurge --workspace /path/to/project
@@ -123,16 +130,19 @@ Telegram resolves the value at channel startup.
 
 ## Core Runtime Config
 
-Concrete agent cores can configure the single-turn model loop budget:
+Concrete agent cores can configure the single-turn model loop budget and the default workspace for non-local channel runs:
 
 ```yaml
 runtime:
   max_model_steps: 90
+  workspace: /path/to/project
 ```
 
-Default and hard limit are both `90`. Allowed range is `1..90`; invalid values fail core load.
+`max_model_steps` defaults to `90`; the hard limit is also `90`. Allowed range is `1..90`; invalid values fail core load.
 
-This field belongs to a concrete core, not to the root `agents/agent.yaml` fallback.
+`workspace` is optional. Relative paths are resolved from the runtime core directory. Local TUI startup ignores this default unless `--workspace` or `DEMIURGE_WORKSPACE` is set, because the local TUI uses the launch directory by default.
+
+These fields belong to a concrete core, not to the root `agents/agent.yaml` fallback.
 
 ## Approval Config
 

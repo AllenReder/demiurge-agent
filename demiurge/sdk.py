@@ -214,6 +214,7 @@ class BootstrapContext:
     session_id: str
     core_id: str
     core_version: str
+    workspace: str
     slot_id: str
     slot_path: str
     capability: CapabilityClient

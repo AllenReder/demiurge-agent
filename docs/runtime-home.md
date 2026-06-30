@@ -40,8 +40,8 @@ Typical layout:
 ```
 
 - `config.yaml`: host-level runtime config. `demiurge init` creates it when
-  missing. It stores default core, default workspace, interactive channel busy
-  mode, and local TUI layout/theme preferences.
+  missing. It stores default core, interactive channel busy mode, and local TUI
+  layout/theme preferences.
 - `demiurge-agent/`: optional managed git checkout created by
   `scripts/install.sh`. `demiurge update` updates this checkout and its uv
   environment.
@@ -59,7 +59,9 @@ Typical layout:
 - `sessions/`: durable session metadata, optional bootstrap context, messages,
   events, and artifacts.
 - `state/`: per-core runtime state and state proposal log.
-- `workspace/`: default tool workspace when no workspace override is set.
+- `workspace/`: fallback tool workspace for non-local channel runs when neither
+  `--workspace`, `DEMIURGE_WORKSPACE`, nor the selected core's
+  `runtime.workspace` is set.
 
 Normal `uv run demiurge` fills in missing fallback, assistant, and evolver
 runtime templates without overwriting user edits. Explicit `uv run demiurge

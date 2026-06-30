@@ -48,10 +48,25 @@ class AgentInfo(BaseModel):
 
 
 class RuntimeInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     language: str = "python"
     python: str | None = None
     surface_root: str = "agent"
     max_model_steps: int = Field(default=90, ge=1, le=90)
+    workspace: str | None = None
+
+    @field_validator("workspace", mode="before")
+    @classmethod
+    def _workspace(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("runtime.workspace must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("runtime.workspace must not be empty")
+        return normalized
 
 
 class ModelInfo(BaseModel):

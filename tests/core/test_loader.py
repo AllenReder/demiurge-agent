@@ -20,6 +20,7 @@ def test_loader_discovers_source_agent_slots():
     assert core.manifest.model.api_key is None
     assert core.manifest.model.api_key_env == "DEMIURGE_API_KEY"
     assert core.manifest.runtime.max_model_steps == 90
+    assert core.manifest.runtime.workspace is None
     assert sorted(core.manifest.channels) == ["telegram"]
     assert core.manifest.channels["telegram"].enabled is False
     assert core.manifest.channels["telegram"].bot_token_env == "DEMIURGE_TELEGRAM_BOT_TOKEN"
@@ -38,10 +39,6 @@ def test_loader_discovers_source_agent_slots():
     assert [slot.slot_id for slot in core.output_slots] == ["base_output"]
     assert [slot.slot_id for slot in core.output_pipeline.serial] == ["base_output"]
     assert [slot.slot_id for slot in core.output_pipeline.parallel] == []
-    assert core.bootstrap_enabled is False
-    assert core.bootstrap_slots == []
-    assert core.bootstrap_pipeline.serial == []
-    assert core.bootstrap_pipeline.parallel == []
     assert [slot.slot_id for slot in core.tool_slots] == ["echo"]
     assert core.skills == []
     assert core.schedules == []
@@ -57,6 +54,7 @@ def test_loader_discovers_evolver_source_agent():
     assert core.core_id == "evolver"
     assert core.version == "0001"
     assert core.manifest.runtime.max_model_steps == 90
+    assert core.manifest.runtime.workspace is None
     assert core.manifest.model.model_name is None
     assert core.manifest.model.model_name_env == "DEMIURGE_EVOLVER_MODEL_NAME"
     assert core.manifest.model.base_url is None
@@ -87,6 +85,34 @@ def test_loader_accepts_enabled_telegram_channel(tmp_path):
     core = CoreLoader().load(target)
 
     assert core.manifest.channels["telegram"].enabled is True
+
+
+def test_loader_accepts_core_runtime_workspace(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    manifest_path = target / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["runtime"]["workspace"] = "project"
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    core = CoreLoader().load(target)
+
+    assert core.manifest.runtime.workspace == "project"
+
+
+@pytest.mark.parametrize("workspace", ["", "   ", 123])
+def test_loader_rejects_invalid_core_runtime_workspace(tmp_path, workspace):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    manifest_path = target / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["runtime"]["workspace"] = workspace
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(CoreLoadError, match="runtime.workspace"):
+        CoreLoader().load(target)
 
 
 def test_loader_discovers_schedule_defaults_and_path_id(tmp_path):
@@ -370,6 +396,7 @@ def test_loader_discovers_optional_bootstrap_serial_pipeline(tmp_path):
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
     bootstrap_dir = target / "agent" / "bootstrap"
+    shutil.rmtree(bootstrap_dir, ignore_errors=True)
     slot_dir = bootstrap_dir / "session_context"
     slot_dir.mkdir(parents=True)
     (bootstrap_dir / "pipeline.yaml").write_text(
@@ -397,6 +424,7 @@ def test_loader_rejects_bootstrap_parallel_key(tmp_path):
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
     bootstrap_dir = target / "agent" / "bootstrap"
+    shutil.rmtree(bootstrap_dir, ignore_errors=True)
     bootstrap_dir.mkdir(parents=True)
     (bootstrap_dir / "pipeline.yaml").write_text(
         "serial: []\nparallel: []\n",
@@ -412,6 +440,7 @@ def test_loader_rejects_unknown_bootstrap_pipeline_slot(tmp_path):
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
     bootstrap_dir = target / "agent" / "bootstrap"
+    shutil.rmtree(bootstrap_dir, ignore_errors=True)
     bootstrap_dir.mkdir(parents=True)
     (bootstrap_dir / "pipeline.yaml").write_text(
         "serial:\n  - missing\n",
@@ -427,6 +456,7 @@ def test_loader_rejects_duplicate_bootstrap_pipeline_slot(tmp_path):
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
     bootstrap_dir = target / "agent" / "bootstrap"
+    shutil.rmtree(bootstrap_dir, ignore_errors=True)
     slot_dir = bootstrap_dir / "session_context"
     slot_dir.mkdir(parents=True)
     (bootstrap_dir / "pipeline.yaml").write_text(
@@ -449,6 +479,7 @@ def test_loader_rejects_invalid_bootstrap_failure_policy(tmp_path):
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
     bootstrap_dir = target / "agent" / "bootstrap"
+    shutil.rmtree(bootstrap_dir, ignore_errors=True)
     slot_dir = bootstrap_dir / "bad_policy"
     slot_dir.mkdir(parents=True)
     (bootstrap_dir / "pipeline.yaml").write_text("serial:\n  - bad_policy\n", encoding="utf-8")

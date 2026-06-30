@@ -121,11 +121,8 @@ uv run demiurge --provider openai --model gpt-4.1-mini --api-key "$DEMIURGE_API_
 
 ## 5. Choose a Workspace
 
-By default, file and terminal tools are scoped to:
-
-```text
-~/.demiurge/workspace
-```
+In the local TUI, file and terminal tools are scoped to the directory where you
+launch `uv run demiurge`.
 
 Override it per run:
 
@@ -138,3 +135,6 @@ Or by environment:
 ```bash
 DEMIURGE_WORKSPACE=/path/to/project uv run demiurge
 ```
+
+External channel runs use the selected core's `agent.yaml` `runtime.workspace`
+when no override is set, then fall back to `~/.demiurge/workspace`.

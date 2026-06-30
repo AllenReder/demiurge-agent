@@ -35,7 +35,7 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Controlled evolution | Core changes are designed to be file-backed, diffable, testable, and promotable through host-owned version controls. |
 | Host-owned harness | Provider calls, tool execution, approvals, state writes, sessions, and delivery stay under a stable runtime boundary. |
 | Authored surface | Agent behavior lives in readable files: `SOUL.md`, skills, tools, schedules, IO modules, optional MCP declarations, tests, and optional code slots. |
-| Local-first runtime | Live cores, sessions, configuration, and workspaces live under `~/.demiurge` by default. |
+| Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
 
 ## Quickstart
 
@@ -50,7 +50,7 @@ This creates:
 
 - a managed checkout at `~/.demiurge/demiurge-agent`;
 - live runtime cores under `~/.demiurge/agents`;
-- the default tool workspace at `~/.demiurge/workspace`.
+- the non-local fallback tool workspace at `~/.demiurge/workspace`.
 
 Update the managed checkout later:
 

@@ -30,9 +30,13 @@ Common options:
 TUI can switch at runtime with `/tool-display quiet|summary|full`.
 
 When `--core` is omitted, demiurge reads `<home>/config.yaml`
-`runtime.default_core`, defaulting to `assistant`. When `--workspace` and
-`DEMIURGE_WORKSPACE` are omitted, demiurge reads `runtime.workspace`; if it is
-null, `<home>/workspace` is used.
+`runtime.default_core`, defaulting to `assistant`.
+
+For local TUI startup, workspace resolution is `--workspace` >
+`DEMIURGE_WORKSPACE` > the directory where `uv run demiurge` was launched.
+External channel startup through `demiurge gateway` does not use the launch
+directory as a default; without an override it uses the selected core's
+`agent.yaml` `runtime.workspace`, then `<home>/workspace`.
 
 The TUI is a TypeScript/Ink/React frontend plus a Python channel adapter.
 `uv run demiurge` starts the frontend, which connects to

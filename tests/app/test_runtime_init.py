@@ -17,7 +17,7 @@ def test_init_runtime_copies_fallback_assistant_and_evolver(tmp_path):
     assert result["host_config"] == str(home / "config.yaml")
     assert result["host_config_created"] is True
     assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) == {
-        "runtime": {"default_core": "assistant", "workspace": None},
+        "runtime": {"default_core": "assistant"},
         "channel": {"busy_mode": "interrupt"},
         "ui": {"user_message_align": "left", "demiurge_theme_color": "ff9afc", "user_theme_color": "9cc9ff"},
     }
@@ -138,7 +138,6 @@ def test_host_config_defaults_user_message_align_left_without_file(tmp_path):
     app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
 
     assert config.runtime.default_core == "assistant"
-    assert config.runtime.workspace is None
     assert config.channel.busy_mode == "interrupt"
     assert config.ui.user_message_align == "left"
     assert config.ui.demiurge_theme_color == "#ff9afc"
@@ -183,37 +182,67 @@ def test_create_app_reads_host_config_theme_colors(tmp_path):
     assert app.status()["user_theme_color"] == "#aabbcc"
 
 
-def test_create_app_uses_host_config_default_core_workspace_and_channel_busy_mode(tmp_path):
+def test_create_app_uses_host_config_default_core_and_channel_busy_mode(tmp_path):
     home = tmp_path / "home"
-    workspace = tmp_path / "workspace"
     home.mkdir()
-    workspace.mkdir()
     (home / "config.yaml").write_text(
-        f"runtime:\n  default_core: evolver\n  workspace: {workspace}\nchannel:\n  busy_mode: queue\n",
+        "runtime:\n  default_core: evolver\nchannel:\n  busy_mode: queue\n",
         encoding="utf-8",
     )
 
     app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
 
     assert app.runner.core_id == "evolver"
-    assert app.workspace.root == workspace.resolve()
+    assert app.workspace.root == (home / "workspace").resolve()
     assert app.channel_busy_mode == "queue"
     assert app.channel_busy_mode_source == "config.yaml:channel.busy_mode"
 
 
-def test_create_app_workspace_env_overrides_host_config(monkeypatch, tmp_path):
+def test_create_app_uses_core_manifest_workspace(tmp_path):
     home = tmp_path / "home"
-    configured_workspace = tmp_path / "configured-workspace"
+    agents = tmp_path / "agents"
+    shutil.copytree(source_agents_root(), agents)
+    manifest_path = agents / "assistant" / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["runtime"]["workspace"] = "project"
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    app = create_app(home=home, provider_name="fake", agents_root=agents)
+
+    assert app.workspace.root == (home / "agents" / "assistant" / "project").resolve()
+
+
+def test_create_app_workspace_env_overrides_core_manifest(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    agents = tmp_path / "agents"
     env_workspace = tmp_path / "env-workspace"
-    home.mkdir()
-    configured_workspace.mkdir()
+    shutil.copytree(source_agents_root(), agents)
+    manifest_path = agents / "assistant" / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["runtime"]["workspace"] = "project"
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     env_workspace.mkdir()
-    (home / "config.yaml").write_text(f"runtime:\n  workspace: {configured_workspace}\n", encoding="utf-8")
     monkeypatch.setenv("DEMIURGE_WORKSPACE", str(env_workspace))
 
-    app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
+    app = create_app(home=home, provider_name="fake", agents_root=agents)
 
     assert app.workspace.root == env_workspace.resolve()
+
+
+def test_create_app_workspace_fallback_overrides_core_manifest(tmp_path):
+    home = tmp_path / "home"
+    agents = tmp_path / "agents"
+    fallback_workspace = tmp_path / "launch-workspace"
+    shutil.copytree(source_agents_root(), agents)
+    manifest_path = agents / "assistant" / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["runtime"]["workspace"] = "project"
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    fallback_workspace.mkdir()
+
+    app = create_app(home=home, provider_name="fake", agents_root=agents, workspace_fallback=fallback_workspace)
+
+    assert app.workspace.root == fallback_workspace.resolve()
 
 
 @pytest.mark.parametrize(

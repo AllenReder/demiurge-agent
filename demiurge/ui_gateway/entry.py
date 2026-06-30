@@ -43,6 +43,7 @@ async def async_main(argv: list[str] | None = None) -> None:
             api_key=config.get("api_key"),
             fake_script=Path(config["fake_script"]) if config.get("fake_script") else None,
             workspace=Path(config["workspace"]) if config.get("workspace") else None,
+            workspace_fallback=Path(config["workspace_fallback"]) if config.get("workspace_fallback") else None,
             tool_display=config.get("tool_display"),
             session_id=config.get("resume") or config.get("session"),
             resume_required=bool(config.get("resume")),

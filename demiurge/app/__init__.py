@@ -41,7 +41,6 @@ class HostRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default_core: str = "assistant"
-    workspace: Path | None = None
 
     @field_validator("default_core")
     @classmethod
@@ -49,13 +48,6 @@ class HostRuntimeConfig(BaseModel):
         if not value.strip():
             raise ValueError("runtime.default_core must not be empty")
         return value.strip()
-
-    @field_validator("workspace", mode="before")
-    @classmethod
-    def _workspace_non_empty(cls, value: Any) -> Any:
-        if isinstance(value, str) and not value.strip():
-            raise ValueError("runtime.workspace must not be empty")
-        return value
 
 
 class HostChannelConfig(BaseModel):
@@ -170,6 +162,7 @@ def create_app(
     api_key: str | None = None,
     fake_script: Path | None = None,
     workspace: Path | None = None,
+    workspace_fallback: Path | None = None,
     agents_root: Path | None = None,
     tool_display: str | None = None,
     session_id: str | None = None,
@@ -181,8 +174,6 @@ def create_app(
     host_config, host_sources = load_host_config(host_config_path)
     resolved_core_id = core_id or host_config.runtime.default_core or "assistant"
     source_agents = source_agents_root(agents_root)
-    workspace_root = (workspace or _default_workspace(host_config, home=home)).expanduser().resolve()
-    workspace_scope = WorkspaceScope(workspace_root)
     approval_runtime = ApprovalRuntime(BridgeApprovalProvider())
     version_store = VersionStore(home)
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
@@ -191,6 +182,14 @@ def create_app(
 
     core_loader = CoreLoader()
     active_core = core_loader.load(version_store.active_core_path(resolved_core_id))
+    workspace_root = _resolve_workspace(
+        workspace=workspace,
+        workspace_fallback=workspace_fallback,
+        core_root=active_core.root,
+        configured_workspace=active_core.manifest.runtime.workspace,
+        home=home,
+    )
+    workspace_scope = WorkspaceScope(workspace_root)
     fallback = load_agent_fallback(version_store.fallback_config_path)
     resolved_model, _ = resolve_model_name(active_core.manifest.model, fallback.model, override=model)
     resolved_base_url, _ = resolve_base_url(active_core.manifest.model, fallback.model, override=base_url)
@@ -377,12 +376,12 @@ def load_host_config(path: Path) -> tuple[HostConfig, dict[str, str]]:
         config = HostConfig.model_validate(raw)
     except ValidationError as exc:
         raise ValueError(
-            f"invalid host config {path}: supported fields are runtime.default_core, runtime.workspace, "
+            f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, and ui.user_theme_color: {exc}"
         ) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise ValueError(
-            f"invalid host config {path}: supported fields are runtime.default_core, runtime.workspace, "
+            f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, and ui.user_theme_color: {exc}"
         ) from exc
     return config, _host_config_sources(raw)
@@ -392,7 +391,6 @@ def default_host_config_dict() -> dict[str, object]:
     return {
         "runtime": {
             "default_core": "assistant",
-            "workspace": None,
         },
         "channel": {
             "busy_mode": "interrupt",
@@ -418,7 +416,6 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
     sources: dict[str, str] = {}
     for section, key in (
         ("runtime", "default_core"),
-        ("runtime", "workspace"),
         ("channel", "busy_mode"),
         ("ui", "user_message_align"),
         ("ui", "demiurge_theme_color"),
@@ -443,12 +440,26 @@ def normalize_hex_color(value: Any, *, field_path: str) -> str:
     return f"#{raw}"
 
 
-def _default_workspace(host_config: HostConfig, *, home: Path) -> Path:
+def _resolve_workspace(
+    *,
+    workspace: Path | None,
+    workspace_fallback: Path | None,
+    core_root: Path,
+    configured_workspace: str | None,
+    home: Path,
+) -> Path:
+    if workspace is not None:
+        return workspace.expanduser().resolve()
     value = os.environ.get("DEMIURGE_WORKSPACE")
     if value:
-        return Path(value)
-    if host_config.runtime.workspace is not None:
-        return host_config.runtime.workspace
+        return Path(value).expanduser().resolve()
+    if workspace_fallback is not None:
+        return workspace_fallback.expanduser().resolve()
+    if configured_workspace is not None:
+        path = Path(configured_workspace).expanduser()
+        if not path.is_absolute():
+            path = core_root / path
+        return path.resolve()
     return ensure_dir(home / "workspace")
 
 

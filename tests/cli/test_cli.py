@@ -20,11 +20,9 @@ def test_default_cli_launches_ts_tui(monkeypatch, tmp_path):
 
 def test_cli_uses_host_config_defaults_for_tui(monkeypatch, tmp_path):
     home = tmp_path / "home"
-    workspace = tmp_path / "workspace"
     home.mkdir()
-    workspace.mkdir()
     (home / "config.yaml").write_text(
-        f"runtime:\n  default_core: evolver\n  workspace: {workspace}\nchannel:\n  busy_mode: queue\n",
+        "runtime:\n  default_core: evolver\nchannel:\n  busy_mode: queue\n",
         encoding="utf-8",
     )
     called = {}
@@ -38,18 +36,16 @@ def test_cli_uses_host_config_defaults_for_tui(monkeypatch, tmp_path):
 
     cli.main(["--home", str(home), "--provider", "fake"])
 
-    assert called == {"core": "evolver", "workspace": workspace, "busy_mode": "queue"}
+    assert called == {"core": "evolver", "workspace": None, "busy_mode": "queue"}
 
 
 def test_cli_core_and_workspace_override_host_config(monkeypatch, tmp_path):
     home = tmp_path / "home"
-    configured_workspace = tmp_path / "configured-workspace"
     cli_workspace = tmp_path / "cli-workspace"
     home.mkdir()
-    configured_workspace.mkdir()
     cli_workspace.mkdir()
     (home / "config.yaml").write_text(
-        f"runtime:\n  default_core: evolver\n  workspace: {configured_workspace}\n",
+        "runtime:\n  default_core: evolver\n",
         encoding="utf-8",
     )
     called = {}
@@ -67,12 +63,9 @@ def test_cli_core_and_workspace_override_host_config(monkeypatch, tmp_path):
 
 def test_cli_workspace_env_overrides_host_config(monkeypatch, tmp_path):
     home = tmp_path / "home"
-    configured_workspace = tmp_path / "configured-workspace"
     env_workspace = tmp_path / "env-workspace"
     home.mkdir()
-    configured_workspace.mkdir()
     env_workspace.mkdir()
-    (home / "config.yaml").write_text(f"runtime:\n  workspace: {configured_workspace}\n", encoding="utf-8")
     monkeypatch.setenv("DEMIURGE_WORKSPACE", str(env_workspace))
     called = {}
 
@@ -84,6 +77,19 @@ def test_cli_workspace_env_overrides_host_config(monkeypatch, tmp_path):
     cli.main(["--home", str(home)])
 
     assert called == {"workspace": None}
+
+
+def test_tui_gateway_config_uses_launch_cwd_as_workspace_fallback(monkeypatch, tmp_path):
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+    args = cli.build_parser().parse_args(["--home", str(tmp_path / "home"), "--provider", "fake"])
+    cli._apply_host_config_defaults(args)
+
+    config = tui_launcher._gateway_config(args)
+
+    assert config["workspace"] is None
+    assert config["workspace_fallback"] == str(launch.resolve())
 
 
 def test_gateway_subcommand_runs_gateway(monkeypatch, tmp_path):

@@ -100,7 +100,9 @@ async def test_session_json_files_preserve_utf8_text(tmp_path):
 
 @pytest.mark.asyncio
 async def test_context_assembler_emits_default_assistant_layers(tmp_path):
-    app = create_app(home=tmp_path / "home", provider_name="fake")
+    agents = _copy_agents(tmp_path)
+    shutil.rmtree(agents / "assistant" / "agent" / "bootstrap", ignore_errors=True)
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     provider = EchoInspectingProvider()
     app.runner.provider = provider
 
@@ -145,6 +147,25 @@ async def test_bootstrap_context_file_is_written_and_injected_after_skill_index(
     bootstrap_index = next(index for index, message in enumerate(request_messages) if message.content == "  BOOT  ")
     assert bootstrap_index > skill_index
     assert all(message.role != "system" for message in app.runner.session_store.read_messages(session_id))
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_receives_resolved_workspace(tmp_path):
+    agents = _copy_agents(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_bootstrap_module(
+        agents,
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add(ctx.bootstrap.workspace)\n",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, workspace=workspace)
+    provider = EchoInspectingProvider()
+    app.runner.provider = provider
+
+    await app.runner.run_turn("hello")
+
+    assert app.runner.session_store.read_bootstrap_context(app.runner.session_id) == str(workspace.resolve())
 
 
 @pytest.mark.asyncio

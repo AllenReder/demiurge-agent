@@ -273,8 +273,9 @@ class ModuleAgentsClient:
 
 
 class ModuleBootstrapClient:
-    def __init__(self) -> None:
+    def __init__(self, *, workspace: str | None = None) -> None:
         self.fragments: list[str] = []
+        self.workspace = workspace or ""
 
     def add(self, text: str) -> None:
         content = str(text or "")
@@ -1467,11 +1468,12 @@ class SessionTurnStepRunner:
                     kind="bootstrap",
                     **interaction_metadata,
                 )
-                client = ModuleBootstrapClient()
+                client = ModuleBootstrapClient(workspace=self.workspace)
                 ctx = BootstrapContext(
                     session_id=self.session_id,
                     core_id=core.core_id,
                     core_version=core.version,
+                    workspace=self.workspace or "",
                     slot_id=slot.slot_id,
                     slot_path=slot.relative_path,
                     capability=capability,

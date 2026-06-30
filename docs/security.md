@@ -4,13 +4,16 @@ This page describes demiurge's current local safety model. It is an application-
 
 ## Workspace Scope
 
-File and terminal tools can only access paths inside the configured workspace. The default workspace is:
+File and terminal tools can only access paths inside the resolved workspace.
+Local TUI sessions default to the directory where `uv run demiurge` was
+launched. External channel/gateway/scheduler runs default to the selected
+core's `agent.yaml` `runtime.workspace`, then:
 
 ```text
 ~/.demiurge/workspace
 ```
 
-Override it with `--workspace`, `DEMIURGE_WORKSPACE`, or `runtime.workspace` in `<home>/config.yaml`.
+Override it with `--workspace`, `DEMIURGE_WORKSPACE`, or `runtime.workspace` in the concrete core `agent.yaml`.
 
 Paths outside the workspace are rejected by the host before tool execution.
 

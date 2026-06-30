@@ -22,7 +22,8 @@ uv run demiurge --provider openai --api-key "$DEMIURGE_API_KEY"
 
 ## File Tools Cannot Access a Path
 
-File and terminal tools are scoped to the configured workspace:
+File and terminal tools are scoped to the resolved workspace. In the local TUI,
+that is the launch directory unless you override it:
 
 ```bash
 uv run demiurge --workspace /path/to/project

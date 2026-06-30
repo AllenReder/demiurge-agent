@@ -59,16 +59,22 @@ the input/output module lists declared by that schedule.
 the concrete core because they change the tools visible to that core. The host
 owns MCP transports, subprocesses, logs, session state, and tool execution.
 
-The model-step budget for a single turn belongs in the concrete core
-`agent.yaml`:
+The model-step budget and non-local channel workspace default belong in the
+concrete core `agent.yaml`:
 
 ```yaml
 runtime:
   max_model_steps: 90
+  workspace: /path/to/project
 ```
 
 The default and host hard limit are both `90`; the supported range is `1..90`.
-Do not put this field in the root `agents/agent.yaml` fallback file.
+`workspace` is optional; relative paths are resolved from the runtime core
+directory. Local TUI startup uses the launch directory by default, so this
+workspace field is mainly for gateway, Telegram, scheduler, and other non-local
+channel runs.
+
+Do not put these fields in the root `agents/agent.yaml` fallback file.
 
 ## Bootstrap Modules
 
@@ -106,7 +112,7 @@ capabilities: []
 
 ```python
 def process(ctx):
-    ctx.bootstrap.add("Use this session context on every model request.")
+    ctx.bootstrap.add(f"Workspace: {ctx.bootstrap.workspace}")
 ```
 
 The host joins successful module additions with blank lines and writes the

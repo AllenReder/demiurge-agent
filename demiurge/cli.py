@@ -221,14 +221,8 @@ def _apply_host_config_defaults(args: argparse.Namespace) -> None:
     host_config = _host_config_or_default(args.home or default_home())
     if args.core is None:
         args.core = host_config.runtime.default_core or "assistant"
-    if args.workspace is None and host_config.runtime.workspace is not None and not _workspace_env_value():
-        args.workspace = host_config.runtime.workspace
     if not hasattr(args, "channel_busy_mode"):
         args.channel_busy_mode = host_config.channel.busy_mode
-
-
-def _workspace_env_value() -> str | None:
-    return os.environ.get("DEMIURGE_WORKSPACE") or None
 
 
 def _handle_update_command(args: argparse.Namespace) -> dict[str, object]:
