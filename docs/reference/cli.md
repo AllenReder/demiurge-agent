@@ -69,8 +69,8 @@ Updates a managed checkout and optionally runs a read-only runtime drift check.
 uv run demiurge gateway --core assistant
 ```
 
-Runs enabled external channels for the selected core. Current external channel
-support is Telegram.
+Runs enabled external channels for the selected core. Supported external
+channels are Telegram, generic webhook, Slack, Mattermost, Matrix, and email.
 
 ## Success Check
 

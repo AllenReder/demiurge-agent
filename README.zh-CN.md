@@ -116,25 +116,29 @@ uv run demiurge --provider openai --model deepseek-v4-flash --base-url https://e
 
 真实密钥应放在环境变量里。`/status` 只显示密钥来源，不显示密钥值。
 
-## Telegram Gateway
+## External Gateway
 
-在目标 core 中启用 Telegram：
+在目标 core 中启用一个或多个 channel：
 
 ```yaml
 channels:
   telegram:
     enabled: true
     bot_token_env: DEMIURGE_TELEGRAM_BOT_TOKEN
+  webhook:
+    enabled: true
+    token_env: DEMIURGE_WEBHOOK_TOKEN
 ```
 
 然后运行：
 
 ```bash
 export DEMIURGE_TELEGRAM_BOT_TOKEN="..."
+export DEMIURGE_WEBHOOK_TOKEN="..."
 demiurge gateway --core assistant
 ```
 
-Telegram 默认拒绝未授权访问。私聊需要把数字 `from.id` 加入 `allowed_users`；群聊需要同时允许 user id 和 chat id。
+Gateway 支持 Telegram、通用 webhook、Slack、Mattermost、Matrix 和 email。所有 channel 默认关闭，密钥应放在环境变量中，外部输入会先校验平台 token/signature。Telegram 默认拒绝未授权访问；完整配置见 [docs/operations/channels.md](docs/operations/channels.md)。
 
 ## 开发者工作流
 
@@ -169,7 +173,7 @@ cd ..
 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | 安装、初始化 runtime home 和启动 TUI。 |
 | [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | host-owned harness 和 agent-core authored surface 边界。 |
 | [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md) | agent core 目录结构和 authored module roots。 |
-| [docs/operations/channels.md](docs/operations/channels.md) | 本地 TUI 和 Telegram gateway 行为。 |
+| [docs/operations/channels.md](docs/operations/channels.md) | 本地 TUI 和外部 gateway channel 行为。 |
 | [docs/concepts/security-model.md](docs/concepts/security-model.md) | workspace scope、审批和 channel trust boundary。 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发与验证流程。 |
 | [RELEASE.md](RELEASE.md) | 发布检查清单。 |

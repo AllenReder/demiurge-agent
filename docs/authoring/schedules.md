@@ -36,7 +36,9 @@ delivery:
 `modules.input` and `modules.output` are schedule-local serial lists. They do
 not run the core's full pipeline and do not run parallel modules.
 
-## Telegram Delivery
+## External Delivery
+
+Telegram keeps its compatibility target field:
 
 ```yaml
 delivery:
@@ -46,6 +48,17 @@ delivery:
 
 The target must be listed in the same core's
 `channels.telegram.allowed_users` or `channels.telegram.allowed_chats`.
+
+Other external channels use `target`:
+
+```yaml
+delivery:
+  mode: matrix
+  target: "!room:example.org"
+```
+
+The selected channel must be enabled/configured in the same core and the target
+must pass that channel's allowlist rules.
 
 ## Runtime Semantics
 

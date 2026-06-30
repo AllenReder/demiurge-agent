@@ -21,8 +21,8 @@ def test_loader_discovers_source_agent_slots():
     assert core.manifest.model.api_key_env == "DEMIURGE_API_KEY"
     assert core.manifest.runtime.max_model_steps == 90
     assert core.manifest.runtime.workspace is None
-    assert sorted(core.manifest.channels) == ["telegram"]
-    assert core.manifest.channels["telegram"].enabled is False
+    assert sorted(core.manifest.channels) == ["email", "matrix", "mattermost", "slack", "telegram", "webhook"]
+    assert all(channel.enabled is False for channel in core.manifest.channels.values())
     assert core.manifest.channels["telegram"].bot_token_env == "DEMIURGE_TELEGRAM_BOT_TOKEN"
     assert core.manifest.channels["telegram"].message_format == "markdown_v2"
     assert core.manifest.channels["telegram"].register_commands is True
@@ -32,6 +32,11 @@ def test_loader_discovers_source_agent_slots():
     assert core.manifest.channels["telegram"].allowed_users == []
     assert core.manifest.channels["telegram"].allowed_chats == []
     assert core.manifest.channels["telegram"].unauthorized_response == "brief"
+    assert core.manifest.channels["webhook"].token_env == "DEMIURGE_WEBHOOK_TOKEN"
+    assert core.manifest.channels["slack"].signing_secret_env == "SLACK_SIGNING_SECRET"
+    assert core.manifest.channels["mattermost"].webhook_token_env == "MATTERMOST_WEBHOOK_TOKEN"
+    assert core.manifest.channels["matrix"].access_token_env == "MATRIX_ACCESS_TOKEN"
+    assert core.manifest.channels["email"].smtp_username_env == "DEMIURGE_SMTP_USERNAME"
     assert core.manifest.tools.toolsets == ["coding", "demiurge_control"]
     assert [slot.slot_id for slot in core.input_slots] == ["base_input"]
     assert [slot.slot_id for slot in core.input_pipeline.serial] == ["base_input"]

@@ -116,25 +116,29 @@ uv run demiurge --provider openai --model deepseek-v4-flash --base-url https://e
 
 Keep real secrets in environment variables. `/status` shows secret sources, not secret values.
 
-## Telegram Gateway
+## External Gateway
 
-Enable Telegram in the target core:
+Enable one or more channels in the target core:
 
 ```yaml
 channels:
   telegram:
     enabled: true
     bot_token_env: DEMIURGE_TELEGRAM_BOT_TOKEN
+  webhook:
+    enabled: true
+    token_env: DEMIURGE_WEBHOOK_TOKEN
 ```
 
 Then run:
 
 ```bash
 export DEMIURGE_TELEGRAM_BOT_TOKEN="..."
+export DEMIURGE_WEBHOOK_TOKEN="..."
 demiurge gateway --core assistant
 ```
 
-Telegram access is deny-by-default. Private chats require numeric `from.id` in `allowed_users`; groups require both user id and chat id to be allowed.
+The gateway supports Telegram, generic webhooks, Slack, Mattermost, Matrix, and email. Channels are disabled by default, secrets should live in environment variables, and inbound channels verify platform tokens/signatures before accepting input. Telegram access is deny-by-default; see [docs/operations/channels.md](docs/operations/channels.md) for all channel setup guides.
 
 ## Developer Workflow
 
@@ -169,7 +173,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow.
 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | Install, initialize runtime home, and start the TUI. |
 | [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | Host-owned harness and agent-core authored-surface boundary. |
 | [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md) | Agent core layout and authored module roots. |
-| [docs/operations/channels.md](docs/operations/channels.md) | Local TUI and Telegram gateway behavior. |
+| [docs/operations/channels.md](docs/operations/channels.md) | Local TUI and external gateway channel behavior. |
 | [docs/concepts/security-model.md](docs/concepts/security-model.md) | Workspace scope, approvals, and channel trust boundaries. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development and verification workflow. |
 | [RELEASE.md](RELEASE.md) | Release checklist. |

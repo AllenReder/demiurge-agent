@@ -74,6 +74,8 @@ def schedule_signature(schedule: ScheduleDefinition) -> str:
         },
         "delivery": {
             "mode": schedule.delivery.mode,
+            "channel": schedule.delivery.channel,
+            "target": schedule.delivery.target,
             "chat_id": schedule.delivery.chat_id,
         },
     }
@@ -246,7 +248,7 @@ class SchedulerService:
         self.poll_interval_seconds = poll_interval_seconds
         self.store = SchedulerStore(app.home, app.runner.core_id)
         self._task: asyncio.Task[None] | None = None
-        self._telegram_bridge: Any | None = None
+        self._bridges: dict[str, Any] = {}
 
     @property
     def running(self) -> bool:
@@ -297,8 +299,8 @@ class SchedulerService:
         turn_id: str | None = None
         deliveries = 0
         try:
-            if schedule.delivery.mode == "telegram":
-                self._require_telegram_target_allowed(core, schedule)
+            if schedule.delivery.mode != "local":
+                self._require_channel_target_allowed(core, schedule)
             runner = self._new_run_runner()
             inbound = self._schedule_inbound(schedule, claim)
             result = await runner.run_turn(
@@ -368,21 +370,24 @@ class SchedulerService:
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:
         metadata = self._schedule_metadata(schedule, claim)
-        if schedule.delivery.mode == "telegram":
-            chat_id = schedule.delivery.chat_id
-            assert chat_id is not None
-            metadata.update({"telegram_chat_id": chat_id})
+        if schedule.delivery.mode == "local":
             return InteractionInbound(
-                channel="telegram",
+                channel="schedule",
                 text=schedule.prompt,
-                source=str(chat_id),
+                source=schedule.schedule_id,
                 conversation_key=None,
                 metadata=metadata,
             )
+        channel = schedule.delivery.channel_name
+        target = schedule.delivery.delivery_target
+        assert target is not None
+        metadata.update({f"{channel}_target": target})
+        if channel == "telegram" and schedule.delivery.chat_id is not None:
+            metadata.update({"telegram_chat_id": schedule.delivery.chat_id})
         return InteractionInbound(
-            channel="schedule",
+            channel=channel,
             text=schedule.prompt,
-            source=schedule.schedule_id,
+            source=target,
             conversation_key=None,
             metadata=metadata,
         )
@@ -395,6 +400,8 @@ class SchedulerService:
             "due_at": format_instant(claim.due_at),
             "scheduled_at": format_instant(claim.scheduled_at),
             "delivery_mode": schedule.delivery.mode,
+            "delivery_channel": schedule.delivery.channel_name,
+            "delivery_target": schedule.delivery.delivery_target,
         }
 
     async def _deliver_if_needed(
@@ -406,47 +413,48 @@ class SchedulerService:
     ) -> int:
         if schedule.delivery.mode == "local":
             return 0
-        bridge = self.delivery_bridge or self._get_telegram_bridge(core)
-        chat_id = schedule.delivery.chat_id
-        assert chat_id is not None
+        channel = schedule.delivery.channel_name
+        target = schedule.delivery.delivery_target
+        assert target is not None
+        bridge = self.delivery_bridge or self._get_channel_bridge(core, channel)
+        metadata = {
+            "source": str(target),
+            f"{channel}_target": target,
+            **self._schedule_metadata(schedule, claim),
+        }
+        if channel == "telegram" and schedule.delivery.chat_id is not None:
+            metadata["telegram_chat_id"] = schedule.delivery.chat_id
         await bridge.deliver(
             InteractionOutbound(
-                channel="telegram",
+                channel=channel,
                 items=list(result.items),
                 session_id=result.session_id,
                 turn_id=result.turn_id,
-                metadata={
-                    "source": str(chat_id),
-                    "telegram_chat_id": chat_id,
-                    **self._schedule_metadata(schedule, claim),
-                },
+                metadata=metadata,
             )
         )
         return len(result.deliveries)
 
-    def _get_telegram_bridge(self, core: LoadedCore) -> Any:
-        if self._telegram_bridge is not None:
-            return self._telegram_bridge
-        from demiurge.channels.telegram.bridge import TelegramInteractionBridge
+    def _get_channel_bridge(self, core: LoadedCore, channel: str) -> Any:
+        bridge = self._bridges.get(channel)
+        if bridge is not None:
+            return bridge
+        from demiurge.channels.registry import build_channel_bridge
 
-        config = core.manifest.channels.get("telegram")
+        config = core.manifest.channels.get(channel)
         if config is None:
-            raise RuntimeError("telegram schedule delivery requires channels.telegram")
-        self._telegram_bridge = TelegramInteractionBridge.from_config(
-            InteractionRuntime(self.app.runner),
-            config,
-            tool_display=getattr(self.app, "tool_display", "summary"),
-            busy_mode=getattr(self.app, "channel_busy_mode", "interrupt"),
-        )
-        return self._telegram_bridge
+            raise RuntimeError(f"{channel} schedule delivery requires channels.{channel}")
+        self._bridges[channel] = build_channel_bridge(self.app, channel, config)
+        return self._bridges[channel]
 
-    def _require_telegram_target_allowed(self, core: LoadedCore, schedule: ScheduleDefinition) -> None:
-        config = core.manifest.channels.get("telegram")
-        chat_id = schedule.delivery.chat_id
-        if config is None or chat_id is None:
-            raise RuntimeError("telegram schedule delivery requires channels.telegram and chat_id")
-        if chat_id not in set(config.allowed_users) and chat_id not in set(config.allowed_chats):
-            raise RuntimeError("telegram schedule delivery target is not allowed by core allowlist")
+    def _require_channel_target_allowed(self, core: LoadedCore, schedule: ScheduleDefinition) -> None:
+        channel = schedule.delivery.channel_name
+        config = core.manifest.channels.get(channel)
+        if config is None:
+            raise RuntimeError(f"{channel} schedule delivery requires channels.{channel}")
+        from demiurge.channels.registry import validate_schedule_target
+
+        validate_schedule_target(channel, config, schedule.delivery)
 
 
 def start_scheduler_for_app(

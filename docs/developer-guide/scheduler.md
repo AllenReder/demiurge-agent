@@ -41,12 +41,16 @@ the full core pipeline or parallel modules.
 
 ## Delivery
 
-`local` delivery records session output and scheduler logs only. `telegram`
-delivery validates the target against the same core's Telegram allowlist and
-uses the Telegram interaction bridge.
+`local` delivery records session output and scheduler logs only. External
+channel delivery validates the target against the same core's channel config and
+routes output through the active gateway bridge when available. If the scheduler
+runs without an active gateway bridge, it builds the configured channel bridge on
+demand.
+
+Telegram uses `chat_id`; other external channels use `target`.
 
 ## Failure Modes
 
 - Interactive clarification or approval in a schedule run fails closed.
-- Telegram delivery without an allowed target records an error.
+- External delivery without an allowed target records an error.
 - Process downtime coalesces missed fires into one claimed run.

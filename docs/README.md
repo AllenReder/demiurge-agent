@@ -36,7 +36,7 @@ runtime safely.
 2. Read the host/core boundary before editing runtime cores.
 3. Add one input module and one output module.
 4. Install a package into a runtime core and inspect the changes.
-5. Configure approvals, workspace scope, and Telegram only after local TUI works.
+5. Configure approvals, workspace scope, and external channels only after local TUI works.
 
 ## Concepts
 
@@ -69,6 +69,11 @@ runtime safely.
 | [operations/configuration.md](operations/configuration.md) | Host config, fallback agent config, workspace, approvals, and channels. |
 | [operations/channels.md](operations/channels.md) | TUI and external channel behavior. |
 | [operations/telegram.md](operations/telegram.md) | Telegram setup, allowlists, delivery, and approvals. |
+| [operations/webhook.md](operations/webhook.md) | Generic HTTP JSON webhook setup and callback delivery. |
+| [operations/slack.md](operations/slack.md) | Slack Events API, slash commands, and Web API replies. |
+| [operations/mattermost.md](operations/mattermost.md) | Mattermost webhook and REST reply setup. |
+| [operations/matrix.md](operations/matrix.md) | Matrix REST sync and room-message delivery. |
+| [operations/email.md](operations/email.md) | Email IMAP polling and SMTP reply setup. |
 | [operations/package-management.md](operations/package-management.md) | Package wizard and scripted install/uninstall workflow. |
 | [operations/troubleshooting.md](operations/troubleshooting.md) | Common failures and recovery steps. |
 
