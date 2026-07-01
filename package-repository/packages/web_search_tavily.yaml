@@ -1,0 +1,33 @@
+schema_version: 2
+id: web_search_tavily
+name: Tavily Web Search
+summary: Search the web with Tavily Search through a package-owned web_search tool.
+tags:
+  - web
+  - search
+  - provider:tavily
+options:
+  - id: api_key
+    type: secret
+    prompt: Tavily API key
+    description: Optional direct Tavily API key; leave empty to read DEMIURGE_TAVILY_API_KEY.
+    required: false
+    default: null
+components:
+  - id: web_search_lib
+    kind: lib
+    source: web_search_tavily
+    target: agent/lib/web_search_tavily
+    config:
+      provider: web_search_tavily
+      base_url: https://api.tavily.com/search
+      timeout_seconds: 30
+      default_max_results: 5
+      api_key: ${options.api_key}
+      api_key_env: DEMIURGE_TAVILY_API_KEY
+      fallback_envs:
+        - TAVILY_API_KEY
+  - id: web_search_tool
+    kind: tool
+    source: web_search_tavily
+    target: agent/tools/web_search

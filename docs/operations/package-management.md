@@ -55,6 +55,9 @@ kinds:
 - `conversation_style`: input + skill package for per-turn communication hints.
 - `context_reseed`: output + bootstrap + skill + shared lib for bounded continuity
   notes across sessions, saved only when explicitly requested by default.
+- `web_search_brave` and `web_search_tavily`: provider-owned lib + same
+  authored `web_search` tool target. Only one can be installed in a core at a
+  time because both expose the same model-facing tool name.
 - `minimax_tts`, `tts_openai`, `tts_xai`, and `tts_gemini`: shared lib + output
   + optional provider-specific tool/skill/core package for speech artifacts.
 - `stt_openai`, `stt_groq`, `stt_deepgram`, `stt_assemblyai`, and

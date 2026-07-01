@@ -1,0 +1,34 @@
+schema_version: 2
+id: web_search_brave
+name: Brave Web Search
+summary: Search the web with Brave Search through a package-owned web_search tool.
+tags:
+  - web
+  - search
+  - provider:brave
+options:
+  - id: api_key
+    type: secret
+    prompt: Brave Search API key
+    description: Optional direct Brave Search API key; leave empty to read DEMIURGE_BRAVE_SEARCH_API_KEY.
+    required: false
+    default: null
+components:
+  - id: web_search_lib
+    kind: lib
+    source: web_search_brave
+    target: agent/lib/web_search_brave
+    config:
+      provider: web_search_brave
+      base_url: https://api.search.brave.com/res/v1/web/search
+      timeout_seconds: 30
+      default_count: 5
+      api_key: ${options.api_key}
+      api_key_env: DEMIURGE_BRAVE_SEARCH_API_KEY
+      fallback_envs:
+        - BRAVE_SEARCH_API_KEY
+        - BRAVE_API_KEY
+  - id: web_search_tool
+    kind: tool
+    source: web_search_brave
+    target: agent/tools/web_search

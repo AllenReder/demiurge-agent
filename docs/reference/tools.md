@@ -51,6 +51,17 @@ local delivery. Results include the host runtime timezone and source; schedule
 YAML does not accept a timezone field on individual schedules. It is not a
 Hermes-style runtime job store.
 
+## Package-Provided Web Search
+
+`web_search` is not part of the default `coding` toolset. It is installed by
+provider packages such as `web_search_brave` or `web_search_tavily`.
+
+Both packages expose the same model-facing tool name, `web_search`, but own
+their provider-specific request code and configuration in separate libs. Because
+both packages target `agent/tools/web_search`, only one web search provider
+package can be installed in a core at a time. `web_extract` remains the built-in
+tool for fetching a known URL.
+
 ## Authored and MCP Tools
 
 Authored tools live under `agent/tools/`. MCP tools are discovered from

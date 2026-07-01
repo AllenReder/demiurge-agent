@@ -143,15 +143,29 @@ tool and voice skill so multiple TTS providers can coexist in one core:
 | `tts_xai` | `agent/lib/tts_xai`, `agent/output/tts_xai` | `agent/tools/text_to_speech_xai` |
 | `tts_gemini` | `agent/lib/tts_gemini`, `agent/output/tts_gemini` | `agent/tools/text_to_speech_gemini` |
 
+Web search provider packages install a provider-owned lib plus the same
+model-facing authored tool name, `agent/tools/web_search`:
+
+| Package | Lib | Tool |
+| --- | --- | --- |
+| `web_search_brave` | `agent/lib/web_search_brave` | `agent/tools/web_search` |
+| `web_search_tavily` | `agent/lib/web_search_tavily` | `agent/tools/web_search` |
+
+Because both packages write the same tool target, only one web search provider
+package can be installed in a core at a time. To switch providers, uninstall the
+current web search package, then install the other one. `web_extract` remains a
+host built-in tool for fetching a specific URL; these packages only add search.
+
 Provider secrets are optional package options and can also be read from
 environment variables. Prefer environment variables for non-plaintext storage:
 `api_key` option values are written into the installed runtime component's
-`agent/lib/tts_<provider>/config.yaml` so the component can run without host CLI
-state. Built-in provider-specific environment variables are
-`DEMIURGE_MINIMAX_API_KEY`, `DEMIURGE_OPENAI_API_KEY`, `DEMIURGE_XAI_API_KEY`,
-and `DEMIURGE_GEMINI_API_KEY`; provider-standard fallbacks include
-`OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, and `GOOGLE_API_KEY` where
-supported by the package.
+`config.yaml` so the component can run without host CLI state. Built-in
+provider-specific environment variables include `DEMIURGE_MINIMAX_API_KEY`,
+`DEMIURGE_OPENAI_API_KEY`, `DEMIURGE_XAI_API_KEY`, `DEMIURGE_GEMINI_API_KEY`,
+`DEMIURGE_BRAVE_SEARCH_API_KEY`, and `DEMIURGE_TAVILY_API_KEY`;
+provider-standard fallbacks include `OPENAI_API_KEY`, `XAI_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_SEARCH_API_KEY`, `BRAVE_API_KEY`,
+and `TAVILY_API_KEY` where supported by the package.
 
 ## Success Check
 

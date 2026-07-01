@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
 import pytest
@@ -217,6 +218,70 @@ def _mock_openai_stt_http(monkeypatch, *, transcript: str = "transcribed voice")
     return calls
 
 
+def _mock_brave_search_http(monkeypatch, *, response: dict | None = None) -> list[dict[str, object]]:
+    monkeypatch.setenv("DEMIURGE_BRAVE_SEARCH_API_KEY", "test-brave-key")
+    calls: list[dict[str, object]] = []
+    response_payload = response or {
+        "query": {"original": "Demiurge package search"},
+        "web": {
+            "results": [
+                {
+                    "title": "Demiurge Packages",
+                    "url": "https://example.com/demiurge-packages",
+                    "description": "Package-first web search.",
+                }
+            ]
+        },
+    }
+
+    def fake_urlopen(request: Request, timeout=30):
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "data": request.data,
+                "timeout": timeout,
+            }
+        )
+        return _FakeHTTPResponse(json.dumps(response_payload).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
+def _mock_tavily_search_http(monkeypatch, *, response: dict | None = None) -> list[dict[str, object]]:
+    monkeypatch.setenv("DEMIURGE_TAVILY_API_KEY", "test-tavily-key")
+    calls: list[dict[str, object]] = []
+    response_payload = response or {
+        "answer": "Demiurge uses package-owned tools.",
+        "results": [
+            {
+                "title": "Demiurge Web Search",
+                "url": "https://example.com/web-search",
+                "content": "Provider packages can expose a stable web_search tool.",
+            }
+        ],
+        "response_time": 0.12,
+        "request_id": "req_test",
+    }
+
+    def fake_urlopen(request: Request, timeout=30):
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "json": json.loads((request.data or b"{}").decode("utf-8")),
+                "timeout": timeout,
+            }
+        )
+        return _FakeHTTPResponse(json.dumps(response_payload).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
 def test_builtin_repository_lists_minimax_tts_package():
     repository = PackageRepository.load(default_package_repository_root())
 
@@ -277,6 +342,28 @@ def test_builtin_repository_lists_provider_stt_packages(package_id, provider):
     assert package.components[2].pipeline == {"group": "serial", "before": "base_input"}
     assert package.components[3].source == "stt_transcription"
     assert {component.kind for component in package.components} == {"lib", "input", "skill"}
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider"),
+    [
+        ("web_search_brave", "brave"),
+        ("web_search_tavily", "tavily"),
+    ],
+)
+def test_builtin_repository_lists_web_search_provider_packages(package_id, provider):
+    repository = PackageRepository.load(default_package_repository_root())
+
+    package = repository.packages[package_id]
+    assert {"web", "search", f"provider:{provider}"}.issubset(package.tags)
+    assert [option.option_id for option in package.options] == ["api_key"]
+    assert {component.kind for component in package.components} == {"lib", "tool"}
+    lib_component = next(component for component in package.components if component.kind == "lib")
+    tool_component = next(component for component in package.components if component.kind == "tool")
+    assert lib_component.source == package_id
+    assert lib_component.target == f"agent/lib/{package_id}"
+    assert tool_component.source == package_id
+    assert tool_component.target == "agent/tools/web_search"
 
 
 def test_builtin_repository_lists_memory_basic_package():
@@ -360,6 +447,60 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert (memory_dir / "USER.md").read_text(encoding="utf-8") == "User prefers concise Chinese replies."
     pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["session_context"]
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "env_name"),
+    [
+        ("web_search_brave", "brave", "DEMIURGE_BRAVE_SEARCH_API_KEY"),
+        ("web_search_tavily", "tavily", "DEMIURGE_TAVILY_API_KEY"),
+    ],
+)
+def test_install_and_uninstall_web_search_provider_package(tmp_path, package_id, provider, env_name):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    result = manager.install(core_id="assistant", package_id=package_id, option_answers={"api_key": "secret-value"})
+
+    core_path = app.version_store.active_core_path("assistant")
+    lib_path = core_path / "agent" / "lib" / package_id
+    tool_path = core_path / "agent" / "tools" / "web_search"
+    assert result.registry_path == core_path / "packages.yaml"
+    assert (lib_path / "search.py").exists()
+    assert (tool_path / "module.py").exists()
+    lib_config = yaml.safe_load((lib_path / "config.yaml").read_text())
+    assert lib_config["provider"] == package_id
+    assert lib_config["api_key"] == "secret-value"
+    assert lib_config["api_key_env"] == env_name
+    slot = yaml.safe_load((tool_path / "slot.yaml").read_text())
+    assert slot["capability"] == "network.fetch"
+    assert slot["capabilities"] == ["network.fetch"]
+    assert slot["display_policy"] == "summary"
+    assert slot["model_output_policy"] == "content"
+    assert slot["input_schema"]["required"] == ["query"]
+    registry = yaml.safe_load((core_path / "packages.yaml").read_text())
+    assert registry["installed"][0]["package_id"] == package_id
+    assert registry["installed"][0]["options"]["api_key"] == REDACTED_SECRET
+
+    removed = manager.uninstall(core_id="assistant", package_id=package_id)
+
+    assert removed.action == "uninstall"
+    assert not lib_path.exists()
+    assert not tool_path.exists()
+
+
+def test_web_search_provider_packages_are_mutually_exclusive_by_tool_target(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    manager.install(core_id="assistant", package_id="web_search_brave")
+    with pytest.raises(PackageOperationError, match="agent/tools/web_search"):
+        manager.install(core_id="assistant", package_id="web_search_tavily")
+
+    manager.uninstall(core_id="assistant", package_id="web_search_brave")
+    installed = manager.install(core_id="assistant", package_id="web_search_tavily")
+
+    assert installed.package_id == "web_search_tavily"
 
 
 def test_repository_rejects_component_source_escape(tmp_path):
@@ -1384,6 +1525,222 @@ async def test_context_reseed_rejects_symlink_storage_escape(tmp_path):
         and "must resolve inside the core root" in event["error"]
         for event in app.runner.event_log.tail(30)
     )
+
+
+@pytest.mark.asyncio
+async def test_brave_web_search_tool_normalizes_results(tmp_path, monkeypatch):
+    script = tmp_path / "brave-search.json"
+    script.write_text(
+        json.dumps(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "search_1",
+                            "name": "web_search",
+                            "arguments": {
+                                "query": "Demiurge package search",
+                                "count": 3,
+                                "country": "US",
+                                "date_after": "2026-01-01",
+                                "date_before": "2026-07-01",
+                            },
+                        }
+                    ]
+                },
+                {"content": "search complete"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _manager(app).install(core_id="assistant", package_id="web_search_brave")
+    calls = _mock_brave_search_http(monkeypatch)
+
+    result = await app.runner.run_turn("search brave")
+
+    tool_result = result.tool_results[0].result
+    payload = json.loads(tool_result.content)
+    assert payload["success"] is True
+    assert payload["provider"] == "brave"
+    assert payload["query"] == "Demiurge package search"
+    assert payload["data"]["web"] == [
+        {
+            "title": "Demiurge Packages",
+            "url": "https://example.com/demiurge-packages",
+            "description": "Package-first web search.",
+            "position": 1,
+        }
+    ]
+    assert tool_result.model_output == tool_result.content
+    assert "Brave web_search: 1 result(s)" in (tool_result.display_output or "")
+    parsed = parse_qs(urlparse(calls[0]["url"]).query)
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["headers"]["x-subscription-token"] == "test-brave-key"
+    assert parsed["q"] == ["Demiurge package search"]
+    assert parsed["count"] == ["3"]
+    assert parsed["country"] == ["US"]
+    assert parsed["freshness"] == ["2026-01-01to2026-07-01"]
+    assert "test-brave-key" not in tool_result.content
+    assert "test-brave-key" not in (tool_result.display_output or "")
+
+
+@pytest.mark.asyncio
+async def test_tavily_web_search_tool_normalizes_results(tmp_path, monkeypatch):
+    script = tmp_path / "tavily-search.json"
+    script.write_text(
+        json.dumps(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "search_1",
+                            "name": "web_search",
+                            "arguments": {
+                                "query": "Demiurge package search",
+                                "search_depth": "advanced",
+                                "topic": "general",
+                                "time_range": "week",
+                                "max_results": 2,
+                                "include_answer": "advanced",
+                                "include_domains": ["example.com"],
+                                "exclude_domains": ["blocked.example"],
+                                "country": "United States",
+                            },
+                        }
+                    ]
+                },
+                {"content": "search complete"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _manager(app).install(core_id="assistant", package_id="web_search_tavily")
+    calls = _mock_tavily_search_http(monkeypatch)
+
+    result = await app.runner.run_turn("search tavily")
+
+    tool_result = result.tool_results[0].result
+    payload = json.loads(tool_result.content)
+    assert payload["success"] is True
+    assert payload["provider"] == "tavily"
+    assert payload["answer"] == "Demiurge uses package-owned tools."
+    assert payload["data"]["web"] == [
+        {
+            "title": "Demiurge Web Search",
+            "url": "https://example.com/web-search",
+            "description": "Provider packages can expose a stable web_search tool.",
+            "position": 1,
+        }
+    ]
+    assert "Tavily web_search: 1 result(s)" in (tool_result.display_output or "")
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["headers"]["authorization"] == "Bearer test-tavily-key"
+    assert calls[0]["json"] == {
+        "query": "Demiurge package search",
+        "max_results": 2,
+        "search_depth": "advanced",
+        "topic": "general",
+        "time_range": "week",
+        "country": "United States",
+        "include_domains": ["example.com"],
+        "exclude_domains": ["blocked.example"],
+        "include_answer": "advanced",
+    }
+    assert "test-tavily-key" not in tool_result.content
+    assert "test-tavily-key" not in (tool_result.display_output or "")
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_reports_missing_api_key_without_network(tmp_path, monkeypatch):
+    for env_name in ("DEMIURGE_BRAVE_SEARCH_API_KEY", "BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+    script = tmp_path / "missing-key-search.json"
+    script.write_text(
+        json.dumps(
+            [
+                {"tool_calls": [{"id": "search_1", "name": "web_search", "arguments": {"query": "Demiurge"}}]},
+                {"content": "search complete"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _manager(app).install(core_id="assistant", package_id="web_search_brave")
+
+    result = await app.runner.run_turn("search missing key")
+
+    tool_result = result.tool_results[0].result
+    payload = json.loads(tool_result.content)
+    assert tool_result.is_error is True
+    assert payload["success"] is False
+    assert payload["provider"] == "brave"
+    assert "API key is not configured" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_redacts_api_key_from_provider_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEMIURGE_BRAVE_SEARCH_API_KEY", "test-brave-key")
+
+    def fake_urlopen(request: Request, timeout=30):
+        raise OSError("network failure for test-brave-key")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    script = tmp_path / "redact-search.json"
+    script.write_text(
+        json.dumps(
+            [
+                {"tool_calls": [{"id": "search_1", "name": "web_search", "arguments": {"query": "Demiurge"}}]},
+                {"content": "search complete"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _manager(app).install(core_id="assistant", package_id="web_search_brave")
+
+    result = await app.runner.run_turn("search redact")
+
+    tool_result = result.tool_results[0].result
+    payload = json.loads(tool_result.content)
+    assert tool_result.is_error is True
+    assert "test-brave-key" not in payload["error"]
+    assert "<redacted>" in payload["error"]
+    assert "test-brave-key" not in tool_result.content
+
+
+@pytest.mark.asyncio
+async def test_web_search_tool_requires_network_fetch_capability(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEMIURGE_BRAVE_SEARCH_API_KEY", "test-brave-key")
+    script = tmp_path / "capability-search.json"
+    script.write_text(
+        json.dumps(
+            [
+                {"tool_calls": [{"id": "search_1", "name": "web_search", "arguments": {"query": "Demiurge"}}]},
+                {"content": "search complete"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _manager(app).install(core_id="assistant", package_id="web_search_brave")
+    core_path = app.version_store.active_core_path("assistant")
+    manifest_path = core_path / "agent.yaml"
+    raw_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw_manifest["capabilities"]["defaults"].pop("network.fetch", None)
+    manifest_path.write_text(yaml.safe_dump(raw_manifest, sort_keys=False), encoding="utf-8")
+    slot_path = core_path / "agent" / "tools" / "web_search" / "slot.yaml"
+    slot = yaml.safe_load(slot_path.read_text(encoding="utf-8"))
+    slot["capabilities"] = []
+    slot.pop("capability", None)
+    slot_path.write_text(yaml.safe_dump(slot, sort_keys=False), encoding="utf-8")
+
+    result = await app.runner.run_turn("search capability")
+
+    tool_result = result.tool_results[0].result
+    assert tool_result.is_error is True
+    assert "capability denied: network.fetch" in tool_result.content
 
 
 @pytest.mark.asyncio
