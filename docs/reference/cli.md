@@ -63,11 +63,17 @@ host config values. JSON output redacts direct API keys.
 ```bash
 uv run demiurge package
 uv run demiurge package list --core assistant
-uv run demiurge package install <package_id> --core assistant --preview
-uv run demiurge package uninstall <package_id> --core assistant
+uv run demiurge package list --repo builtin
+uv run demiurge package install <package_id|repo/package_id> --core assistant --preview
+uv run demiurge package uninstall <package_id|repo/package_id> --core assistant
+uv run demiurge package repo list
+uv run demiurge package repo add community https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo sync community
+uv run demiurge package repo remove community
 ```
 
-Manages catalog packages for runtime cores.
+Manages package repository packages for runtime cores. External path and git
+repositories must be trusted before they can install local code slots.
 
 ## `update`
 

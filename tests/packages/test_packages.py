@@ -6,16 +6,17 @@ import pytest
 import yaml
 from rich.console import Console
 
-from demiurge.app import create_app
+from demiurge.app import create_app, load_host_config
 from demiurge.cli import main
 from demiurge.package_wizard import PackageWizard
 from demiurge.packages import (
     REDACTED_SECRET,
-    PackageCatalog,
-    PackageCatalogError,
+    PackageRepository,
+    PackageRepositoryError,
     PackageManager,
     PackageOperationError,
-    default_catalog_root,
+    default_package_repository_root,
+    load_package_repository_collection,
 )
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
@@ -23,9 +24,14 @@ from demiurge.security.approval import ApprovalDecision
 from demiurge.ui_gateway import TuiInteractionBridge
 
 
-def _manager(app, catalog_root: Path | None = None) -> PackageManager:
-    catalog = PackageCatalog.load(default_catalog_root(catalog_root))
-    return PackageManager(version_store=app.version_store, catalog=catalog)
+def _manager(app, repository_root: Path | None = None) -> PackageManager:
+    configs = (
+        {"builtin": {"type": "builtin"}}
+        if repository_root is None
+        else {"test": {"type": "path", "path": str(repository_root), "trusted": True}}
+    )
+    repositories = load_package_repository_collection(home=app.home, repository_configs=configs)
+    return PackageManager(version_store=app.version_store, repository=repositories)
 
 
 class _FakeHTTPResponse:
@@ -183,11 +189,11 @@ def _mock_provider_tts_http(
     return calls
 
 
-def test_builtin_catalog_lists_minimax_tts_package():
-    catalog = PackageCatalog.load(default_catalog_root())
+def test_builtin_repository_lists_minimax_tts_package():
+    repository = PackageRepository.load(default_package_repository_root())
 
-    assert catalog.catalog.catalog_id == "demiurge_builtin"
-    package = catalog.packages["minimax_tts"]
+    assert repository.repository.repository_id == "builtin"
+    package = repository.packages["minimax_tts"]
     assert {"audio", "tts", "provider:minimax"}.issubset(package.tags)
     assert [option.option_id for option in package.options] == ["mode", "enable_tool", "api_key"]
     mode = package.options[0]
@@ -205,10 +211,10 @@ def test_builtin_catalog_lists_minimax_tts_package():
         ("tts_gemini", "gemini", "text_to_speech_gemini"),
     ],
 )
-def test_builtin_catalog_lists_provider_tts_packages(package_id, provider, tool_id):
-    catalog = PackageCatalog.load(default_catalog_root())
+def test_builtin_repository_lists_provider_tts_packages(package_id, provider, tool_id):
+    repository = PackageRepository.load(default_package_repository_root())
 
-    package = catalog.packages[package_id]
+    package = repository.packages[package_id]
     assert {"audio", "tts", f"provider:{provider}"}.issubset(package.tags)
     assert [option.option_id for option in package.options] == ["mode", "enable_tool", "api_key"]
     assert package.options[0].choices == ["direct", "summary"]
@@ -221,10 +227,10 @@ def test_builtin_catalog_lists_provider_tts_packages(package_id, provider, tool_
     assert tool_component.target == f"agent/tools/{tool_id}"
 
 
-def test_builtin_catalog_lists_memory_basic_package():
-    catalog = PackageCatalog.load(default_catalog_root())
+def test_builtin_repository_lists_memory_basic_package():
+    repository = PackageRepository.load(default_package_repository_root())
 
-    package = catalog.packages["memory_basic"]
+    package = repository.packages["memory_basic"]
     assert {"memory", "context"}.issubset(package.tags)
     assert {component.kind for component in package.components} == {"lib", "bootstrap", "tool"}
     assert [component.component_id for component in package.components] == [
@@ -234,10 +240,10 @@ def test_builtin_catalog_lists_memory_basic_package():
     ]
 
 
-def test_builtin_catalog_lists_conversation_style_package():
-    catalog = PackageCatalog.load(default_catalog_root())
+def test_builtin_repository_lists_conversation_style_package():
+    repository = PackageRepository.load(default_package_repository_root())
 
-    package = catalog.packages["conversation_style"]
+    package = repository.packages["conversation_style"]
     assert {"input", "skill", "communication"}.issubset(package.tags)
     assert [option.option_id for option in package.options] == ["style", "channel_hint", "activate_skill"]
     style = package.options[0]
@@ -246,10 +252,10 @@ def test_builtin_catalog_lists_conversation_style_package():
     assert {component.kind for component in package.components} == {"input", "skill"}
 
 
-def test_builtin_catalog_lists_context_reseed_package():
-    catalog = PackageCatalog.load(default_catalog_root())
+def test_builtin_repository_lists_context_reseed_package():
+    repository = PackageRepository.load(default_package_repository_root())
 
-    package = catalog.packages["context_reseed"]
+    package = repository.packages["context_reseed"]
     assert {"bootstrap", "output", "context"}.issubset(package.tags)
     assert [option.option_id for option in package.options] == ["mode", "max_chars", "notice"]
     assert package.options[0].default == "explicit"
@@ -304,10 +310,10 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert pipeline["serial"] == ["session_context"]
 
 
-def test_catalog_rejects_component_source_escape(tmp_path):
-    root = tmp_path / "catalog"
+def test_repository_rejects_component_source_escape(tmp_path):
+    root = tmp_path / "repository"
     (root / "packages").mkdir(parents=True)
-    (root / "catalog.yaml").write_text("id: test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: test\n", encoding="utf-8")
     (root / "packages" / "bad.yaml").write_text(
         "id: bad\n"
         "components:\n"
@@ -317,18 +323,18 @@ def test_catalog_rejects_component_source_escape(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(PackageCatalogError, match="component source must stay inside"):
-        PackageCatalog.load(root)
+    with pytest.raises(PackageRepositoryError, match="component source must stay inside"):
+        PackageRepository.load(root)
 
 
-def test_catalog_rejects_top_level_component_source_symlink(tmp_path):
-    root = tmp_path / "catalog"
+def test_repository_rejects_top_level_component_source_symlink(tmp_path):
+    root = tmp_path / "repository"
     (root / "packages").mkdir(parents=True)
     real = root / "output" / "real_voice"
     real.mkdir(parents=True)
     (real / "module.py").write_text("# real\n", encoding="utf-8")
     (root / "output" / "voice_link").symlink_to(real, target_is_directory=True)
-    (root / "catalog.yaml").write_text("id: test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: test\n", encoding="utf-8")
     (root / "packages" / "bad.yaml").write_text(
         "id: bad\n"
         "components:\n"
@@ -338,18 +344,18 @@ def test_catalog_rejects_top_level_component_source_symlink(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(PackageCatalogError, match="component source cannot be a symlink"):
-        PackageCatalog.load(root)
+    with pytest.raises(PackageRepositoryError, match="component source cannot be a symlink"):
+        PackageRepository.load(root)
 
 
 def test_install_ignores_python_bytecode_cache_from_component_source(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_test_catalog(catalog_root)
-    cache_dir = catalog_root / "output" / "first" / "__pycache__"
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+    cache_dir = repository_root / "output" / "first" / "__pycache__"
     cache_dir.mkdir()
     (cache_dir / "module.cpython-311.pyc").write_bytes(b"cached bytecode")
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     manager.install(core_id="assistant", package_id="first")
 
@@ -385,8 +391,11 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert pipeline["serial"] == ["base_output"]
     assert pipeline["parallel"] == ["tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
-    assert registry["schema_version"] == 2
+    assert registry["schema_version"] == 3
     assert registry["installed"][0]["package_id"] == "minimax_tts"
+    assert registry["installed"][0]["repository_alias"] == "builtin"
+    assert registry["installed"][0]["repository_id"] == "builtin"
+    assert registry["installed"][0]["repository_type"] == "builtin"
     assert registry["installed"][0]["options"]["api_key"] is None
     assert "config" not in registry["installed"][0]["components"][0]
 
@@ -456,6 +465,8 @@ def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id,
     assert pipeline["parallel"] == [f"tts_{provider}"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["installed"][0]["package_id"] == package_id
+    assert registry["installed"][0]["repository_alias"] == "builtin"
+    assert registry["installed"][0]["repository_id"] == "builtin"
     assert registry["installed"][0]["options"]["api_key"] is None
 
     removed = manager.uninstall(core_id="assistant", package_id=package_id)
@@ -608,10 +619,10 @@ def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):
 
 
 def test_package_options_validate_required_defaults_and_choices(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_option_catalog(catalog_root, required_default=False)
+    repository_root = tmp_path / "repository"
+    _write_option_repository(repository_root, required_default=False)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     with pytest.raises(PackageOperationError, match="run `demiurge package`"):
         manager.install(core_id="assistant", package_id="voice")
@@ -626,10 +637,10 @@ def test_package_options_validate_required_defaults_and_choices(tmp_path):
 
 
 def test_package_options_use_defaults_for_noninteractive_install(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_option_catalog(catalog_root, required_default=True)
+    repository_root = tmp_path / "repository"
+    _write_option_repository(repository_root, required_default=True)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     manager.install(core_id="assistant", package_id="voice")
 
@@ -640,10 +651,10 @@ def test_package_options_use_defaults_for_noninteractive_install(tmp_path):
 
 
 def test_install_rejects_existing_unmanaged_target(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_test_catalog(catalog_root)
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     manager.install(core_id="assistant", package_id="first")
 
@@ -652,10 +663,10 @@ def test_install_rejects_existing_unmanaged_target(tmp_path):
 
 
 def test_shared_lib_source_is_reused_and_pruned_last(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_shared_lib_catalog(catalog_root)
+    repository_root = tmp_path / "repository"
+    _write_shared_lib_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     first = manager.install(core_id="assistant", package_id="first")
     second = manager.install(core_id="assistant", package_id="second")
@@ -674,10 +685,10 @@ def test_shared_lib_source_is_reused_and_pruned_last(tmp_path):
 
 
 def test_install_and_uninstall_bootstrap_package_updates_serial_pipeline(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_bootstrap_catalog(catalog_root)
+    repository_root = tmp_path / "repository"
+    _write_bootstrap_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     result = manager.install(core_id="assistant", package_id="bootstrap_before")
 
@@ -699,10 +710,10 @@ def test_install_and_uninstall_bootstrap_package_updates_serial_pipeline(tmp_pat
 
 
 def test_bootstrap_pipeline_after_ordering(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_bootstrap_catalog(catalog_root)
+    repository_root = tmp_path / "repository"
+    _write_bootstrap_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     manager.install(core_id="assistant", package_id="bootstrap_after")
 
@@ -712,10 +723,10 @@ def test_bootstrap_pipeline_after_ordering(tmp_path):
 
 
 def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
-    catalog_root = tmp_path / "catalog"
-    _write_bootstrap_catalog(catalog_root)
+    repository_root = tmp_path / "repository"
+    _write_bootstrap_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, catalog_root)
+    manager = _manager(app, repository_root)
 
     with pytest.raises(PackageOperationError, match="invalid bootstrap pipeline group: parallel"):
         manager.preview_install(core_id="assistant", package_id="bootstrap_parallel")
@@ -726,12 +737,41 @@ def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
     assert pipeline == {"serial": ["session_context"]}
 
 
+def test_multi_repository_requires_qualified_ref_for_duplicate_package_ids(tmp_path):
+    first_root = tmp_path / "first-repository"
+    second_root = tmp_path / "second-repository"
+    _write_test_repository(first_root)
+    _write_test_repository(second_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    repositories = load_package_repository_collection(
+        home=app.home,
+        repository_configs={
+            "one": {"type": "path", "path": str(first_root), "trusted": True},
+            "two": {"type": "path", "path": str(second_root), "trusted": True},
+        },
+    )
+    manager = PackageManager(version_store=app.version_store, repository=repositories)
+
+    with pytest.raises(PackageOperationError, match="ambiguous package 'first'"):
+        manager.install(core_id="assistant", package_id="first")
+
+    result = manager.install(core_id="assistant", package_id="one/first")
+    registry = yaml.safe_load((app.version_store.active_core_path("assistant") / "packages.yaml").read_text())
+
+    assert result.package_ref == "one/first"
+    assert registry["installed"][0]["repository_alias"] == "one"
+    assert registry["installed"][0]["repository_id"] == "test_repository"
+
+
 def test_cli_package_list_and_install(tmp_path, capsys):
     home = tmp_path / "home"
 
     main(["--home", str(home), "package", "list", "--tag", "tts", "--json"])
     listed = json.loads(capsys.readouterr().out)
     minimax = next(package for package in listed["packages"] if package["id"] == "minimax_tts")
+    assert minimax["ref"] == "builtin/minimax_tts"
+    assert minimax["repository_alias"] == "builtin"
+    assert listed["repositories"][0]["alias"] == "builtin"
     mode = next(option for option in minimax["options"] if option["id"] == "mode")
     assert mode["description"]
     assert mode["choice_descriptions"]["summary"]
@@ -753,6 +793,12 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     preview = json.loads(capsys.readouterr().out)
     assert preview["preview"] is True
     assert preview["package_id"] == "minimax_tts"
+    assert preview["package_ref"] == "builtin/minimax_tts"
+    assert preview["repository_alias"] == "builtin"
+    assert preview["repository_id"] == "builtin"
+    assert preview["repository_type"] == "builtin"
+    assert preview["repository_ref"] is None
+    assert preview["repository_commit"] is None
     assert not (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
 
     main(
@@ -795,6 +841,12 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert installed["action"] == "install"
     assert installed["preview"] is False
     assert installed["package_id"] == "minimax_tts"
+    assert installed["package_ref"] == "builtin/minimax_tts"
+    assert installed["repository_alias"] == "builtin"
+    assert installed["repository_id"] == "builtin"
+    assert installed["repository_type"] == "builtin"
+    assert installed["repository_ref"] is None
+    assert installed["repository_commit"] is None
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
     assert (home / "agents" / "assistant" / "agent" / "tools" / "text_to_speech").exists()
     assert not (home / "agents" / "assistant" / "agent" / "tools" / "tts_synthesize").exists()
@@ -805,6 +857,43 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert uninstall_preview["preview"] is True
     assert uninstall_preview["components"][0]["remove"] is True
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
+
+
+def test_cli_package_repo_add_list_remove_path_repository(tmp_path, capsys):
+    home = tmp_path / "home"
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+
+    main(["--home", str(home), "package", "repo", "add", "local", str(repository_root), "--trust", "--json"])
+    added = json.loads(capsys.readouterr().out)
+    assert added["alias"] == "local"
+    assert added["repository_id"] == "test_repository"
+    assert added["ready"] is True
+
+    main(["--home", str(home), "package", "repo", "list", "--json"])
+    listed = json.loads(capsys.readouterr().out)
+    assert {item["alias"] for item in listed["repositories"]} == {"builtin", "local"}
+
+    main(["--home", str(home), "package", "install", "local/first", "--core", "assistant", "--json"])
+    installed = json.loads(capsys.readouterr().out)
+    assert installed["package_ref"] == "local/first"
+    assert installed["repository_alias"] == "local"
+
+    with pytest.raises(SystemExit, match="still referenced"):
+        main(["--home", str(home), "package", "repo", "remove", "local"])
+
+    main(["--home", str(home), "package", "repo", "remove", "local", "--force", "--json"])
+    removed = json.loads(capsys.readouterr().out)
+    assert removed["removed"] == "local"
+    assert removed["forced"] is True
+
+
+def test_cli_package_repo_add_requires_trust_for_noninteractive_external_repo(tmp_path):
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+
+    with pytest.raises(SystemExit, match="require --trust"):
+        main(["--home", str(tmp_path / "home"), "package", "repo", "add", "local", str(repository_root), "--json"])
 
 
 def test_cli_package_without_subcommand_runs_interactive_wizard(tmp_path, monkeypatch):
@@ -825,13 +914,21 @@ def test_wizard_installs_with_option_answers(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
     prompt = _FakePrompt(
-        selections=["assistant", "all", "minimax_tts", "install", "direct", "back", "exit"],
+        selections=["assistant", "all", "builtin/minimax_tts", "install", "direct", "back", "exit"],
         confirms=[False, True],
         inputs=["wizard-secret"],
     )
     console = Console(record=True)
 
-    PackageWizard(manager=manager, version_store=app.version_store, console=console, prompt=prompt).run()
+    host_config = load_host_config(app.host_config_path)[0]
+    PackageWizard(
+        manager=manager,
+        version_store=app.version_store,
+        home=app.home,
+        host_config=host_config,
+        console=console,
+        prompt=prompt,
+    ).run()
 
     config = yaml.safe_load(
         (app.version_store.active_core_path("assistant") / "agent" / "lib" / "tts_minimax" / "config.yaml").read_text()
@@ -851,11 +948,19 @@ def test_wizard_uninstalls_installed_package(tmp_path):
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="minimax_tts")
     prompt = _FakePrompt(
-        selections=["assistant", "installed", "minimax_tts", "uninstall", "exit"],
+        selections=["assistant", "installed", "builtin/minimax_tts", "uninstall", "exit"],
         confirms=[True],
     )
 
-    PackageWizard(manager=manager, version_store=app.version_store, console=Console(record=True), prompt=prompt).run()
+    host_config = load_host_config(app.host_config_path)[0]
+    PackageWizard(
+        manager=manager,
+        version_store=app.version_store,
+        home=app.home,
+        host_config=host_config,
+        console=Console(record=True),
+        prompt=prompt,
+    ).run()
 
     assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax").exists()
 
@@ -872,8 +977,8 @@ async def test_tui_packages_command_lists_details_and_installs(tmp_path):
 
     output = sink.text()
     assert "minimax_tts" in output
-    assert "Package: minimax_tts" in output
-    assert "installed minimax_tts for assistant" in output
+    assert "Package: builtin/minimax_tts" in output
+    assert "installed builtin/minimax_tts for assistant" in output
 
 
 @pytest.mark.asyncio
@@ -1321,7 +1426,7 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
     )
 
 
-def _write_test_catalog(root: Path) -> None:
+def _write_test_repository(root: Path) -> None:
     (root / "packages").mkdir(parents=True)
     for component in ("first", "second"):
         slot = root / "output" / component
@@ -1335,7 +1440,7 @@ def _write_test_catalog(root: Path) -> None:
             encoding="utf-8",
         )
         (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
-    (root / "catalog.yaml").write_text("id: test_catalog\nname: Test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: test_repository\nname: Test\n", encoding="utf-8")
     for package_id, source in (("first", "first"), ("second", "second")):
         (root / "packages" / f"{package_id}.yaml").write_text(
             f"id: {package_id}\n"
@@ -1353,12 +1458,12 @@ def _write_test_catalog(root: Path) -> None:
         )
 
 
-def _write_shared_lib_catalog(root: Path) -> None:
+def _write_shared_lib_repository(root: Path) -> None:
     lib = root / "lib" / "shared"
     lib.mkdir(parents=True)
     (lib / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "packages").mkdir(parents=True)
-    (root / "catalog.yaml").write_text("id: shared_catalog\nname: Shared\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: shared_repository\nname: Shared\n", encoding="utf-8")
     for package_id in ("first", "second"):
         (root / "packages" / f"{package_id}.yaml").write_text(
             f"id: {package_id}\n"
@@ -1371,7 +1476,7 @@ def _write_shared_lib_catalog(root: Path) -> None:
         )
 
 
-def _write_bootstrap_catalog(root: Path) -> None:
+def _write_bootstrap_repository(root: Path) -> None:
     (root / "packages").mkdir(parents=True)
     for component in ("before_session", "after_session", "parallel_session"):
         slot = root / "bootstrap" / component
@@ -1385,7 +1490,7 @@ def _write_bootstrap_catalog(root: Path) -> None:
             encoding="utf-8",
         )
         (slot / "module.py").write_text("def process(ctx):\n    ctx.bootstrap.add('test bootstrap')\n", encoding="utf-8")
-    (root / "catalog.yaml").write_text("id: bootstrap_catalog\nname: Bootstrap\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: bootstrap_repository\nname: Bootstrap\n", encoding="utf-8")
     (root / "packages" / "bootstrap_before.yaml").write_text(
         "id: bootstrap_before\n"
         "tags:\n"
@@ -1459,7 +1564,7 @@ class _FakePrompt:
         return self.inputs.pop(0)
 
 
-def _write_option_catalog(root: Path, *, required_default: bool) -> None:
+def _write_option_repository(root: Path, *, required_default: bool) -> None:
     slot = root / "output" / "voice"
     slot.mkdir(parents=True)
     (root / "packages").mkdir(parents=True)
@@ -1472,7 +1577,7 @@ def _write_option_catalog(root: Path, *, required_default: bool) -> None:
         encoding="utf-8",
     )
     (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
-    (root / "catalog.yaml").write_text("id: options_catalog\nname: Options\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("id: options_repository\nname: Options\n", encoding="utf-8")
     default_line = "    default: alto\n" if required_default else ""
     (root / "packages" / "voice.yaml").write_text(
         "id: voice\n"

@@ -1,8 +1,8 @@
 # Packages
 
-Packages install reusable catalog components into a runtime agent core. They
-are a user-facing workflow for composing cores from input modules, output
-modules, tools, skills, shared libraries, or child cores.
+Packages install reusable package repository components into a runtime agent
+core. They are a user-facing workflow for composing cores from input modules,
+output modules, tools, skills, shared libraries, or child cores.
 
 ## Install a Package
 
@@ -16,7 +16,9 @@ Scripted install:
 
 ```bash
 uv run demiurge package list --core assistant
+uv run demiurge package list --repo builtin
 uv run demiurge package install memory_basic --core assistant --preview
+uv run demiurge package install builtin/memory_basic --core assistant --preview
 uv run demiurge package install memory_basic --core assistant
 ```
 
@@ -40,13 +42,13 @@ It does not modify repository source templates under `agents/`.
 Each target core stores `packages.yaml` at its root. Component configuration
 lives in each installed component's `config.yaml`.
 
-## Catalog Components
+## Package Repositories
 
-The built-in catalog lives in:
+The built-in package repository lives in:
 
 ```text
-agent-catalog/
-  catalog.yaml
+package-repository/
+  repository.yaml
   bootstrap/  # when bootstrap components are present
   input/
   output/
@@ -56,6 +58,24 @@ agent-catalog/
   core/
   packages/
 ```
+
+Additional repositories are configured in host config:
+
+```yaml
+packages:
+  repositories:
+    builtin:
+      type: builtin
+    community:
+      type: git
+      url: https://github.com/user/demiurge-packages.git
+      ref: main
+      trusted: true
+```
+
+Repository aliases are local names. Install references may use
+`<repo>/<package_id>`. A bare `<package_id>` works only when it is unique across
+configured repositories.
 
 Supported component kinds:
 
@@ -146,4 +166,6 @@ Use `/tools` after installing a tool package.
 ## Boundary
 
 Package management is not an agent-callable model tool. It is a CLI/TUI helper
-for user-controlled runtime core edits. It does not manage dependency changes.
+for user-controlled runtime core edits. It does not install Python dependencies
+or change the host lock file. Package recipes may document manual dependency
+review items, which are shown as warnings.

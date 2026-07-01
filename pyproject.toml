@@ -59,11 +59,11 @@ packages = ["demiurge"]
 [tool.hatch.build.targets.wheel.force-include]
 "demiurge/ui/tui_dist/entry.js" = "demiurge/ui/tui_dist/entry.js"
 "agents" = "demiurge/resources/agents"
-"agent-catalog" = "demiurge/resources/agent-catalog"
+"package-repository" = "demiurge/resources/package-repository"
 
 [tool.hatch.build.targets.sdist]
 only-include = [
-  "agent-catalog",
+  "package-repository",
   "agents",
   "demiurge",
   "docs",

@@ -4,17 +4,20 @@ from pathlib import Path
 import pytest
 
 from demiurge.app import create_app
-from demiurge.packages import PackageCatalog, PackageManager, default_catalog_root
+from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
 
 
 def _manager(app) -> PackageManager:
-    catalog = PackageCatalog.load(default_catalog_root())
-    return PackageManager(version_store=app.version_store, catalog=catalog)
+    repositories = load_package_repository_collection(
+        home=app.home,
+        repository_configs={"builtin": {"type": "builtin"}},
+    )
+    return PackageManager(version_store=app.version_store, repository=repositories)
 
 
 def _load_store_module():
-    path = Path(__file__).resolve().parents[2] / "agent-catalog" / "lib" / "memory_basic" / "store.py"
+    path = Path(__file__).resolve().parents[2] / "package-repository" / "lib" / "memory_basic" / "store.py"
     spec = importlib.util.spec_from_file_location("memory_basic_store_under_test", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

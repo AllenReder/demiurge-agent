@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
 from demiurge.env_file import load_runtime_env
 from demiurge.provider_presets import get_provider_preset
@@ -118,6 +118,62 @@ class HostProvidersConfig(BaseModel):
         return value
 
 
+class HostPackageRepositoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    type: Literal["builtin", "path", "git"]
+    path: str | None = None
+    url: str | None = None
+    ref: str | None = None
+    subdir: str | None = None
+    trusted: StrictBool = False
+
+    @field_validator("path", "url", "ref", "subdir", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("package repository fields must be strings")
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "HostPackageRepositoryConfig":
+        if self.type == "builtin":
+            if self.path or self.url or self.ref or self.subdir:
+                raise ValueError("builtin package repository cannot set path, url, ref, or subdir")
+        elif self.type == "path":
+            if not self.path:
+                raise ValueError("path package repository requires path")
+            if self.url:
+                raise ValueError("path package repository cannot set url")
+        elif self.type == "git":
+            if not self.url:
+                raise ValueError("git package repository requires url")
+            if self.path:
+                raise ValueError("git package repository cannot set path")
+        return self
+
+
+class HostPackagesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    repositories: dict[str, HostPackageRepositoryConfig] = Field(
+        default_factory=lambda: {"builtin": HostPackageRepositoryConfig(type="builtin")}
+    )
+
+    @field_validator("repositories")
+    @classmethod
+    def _repositories(cls, value: dict[str, HostPackageRepositoryConfig]) -> dict[str, HostPackageRepositoryConfig]:
+        if "builtin" not in value:
+            value = {"builtin": HostPackageRepositoryConfig(type="builtin"), **value}
+        for alias in value:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", alias):
+                raise ValueError(f"invalid package repository alias: {alias}")
+        return value
+
+
 class HostConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -126,6 +182,7 @@ class HostConfig(BaseModel):
     ui: HostUiConfig = Field(default_factory=HostUiConfig)
     debug: HostDebugConfig = Field(default_factory=HostDebugConfig)
     providers: HostProvidersConfig = Field(default_factory=HostProvidersConfig)
+    packages: HostPackagesConfig = Field(default_factory=HostPackagesConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,13 +665,13 @@ def load_host_config(path: Path) -> tuple[HostConfig, dict[str, str]]:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
-            f"ui.user_theme_color, debug.show_system_prompt, and providers.*: {exc}"
+            f"ui.user_theme_color, debug.show_system_prompt, providers.*, and packages.repositories.*: {exc}"
         ) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise ValueError(
             f"invalid host config {path}: supported fields are runtime.default_core, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
-            f"ui.user_theme_color, debug.show_system_prompt, and providers.*: {exc}"
+            f"ui.user_theme_color, debug.show_system_prompt, providers.*, and packages.repositories.*: {exc}"
         ) from exc
     return config, _host_config_sources(raw)
 
@@ -638,6 +695,13 @@ def default_host_config_dict() -> dict[str, object]:
         "providers": {
             "default": None,
             "profiles": {},
+        },
+        "packages": {
+            "repositories": {
+                "builtin": {
+                    "type": "builtin",
+                },
+            },
         },
     }
 
@@ -680,6 +744,12 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
             if isinstance(profile, dict):
                 for key in profile:
                     sources[f"providers.profiles.{profile_id}.{key}"] = f"config.yaml:providers.profiles.{profile_id}.{key}"
+    raw_repositories = raw.get("packages", {}).get("repositories") if isinstance(raw.get("packages"), dict) else None
+    if isinstance(raw_repositories, dict):
+        for alias, repository in raw_repositories.items():
+            if isinstance(repository, dict):
+                for key in repository:
+                    sources[f"packages.repositories.{alias}.{key}"] = f"config.yaml:packages.repositories.{alias}.{key}"
     return sources
 
 

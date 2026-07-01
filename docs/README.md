@@ -59,7 +59,7 @@ runtime safely.
 | [authoring/skills.md](authoring/skills.md) | Progressive skill loading from `agent/skills/`. |
 | [authoring/mcp.md](authoring/mcp.md) | Core-local MCP server declarations. |
 | [authoring/schedules.md](authoring/schedules.md) | Core-declared cron schedules executed by the host scheduler. |
-| [authoring/packages.md](authoring/packages.md) | Install reusable catalog components into runtime cores. |
+| [authoring/packages.md](authoring/packages.md) | Install reusable package repository components into runtime cores. |
 | [authoring/testing-agent-cores.md](authoring/testing-agent-cores.md) | Structural and runtime checks for authored cores. |
 
 ## Operations

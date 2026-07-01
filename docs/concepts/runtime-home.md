@@ -18,12 +18,13 @@ The runtime home is the live local state root. The default is `~/.demiurge`.
   logs/
   workspace/
   history/
+  package-repositories/
   demiurge-agent/
 ```
 
 | Path | Owner | Purpose |
 | --- | --- | --- |
-| `config.yaml` | Host | Local host preferences and provider profiles. |
+| `config.yaml` | Host | Local host preferences, provider profiles, and package repository sources. |
 | `.env` | Host/user | Runtime environment values such as provider API keys; loaded before provider resolution. |
 | `agents/agent.yaml` | User/runtime | Global fallback agent config; not a concrete agent core. |
 | `agents/<core>/` | User/runtime | Live agent cores. |
@@ -33,6 +34,7 @@ The runtime home is the live local state root. The default is `~/.demiurge`.
 | `logs/mcp-stderr.log` | Host | Stdio MCP server stderr log. |
 | `workspace/` | Host/user | Non-local fallback workspace for gateway and scheduler runs. |
 | `history/` | Host | Backups from explicit refresh operations. |
+| `package-repositories/` | Host | Git caches for trusted external package repositories. |
 | `demiurge-agent/` | Installer | Managed source checkout when installed by `scripts/install.sh`. |
 
 ## Source Templates vs Runtime Cores

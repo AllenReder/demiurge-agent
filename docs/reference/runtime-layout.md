@@ -8,14 +8,14 @@ demiurge-agent/
     agent.yaml
     assistant/
     evolver/
-  agent-catalog/
+  package-repository/
   demiurge/
   docs/
   ui-tui/
 ```
 
-`agents/` contains source templates. `agent-catalog/` contains reusable package
-components and package recipes.
+`agents/` contains source templates. `package-repository/` contains the built-in
+package repository: reusable package components and package recipes.
 
 ## Runtime Home
 
@@ -29,6 +29,7 @@ components and package recipes.
   logs/
   workspace/
   history/
+  package-repositories/
 ```
 
 ## Runtime Core

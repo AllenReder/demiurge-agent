@@ -23,7 +23,7 @@ required = {
     "demiurge/resources/agents/agent.yaml",
     "demiurge/resources/agents/assistant/agent.yaml",
     "demiurge/resources/agents/evolver/agent.yaml",
-    "demiurge/resources/agent-catalog/catalog.yaml",
+    "demiurge/resources/package-repository/repository.yaml",
     "demiurge/ui/tui_dist/entry.js",
 }
 

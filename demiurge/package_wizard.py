@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from demiurge.app import HostConfig, HostPackageRepositoryConfig, write_host_config
 from demiurge.packages import PackageInfo, PackageManager, PackageOperationError, PackageOption
+from demiurge.packages import (
+    installed_repository_dependents,
+    load_package_repository_collection,
+    package_repository_cache_root,
+    sync_package_repository,
+)
 from demiurge.storage import VersionStore
 
 
@@ -113,12 +121,16 @@ class PackageWizard:
         *,
         manager: PackageManager,
         version_store: VersionStore,
+        home: Path,
+        host_config: HostConfig,
         console: Console | None = None,
         prompt: PackagePrompt | None = None,
         default_core_id: str = "assistant",
     ) -> None:
         self.manager = manager
         self.version_store = version_store
+        self.home = home
+        self.host_config = host_config
         self.console = console or Console()
         self.prompt = prompt or PromptToolkitPackagePrompt()
         self.default_core_id = default_core_id or "assistant"
@@ -131,9 +143,10 @@ class PackageWizard:
                 action = self.prompt.select(
                     "Package manager",
                     [
-                        SelectChoice("all", "All packages", "Browse all catalog packages"),
+                        SelectChoice("all", "All packages", "Browse all package repository packages"),
                         SelectChoice("search", "Search packages", "Filter by package id, name, summary, or tag"),
                         SelectChoice("tags", "Browse by tag", "View packages grouped by tag"),
+                        SelectChoice("repositories", "Repositories", "Manage package repositories"),
                         SelectChoice("installed", "Installed packages", "View and uninstall"),
                         SelectChoice("exit", "Exit"),
                     ],
@@ -145,6 +158,8 @@ class PackageWizard:
                     self._browse_tags(core_id)
                 elif action == "all":
                     self._browse_packages(core_id, self.manager.list(core_id=core_id).packages, title="All packages")
+                elif action == "repositories":
+                    self._repositories()
                 elif action == "installed":
                     self._installed_packages(core_id)
                 elif action == "exit":
@@ -199,8 +214,8 @@ class PackageWizard:
                 return
             choices = [
                 SelectChoice(
-                    package.package_id,
-                    f"{package.package_id}{' [installed]' if package.package_id in installed_ids else ''}",
+                    package.ref,
+                    f"{package.ref}{' [installed]' if package.package_id in installed_ids else ''}",
                     package.summary,
                 )
                 for package in packages
@@ -209,7 +224,7 @@ class PackageWizard:
             selected = self.prompt.select(title, choices)
             if selected == "back":
                 return
-            package = self.manager.catalog.packages[selected]
+            package = self.manager.repositories.resolve_package_ref(selected)
             self._package_detail(core_id, package)
 
     def _package_detail(self, core_id: str, package: PackageInfo) -> None:
@@ -219,25 +234,25 @@ class PackageWizard:
         actions = [SelectChoice("back", "Back")]
         if not installed:
             actions.insert(0, SelectChoice("install", "Install"))
-        action = self.prompt.select(f"Package {package.package_id}", actions)
+        action = self.prompt.select(f"Package {package.ref}", actions)
         if action != "install":
             return
         answers = self._collect_options(package)
         try:
-            preview = self.manager.preview_install(core_id=core_id, package_id=package.package_id, option_answers=answers)
+            preview = self.manager.preview_install(core_id=core_id, package_id=package.ref, option_answers=answers)
         except PackageOperationError as exc:
             self.console.print(f"[red]Install blocked:[/red] {exc}")
             return
         self._print_preview(preview)
-        if not self.prompt.confirm(f"Install {package.package_id} into {core_id}?", default=False):
+        if not self.prompt.confirm(f"Install {package.ref} into {core_id}?", default=False):
             self.console.print("Install canceled.")
             return
         try:
-            result = self.manager.install(core_id=core_id, package_id=package.package_id, option_answers=answers)
+            result = self.manager.install(core_id=core_id, package_id=package.ref, option_answers=answers)
         except PackageOperationError as exc:
             self.console.print(f"[red]Install failed:[/red] {exc}")
             return
-        self.console.print(f"installed {result.package_id} for {result.core_id}")
+        self.console.print(f"installed {result.package_ref} for {result.core_id}")
         for warning in result.warnings:
             self.console.print(f"warning: {warning}")
 
@@ -248,15 +263,22 @@ class PackageWizard:
                 self.console.print("No packages installed.")
                 return
             self._print_installed(core_id)
-            choices = [SelectChoice(item.package_id, item.package_id, ", ".join(item.tags)) for item in installed]
+            choices = [
+                SelectChoice(
+                    self._installed_ref(item),
+                    self._installed_ref(item),
+                    ", ".join(item.tags),
+                )
+                for item in installed
+            ]
             choices.append(SelectChoice("back", "Back"))
             selected = self.prompt.select("Installed packages", choices)
             if selected == "back":
                 return
-            record = next(item for item in installed if item.package_id == selected)
+            record = next(item for item in installed if self._installed_ref(item) == selected)
             self._print_installed_detail(core_id, selected)
             try:
-                preview = self.manager.preview_uninstall(core_id=core_id, package_id=record.package_id)
+                preview = self.manager.preview_uninstall(core_id=core_id, package_id=selected)
             except PackageOperationError as exc:
                 self.console.print(f"[red]Uninstall blocked:[/red] {exc}")
                 continue
@@ -270,10 +292,114 @@ class PackageWizard:
             if not self.prompt.confirm(f"Uninstall {selected} from {core_id}?", default=False):
                 self.console.print("Uninstall canceled.")
                 continue
-            result = self.manager.uninstall(core_id=core_id, package_id=record.package_id)
-            self.console.print(f"uninstalled {result.package_id} for {result.core_id}")
+            result = self.manager.uninstall(core_id=core_id, package_id=selected)
+            self.console.print(f"uninstalled {result.package_ref} for {result.core_id}")
             for warning in result.warnings:
                 self.console.print(f"warning: {warning}")
+
+    def _repositories(self) -> None:
+        while True:
+            self._print_repositories()
+            action = self.prompt.select(
+                "Package repositories",
+                [
+                    SelectChoice("sync", "Sync", "Fetch git repositories and validate configured repositories"),
+                    SelectChoice("add", "Add", "Add a trusted path or git package repository"),
+                    SelectChoice("remove", "Remove", "Remove a configured repository source"),
+                    SelectChoice("back", "Back"),
+                ],
+            )
+            if action == "back":
+                return
+            if action == "sync":
+                self._sync_repository()
+            elif action == "add":
+                self._add_repository()
+            elif action == "remove":
+                self._remove_repository()
+
+    def _sync_repository(self) -> None:
+        aliases = list(self.host_config.packages.repositories)
+        choices = [SelectChoice("all", "All repositories")]
+        choices.extend(SelectChoice(alias, alias) for alias in aliases)
+        selected = self.prompt.select("Sync repository", choices)
+        targets = aliases if selected == "all" else [selected]
+        for alias in targets:
+            config = self.host_config.packages.repositories[alias]
+            try:
+                status = sync_package_repository(
+                    home=self.home,
+                    alias=alias,
+                    config=config.model_dump(mode="python", exclude_none=True),
+                )
+                self.console.print(f"synced {alias}: {status.package_count} package(s)")
+            except Exception as exc:
+                self.console.print(f"[red]Sync failed for {alias}:[/red] {exc}")
+        self._reload_manager()
+
+    def _add_repository(self) -> None:
+        alias = self.prompt.input("Repository alias").strip()
+        if not alias:
+            self.console.print("Repository alias is required.")
+            return
+        if alias in self.host_config.packages.repositories:
+            self.console.print(f"Repository already exists: {alias}")
+            return
+        location = self.prompt.input("Git URL or local path").strip()
+        if not location:
+            self.console.print("Repository location is required.")
+            return
+        ref = self.prompt.input("Git ref", default="").strip() or None
+        subdir = self.prompt.input("Subdir", default="").strip() or None
+        if self._looks_like_git_url(location):
+            config = HostPackageRepositoryConfig(type="git", url=location, ref=ref, subdir=subdir, trusted=False)
+        else:
+            config = HostPackageRepositoryConfig(
+                type="path",
+                path=str(Path(location).expanduser().resolve()),
+                subdir=subdir,
+                trusted=False,
+            )
+        if not self.prompt.confirm(
+            f"Trust {alias}? Package repositories can install local code into host-shared agent slots.",
+            default=False,
+        ):
+            self.console.print("Repository was not trusted.")
+            return
+        config.trusted = True
+        try:
+            status = sync_package_repository(home=self.home, alias=alias, config=config.model_dump(mode="python", exclude_none=True))
+        except Exception as exc:
+            self.console.print(f"[red]Add failed:[/red] {exc}")
+            return
+        self.host_config.packages.repositories[alias] = config
+        write_host_config(self.home / "config.yaml", self.host_config)
+        self._reload_manager()
+        self.console.print(f"added {alias}: {status.package_count} package(s)")
+
+    def _remove_repository(self) -> None:
+        aliases = [alias for alias in self.host_config.packages.repositories if alias != "builtin"]
+        if not aliases:
+            self.console.print("No removable repositories.")
+            return
+        selected = self.prompt.select("Remove repository", [SelectChoice(alias, alias) for alias in aliases] + [SelectChoice("back", "Back")])
+        if selected == "back":
+            return
+        dependents = installed_repository_dependents(self.version_store, selected)
+        if dependents:
+            self.console.print("Installed package records still reference this repository: " + ", ".join(dependents))
+            if not self.prompt.confirm("Remove only the repository source?", default=False):
+                return
+        config = self.host_config.packages.repositories.pop(selected)
+        if config.type == "git":
+            cache_path = package_repository_cache_root(self.home) / selected
+            if cache_path.exists():
+                import shutil
+
+                shutil.rmtree(cache_path)
+        write_host_config(self.home / "config.yaml", self.host_config)
+        self._reload_manager()
+        self.console.print(f"removed {selected}")
 
     def _collect_options(self, package: PackageInfo) -> dict[str, object]:
         answers: dict[str, object] = {}
@@ -303,13 +429,15 @@ class PackageWizard:
         return value
 
     def _print_package(self, package: PackageInfo, *, installed: bool) -> None:
-        table = Table(title=f"Package: {package.package_id}")
+        table = Table(title=f"Package: {package.ref}")
         table.add_column("field")
         table.add_column("value")
+        table.add_row("repository", package.repository_alias)
         table.add_row("name", package.name)
         table.add_row("tags", ", ".join(package.tags))
         table.add_row("summary", package.summary)
         table.add_row("installed", "yes" if installed else "no")
+        table.add_row("manual dependencies", "\n".join(package.manual_dependencies) or "(none)")
         table.add_row("options", self._format_options(package))
         table.add_row(
             "components",
@@ -324,7 +452,7 @@ class PackageWizard:
         self.console.print(table)
 
     def _print_preview(self, preview) -> None:
-        table = Table(title=f"{preview.action.title()} preview: {preview.package_id}")
+        table = Table(title=f"{preview.action.title()} preview: {preview.package_ref}")
         table.add_column("kind")
         table.add_column("target")
         table.add_column("action")
@@ -341,17 +469,23 @@ class PackageWizard:
         result = self.manager.list(core_id=core_id)
         table = Table(title=f"Installed packages: {core_id}")
         table.add_column("package")
+        table.add_column("repository")
         table.add_column("tags")
         table.add_column("installed")
         for item in result.installed:
-            table.add_row(item.package_id, ", ".join(item.tags), item.installed_at)
+            table.add_row(self._installed_ref(item), item.repository_alias, ", ".join(item.tags), item.installed_at)
         self.console.print(table)
 
-    def _print_installed_detail(self, core_id: str, package_id: str) -> None:
-        record = next(item for item in self.manager.list(core_id=core_id).installed if item.package_id == package_id)
-        table = Table(title=f"Installed package: {package_id}")
+    def _print_installed_detail(self, core_id: str, package_ref: str) -> None:
+        record = next(item for item in self.manager.list(core_id=core_id).installed if self._installed_ref(item) == package_ref)
+        table = Table(title=f"Installed package: {package_ref}")
         table.add_column("field")
         table.add_column("value")
+        table.add_row("repository alias", record.repository_alias)
+        table.add_row("repository id", record.repository_id)
+        table.add_row("repository type", record.repository_type)
+        table.add_row("repository ref", record.repository_ref or "(none)")
+        table.add_row("repository commit", record.repository_commit or "(none)")
         table.add_row("tags", ", ".join(record.tags))
         table.add_row("options", "\n".join(f"{key}: {value}" for key, value in record.options.items()) or "(none)")
         table.add_row(
@@ -383,13 +517,49 @@ class PackageWizard:
         return "\n".join(rows)
 
     def _tag_count(self, tag: str) -> int:
-        return sum(1 for package in self.manager.catalog.packages.values() if tag in package.tags)
+        return sum(1 for package in self.manager.list().packages if tag in package.tags)
+
+    def _print_repositories(self) -> None:
+        table = Table(title="Package repositories")
+        table.add_column("alias")
+        table.add_column("type")
+        table.add_column("status")
+        table.add_column("packages")
+        table.add_column("root")
+        for status in self.manager.repositories.statuses:
+            table.add_row(
+                status.alias,
+                status.source_type,
+                "ready" if status.ready else f"error: {status.error}",
+                str(status.package_count),
+                str(status.root or ""),
+            )
+        self.console.print(table)
+
+    def _reload_manager(self) -> None:
+        repositories = load_package_repository_collection(
+            home=self.home,
+            repository_configs=self.host_config.packages.repositories,
+        )
+        self.manager = PackageManager(version_store=self.version_store, repository=repositories)
+
+    def _looks_like_git_url(self, value: str) -> bool:
+        return (
+            value.startswith(("http://", "https://", "ssh://", "git://"))
+            or value.startswith("git@")
+            or value.endswith(".git")
+        )
+
+    def _installed_ref(self, item) -> str:
+        return f"{item.repository_alias}/{item.package_id}" if item.repository_alias else item.package_id
 
 
 def run_package_wizard(
     *,
     manager: PackageManager,
     version_store: VersionStore,
+    home: Path,
+    host_config: HostConfig,
     default_core_id: str = "assistant",
     console: Console | None = None,
     prompt: PackagePrompt | None = None,
@@ -397,6 +567,8 @@ def run_package_wizard(
     PackageWizard(
         manager=manager,
         version_store=version_store,
+        home=home,
+        host_config=host_config,
         default_core_id=default_core_id,
         console=console,
         prompt=prompt,

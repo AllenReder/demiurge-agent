@@ -6,9 +6,9 @@ import json
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Awaitable, Callable
 
-from demiurge.app import DemiurgeApp
+from demiurge.app import DemiurgeApp, load_host_config
 from demiurge.diagnostics.doctor import DoctorRuntime
-from demiurge.packages import PackageCatalog, PackageManager, PackageOperationError, default_catalog_root
+from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
 from demiurge.sdk import AgentInput, TurnContext
@@ -509,14 +509,19 @@ class TuiInteractionBridge:
         return True
 
     async def _packages(self, args: str) -> bool:
-        manager = PackageManager(version_store=self.app.version_store, catalog=PackageCatalog.load(default_catalog_root()))
+        host_config = load_host_config(self.app.host_config_path)[0]
+        repositories = load_package_repository_collection(
+            home=self.app.home,
+            repository_configs=host_config.packages.repositories,
+        )
+        manager = PackageManager(version_store=self.app.version_store, repository=repositories)
         parts = args.split()
         core_id = self.app.runner.core_id
         if not parts:
             result = manager.list(core_id=core_id)
             installed_ids = {item.package_id for item in result.installed}
             rows = [
-                ("*" if package.package_id in installed_ids else "", package.package_id, ", ".join(package.tags), package.summary)
+                ("*" if package.package_id in installed_ids else "", package.ref, ", ".join(package.tags), package.summary)
                 for package in result.packages
             ]
             await self._emit_command_output("packages", _format_table(["", "package", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
@@ -531,10 +536,13 @@ class TuiInteractionBridge:
             except PackageOperationError as exc:
                 await self._emit_command_output("packages", f"package {action} failed: {exc}")
                 return True
-            await self._emit_command_output("packages", f"{result.action}ed {result.package_id} for {result.core_id}")
+            await self._emit_command_output("packages", f"{result.action}ed {result.package_ref} for {result.core_id}")
             return True
-        package = manager.catalog.packages.get(action)
-        await self._emit_command_output("packages", f"unknown package: {action}" if package is None else _format_key_values(f"Package: {package.package_id}", asdict(package)))
+        try:
+            package = manager.repositories.resolve_package_ref(action)
+        except PackageOperationError:
+            package = None
+        await self._emit_command_output("packages", f"unknown package: {action}" if package is None else _format_key_values(f"Package: {package.ref}", asdict(package)))
         return True
 
     async def _sessions(self, args: str) -> bool:

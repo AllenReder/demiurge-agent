@@ -40,11 +40,11 @@ Status: **alpha / developer preview**. APIs, runtime layout, and authoring contr
 | Capability packages | Reusable tools, IO modules, skills, libraries, and child cores can be installed into runtime agent cores through package recipes. |
 | Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
 
-The built-in `agent-catalog` includes optional packages such as local memory,
-conversation style hints, context reseed notes, and provider-specific speech
-output for MiniMax, OpenAI, xAI, and Gemini. They install into runtime cores as
-composable bootstrap/input/output/tool/skill/lib components rather than changing
-source templates.
+The built-in `package-repository/` includes optional packages such as local
+memory, conversation style hints, context reseed notes, and provider-specific
+speech output for MiniMax, OpenAI, xAI, and Gemini. They install into runtime
+cores as composable bootstrap/input/output/tool/skill/lib components rather
+than changing source templates.
 
 ## Quickstart
 

@@ -3,7 +3,7 @@
 Package recipes live under:
 
 ```text
-agent-catalog/packages/<package_id>.yaml
+package-repository/packages/<package_id>.yaml
 ```
 
 They describe installable component sets for runtime cores.
@@ -18,6 +18,7 @@ summary: Generate speech audio with MiniMax.
 tags:
   - audio
   - tts
+manual_dependencies: []
 options:
   - id: mode
     type: choice
@@ -73,12 +74,14 @@ Config values can reference options with `${options.<id>}`.
 
 ## Validation Rules
 
-- Component sources must stay inside the catalog.
+- Component sources must stay inside the package repository.
 - Component sources cannot be symlinks.
 - Existing target paths are rejected unless reused by another installed package
   with the same source and target.
 - Pipeline edits are allowed only for bootstrap/input/output components.
 - Bootstrap pipeline edits are serial-only.
+- `manual_dependencies` entries are warnings only; Demiurge does not install
+  Python dependencies or edit the host lock file.
 
 ## Recipe Examples
 

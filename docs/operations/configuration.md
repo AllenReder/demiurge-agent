@@ -27,6 +27,10 @@ debug:
 providers:
   default: null
   profiles: {}
+packages:
+  repositories:
+    builtin:
+      type: builtin
 ```
 
 This file is not an agent core and not the global fallback agent config.
@@ -55,6 +59,30 @@ providers:
 `api_key_env` reads from `~/.demiurge/.env` first, then the shell environment.
 If both `api_key_env` and direct `api_key` are present, the environment value
 wins. Use `demiurge setup` to create and inspect these profiles.
+
+## Package Repositories
+
+Package repository sources are host-owned:
+
+```yaml
+packages:
+  repositories:
+    builtin:
+      type: builtin
+    community:
+      type: git
+      url: https://github.com/user/demiurge-packages.git
+      ref: main
+      trusted: true
+    local_lab:
+      type: path
+      path: /path/to/package-repository
+      trusted: true
+```
+
+Use `demiurge package repo ...` to add, sync, list, or remove repositories.
+Git caches live under `<home>/package-repositories/<alias>/`. Package install
+still writes only to the target runtime core.
 
 ## Runtime Home
 

@@ -32,7 +32,7 @@ SessionTurnStepRunner
 | Tool runtime | Build visible registry and execute built-in, authored, and MCP tools. |
 | Delivery runtime | Convert authored delivery requests into artifacts, session messages, events, and channel items. |
 | Scheduler | Claim due core-authored schedules and run fresh sessions. |
-| Package manager | Preview, install, and uninstall catalog components into runtime cores. |
+| Package manager | Preview, install, and uninstall package repository components into runtime cores. |
 
 ## Entry Points
 

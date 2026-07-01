@@ -3,13 +3,34 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import sys
 import subprocess
 from pathlib import Path
 
-from .app import HostConfig, create_app, ensure_runtime_defaults, init_runtime, load_host_config, refresh_runtime, source_agents_root
+from .app import (
+    HostConfig,
+    HostPackageRepositoryConfig,
+    create_app,
+    ensure_runtime_defaults,
+    init_runtime,
+    load_host_config,
+    refresh_runtime,
+    source_agents_root,
+    write_host_config,
+)
 from demiurge.channels.gateway import GatewayConfigError, run_gateway
 from demiurge.diagnostics.doctor import DoctorReport, DoctorRuntime
-from demiurge.packages import PackageCatalog, PackageManager, PackageOperationPreview, default_catalog_root
+from demiurge.packages import (
+    PackageManager,
+    PackageOperationPreview,
+    PackageRepositoryError,
+    installed_repository_dependents,
+    list_package_repository_statuses,
+    load_package_repository_collection,
+    package_repository_cache_root,
+    sync_package_repository,
+)
 from demiurge.package_wizard import run_package_wizard
 from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS_BY_ID
 from demiurge.setup_cli import handle_setup_command
@@ -58,14 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--core", dest="doctor_core", default=None, help="Core id to check")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_parser = subparsers.add_parser("package", help="Interactively manage, list, install, or uninstall agent packages")
-    package_parser.add_argument("--catalog-root", type=Path, default=None, help="Agent catalog root")
     package_subparsers = package_parser.add_subparsers(dest="package_command")
-    package_list = package_subparsers.add_parser("list", help="List catalog packages and optionally installed packages")
+    package_list = package_subparsers.add_parser("list", help="List package repository packages and optionally installed packages")
     package_list.add_argument("--core", dest="package_core", default=None, help="Runtime core id to include installed state")
     package_list.add_argument("--tag", dest="package_tag", default=None, help="Filter packages by tag")
+    package_list.add_argument("--repo", dest="package_repo", default=None, help="Filter packages by repository alias")
     package_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_install = package_subparsers.add_parser("install", help="Install a package into a runtime core")
-    package_install.add_argument("package_id", help="Package id to install")
+    package_install.add_argument("package_id", help="Package id or repo/package ref to install")
     package_install.add_argument("--core", dest="package_core", required=True, help="Target runtime core id")
     package_install.add_argument(
         "--option",
@@ -78,10 +99,28 @@ def build_parser() -> argparse.ArgumentParser:
     package_install.add_argument("--preview", action="store_true", help="Show install plan without writing files")
     package_install.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_uninstall = package_subparsers.add_parser("uninstall", help="Uninstall a package from a runtime core")
-    package_uninstall.add_argument("package_id", help="Package id to uninstall")
+    package_uninstall.add_argument("package_id", help="Package id or repo/package ref to uninstall")
     package_uninstall.add_argument("--core", dest="package_core", required=True, help="Target runtime core id")
     package_uninstall.add_argument("--preview", action="store_true", help="Show uninstall plan without writing files")
     package_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    package_repo = package_subparsers.add_parser("repo", help="Manage package repositories")
+    package_repo_subparsers = package_repo.add_subparsers(dest="package_repo_command")
+    package_repo_list = package_repo_subparsers.add_parser("list", help="List configured package repositories")
+    package_repo_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    package_repo_add = package_repo_subparsers.add_parser("add", help="Add a path or git package repository")
+    package_repo_add.add_argument("alias", help="Local repository alias")
+    package_repo_add.add_argument("location", help="Git URL or local path")
+    package_repo_add.add_argument("--ref", default=None, help="Git branch, tag, or commit to sync")
+    package_repo_add.add_argument("--subdir", default=None, help="Repository subdirectory containing repository.yaml")
+    package_repo_add.add_argument("--trust", action="store_true", help="Trust this external repository's local code")
+    package_repo_add.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    package_repo_remove = package_repo_subparsers.add_parser("remove", help="Remove a configured package repository")
+    package_repo_remove.add_argument("alias", help="Repository alias to remove")
+    package_repo_remove.add_argument("--force", action="store_true", help="Remove even when installed packages reference it")
+    package_repo_remove.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    package_repo_sync = package_repo_subparsers.add_parser("sync", help="Sync package repository caches")
+    package_repo_sync.add_argument("alias", nargs="?", default=None, help="Repository alias to sync; defaults to all")
+    package_repo_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     update_parser = subparsers.add_parser("update", help="Update a managed demiurge checkout")
     update_parser.add_argument("--home", dest="update_home", type=Path, default=None, help="Runtime home directory")
     update_parser.add_argument(
@@ -332,12 +371,20 @@ def _print_refresh_result(result: dict[str, object]) -> None:
 
 def _handle_package_command(args: argparse.Namespace) -> None:
     home = args.home or default_home()
+    host_config = _host_config_or_default(home)
     version_store = VersionStore(home)
+    if args.package_command == "repo":
+        _handle_package_repo_command(args, home=home, host_config=host_config, version_store=version_store)
+        return
     target_core = getattr(args, "package_core", None)
     if target_core:
         ensure_runtime_defaults(version_store, source_agents_root(args.agents_root), requested_core_id=target_core)
-    catalog = PackageCatalog.load(default_catalog_root(args.catalog_root))
-    manager = PackageManager(version_store=version_store, catalog=catalog)
+    repositories = load_package_repository_collection(
+        home=home,
+        repository_configs=host_config.packages.repositories,
+        repository_alias=getattr(args, "package_repo", None),
+    )
+    manager = PackageManager(version_store=version_store, repository=repositories)
     if args.package_command is None:
         ensure_runtime_defaults(
             version_store,
@@ -347,11 +394,17 @@ def _handle_package_command(args: argparse.Namespace) -> None:
         run_package_wizard(
             manager=manager,
             version_store=version_store,
+            home=home,
+            host_config=host_config,
             default_core_id=args.core or "assistant",
         )
         return
     if args.package_command == "list":
-        result = manager.list(core_id=target_core, tag=getattr(args, "package_tag", None))
+        result = manager.list(
+            core_id=target_core,
+            tag=getattr(args, "package_tag", None),
+            repository_alias=getattr(args, "package_repo", None),
+        )
         if args.json:
             print(json.dumps(_package_list_to_dict(result), indent=2, ensure_ascii=False))
             return
@@ -381,27 +434,106 @@ def _handle_package_command(args: argparse.Namespace) -> None:
     raise SystemExit(f"unknown package command: {args.package_command}")
 
 
+def _handle_package_repo_command(
+    args: argparse.Namespace,
+    *,
+    home: Path,
+    host_config: HostConfig,
+    version_store: VersionStore,
+) -> None:
+    command = args.package_repo_command or "list"
+    if command == "list":
+        statuses = list_package_repository_statuses(home=home, repository_configs=host_config.packages.repositories)
+        if args.json:
+            print(json.dumps({"repositories": [_repository_status_to_dict(item) for item in statuses]}, indent=2, ensure_ascii=False))
+            return
+        _print_repository_statuses(statuses)
+        return
+    if command == "add":
+        config = _package_repo_config_from_location(args)
+        if config.type != "builtin" and not config.trusted:
+            if args.json or not sys.stdin.isatty():
+                raise SystemExit("external package repositories require --trust in non-interactive mode")
+            if not _confirm_trust(args.alias, args.location):
+                raise SystemExit("package repository was not trusted")
+            config.trusted = True
+        if args.alias in host_config.packages.repositories:
+            raise SystemExit(f"package repository already exists: {args.alias}")
+        status = sync_package_repository(home=home, alias=args.alias, config=config.model_dump(mode="python", exclude_none=True))
+        host_config.packages.repositories[args.alias] = config
+        write_host_config(home / "config.yaml", host_config)
+        if args.json:
+            print(json.dumps(_repository_status_to_dict(status), indent=2, ensure_ascii=False))
+            return
+        print(f"added package repository {args.alias}: {status.name or status.repository_id}")
+        return
+    if command == "remove":
+        if args.alias == "builtin":
+            raise SystemExit("builtin package repository cannot be removed")
+        if args.alias not in host_config.packages.repositories:
+            raise SystemExit(f"unknown package repository: {args.alias}")
+        dependents = installed_repository_dependents(version_store, args.alias)
+        if dependents and not args.force:
+            raise SystemExit(
+                "package repository is still referenced by installed packages: "
+                + ", ".join(dependents)
+                + "; rerun with --force to remove only the repository source"
+            )
+        removed = host_config.packages.repositories.pop(args.alias)
+        if removed.type == "git":
+            cache_path = package_repository_cache_root(home) / args.alias
+            if cache_path.exists():
+                shutil.rmtree(cache_path)
+        write_host_config(home / "config.yaml", host_config)
+        result = {"removed": args.alias, "dependents": dependents, "forced": bool(args.force)}
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+        print(f"removed package repository {args.alias}")
+        if dependents:
+            print("warning: installed package records still reference it: " + ", ".join(dependents))
+        return
+    if command == "sync":
+        aliases = [args.alias] if args.alias else list(host_config.packages.repositories)
+        statuses = []
+        for alias in aliases:
+            config = host_config.packages.repositories.get(alias)
+            if config is None:
+                raise SystemExit(f"unknown package repository: {alias}")
+            statuses.append(sync_package_repository(home=home, alias=alias, config=config.model_dump(mode="python", exclude_none=True)))
+        if args.json:
+            print(json.dumps({"repositories": [_repository_status_to_dict(item) for item in statuses]}, indent=2, ensure_ascii=False))
+            return
+        _print_repository_statuses(statuses)
+        return
+    raise SystemExit(f"unknown package repo command: {command}")
+
+
 def _print_package_list(result, *, core_id: str | None) -> None:
-    print(f"catalog: {result.catalog.catalog_id} - {result.catalog.name}")
+    print("repositories:")
+    for repository in result.repositories:
+        ready = "ready" if repository.ready else f"error: {repository.error}"
+        print(f"- {repository.alias} ({repository.source_type}) - {repository.name or repository.repository_id or '(unknown)'} - {ready}")
     installed_ids = {item.package_id for item in result.installed}
     print("tags: " + (", ".join(result.tags) or "(none)"))
     print("packages:")
     for package in result.packages:
         marker = "*" if package.package_id in installed_ids else " "
-        print(f"{marker} {package.package_id} [{', '.join(package.tags) or 'no tags'}] - {package.summary}")
+        print(f"{marker} {package.ref} [{', '.join(package.tags) or 'no tags'}] - {package.summary}")
     if core_id:
         print(f"installed for {core_id}:")
         if not result.installed:
             print("  (none)")
         for item in result.installed:
-            print(f"  - {item.package_id} ({', '.join(item.tags) or 'no tags'})")
+            package_ref = f"{item.repository_alias}/{item.package_id}" if item.repository_alias else item.package_id
+            print(f"  - {package_ref} ({', '.join(item.tags) or 'no tags'})")
 
 
 def _print_package_operation(result) -> None:
     if isinstance(result, PackageOperationPreview):
-        print(f"preview {result.action} {result.package_id} for {result.core_id}")
+        print(f"preview {result.action} {result.package_ref} for {result.core_id}")
     else:
-        print(f"{result.action}ed {result.package_id} for {result.core_id}")
+        print(f"{result.action}ed {result.package_ref} for {result.core_id}")
     print(f"registry: {result.registry_path}")
     for component in result.components:
         if "remove" in component:
@@ -420,19 +552,21 @@ def _print_package_operation(result) -> None:
 
 def _package_list_to_dict(result) -> dict[str, object]:
     return {
-        "catalog": {
-            "id": result.catalog.catalog_id,
-            "name": result.catalog.name,
-            "summary": result.catalog.summary,
-            "root": str(result.catalog.root),
-        },
+        "repositories": [_repository_status_to_dict(repository) for repository in result.repositories],
         "tags": result.tags,
         "packages": [
             {
                 "id": package.package_id,
+                "ref": package.ref,
+                "repository_alias": package.repository_alias,
+                "repository_id": package.repository_id,
+                "repository_type": package.repository_type,
+                "repository_ref": package.repository_ref,
+                "repository_commit": package.repository_commit,
                 "name": package.name,
                 "summary": package.summary,
                 "tags": package.tags,
+                "manual_dependencies": package.manual_dependencies,
                 "components": [
                     {
                         "id": component.component_id,
@@ -452,7 +586,12 @@ def _package_list_to_dict(result) -> dict[str, object]:
         "installed": [
             {
                 "package_id": item.package_id,
-                "catalog_id": item.catalog_id,
+                "package_ref": f"{item.repository_alias}/{item.package_id}" if item.repository_alias else item.package_id,
+                "repository_alias": item.repository_alias,
+                "repository_id": item.repository_id,
+                "repository_type": item.repository_type,
+                "repository_ref": item.repository_ref,
+                "repository_commit": item.repository_commit,
                 "tags": item.tags,
                 "components": item.components,
                 "installed_at": item.installed_at,
@@ -470,11 +609,79 @@ def _package_operation_to_dict(result) -> dict[str, object]:
         "preview": isinstance(result, PackageOperationPreview),
         "core_id": result.core_id,
         "package_id": result.package_id,
+        "package_ref": result.package_ref,
+        "repository_alias": result.repository_alias,
+        "repository_id": result.repository_id,
+        "repository_type": result.repository_type,
+        "repository_ref": result.repository_ref,
+        "repository_commit": result.repository_commit,
         "components": result.components,
         "warnings": result.warnings,
         "registry_path": str(result.registry_path),
         "options": result.options,
     }
+
+
+def _print_repository_statuses(statuses) -> None:
+    print("package repositories:")
+    for status in statuses:
+        ready = "ready" if status.ready else f"error: {status.error}"
+        ref = f" ref={status.ref}" if status.ref else ""
+        commit = f" commit={status.commit[:12]}" if status.commit else ""
+        print(
+            f"- {status.alias} ({status.source_type}) {status.name or status.repository_id or '(unknown)'} "
+            f"packages={status.package_count}{ref}{commit} {ready}"
+        )
+
+
+def _repository_status_to_dict(status) -> dict[str, object]:
+    return {
+        "alias": status.alias,
+        "type": status.source_type,
+        "trusted": status.trusted,
+        "root": str(status.root) if status.root else None,
+        "repository_id": status.repository_id,
+        "name": status.name,
+        "summary": status.summary,
+        "package_count": status.package_count,
+        "ref": status.ref,
+        "commit": status.commit,
+        "ready": status.ready,
+        "error": status.error,
+    }
+
+
+def _package_repo_config_from_location(args: argparse.Namespace) -> HostPackageRepositoryConfig:
+    location = str(args.location).strip()
+    if _looks_like_git_url(location):
+        return HostPackageRepositoryConfig(
+            type="git",
+            url=location,
+            ref=args.ref,
+            subdir=args.subdir,
+            trusted=bool(args.trust),
+        )
+    path = Path(location).expanduser().resolve()
+    return HostPackageRepositoryConfig(
+        type="path",
+        path=str(path),
+        subdir=args.subdir,
+        trusted=bool(args.trust),
+    )
+
+
+def _looks_like_git_url(value: str) -> bool:
+    return (
+        value.startswith(("http://", "https://", "ssh://", "git://"))
+        or value.startswith("git@")
+        or value.endswith(".git")
+    )
+
+
+def _confirm_trust(alias: str, location: str) -> bool:
+    print(f"Package repository {alias} can install local code into host-shared agent slots.")
+    answer = input(f"Trust {location}? [y/N] ").strip().lower()
+    return answer in {"y", "yes", "true", "1", "on"}
 
 
 def _package_option_to_dict(option) -> dict[str, object]:

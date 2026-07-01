@@ -1,7 +1,7 @@
 # Package Management
 
 Package management is a user-controlled workflow for installing reusable
-catalog packages into runtime cores.
+package repository packages into runtime cores.
 
 ## Interactive Wizard
 
@@ -9,26 +9,41 @@ catalog packages into runtime cores.
 uv run demiurge package
 ```
 
-The wizard selects a target core, searches or browses packages, collects
-options, shows a preview, then asks for confirmation.
+The wizard selects a target core, manages package repositories, searches or
+browses packages, collects options, shows a preview, then asks for confirmation.
 
 ## Scripted Commands
 
 ```bash
 uv run demiurge package list --core assistant
+uv run demiurge package list --repo builtin
 uv run demiurge package list --tag tts --json
 uv run demiurge package install minimax_tts --core assistant --preview
+uv run demiurge package install builtin/minimax_tts --core assistant --preview
 uv run demiurge package install minimax_tts --core assistant --option mode=summary
 uv run demiurge package uninstall minimax_tts --core assistant --preview
 ```
 
-The package command supports list, install, and uninstall. It does not support
-reinstall, config edit, upgrade, rollback, git commits, or agent-callable
-package management.
+Repository management:
 
-## Built-In Catalog Highlights
+```bash
+uv run demiurge package repo list
+uv run demiurge package repo add community https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo sync community
+uv run demiurge package repo remove community
+```
 
-The built-in catalog includes reusable examples for the main agent-core slot
+External `path` and `git` repositories must be explicitly trusted because their
+packages can install local code slots into the host-shared runtime environment.
+`repo sync` updates repository caches only; it does not update already installed
+packages.
+
+The package command does not support reinstall, package update, config edit,
+rollback, git commits, or agent-callable package management.
+
+## Built-In Repository Highlights
+
+The built-in repository includes reusable examples for the main agent-core slot
 kinds:
 
 - `memory_basic`: bootstrap + tool + shared lib for durable local memory.
@@ -54,6 +69,12 @@ Install writes to the target runtime core and records package ownership in:
 
 Uninstall uses this registry to remove owned components and pipeline entries.
 Shared reused targets are kept until the final referencing package is removed.
+
+Git repository caches live under:
+
+```text
+~/.demiurge/package-repositories/<alias>/
+```
 
 ## Success Check
 

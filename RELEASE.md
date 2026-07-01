@@ -33,7 +33,7 @@ wheel="dist/demiurge-${version}-py3-none-any.whl"
 sdist="dist/demiurge-${version}.tar.gz"
 test -f "$wheel"
 test -f "$sdist"
-uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
+uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|package-repository)|demiurge/ui/tui_dist/entry.js'
 if tar -tzf "$sdist" | rg '^demiurge-[^/]+/\.temp/'; then
   echo "sdist includes .temp content" >&2
   exit 1
@@ -113,7 +113,7 @@ Release notes should explicitly mention:
 - no container sandbox in v1;
 - code slots run in the host-shared Python environment by default;
 - Telegram is long-polling only;
-- package catalog is local-only;
+- package repositories can be local, built-in, or explicitly trusted Git/path sources;
 - LLM-driven evolver core is not complete.
 
 ## PyPI Decision
