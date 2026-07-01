@@ -97,8 +97,8 @@ jobs:
           test "$package_version" = "$RELEASE_VERSION"
 
           escaped_version="${RELEASE_VERSION//./\\.}"
-          rg -n "^# Demiurge ${escaped_version}$" "$RELEASE_NOTES"
-          rg -n "/docs/releases/${escaped_version}" \
+          grep -nE "^# Demiurge ${escaped_version}$" "$RELEASE_NOTES"
+          grep -nF "/docs/releases/${RELEASE_VERSION}" \
             website/docusaurus.config.ts \
             website/i18n/zh-CN/docusaurus-theme-classic/footer.json
 
