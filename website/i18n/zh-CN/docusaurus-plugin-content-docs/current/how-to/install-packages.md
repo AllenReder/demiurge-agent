@@ -8,6 +8,17 @@ description: Preview、安装、列出和卸载可复用 Agent Core packages。
 Packages 会把可复用 components 安装进 runtime Agent Core。它们可以安装 Agent
 Slots、tools、skills、libraries 和 child cores。
 
+## 使用交互式 Package Manager
+
+简单安装和管理 package 时，直接启动交互式 package manager：
+
+```bash
+uv run demiurge package
+```
+
+用这个流程可以浏览 packages、为 runtime core 安装或卸载 packages，以及管理
+package repositories，不需要记住下面每个独立 subcommand。
+
 ## 列出 Packages
 
 ```bash

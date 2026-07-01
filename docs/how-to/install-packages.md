@@ -9,6 +9,19 @@ Packages install reusable components into runtime Agent Cores. They can install
 Agent Slots, tools, skills, libraries, and
 child cores.
 
+## Use the Interactive Package Manager
+
+For simple package installation and management, start the interactive package
+manager:
+
+```bash
+uv run demiurge package
+```
+
+Use this flow to browse packages, install or uninstall packages for a runtime
+core, and manage package repositories without memorizing the individual
+subcommands below.
+
 ## List Packages
 
 ```bash
