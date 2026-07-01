@@ -6,4 +6,4 @@ category: audio
 
 # OpenAI TTS Voice
 
-Use `text_to_speech_openai` when the user explicitly asks for a speech audio artifact using the OpenAI TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.
+Use `text_to_speech` when the user explicitly asks for a speech audio artifact using the OpenAI TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.

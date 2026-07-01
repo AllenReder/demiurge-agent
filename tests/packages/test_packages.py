@@ -361,11 +361,11 @@ def _mock_tavily_search_http(monkeypatch, *, response: dict | None = None) -> li
     return calls
 
 
-def test_builtin_repository_lists_minimax_tts_package():
+def test_builtin_repository_lists_tts_minimax_package():
     repository = PackageRepository.load(default_package_repository_root())
 
     assert repository.repository.repository_id == "builtin"
-    package = repository.packages["minimax_tts"]
+    package = repository.packages["tts_minimax"]
     assert {"audio", "tts", "provider:minimax"}.issubset(package.tags)
     assert [option.option_id for option in package.options] == ["mode", "enable_tool", "api_key"]
     mode = package.options[0]
@@ -373,17 +373,20 @@ def test_builtin_repository_lists_minimax_tts_package():
     assert mode.choice_descriptions["direct"]
     assert mode.choice_descriptions["summary"]
     assert {component.kind for component in package.components} == {"lib", "output", "core", "tool", "skill"}
+    tool_component = next(component for component in package.components if component.kind == "tool")
+    assert tool_component.source == "text_to_speech_minimax"
+    assert tool_component.target == "agent/tools/text_to_speech"
 
 
 @pytest.mark.parametrize(
-    ("package_id", "provider", "tool_id"),
+    ("package_id", "provider"),
     [
-        ("tts_openai", "openai", "text_to_speech_openai"),
-        ("tts_xai", "xai", "text_to_speech_xai"),
-        ("tts_gemini", "gemini", "text_to_speech_gemini"),
+        ("tts_openai", "openai"),
+        ("tts_xai", "xai"),
+        ("tts_gemini", "gemini"),
     ],
 )
-def test_builtin_repository_lists_provider_tts_packages(package_id, provider, tool_id):
+def test_builtin_repository_lists_provider_tts_packages(package_id, provider):
     repository = PackageRepository.load(default_package_repository_root())
 
     package = repository.packages[package_id]
@@ -396,7 +399,8 @@ def test_builtin_repository_lists_provider_tts_packages(package_id, provider, to
     assert {component.source for component in output_components} == {f"tts_{provider}", f"tts_{provider}_summary"}
     assert {component.target for component in output_components} == {f"agent/output/tts_{provider}"}
     tool_component = next(component for component in package.components if component.kind == "tool")
-    assert tool_component.target == f"agent/tools/{tool_id}"
+    assert tool_component.source == f"text_to_speech_{provider}"
+    assert tool_component.target == "agent/tools/text_to_speech"
 
 
 @pytest.mark.parametrize(
@@ -643,7 +647,7 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    result = manager.install(core_id="assistant", package_id="minimax_tts")
+    result = manager.install(core_id="assistant", package_id="tts_minimax")
 
     core_path = app.version_store.active_core_path("assistant")
     assert result.registry_path == core_path / "packages.yaml"
@@ -667,14 +671,14 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert pipeline["parallel"] == ["tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["schema_version"] == 3
-    assert registry["installed"][0]["package_id"] == "minimax_tts"
+    assert registry["installed"][0]["package_id"] == "tts_minimax"
     assert registry["installed"][0]["repository_alias"] == "builtin"
     assert registry["installed"][0]["repository_id"] == "builtin"
     assert registry["installed"][0]["repository_type"] == "builtin"
     assert registry["installed"][0]["options"]["api_key"] is None
     assert "config" not in registry["installed"][0]["components"][0]
 
-    removed = manager.uninstall(core_id="assistant", package_id="minimax_tts")
+    removed = manager.uninstall(core_id="assistant", package_id="tts_minimax")
 
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "output" / "tts_minimax").exists()
@@ -832,35 +836,36 @@ def test_install_provider_tts_summary_reuses_shared_summarizer_core(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("package_id", "provider", "tool_id"),
+    ("package_id", "provider"),
     [
-        ("tts_openai", "openai", "text_to_speech_openai"),
-        ("tts_xai", "xai", "text_to_speech_xai"),
-        ("tts_gemini", "gemini", "text_to_speech_gemini"),
+        ("tts_openai", "openai"),
+        ("tts_xai", "xai"),
+        ("tts_gemini", "gemini"),
     ],
 )
-def test_install_provider_tts_optional_tool_is_provider_specific(tmp_path, package_id, provider, tool_id):
+def test_install_provider_tts_optional_tool_uses_shared_name(tmp_path, package_id, provider):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
     manager.install(core_id="assistant", package_id=package_id, option_answers={"enable_tool": True})
 
     core_path = app.version_store.active_core_path("assistant")
-    assert (core_path / "agent" / "tools" / tool_id).exists()
-    assert not (core_path / "agent" / "tools" / "text_to_speech").exists()
-    tool_config = yaml.safe_load((core_path / "agent" / "tools" / tool_id / "config.yaml").read_text())
+    assert (core_path / "agent" / "tools" / "text_to_speech").exists()
+    assert not (core_path / "agent" / "tools" / f"text_to_speech_{provider}").exists()
+    tool_config = yaml.safe_load((core_path / "agent" / "tools" / "text_to_speech" / "config.yaml").read_text())
     assert tool_config == {"filename_template": f"{{turn_id}}-{provider}-tool.{{format}}"}
     skill_path = core_path / "agent" / "skills" / f"tts_voice_{provider}" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
     assert f"name: tts_voice_{provider}" in skill_text
-    assert tool_id in skill_text
+    assert "`text_to_speech`" in skill_text
+    assert f"`text_to_speech_{provider}`" not in skill_text
 
 
 def test_install_summary_mode_copies_child_core_and_config(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"mode": "summary"})
+    manager.install(core_id="assistant", package_id="tts_minimax", option_answers={"mode": "summary"})
 
     core_path = app.version_store.active_core_path("assistant")
     child_core = app.version_store.active_core_path("tts_summarizer")
@@ -944,7 +949,7 @@ def test_install_writes_option_answers_to_config_and_redacts_registry(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
 
-    result = manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"api_key": "secret-value"})
+    result = manager.install(core_id="assistant", package_id="tts_minimax", option_answers={"api_key": "secret-value"})
 
     core_path = app.version_store.active_core_path("assistant")
     config = yaml.safe_load((core_path / "agent" / "lib" / "tts_minimax" / "config.yaml").read_text())
@@ -1105,8 +1110,8 @@ def test_cli_package_list_and_install(tmp_path, capsys):
 
     main(["--home", str(home), "package", "list", "--tag", "tts", "--json"])
     listed = json.loads(capsys.readouterr().out)
-    minimax = next(package for package in listed["packages"] if package["id"] == "minimax_tts")
-    assert minimax["ref"] == "builtin/minimax_tts"
+    minimax = next(package for package in listed["packages"] if package["id"] == "tts_minimax")
+    assert minimax["ref"] == "builtin/tts_minimax"
     assert minimax["repository_alias"] == "builtin"
     assert listed["repositories"][0]["alias"] == "builtin"
     mode = next(option for option in minimax["options"] if option["id"] == "mode")
@@ -1120,7 +1125,7 @@ def test_cli_package_list_and_install(tmp_path, capsys):
             str(home),
             "package",
             "install",
-            "minimax_tts",
+            "tts_minimax",
             "--core",
             "assistant",
             "--preview",
@@ -1129,8 +1134,8 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     )
     preview = json.loads(capsys.readouterr().out)
     assert preview["preview"] is True
-    assert preview["package_id"] == "minimax_tts"
-    assert preview["package_ref"] == "builtin/minimax_tts"
+    assert preview["package_id"] == "tts_minimax"
+    assert preview["package_ref"] == "builtin/tts_minimax"
     assert preview["repository_alias"] == "builtin"
     assert preview["repository_id"] == "builtin"
     assert preview["repository_type"] == "builtin"
@@ -1164,7 +1169,7 @@ def test_cli_package_list_and_install(tmp_path, capsys):
             str(home),
             "package",
             "install",
-            "minimax_tts",
+            "tts_minimax",
             "--core",
             "assistant",
             "--option",
@@ -1177,8 +1182,8 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     installed = json.loads(capsys.readouterr().out)
     assert installed["action"] == "install"
     assert installed["preview"] is False
-    assert installed["package_id"] == "minimax_tts"
-    assert installed["package_ref"] == "builtin/minimax_tts"
+    assert installed["package_id"] == "tts_minimax"
+    assert installed["package_ref"] == "builtin/tts_minimax"
     assert installed["repository_alias"] == "builtin"
     assert installed["repository_id"] == "builtin"
     assert installed["repository_type"] == "builtin"
@@ -1189,7 +1194,7 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert not (home / "agents" / "assistant" / "agent" / "tools" / "tts_synthesize").exists()
     assert (home / "agents" / "tts_summarizer" / "agent.yaml").exists()
 
-    main(["--home", str(home), "package", "uninstall", "minimax_tts", "--core", "assistant", "--preview", "--json"])
+    main(["--home", str(home), "package", "uninstall", "tts_minimax", "--core", "assistant", "--preview", "--json"])
     uninstall_preview = json.loads(capsys.readouterr().out)
     assert uninstall_preview["preview"] is True
     assert uninstall_preview["components"][0]["remove"] is True
@@ -1287,7 +1292,7 @@ def test_wizard_installs_with_option_answers(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
     prompt = _FakePrompt(
-        selections=["packages", "assistant", "builtin/minimax_tts", "direct", "install", "__back__", "exit"],
+        selections=["packages", "assistant", "builtin/tts_minimax", "direct", "install", "__back__", "exit"],
         confirms=[False],
         inputs=["wizard-secret"],
     )
@@ -1319,10 +1324,10 @@ def test_wizard_installs_with_option_answers(tmp_path):
     assert [column.label for column in package_select["columns"]] == ["", "Repo", "Package", "Tags / Summary"]
     assert "__search__" in {row.value for row in package_select["rows"]}
     assert next(row for row in package_select["rows"] if row.value == "__search__").row_type == "action"
-    minimax_row = next(row for row in package_select["rows"] if row.value == "builtin/minimax_tts")
+    minimax_row = next(row for row in package_select["rows"] if row.value == "builtin/tts_minimax")
     assert minimax_row.cells[0] == ""
     assert minimax_row.cells[1] == "builtin"
-    assert minimax_row.cells[2] == "minimax_tts"
+    assert minimax_row.cells[2] == "tts_minimax"
     mode_select = next(call for call in prompt.select_calls if call["title"] == "TTS mode")
     assert mode_select["choices"][0].description
     assert mode_select["choices"][1].description
@@ -1331,9 +1336,9 @@ def test_wizard_installs_with_option_answers(tmp_path):
 def test_wizard_uninstalls_installed_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
-    manager.install(core_id="assistant", package_id="minimax_tts")
+    manager.install(core_id="assistant", package_id="tts_minimax")
     prompt = _FakePrompt(
-        selections=["packages", "assistant", "builtin/minimax_tts", "uninstall", "__back__", "exit"],
+        selections=["packages", "assistant", "builtin/tts_minimax", "uninstall", "__back__", "exit"],
     )
 
     host_config = load_host_config(app.host_config_path)[0]
@@ -1348,10 +1353,10 @@ def test_wizard_uninstalls_installed_package(tmp_path):
 
     assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax").exists()
     package_select = next(call for call in prompt.table_calls if call["title"] == "Packages for assistant")
-    installed_row = next(row for row in package_select["rows"] if row.value == "builtin/minimax_tts")
+    installed_row = next(row for row in package_select["rows"] if row.value == "builtin/tts_minimax")
     assert installed_row.cells[0] == "✓"
     assert installed_row.cells[1] == "builtin"
-    assert installed_row.cells[2] == "minimax_tts"
+    assert installed_row.cells[2] == "tts_minimax"
     assert "[installed]" not in " ".join(installed_row.cells)
 
 
@@ -1499,13 +1504,13 @@ async def test_tui_packages_command_lists_details_and_installs(tmp_path):
     bridge = TuiInteractionBridge(app, emit=sink)
 
     assert (await bridge.command("/packages"))["handled"] is True
-    assert (await bridge.command("/packages minimax_tts"))["handled"] is True
-    assert (await bridge.command("/packages install minimax_tts"))["handled"] is True
+    assert (await bridge.command("/packages tts_minimax"))["handled"] is True
+    assert (await bridge.command("/packages install tts_minimax"))["handled"] is True
 
     output = sink.text()
-    assert "minimax_tts" in output
-    assert "Package: builtin/minimax_tts" in output
-    assert "installed builtin/minimax_tts for assistant" in output
+    assert "tts_minimax" in output
+    assert "Package: builtin/tts_minimax" in output
+    assert "installed builtin/tts_minimax for assistant" in output
 
 
 @pytest.mark.asyncio
@@ -1992,7 +1997,7 @@ async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_pat
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", package_id="minimax_tts")
+    _manager(app).install(core_id="assistant", package_id="tts_minimax")
     calls = _mock_minimax_http(monkeypatch)
     bridge = _RecordingBridge()
 
@@ -2018,7 +2023,7 @@ async def test_minimax_summary_mode_uses_child_result_then_parent_delivers_audio
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", package_id="minimax_tts", option_answers={"mode": "summary"})
+    _manager(app).install(core_id="assistant", package_id="tts_minimax", option_answers={"mode": "summary"})
     calls = _mock_minimax_http(monkeypatch)
     bridge = _RecordingBridge()
 
@@ -2052,7 +2057,7 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
     manager = _manager(app)
-    manager.install(core_id="assistant", package_id="minimax_tts", option_answers={"enable_tool": True})
+    manager.install(core_id="assistant", package_id="tts_minimax", option_answers={"enable_tool": True})
     calls = _mock_minimax_http(monkeypatch)
 
     result = await InteractionRuntime(app.runner).handle(
@@ -2085,7 +2090,7 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", package_id="minimax_tts")
+    _manager(app).install(core_id="assistant", package_id="tts_minimax")
     config_path = app.version_store.active_core_path("assistant") / "agent" / "lib" / "tts_minimax" / "config.yaml"
     config = yaml.safe_load(config_path.read_text())
     config["output_format"] = "url"
@@ -2229,19 +2234,18 @@ async def test_provider_tts_summary_mode_reuses_tts_summarizer(tmp_path, monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("package_id", "provider", "tool_id", "expected_suffix", "expected_bytes", "expected_media_type"),
+    ("package_id", "provider", "expected_suffix", "expected_bytes", "expected_media_type"),
     [
-        ("tts_openai", "openai", "text_to_speech_openai", "openai-tool.mp3", b"OPENAI-AUDIO", "audio/mpeg"),
-        ("tts_xai", "xai", "text_to_speech_xai", "xai-tool.mp3", b"XAI-AUDIO", "audio/mpeg"),
-        ("tts_gemini", "gemini", "text_to_speech_gemini", "gemini-tool.wav", b"\x01\x02\x03\x04", "audio/wav"),
+        ("tts_openai", "openai", "openai-tool.mp3", b"OPENAI-AUDIO", "audio/mpeg"),
+        ("tts_xai", "xai", "xai-tool.mp3", b"XAI-AUDIO", "audio/mpeg"),
+        ("tts_gemini", "gemini", "gemini-tool.wav", b"\x01\x02\x03\x04", "audio/wav"),
     ],
 )
-async def test_provider_tts_tool_generates_audio_with_provider_specific_tool(
+async def test_provider_tts_tool_generates_audio_with_shared_tool_name(
     tmp_path,
     monkeypatch,
     package_id,
     provider,
-    tool_id,
     expected_suffix,
     expected_bytes,
     expected_media_type,
@@ -2252,7 +2256,7 @@ async def test_provider_tts_tool_generates_audio_with_provider_specific_tool(
     script.write_text(
         json.dumps(
             [
-                {"tool_calls": [{"id": "tts_tool", "name": tool_id, "arguments": {"text": "tool voice"}}]},
+                {"tool_calls": [{"id": "tts_tool", "name": "text_to_speech", "arguments": {"text": "tool voice"}}]},
                 {"content": ""},
             ]
         ),
@@ -2278,9 +2282,9 @@ async def test_provider_tts_tool_generates_audio_with_provider_specific_tool(
     )
     audio_block = next(block for block in audio_delivery.blocks if block.get("type") == "audio")
     assert audio_delivery.history_policy == "transient"
-    assert audio_delivery.metadata["slot"] == f"agent/tools/{tool_id}"
+    assert audio_delivery.metadata["slot"] == "agent/tools/text_to_speech"
     assert audio_block["artifact"]["media_type"] == expected_media_type
-    assert result.tool_results[0].call.name == tool_id
+    assert result.tool_results[0].call.name == "text_to_speech"
     artifact_bytes = next(workspace.glob(f".demiurge-tts/*-{expected_suffix}")).read_bytes()
     if provider == "gemini":
         assert artifact_bytes.startswith(b"RIFF")
@@ -2294,7 +2298,7 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    _manager(app).install(core_id="assistant", package_id="minimax_tts")
+    _manager(app).install(core_id="assistant", package_id="tts_minimax")
     _mock_minimax_http(
         monkeypatch,
         response={
@@ -2420,6 +2424,53 @@ def _write_bootstrap_repository(root: Path) -> None:
         "    source: parallel_session\n"
         "    pipeline:\n"
         "      group: parallel\n",
+        encoding="utf-8",
+    )
+
+
+def _write_manifest_file_repository(root: Path) -> None:
+    (root / "packages").mkdir(parents=True)
+    (root / "repository.yaml").write_text("id: manifest_repository\nname: Manifest\n", encoding="utf-8")
+    (root / "mcp").mkdir()
+    (root / "mcp" / "docs.yaml").write_text(
+        "transport: streamable_http\n",
+        encoding="utf-8",
+    )
+    (root / "schedule").mkdir()
+    (root / "schedule" / "daily.yaml").write_text("{}\n", encoding="utf-8")
+    (root / "packages" / "docs_mcp.yaml").write_text(
+        "id: docs_mcp\n"
+        "options:\n"
+        "  - id: url\n"
+        "    type: string\n"
+        "    prompt: MCP URL\n"
+        "    default: https://example.test/mcp\n"
+        "components:\n"
+        "  - id: docs\n"
+        "    kind: mcp\n"
+        "    source: docs.yaml\n"
+        "    config:\n"
+        "      url: ${options.url}\n",
+        encoding="utf-8",
+    )
+    (root / "packages" / "daily_schedule.yaml").write_text(
+        "id: daily_schedule\n"
+        "options:\n"
+        "  - id: cron\n"
+        "    type: string\n"
+        "    prompt: Cron\n"
+        "    default: 0 9 * * *\n"
+        "  - id: prompt\n"
+        "    type: string\n"
+        "    prompt: Prompt\n"
+        "    default: Write a daily summary.\n"
+        "components:\n"
+        "  - id: daily\n"
+        "    kind: schedule\n"
+        "    source: daily.yaml\n"
+        "    config:\n"
+        "      schedule: ${options.cron}\n"
+        "      prompt: ${options.prompt}\n",
         encoding="utf-8",
     )
 

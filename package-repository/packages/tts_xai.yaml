@@ -20,7 +20,7 @@ options:
   - id: enable_tool
     type: bool
     prompt: Add agent TTS tool
-    description: Also install an authored provider-specific tool so the agent can generate speech on demand.
+    description: Also install an authored TTS tool so the agent can generate speech on demand.
     default: false
   - id: api_key
     type: secret
@@ -83,7 +83,7 @@ components:
   - id: tts_tool
     kind: tool
     source: text_to_speech_xai
-    target: agent/tools/text_to_speech_xai
+    target: agent/tools/text_to_speech
     when:
       enable_tool: true
     config:

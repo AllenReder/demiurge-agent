@@ -6,4 +6,4 @@ category: audio
 
 # Gemini TTS Voice
 
-Use `text_to_speech_gemini` when the user explicitly asks for a speech audio artifact using the Gemini TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.
+Use `text_to_speech` when the user explicitly asks for a speech audio artifact using the Gemini TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.

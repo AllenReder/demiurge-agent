@@ -1,5 +1,5 @@
 schema_version: 2
-id: minimax_tts
+id: tts_minimax
 name: MiniMax TTS
 summary: Generate speech audio with MiniMax, either directly or through a summarizer core.
 tags:
@@ -71,7 +71,7 @@ components:
       mode: summary
   - id: tts_tool
     kind: tool
-    source: text_to_speech
+    source: text_to_speech_minimax
     target: agent/tools/text_to_speech
     when:
       enable_tool: true

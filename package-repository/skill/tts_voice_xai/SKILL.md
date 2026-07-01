@@ -6,4 +6,4 @@ category: audio
 
 # xAI TTS Voice
 
-Use `text_to_speech_xai` when the user explicitly asks for a speech audio artifact using the xAI TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.
+Use `text_to_speech` when the user explicitly asks for a speech audio artifact using the xAI TTS provider. Provide concise text to synthesize. The tool sends the generated audio directly.
