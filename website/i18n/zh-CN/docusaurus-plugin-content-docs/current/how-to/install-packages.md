@@ -56,6 +56,26 @@ uv run demiurge package install web_search_tavily --core assistant --preview
 因为两个 packages 都 target `agent/tools/web_search`，同一个 core 中一次只安装一个
 web search provider package。要切换 provider，先卸载当前 web search package。
 
+Provider-owned speech-to-text packages 会在 model request 前转录音频附件：
+
+```bash
+uv run demiurge package list --tag stt
+uv run demiurge package install stt_dashscope --core assistant --preview
+```
+
+内置 STT packages 包括 `stt_openai`、`stt_groq`、`stt_deepgram`、
+`stt_assemblyai`、`stt_gemini`、`stt_dashscope`、`stt_baidu` 和
+`stt_tencent`。它们都 target `agent/input/speech_to_text`，所以同一个 core 中一次只安装一个
+STT provider package。要切换 provider，先卸载当前 STT package。
+
+常用凭证环境变量：
+
+| Package | 环境变量 |
+| --- | --- |
+| `stt_dashscope` | `DEMIURGE_DASHSCOPE_API_KEY` 或 `DASHSCOPE_API_KEY` |
+| `stt_baidu` | `DEMIURGE_BAIDU_ACCESS_TOKEN`，或 `DEMIURGE_BAIDU_API_KEY` 加 `DEMIURGE_BAIDU_SECRET_KEY` |
+| `stt_tencent` | `DEMIURGE_TENCENT_SECRET_ID` 加 `DEMIURGE_TENCENT_SECRET_KEY` |
+
 ## 卸载
 
 ```bash

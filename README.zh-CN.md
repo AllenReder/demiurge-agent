@@ -91,6 +91,9 @@ runtime 会把 source templates 复制到 `~/.demiurge/agents`。runtime core
 的改动是文件化、可 diff、可 gate 的。Package recipes 会把可复用组件安装进
 runtime cores，不修改 source templates。
 
+内置 package repository 包含本地记忆、对话风格提示、context reseed、provider-owned
+web search，以及 provider-specific speech input/output 等可选 packages。
+
 ## 开发者路径
 
 ```bash

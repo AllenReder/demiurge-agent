@@ -218,6 +218,85 @@ def _mock_openai_stt_http(monkeypatch, *, transcript: str = "transcribed voice")
     return calls
 
 
+def _mock_gemini_stt_http(monkeypatch, *, transcript: str = "gemini voice") -> list[dict[str, object]]:
+    monkeypatch.setenv("DEMIURGE_GEMINI_API_KEY", "test-gemini-key")
+    calls: list[dict[str, object]] = []
+
+    def fake_urlopen(request: Request, timeout=60):
+        payload = json.loads((request.data or b"{}").decode("utf-8")) if request.data else None
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "json": payload,
+                "gemini_key": request.get_header("X-goog-api-key"),
+            }
+        )
+        return _FakeHTTPResponse(
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": json.dumps(
+                                            {
+                                                "text": transcript,
+                                                "language": "zh",
+                                                "confidence": 0.95,
+                                            }
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
+def _mock_domestic_stt_http(monkeypatch, *, provider: str, transcript: str = "国内语音转写") -> list[dict[str, object]]:
+    env_by_provider = {
+        "dashscope": ("DEMIURGE_DASHSCOPE_API_KEY", "test-dashscope-key"),
+        "baidu": ("DEMIURGE_BAIDU_ACCESS_TOKEN", "test-baidu-token"),
+        "tencent": ("DEMIURGE_TENCENT_SECRET_ID", "test-tencent-id"),
+    }
+    env_name, env_value = env_by_provider[provider]
+    monkeypatch.setenv(env_name, env_value)
+    if provider == "tencent":
+        monkeypatch.setenv("DEMIURGE_TENCENT_SECRET_KEY", "test-tencent-secret")
+    calls: list[dict[str, object]] = []
+
+    def fake_urlopen(request: Request, timeout=60):
+        payload = json.loads((request.data or b"{}").decode("utf-8")) if request.data else None
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "json": payload,
+                "authorization": request.get_header("Authorization"),
+                "content_type": request.get_header("Content-type") or request.get_header("Content-Type"),
+                "x_tc_action": request.get_header("X-tc-action") or request.get_header("X-TC-Action"),
+                "x_tc_version": request.get_header("X-tc-version") or request.get_header("X-TC-Version"),
+            }
+        )
+        if provider == "dashscope":
+            body = {"choices": [{"message": {"content": transcript}}]}
+        elif provider == "baidu":
+            body = {"err_no": 0, "result": [transcript], "corpus_no": "baidu-corpus"}
+        else:
+            body = {"Response": {"Result": transcript, "RequestId": "tencent-request"}}
+        return _FakeHTTPResponse(json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
 def _mock_brave_search_http(monkeypatch, *, response: dict | None = None) -> list[dict[str, object]]:
     monkeypatch.setenv("DEMIURGE_BRAVE_SEARCH_API_KEY", "test-brave-key")
     calls: list[dict[str, object]] = []
@@ -328,6 +407,9 @@ def test_builtin_repository_lists_provider_tts_packages(package_id, provider, to
         ("stt_deepgram", "deepgram"),
         ("stt_assemblyai", "assemblyai"),
         ("stt_gemini", "gemini"),
+        ("stt_dashscope", "dashscope"),
+        ("stt_baidu", "baidu"),
+        ("stt_tencent", "tencent"),
     ],
 )
 def test_builtin_repository_lists_provider_stt_packages(package_id, provider):
@@ -679,6 +761,9 @@ def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id,
         ("stt_deepgram", "deepgram", "DEMIURGE_DEEPGRAM_API_KEY"),
         ("stt_assemblyai", "assemblyai", "DEMIURGE_ASSEMBLYAI_API_KEY"),
         ("stt_gemini", "gemini", "DEMIURGE_GEMINI_API_KEY"),
+        ("stt_dashscope", "dashscope", "DEMIURGE_DASHSCOPE_API_KEY"),
+        ("stt_baidu", "baidu", "DEMIURGE_BAIDU_API_KEY"),
+        ("stt_tencent", "tencent", "DEMIURGE_TENCENT_SECRET_ID"),
     ],
 )
 def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provider, env_name):
@@ -697,8 +782,14 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     assert (core_path / "agent" / "skills" / "stt_transcription" / "SKILL.md").exists()
     lib_config = yaml.safe_load((core_path / "agent" / "lib" / f"stt_{provider}" / "config.yaml").read_text())
     assert lib_config["provider"] == f"stt_{provider}"
-    assert lib_config["api_key_env"] == env_name
-    assert lib_config["api_key"] is None
+    if provider == "tencent":
+        assert lib_config["secret_id_env"] == env_name
+        assert lib_config["secret_key_env"] == "DEMIURGE_TENCENT_SECRET_KEY"
+        assert lib_config["secret_id"] is None
+        assert lib_config["secret_key"] is None
+    else:
+        assert lib_config["api_key_env"] == env_name
+        assert lib_config["api_key"] is None
     input_slot = yaml.safe_load((core_path / "agent" / "input" / "speech_to_text" / "slot.yaml").read_text())
     assert input_slot["capabilities"] == ["network.fetch", "skill.activate:stt_transcription"]
     pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
@@ -707,7 +798,12 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     assert registry["installed"][0]["package_id"] == package_id
     assert registry["installed"][0]["repository_alias"] == "builtin"
     assert registry["installed"][0]["repository_id"] == "builtin"
-    assert registry["installed"][0]["options"]["api_key"] is None
+    secret_options = {
+        option.option_id
+        for option in PackageRepository.load(default_package_repository_root()).packages[package_id].options
+        if option.option_type == "secret"
+    }
+    assert all(registry["installed"][0]["options"][option_id] is None for option_id in secret_options)
 
     removed = manager.uninstall(core_id="assistant", package_id=package_id)
 
@@ -1785,6 +1881,112 @@ async def test_openai_stt_transcribes_interaction_attachment_into_prompt(tmp_pat
     assert "Transcript metadata:" in request_text
     assert "audio attached" in request_text
     assert "# Speech-to-Text Transcription" in request_text
+
+
+@pytest.mark.asyncio
+async def test_gemini_stt_transcribes_interaction_attachment_into_prompt(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    audio_path = workspace / "voice.mp3"
+    audio_path.write_bytes(b"VOICE-DATA")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="stt_gemini")
+    provider = _RecordingProvider(default="heard")
+    app.runner.provider = provider
+    calls = _mock_gemini_stt_http(monkeypatch, transcript="gemini transcript")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(
+            channel="tui",
+            text="audio attached",
+            source="local",
+            conversation_key="pkg:gemini:stt",
+            attachments=[
+                {
+                    "id": "voice-1",
+                    "filename": "voice.mp3",
+                    "media_type": "audio/mpeg",
+                    "path": str(audio_path),
+                    "size_bytes": len(b"VOICE-DATA"),
+                    "duration_seconds": 1.25,
+                }
+            ],
+        )
+    )
+
+    assert calls[0]["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert calls[0]["gemini_key"] == "test-gemini-key"
+    inline_data = calls[0]["json"]["contents"][0]["parts"][1]["inline_data"]
+    assert inline_data["mime_type"] == "audio/mpeg"
+    assert inline_data["data"]
+    request_text = "\n".join(message.content for message in provider.requests[0].messages)
+    assert "Voice message transcript (stt_gemini):" in request_text
+    assert "gemini transcript" in request_text
+    assert "Transcript metadata:" in request_text
+    assert "audio attached" in request_text
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "expected_url"),
+    [
+        ("stt_dashscope", "dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
+        ("stt_baidu", "baidu", "https://vop.baidu.com/server_api"),
+        ("stt_tencent", "tencent", "https://asr.tencentcloudapi.com"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_domestic_stt_transcribes_interaction_attachment_into_prompt(tmp_path, monkeypatch, package_id, provider, expected_url):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    audio_path = workspace / "voice.mp3"
+    audio_path.write_bytes(b"VOICE-DATA")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id=package_id)
+    llm_provider = _RecordingProvider(default="heard")
+    app.runner.provider = llm_provider
+    calls = _mock_domestic_stt_http(monkeypatch, provider=provider, transcript=f"{provider} transcript")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(
+            channel="tui",
+            text="audio attached",
+            source="local",
+            conversation_key=f"pkg:{provider}:stt",
+            attachments=[
+                {
+                    "id": "voice-1",
+                    "filename": "voice.mp3",
+                    "media_type": "audio/mpeg",
+                    "path": str(audio_path),
+                    "size_bytes": len(b"VOICE-DATA"),
+                    "duration_seconds": 1.25,
+                }
+            ],
+        )
+    )
+
+    assert calls[0]["url"] == expected_url
+    if provider == "dashscope":
+        assert calls[0]["authorization"] == "Bearer test-dashscope-key"
+        assert calls[0]["json"]["model"] == "qwen3-asr-flash"
+        audio = calls[0]["json"]["messages"][0]["content"][1]["input_audio"]["data"]
+        assert audio.startswith("data:audio/mpeg;base64,")
+    elif provider == "baidu":
+        assert calls[0]["json"]["token"] == "test-baidu-token"
+        assert calls[0]["json"]["format"] == "mp3"
+        assert calls[0]["json"]["dev_pid"] == 1537
+        assert calls[0]["json"]["speech"]
+    else:
+        assert str(calls[0]["authorization"]).startswith("TC3-HMAC-SHA256 Credential=test-tencent-id/")
+        assert calls[0]["x_tc_action"] == "SentenceRecognition"
+        assert calls[0]["x_tc_version"] == "2019-06-14"
+        assert calls[0]["json"]["EngSerViceType"] == "16k_zh"
+        assert calls[0]["json"]["Data"]
+    request_text = "\n".join(message.content for message in llm_provider.requests[0].messages)
+    assert f"Voice message transcript (stt_{provider}):" in request_text
+    assert f"{provider} transcript" in request_text
+    assert "Transcript metadata:" in request_text
+    assert "audio attached" in request_text
 
 
 @pytest.mark.asyncio

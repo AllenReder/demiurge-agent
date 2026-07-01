@@ -58,6 +58,28 @@ Because both packages target `agent/tools/web_search`, install only one web
 search provider package in a core at a time. To switch providers, uninstall the
 current web search package first.
 
+Provider-owned speech-to-text packages transcribe audio attachments before the
+model request:
+
+```bash
+uv run demiurge package list --tag stt
+uv run demiurge package install stt_dashscope --core assistant --preview
+```
+
+The built-in STT packages are `stt_openai`, `stt_groq`, `stt_deepgram`,
+`stt_assemblyai`, `stt_gemini`, `stt_dashscope`, `stt_baidu`, and
+`stt_tencent`. They all target `agent/input/speech_to_text`, so install only one
+STT provider package in a core at a time. To switch providers, uninstall the
+current STT package first.
+
+Common credential environment variables:
+
+| Package | Environment variables |
+| --- | --- |
+| `stt_dashscope` | `DEMIURGE_DASHSCOPE_API_KEY` or `DASHSCOPE_API_KEY` |
+| `stt_baidu` | `DEMIURGE_BAIDU_ACCESS_TOKEN`, or `DEMIURGE_BAIDU_API_KEY` plus `DEMIURGE_BAIDU_SECRET_KEY` |
+| `stt_tencent` | `DEMIURGE_TENCENT_SECRET_ID` plus `DEMIURGE_TENCENT_SECRET_KEY` |
+
 ## Uninstall
 
 ```bash

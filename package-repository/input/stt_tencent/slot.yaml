@@ -1,0 +1,7 @@
+entrypoint: module:process
+description: Transcribe voice/audio attachments with Tencent Cloud STT and add the transcript to the user prompt.
+failure_policy: soft
+history_policy: persist
+capabilities:
+  - network.fetch
+  - skill.activate:stt_transcription

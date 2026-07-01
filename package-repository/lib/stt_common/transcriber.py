@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import datetime as _datetime
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
 from pathlib import Path
+import time
 from typing import Any, Mapping, Sequence
 import urllib.error
 import urllib.parse
@@ -170,6 +174,12 @@ def _transcribe_one(candidate: AttachmentCandidate, config: Mapping[str, Any]) -
         return _transcribe_assemblyai(candidate, config)
     if provider == "stt_gemini":
         return _transcribe_gemini(candidate, config)
+    if provider == "stt_dashscope":
+        return _transcribe_dashscope(candidate, config)
+    if provider == "stt_baidu":
+        return _transcribe_baidu(candidate, config)
+    if provider == "stt_tencent":
+        return _transcribe_tencent(candidate, config)
     raise ValueError(f"unsupported STT provider: {provider or '(missing)'}")
 
 
@@ -382,6 +392,187 @@ def _transcribe_gemini(candidate: AttachmentCandidate, config: Mapping[str, Any]
                 "confidence": parsed.get("confidence"),
                 "segments": parsed.get("segments"),
                 "warnings": parsed.get("warnings"),
+                "source": _source_metadata(candidate),
+            }
+        ),
+    )
+
+
+def _transcribe_dashscope(candidate: AttachmentCandidate, config: Mapping[str, Any]) -> TranscriptionResult:
+    api_key = _resolve_secret(config, default_env="DEMIURGE_DASHSCOPE_API_KEY")
+    if not api_key:
+        env_name = str(config.get("api_key_env") or "DEMIURGE_DASHSCOPE_API_KEY")
+        raise ValueError(f"DashScope STT API key is not configured; set {env_name} or config.api_key")
+    model = str(config.get("model") or "qwen3-asr-flash")
+    instruction = str(config.get("transcription_instruction") or "Transcribe the attached audio into text. Return only the transcript.")
+    language = _optional_str(config.get("language"))
+    if language:
+        instruction = f"{instruction}\nLanguage hint: {language}."
+    data = _read_attachment_bytes(candidate)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": instruction},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": _audio_data_url(data, candidate, config),
+                        },
+                    },
+                ],
+            }
+        ],
+        "stream": False,
+    }
+    asr_options = _drop_none(
+        {
+            "language": _optional_str(config.get("language")),
+            "enable_itn": _config_bool_or_none(config.get("enable_itn")),
+        }
+    )
+    if asr_options:
+        payload["asr_options"] = asr_options
+    if config.get("temperature") is not None:
+        payload["temperature"] = config.get("temperature")
+    url = _join_url(str(config.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"), str(config.get("endpoint") or "/chat/completions"))
+    raw = _post_json(
+        url,
+        payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+        provider_label="DashScope STT",
+        timeout=_timeout(config),
+    )
+    response = _parse_json(raw, provider_label="DashScope STT")
+    text_payload = _chat_completion_text(response)
+    parsed = _parse_json_text(text_payload)
+    text = str(parsed.get("text") or parsed.get("transcript") or text_payload or "").strip()
+    if not text:
+        raise RuntimeError("DashScope STT returned an empty transcript")
+    return TranscriptionResult(
+        text=text,
+        metadata=_drop_none(
+            {
+                "provider": "stt_dashscope",
+                "model": model,
+                "language": parsed.get("language") or language,
+                "confidence": parsed.get("confidence"),
+                "segments": parsed.get("segments"),
+                "source": _source_metadata(candidate),
+            }
+        ),
+    )
+
+
+def _transcribe_baidu(candidate: AttachmentCandidate, config: Mapping[str, Any]) -> TranscriptionResult:
+    access_token = _baidu_access_token(config)
+    audio = _read_attachment_bytes(candidate)
+    payload = _drop_none(
+        {
+            "format": _infer_audio_format(candidate, config),
+            "rate": _positive_int(config.get("sample_rate"), default=16000),
+            "channel": _positive_int(config.get("channel"), default=1),
+            "cuid": str(config.get("cuid") or "demiurge"),
+            "token": access_token or None,
+            "dev_pid": _positive_int(config.get("dev_pid"), default=1537),
+            "speech": base64.b64encode(audio).decode("ascii"),
+            "len": len(audio),
+        }
+    )
+    raw = _post_json(
+        str(config.get("base_url") or "https://vop.baidu.com/server_api"),
+        payload,
+        headers={},
+        provider_label="Baidu STT",
+        timeout=_timeout(config),
+    )
+    response = _parse_json(raw, provider_label="Baidu STT")
+    err_no = response.get("err_no")
+    if err_no not in (0, "0", None):
+        raise RuntimeError(f"Baidu STT failed: {response.get('err_msg') or response.get('error_msg') or err_no}")
+    result = _list(response.get("result"))
+    text = "\n".join(str(item).strip() for item in result if str(item).strip()).strip()
+    if not text:
+        text = str(response.get("text") or response.get("transcript") or "").strip()
+    if not text:
+        raise RuntimeError("Baidu STT returned an empty transcript")
+    return TranscriptionResult(
+        text=text,
+        metadata=_drop_none(
+            {
+                "provider": "stt_baidu",
+                "model": str(config.get("model") or "极速版语音识别"),
+                "language": config.get("language"),
+                "duration_seconds": candidate.duration_seconds,
+                "corpus_no": response.get("corpus_no"),
+                "source": _source_metadata(candidate),
+            }
+        ),
+    )
+
+
+def _transcribe_tencent(candidate: AttachmentCandidate, config: Mapping[str, Any]) -> TranscriptionResult:
+    secret_id = _resolve_secret_key(config, key="secret_id", env_key="secret_id_env", default_env="DEMIURGE_TENCENT_SECRET_ID")
+    secret_key = _resolve_secret_key(config, key="secret_key", env_key="secret_key_env", default_env="DEMIURGE_TENCENT_SECRET_KEY")
+    if not secret_id or not secret_key:
+        raise ValueError("Tencent STT credentials are not configured; set DEMIURGE_TENCENT_SECRET_ID and DEMIURGE_TENCENT_SECRET_KEY")
+    audio = _read_attachment_bytes(candidate)
+    service = "asr"
+    host = str(config.get("host") or "asr.tencentcloudapi.com")
+    action = str(config.get("action") or "SentenceRecognition")
+    version = str(config.get("version") or "2019-06-14")
+    region = str(config.get("region") or "ap-shanghai")
+    payload = _drop_none(
+        {
+            "ProjectId": _positive_int(config.get("project_id"), default=0),
+            "SubServiceType": _positive_int(config.get("sub_service_type"), default=2),
+            "EngSerViceType": str(config.get("engine_model_type") or config.get("model") or "16k_zh"),
+            "SourceType": 1,
+            "VoiceFormat": _infer_audio_format(candidate, config),
+            "UsrAudioKey": candidate.identifier,
+            "Data": base64.b64encode(audio).decode("ascii"),
+            "DataLen": len(audio),
+            "WordInfo": _positive_int(config.get("word_info"), default=0),
+            "FilterDirty": _positive_int(config.get("filter_dirty"), default=0),
+            "FilterModal": _positive_int(config.get("filter_modal"), default=0),
+            "ConvertNumMode": _positive_int(config.get("convert_num_mode"), default=1),
+            "HotwordId": _optional_str(config.get("hotword_id")),
+            "CustomizationId": _optional_str(config.get("customization_id")),
+        }
+    )
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    timestamp = int(time.time())
+    headers = _tencent_headers(
+        body,
+        secret_id=secret_id,
+        secret_key=secret_key,
+        service=service,
+        host=host,
+        action=action,
+        version=version,
+        region=region,
+        timestamp=timestamp,
+    )
+    request = urllib.request.Request(f"https://{host}", data=body, method="POST", headers=headers)
+    raw = _urlopen_read(request, provider_label="Tencent STT", timeout=_timeout(config))
+    response = _parse_json(raw, provider_label="Tencent STT")
+    response_body = _mapping(response.get("Response"))
+    error = _mapping(response_body.get("Error"))
+    if error:
+        raise RuntimeError(f"Tencent STT failed: {error.get('Code') or 'Error'} {error.get('Message') or ''}".strip())
+    text = str(response_body.get("Result") or "").strip()
+    if not text:
+        raise RuntimeError("Tencent STT returned an empty transcript")
+    return TranscriptionResult(
+        text=text,
+        metadata=_drop_none(
+            {
+                "provider": "stt_tencent",
+                "model": payload.get("EngSerViceType"),
+                "duration_seconds": candidate.duration_seconds,
+                "request_id": response_body.get("RequestId"),
                 "source": _source_metadata(candidate),
             }
         ),
@@ -617,6 +808,19 @@ def _gemini_text(response: Mapping[str, Any]) -> str:
     return ""
 
 
+def _chat_completion_text(response: Mapping[str, Any]) -> str:
+    choices = _list(response.get("choices"))
+    if not choices:
+        return ""
+    message = _mapping(_mapping(choices[0]).get("message"))
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "".join(str(_mapping(item).get("text") or "") for item in content).strip()
+    return ""
+
+
 def _parse_json_text(value: str) -> Mapping[str, Any]:
     try:
         parsed = json.loads(value)
@@ -668,6 +872,165 @@ def _resolve_secret(config: Mapping[str, Any], *, default_env: str) -> str:
         if value:
             return value
     return ""
+
+
+def _resolve_secret_key(config: Mapping[str, Any], *, key: str, env_key: str, default_env: str) -> str:
+    direct = str(config.get(key) or "").strip()
+    if direct:
+        return direct
+    env_names = [str(config.get(env_key) or default_env).strip()]
+    env_names.extend(str(item).strip() for item in _list(config.get(f"{key}_fallback_envs")))
+    for env_name in env_names:
+        if not env_name:
+            continue
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _baidu_access_token(config: Mapping[str, Any]) -> str:
+    direct = _resolve_secret_key(
+        config,
+        key="access_token",
+        env_key="access_token_env",
+        default_env="DEMIURGE_BAIDU_ACCESS_TOKEN",
+    )
+    if direct:
+        return direct
+    api_key = _resolve_secret(config, default_env="DEMIURGE_BAIDU_API_KEY")
+    secret_key = _resolve_secret_key(
+        config,
+        key="secret_key",
+        env_key="secret_key_env",
+        default_env="DEMIURGE_BAIDU_SECRET_KEY",
+    )
+    if not api_key or not secret_key:
+        raise ValueError(
+            "Baidu STT credentials are not configured; set DEMIURGE_BAIDU_ACCESS_TOKEN "
+            "or both DEMIURGE_BAIDU_API_KEY and DEMIURGE_BAIDU_SECRET_KEY"
+        )
+    token_url = _url_with_query(
+        str(config.get("token_url") or "https://aip.baidubce.com/oauth/2.0/token"),
+        {
+            "grant_type": "client_credentials",
+            "client_id": api_key,
+            "client_secret": secret_key,
+        },
+    )
+    request = urllib.request.Request(token_url, method="POST")
+    response = _parse_json(_urlopen_read(request, provider_label="Baidu OAuth", timeout=_timeout(config)), provider_label="Baidu OAuth")
+    token = str(response.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError(f"Baidu OAuth returned no access_token: {response.get('error_description') or response.get('error') or 'unknown error'}")
+    return token
+
+
+def _infer_audio_format(candidate: AttachmentCandidate, config: Mapping[str, Any]) -> str:
+    configured = str(config.get("audio_format") or "").strip().lower()
+    if configured:
+        return configured
+    suffix = Path(candidate.filename or "").suffix.lower().lstrip(".")
+    if suffix == "mpga":
+        return "mp3"
+    if suffix:
+        return suffix
+    media = str(candidate.media_type or "").split(";", 1)[0].strip().lower()
+    return {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/m4a": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/mp4": "mp4",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/webm": "webm",
+        "audio/flac": "flac",
+        "audio/pcm": "pcm",
+        "audio/amr": "amr",
+    }.get(media, "mp3")
+
+
+def _audio_data_url(data: bytes, candidate: AttachmentCandidate, config: Mapping[str, Any]) -> str:
+    media_type = candidate.media_type or _mime_for_audio_format(_infer_audio_format(candidate, config))
+    return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _mime_for_audio_format(audio_format: str) -> str:
+    return {
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "m4a": "audio/m4a",
+        "mp3": "audio/mpeg",
+        "mp4": "audio/mp4",
+        "ogg": "audio/ogg",
+        "opus": "audio/opus",
+        "pcm": "audio/pcm",
+        "wav": "audio/wav",
+        "webm": "audio/webm",
+        "amr": "audio/amr",
+    }.get(audio_format, "audio/mpeg")
+
+
+def _tencent_headers(
+    body: bytes,
+    *,
+    secret_id: str,
+    secret_key: str,
+    service: str,
+    host: str,
+    action: str,
+    version: str,
+    region: str,
+    timestamp: int,
+) -> dict[str, str]:
+    algorithm = "TC3-HMAC-SHA256"
+    date = _datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+    content_type = "application/json; charset=utf-8"
+    canonical_headers = f"content-type:{content_type}\nhost:{host}\nx-tc-action:{action.lower()}\n"
+    signed_headers = "content-type;host;x-tc-action"
+    canonical_request = "\n".join(
+        [
+            "POST",
+            "/",
+            "",
+            canonical_headers,
+            signed_headers,
+            hashlib.sha256(body).hexdigest(),
+        ]
+    )
+    credential_scope = f"{date}/{service}/tc3_request"
+    string_to_sign = "\n".join(
+        [
+            algorithm,
+            str(timestamp),
+            credential_scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ]
+    )
+    secret_date = _hmac_sha256(("TC3" + secret_key).encode("utf-8"), date)
+    secret_service = _hmac_sha256(secret_date, service)
+    secret_signing = _hmac_sha256(secret_service, "tc3_request")
+    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    authorization = (
+        f"{algorithm} Credential={secret_id}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    return {
+        "Authorization": authorization,
+        "Content-Type": content_type,
+        "Host": host,
+        "X-TC-Action": action,
+        "X-TC-Version": version,
+        "X-TC-Timestamp": str(timestamp),
+        "X-TC-Region": region,
+    }
+
+
+def _hmac_sha256(key: bytes, value: str) -> bytes:
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).digest()
 
 
 def _source_metadata(candidate: AttachmentCandidate) -> dict[str, Any]:

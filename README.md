@@ -95,7 +95,7 @@ components into those runtime cores without modifying the source templates.
 
 The built-in package repository includes optional packages for local memory,
 conversation style hints, context reseed notes, provider-owned web search, and
-provider-specific speech output.
+provider-specific speech input/output.
 
 ## Contributor Path
 
