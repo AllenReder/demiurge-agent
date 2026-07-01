@@ -1,0 +1,163 @@
+schema_version: 2
+id: memory_honcho
+name: Honcho Memory
+summary: Add Honcho-backed persistent memory with automatic recall, turn sync, and model-callable memory tools.
+tags:
+  - memory
+  - context
+  - provider:honcho
+manual_dependencies:
+  - honcho-ai
+options:
+  - id: recall_mode
+    type: choice
+    prompt: Recall mode
+    description: Choose whether Honcho context is injected automatically, exposed through tools, or both.
+    default: hybrid
+    choices:
+      - value: hybrid
+        description: Inject relevant Honcho context and expose Honcho tools.
+      - value: context
+        description: Inject Honcho context automatically without requiring tool use.
+      - value: tools
+        description: Expose Honcho tools only; no automatic recall context is injected.
+  - id: enable_tools
+    type: bool
+    prompt: Add Honcho tools
+    description: Install authored honcho_* tools for explicit profile, search, context, reasoning, and conclusion calls.
+    default: true
+  - id: api_key
+    type: secret
+    prompt: Honcho API key
+    description: Optional direct Honcho API key; leave empty to read HONCHO_API_KEY.
+    required: false
+    default: null
+  - id: base_url
+    type: string
+    prompt: Honcho base URL
+    description: Optional self-hosted Honcho base URL; leave empty for Honcho SDK defaults or HONCHO_BASE_URL.
+    required: false
+    default: null
+  - id: workspace
+    type: string
+    prompt: Honcho workspace
+    description: Honcho workspace id used by this Agent Core.
+    default: demiurge
+  - id: peer_name
+    type: string
+    prompt: User peer name
+    description: Optional stable Honcho user peer id. Leave empty to derive it from runtime metadata or the session.
+    required: false
+    default: null
+  - id: ai_peer
+    type: string
+    prompt: AI peer name
+    description: Honcho peer id for the assistant.
+    default: demiurge-assistant
+  - id: session_strategy
+    type: choice
+    prompt: Session strategy
+    description: Choose how Demiurge sessions map to Honcho sessions.
+    default: per-directory
+    choices:
+      - value: per-directory
+        description: Use the workspace directory name for cross-session memory in the same project.
+      - value: per-repo
+        description: Use the workspace directory name as a repository-oriented session key.
+      - value: per-session
+        description: Use the Demiurge session id directly.
+      - value: global
+        description: Use one Honcho session for this workspace option.
+  - id: context_tokens
+    type: string
+    prompt: Context token budget
+    description: Approximate token budget for auto-injected Honcho context.
+    default: "1200"
+  - id: timeout_seconds
+    type: string
+    prompt: Request timeout seconds
+    description: Timeout passed to the Honcho client when the SDK supports it.
+    default: "3"
+  - id: context_cadence
+    type: string
+    prompt: Context cadence
+    description: Minimum turn gap between remote context refreshes.
+    default: "1"
+components:
+  - id: memory_honcho_lib
+    kind: lib
+    source: memory_honcho
+    target: agent/lib/memory_honcho
+    config:
+      recall_mode: ${options.recall_mode}
+      enable_tools: ${options.enable_tools}
+      api_key: ${options.api_key}
+      api_key_env: HONCHO_API_KEY
+      base_url: ${options.base_url}
+      base_url_env: HONCHO_BASE_URL
+      workspace: ${options.workspace}
+      peer_name: ${options.peer_name}
+      ai_peer: ${options.ai_peer}
+      session_strategy: ${options.session_strategy}
+      context_tokens: ${options.context_tokens}
+      timeout_seconds: ${options.timeout_seconds}
+      context_cadence: ${options.context_cadence}
+      storage:
+        relative_to: core_root
+        path: memory/honcho
+  - id: memory_honcho_bootstrap
+    kind: bootstrap
+    source: memory_honcho
+    target: agent/bootstrap/memory_honcho
+    pipeline:
+      after: session_context
+    config: {}
+  - id: memory_honcho_recall
+    kind: input
+    source: memory_honcho_recall
+    target: agent/input/memory_honcho_recall
+    pipeline:
+      group: serial
+      before: base_input
+    config: {}
+  - id: memory_honcho_sync
+    kind: output
+    source: memory_honcho_sync
+    target: agent/output/memory_honcho_sync
+    pipeline:
+      group: parallel
+    config: {}
+  - id: honcho_profile_tool
+    kind: tool
+    source: honcho_profile
+    target: agent/tools/honcho_profile
+    when:
+      enable_tools: true
+  - id: honcho_search_tool
+    kind: tool
+    source: honcho_search
+    target: agent/tools/honcho_search
+    when:
+      enable_tools: true
+  - id: honcho_context_tool
+    kind: tool
+    source: honcho_context
+    target: agent/tools/honcho_context
+    when:
+      enable_tools: true
+  - id: honcho_reasoning_tool
+    kind: tool
+    source: honcho_reasoning
+    target: agent/tools/honcho_reasoning
+    when:
+      enable_tools: true
+  - id: honcho_conclude_tool
+    kind: tool
+    source: honcho_conclude
+    target: agent/tools/honcho_conclude
+    when:
+      enable_tools: true
+  - id: memory_honcho_skill
+    kind: skill
+    source: memory_honcho
+    target: agent/skills/memory_honcho

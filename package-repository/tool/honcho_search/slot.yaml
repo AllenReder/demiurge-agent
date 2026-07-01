@@ -1,0 +1,22 @@
+entrypoint: module:execute
+description: Search Honcho memory for raw context about a peer. Returns excerpts and peer-card facts without LLM synthesis.
+failure_policy: soft
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: What to search for in Honcho memory.
+    peer:
+      type: string
+      description: Peer to query. Use user, ai, or an explicit Honcho peer id.
+  required:
+    - query
+  additionalProperties: false
+capability: network.fetch
+risk: medium
+approval_policy: auto
+display_policy: summary
+model_output_policy: content
+capabilities:
+  - network.fetch

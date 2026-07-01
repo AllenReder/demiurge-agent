@@ -92,9 +92,9 @@ The runtime copies source templates into `~/.demiurge/agents`. Edits to runtime
 cores are file-backed, diffable, and gateable. Package recipes install reusable
 components into those runtime cores without modifying the source templates.
 
-The built-in package repository includes optional packages for local memory,
-conversation style hints, context reseed notes, provider-owned web search, and
-provider-specific speech input/output.
+The built-in package repository includes optional packages for local and
+Honcho-backed memory, conversation style hints, context reseed notes,
+provider-owned web search, and provider-specific speech input/output.
 
 ## Contributor Path
 

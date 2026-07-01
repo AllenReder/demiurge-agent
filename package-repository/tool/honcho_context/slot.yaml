@@ -1,0 +1,17 @@
+entrypoint: module:execute
+description: Retrieve the current Honcho session context, including summary, representation, and peer card.
+failure_policy: soft
+input_schema:
+  type: object
+  properties:
+    peer:
+      type: string
+      description: Peer to query. Use user, ai, or an explicit Honcho peer id.
+  additionalProperties: false
+capability: network.fetch
+risk: medium
+approval_policy: auto
+display_policy: summary
+model_output_policy: content
+capabilities:
+  - network.fetch

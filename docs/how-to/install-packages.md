@@ -31,6 +31,21 @@ provider integration.
 uv run demiurge package install memory_basic --core assistant
 ```
 
+For Honcho-backed memory, preview the package and review the manual SDK
+dependency warning before installing:
+
+```bash
+uv run demiurge package install memory_honcho --core assistant --preview
+uv run demiurge package install memory_honcho --core assistant
+```
+
+`memory_honcho` does not edit `uv.lock` or install `honcho-ai` for you. Install
+that dependency according to your host environment policy, then set
+`HONCHO_API_KEY` or pass a secret `api_key` option during package installation.
+The package installs automatic recall, turn sync, and `honcho_*` tools by
+default. Uninstall removes package-owned slots, tools, skill, and lib files, but
+leaves `memory/honcho/` cache and outbox data in place.
+
 Use a repository-qualified package id when package names are ambiguous:
 
 ```bash
