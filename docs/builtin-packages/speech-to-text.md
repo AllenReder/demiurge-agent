@@ -7,8 +7,9 @@ description: Install built-in speech-to-text packages for audio attachment trans
 # Speech-to-Text Packages
 
 Built-in speech-to-text packages transcribe audio or video attachments before
-the model request. They install an input slot at `agent/input/speech_to_text`,
-so install only one STT provider package in a core at a time.
+the model request. Every STT provider package installs its provider module into
+the shared `agent/input/speech_to_text` target, so install only one STT provider
+package in a core at a time.
 
 ## Packages
 
@@ -54,9 +55,9 @@ Most STT packages accept:
 | `language` | Optional spoken-language hint. |
 | `include_metadata` | Adds compact provider/source metadata beside the transcript. |
 
-Provider-specific packages may add options such as timestamp granularity,
-speaker labels, diarization, inverse text normalization, region, or model id.
-Use preview to inspect the exact config that will be installed.
+Provider-specific packages may add options such as context hints, timestamp
+granularity, speaker labels, diarization, inverse text normalization, region,
+or model id. Use preview to inspect the exact config that will be installed.
 
 ## Credential Environment Variables
 
@@ -74,9 +75,10 @@ Use preview to inspect the exact config that will be installed.
 ## Runtime Behavior
 
 The installed input slot runs before `base_input`. When a turn includes a
-supported audio or video attachment, the slot sends it to the provider, then
-adds a transcript section to the current user prompt. The original attachment
-metadata can be included when `include_metadata=true`.
+supported audio or video attachment, the slot requires `network.fetch`, sends
+the attachment to the provider, then adds a transcript section to the current
+user prompt. The original attachment metadata can be included when
+`include_metadata=true`.
 
 If no supported attachment is present, the slot does not modify the prompt.
 

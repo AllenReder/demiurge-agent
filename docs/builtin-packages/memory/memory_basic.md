@@ -30,6 +30,9 @@ agent/bootstrap/pipeline.yaml:
     - memory_basic
 ```
 
+If the core already has the default `session_context` bootstrap slot, the
+installer inserts `memory_basic` after it.
+
 The durable memory files live outside package-owned component directories:
 
 ```text

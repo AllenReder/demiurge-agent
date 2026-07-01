@@ -11,6 +11,10 @@
     "message": "操作指南",
     "description": "The label for category 'How-to Guides' in sidebar 'docs'"
   },
+  "sidebar.docs.category.Built-in Packages": {
+    "message": "内置 Packages",
+    "description": "The label for category 'Built-in Packages' in sidebar 'docs'"
+  },
   "sidebar.docs.category.Explanation": {
     "message": "解释",
     "description": "The label for category 'Explanation' in sidebar 'docs'"

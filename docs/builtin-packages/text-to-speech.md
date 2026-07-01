@@ -6,9 +6,9 @@ description: Install built-in text-to-speech packages for assistant audio output
 
 # Text-to-Speech Packages
 
-Built-in text-to-speech packages generate audio from assistant replies. They
-install output slots and can optionally install an authored tool for on-demand
-speech generation.
+Built-in text-to-speech packages generate audio from assistant replies. Each
+provider installs one package-owned output slot and can optionally install an
+authored tool for on-demand speech generation.
 
 Install one TTS output package per core unless you intentionally want multiple
 audio providers to run after every assistant response.
@@ -56,7 +56,7 @@ uv run demiurge package install tts_minimax \
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `mode` | `direct` | `direct` speaks the assistant reply as-is. `summary` installs/uses the shared `tts_summarizer` core first. |
+| `mode` | `direct` | `direct` speaks the assistant reply as-is. `summary` installs the shared `tts_summarizer` core and synthesizes its summary instead. |
 | `enable_tool` | `false` | Installs the authored `text_to_speech` tool for on-demand speech generation. |
 | `api_key` | unset | Direct provider API key. Leave empty to use environment variables. |
 
@@ -71,9 +71,10 @@ uv run demiurge package install tts_minimax \
 
 ## Runtime Behavior
 
-The installed output slot runs after `base_output`. In `direct` mode it sends
-the assistant reply text to the provider. In `summary` mode it first runs the
-shared `tts_summarizer` child core, then synthesizes the summary.
+The installed output slot runs in the output pipeline after `base_output`. In
+`direct` mode it sends the assistant reply text to the provider. In `summary`
+mode it first runs the shared `tts_summarizer` child core, then synthesizes the
+summary.
 
 Generated audio is written under the workspace:
 

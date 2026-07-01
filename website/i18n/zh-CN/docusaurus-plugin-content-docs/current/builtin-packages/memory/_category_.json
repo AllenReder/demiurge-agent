@@ -1,0 +1,8 @@
+{
+  "label": "Memory",
+  "position": 1,
+  "link": {
+    "type": "generated-index",
+    "description": "用于本地持久记忆或 Honcho-backed recall 的内置 memory packages。"
+  }
+}

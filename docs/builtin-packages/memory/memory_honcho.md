@@ -24,12 +24,17 @@ agent/lib/memory_honcho/
 agent/bootstrap/memory_honcho/
 agent/input/memory_honcho_recall/
 agent/output/memory_honcho_sync/
+agent/skills/memory_honcho/
+```
+
+When `enable_tools=true`, which is the default, it also installs:
+
+```text
 agent/tools/honcho_profile/
 agent/tools/honcho_search/
 agent/tools/honcho_context/
 agent/tools/honcho_reasoning/
 agent/tools/honcho_conclude/
-agent/skills/memory_honcho/
 ```
 
 It also edits the slot pipelines:

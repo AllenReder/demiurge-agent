@@ -1,0 +1,8 @@
+{
+  "label": "内置 Packages",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Demiurge 内置 package repository 随附 packages 的使用指南。"
+  }
+}

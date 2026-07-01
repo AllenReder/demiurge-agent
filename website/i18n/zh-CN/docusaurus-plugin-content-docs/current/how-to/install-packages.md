@@ -50,7 +50,7 @@ uv run demiurge package install builtin/memory_basic --core assistant
 用重复的 `--option` flags 传入 options：
 
 ```bash
-uv run demiurge package install minimax_tts \
+uv run demiurge package install tts_minimax \
   --core assistant \
   --option mode=summary \
   --option enable_tool=true
