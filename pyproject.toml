@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "demiurge"
-version = "0.4.0"
+version = "0.4.1"
 description = "Build file-backed, self-evolving Agent Cores."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

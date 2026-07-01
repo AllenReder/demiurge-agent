@@ -18,7 +18,7 @@
   <a href="https://allenreder.github.io/demiurge-agent/docs/">Docs</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start">Quick Start</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/customize-agent-core">Customize a Core</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.4.0">Latest Release</a>
+  <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.4.1">Latest Release</a>
 </p>
 
 Demiurge is an alpha agent framework for building agents whose behavior lives in

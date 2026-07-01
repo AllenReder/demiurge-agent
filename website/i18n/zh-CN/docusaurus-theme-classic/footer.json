@@ -41,7 +41,7 @@
   },
   "link.item.label.Releases": {
     "message": "发布说明",
-    "description": "The label of footer link with label=Releases linking to /docs/releases/0.4.0"
+    "description": "The label of footer link with label=Releases linking to /docs/releases/0.4.1"
   },
   "copyright": {
     "message": "Copyright © 2026 Demiurge contributors.",

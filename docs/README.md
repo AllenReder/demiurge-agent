@@ -70,4 +70,4 @@ Contributors should read:
 - Candidate Agent Core evolution cannot add dependencies automatically.
 - Package recipes install files into runtime cores; they do not modify the host
   lock file.
-- Release notes are preserved under [releases/](releases/0.4.0.md).
+- Release notes are preserved under [releases/](releases/0.4.1.md).

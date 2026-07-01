@@ -18,7 +18,7 @@
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/">文档</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/quick-start">快速开始</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/customize-agent-core">修改 Core</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.4.0">最新发布</a>
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.4.1">最新发布</a>
 </p>
 
 Demiurge 是一个 alpha 阶段的 agent framework。agent 行为保存在文件中，

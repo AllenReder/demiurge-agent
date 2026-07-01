@@ -69,4 +69,4 @@ Package 和 repository 作者建议阅读：
 - Agent Slot code 运行在 host-shared Python environment 中。
 - Candidate Agent Core evolution 不能自动添加 dependencies。
 - Package recipes 会把文件安装进 runtime cores；它们不会修改 host lock file。
-- Release notes 保留在 [releases/](releases/0.4.0.md) 下。
+- Release notes 保留在 [releases/](releases/0.4.1.md) 下。
