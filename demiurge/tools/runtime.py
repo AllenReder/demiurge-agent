@@ -8,13 +8,13 @@ import json
 import os
 import shutil
 import subprocess
-import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from demiurge.jobs import JobConflictError, JobContext, JobOutcome, JobRuntime
 from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
@@ -25,7 +25,6 @@ from demiurge.sdk import ToolContext, ToolResult, TurnContext
 from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.storage import SessionStore, VersionStore
-from demiurge.tools.records import BackgroundProcessRecord
 from demiurge.tools.registry import (
     APPROVAL_ORDER,
     BUILTIN_TOOL_DEFINITIONS,
@@ -57,6 +56,7 @@ class ToolRuntime:
         global_approval: ApprovalInfo | None = None,
         mcp_runtime: McpRuntime | None = None,
         runtime_timezone: RuntimeTimezone | None = None,
+        job_runtime: JobRuntime | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
@@ -65,7 +65,7 @@ class ToolRuntime:
         self.global_approval = global_approval or ApprovalInfo()
         self.mcp_runtime = mcp_runtime
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self._processes: dict[str, BackgroundProcessRecord] = {}
+        self.job_runtime = job_runtime or JobRuntime()
 
     async def prepare_for_turn(
         self,
@@ -244,9 +244,19 @@ class ToolRuntime:
             capability.require("tool.call:evolve_core")
             if self.evolution_runtime is None:
                 return ToolResult(content="evolution runtime is not configured", is_error=True)
+            background = bool(call.arguments.get("background", False))
+            notify_on_complete = bool(call.arguments.get("notify_on_complete", True))
+            goal = str(call.arguments.get("goal") or "")
+            if background:
+                return self._start_evolve_job(
+                    core=core,
+                    turn=turn,
+                    goal=goal,
+                    notify_on_complete=notify_on_complete,
+                )
             result = await self.evolution_runtime.evolve(
                 target_core_id=core.core_id,
-                goal=str(call.arguments.get("goal") or ""),
+                goal=goal,
                 source_turn_id=turn.turn_id,
             )
             return ToolResult(content=result.summary, data=asdict(result), is_error=not result.promoted)
@@ -260,8 +270,10 @@ class ToolRuntime:
             return await self._patch(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "terminal":
             return await self._terminal(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
+        if call.name == "job":
+            return await self._job(call, capability=capability)
         if call.name == "process":
-            return await self._process(call)
+            return await self._process(call, capability=capability)
         if call.name == "skills_list":
             return self._skills_list(call, core=core)
         if call.name == "skill_view":
@@ -572,7 +584,14 @@ class ToolRuntime:
         env.update({str(key): str(value) for key, value in env_overlay.items()})
         env = self.runtime_timezone.apply_subprocess_env(env)
         if bool(call.arguments.get("background", False)):
-            return await self._start_background_process(command=command, cwd=cwd, env=env)
+            return self._start_background_process(
+                command=command,
+                cwd=cwd,
+                env=env,
+                owner_session_id=turn.session_id,
+                owner_turn_id=turn.turn_id,
+                notify_on_complete=bool(call.arguments.get("notify_on_complete", True)),
+            )
         try:
             completed = await asyncio.to_thread(
                 subprocess.run,
@@ -607,39 +626,83 @@ class ToolRuntime:
                 data={"executionStarted": True, "exit_code": 124, "cwd": cwd.relative, "timed_out": True},
             )
 
-    async def _start_background_process(self, *, command: str, cwd: Any, env: Mapping[str, str]) -> ToolResult:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            cwd=cwd.path,
-            env=dict(env),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        process_id = f"proc_{int(time.time() * 1000)}_{process.pid}"
-        output: list[str] = []
-        reader_task = asyncio.create_task(self._capture_process_output(process, output))
-        self._processes[process_id] = BackgroundProcessRecord(
-            process_id=process_id,
-            command=command,
-            cwd=cwd.relative,
-            process=process,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            output=output,
-            reader_task=reader_task,
-        )
+    def _start_background_process(
+        self,
+        *,
+        command: str,
+        cwd: Any,
+        env: Mapping[str, str],
+        owner_session_id: str,
+        owner_turn_id: str,
+        notify_on_complete: bool,
+    ) -> ToolResult:
+        async def run_terminal_job(ctx: JobContext) -> JobOutcome:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=cwd.path,
+                env=dict(env),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            ctx.update_metadata(
+                {
+                    "pid": process.pid,
+                    "process_id": ctx.job_id,
+                    "command": command,
+                    "cwd": cwd.relative,
+                    "returncode": None,
+                }
+            )
+
+            async def cancel_process() -> None:
+                if process.returncode is not None:
+                    return
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+
+            ctx.set_cancel_callback(cancel_process)
+            await self._capture_process_output(process, ctx)
+            returncode = process.returncode
+            ctx.update_metadata({"returncode": returncode})
+            summary = f"terminal command exited {returncode}"
+            ctx.set_summary(summary)
+            if returncode != 0 and self.job_runtime.get(ctx.job_id).status != "cancelled":
+                raise RuntimeError(summary)
+            return JobOutcome(summary=summary, metadata={"returncode": returncode})
+
+        try:
+            record = self.job_runtime.start_task(
+                backend="terminal",
+                owner_session_id=owner_session_id,
+                owner_turn_id=owner_turn_id,
+                source_tool="terminal",
+                task_factory=run_terminal_job,
+                write_scope=f"terminal:{cwd.path}",
+                notify_on_complete=notify_on_complete,
+                metadata={"command": command, "cwd": cwd.relative, "process_id": ""},
+            )
+        except JobConflictError as exc:
+            return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
         payload = {
             "executionStarted": True,
-            "process_id": process_id,
-            "pid": process.pid,
+            "job_id": record.job_id,
+            "process_id": record.job_id,
+            "pid": None,
             "cwd": cwd.relative,
             "running": True,
+            "status": record.status,
+            "notify_on_complete": record.notify_on_complete,
         }
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     async def _capture_process_output(
         self,
         process: asyncio.subprocess.Process,
-        output: list[str],
+        ctx: JobContext,
     ) -> None:
         async def read_stream(stream: asyncio.StreamReader | None, label: str) -> None:
             if stream is None:
@@ -648,68 +711,134 @@ class ToolRuntime:
                 chunk = await stream.readline()
                 if not chunk:
                     break
-                output.append(f"{label}: {chunk.decode('utf-8', errors='replace').rstrip()}")
+                ctx.append_log(f"{label}: {chunk.decode('utf-8', errors='replace').rstrip()}")
 
         await asyncio.gather(read_stream(process.stdout, "stdout"), read_stream(process.stderr, "stderr"))
         await process.wait()
 
-    async def _process(self, call: ToolCall) -> ToolResult:
-        action = str(call.arguments.get("action") or "list").strip().lower()
-        if action == "list":
-            processes = [self._process_payload(record, include_output=False) for record in self._processes.values()]
-            return ToolResult(
-                content=json.dumps({"processes": processes}, ensure_ascii=False),
-                data={"processes": processes},
+    def _start_evolve_job(
+        self,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        goal: str,
+        notify_on_complete: bool,
+    ) -> ToolResult:
+        assert self.evolution_runtime is not None
+
+        async def run_evolve_job(ctx: JobContext) -> JobOutcome:
+            result = await self.evolution_runtime.evolve(
+                target_core_id=core.core_id,
+                goal=goal,
+                source_turn_id=turn.turn_id,
+                auto_promote=False,
             )
-        process_id = str(call.arguments.get("process_id") or "").strip()
-        if not process_id:
-            return ToolResult(content="process_id is required", is_error=True)
-        record = self._processes.get(process_id)
-        if record is None:
-            return ToolResult(content=f"process not found: {process_id}", is_error=True)
+            payload = asdict(result)
+            ctx.update_metadata(payload)
+            ctx.set_result_ref(result.report_path)
+            if result.evolver.get("needs_user"):
+                summary = f"evolve job needs user input for {core.core_id}"
+                ctx.mark_blocked(summary, metadata=payload)
+                return JobOutcome(summary=summary, result_ref=result.report_path, metadata=payload)
+            return JobOutcome(summary=result.summary, result_ref=result.report_path, metadata=payload)
+
+        try:
+            record = self.job_runtime.start_task(
+                backend="evolve",
+                owner_session_id=turn.session_id,
+                owner_turn_id=turn.turn_id,
+                source_tool="evolve_core",
+                task_factory=run_evolve_job,
+                write_scope=f"evolve:{core.core_id}",
+                notify_on_complete=notify_on_complete,
+                metadata={"target_core_id": core.core_id, "goal": goal},
+            )
+        except JobConflictError as exc:
+            return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
+        payload = {
+            "executionStarted": True,
+            "job_id": record.job_id,
+            "backend": record.backend,
+            "status": record.status,
+            "target_core_id": core.core_id,
+            "notify_on_complete": record.notify_on_complete,
+        }
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+
+    async def _job(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
+        capability.require("job.control")
+        return await self._job_action(call, compatibility_process=False)
+
+    async def _process(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
+        capability.require("terminal.exec")
+        return await self._job_action(call, compatibility_process=True)
+
+    async def _job_action(self, call: ToolCall, *, compatibility_process: bool) -> ToolResult:
+        action = str(call.arguments.get("action") or "list").strip().lower()
+        if compatibility_process and action == "kill":
+            action = "cancel"
+        if action == "list":
+            backend = "terminal" if compatibility_process else call.arguments.get("backend")
+            jobs = [
+                self._job_payload(record, include_log=False, compatibility_process=compatibility_process)
+                for record in self.job_runtime.list_jobs(
+                    owner_session_id=call.arguments.get("owner_session_id"),
+                    backend=str(backend) if backend else None,
+                )
+            ]
+            key = "processes" if compatibility_process else "jobs"
+            return ToolResult(
+                content=json.dumps({key: jobs}, ensure_ascii=False),
+                data={key: jobs},
+            )
+        job_id = str(call.arguments.get("job_id") or call.arguments.get("process_id") or "").strip()
+        if not job_id:
+            return ToolResult(content=("process_id" if compatibility_process else "job_id") + " is required", is_error=True)
+        try:
+            record = self.job_runtime.get(job_id)
+        except KeyError:
+            label = "process" if compatibility_process else "job"
+            return ToolResult(content=f"{label} not found: {job_id}", is_error=True)
+        if compatibility_process and record.backend != "terminal":
+            return ToolResult(content=f"process not found: {job_id}", is_error=True)
         if action == "poll":
-            payload = self._process_payload(record, include_output=True)
+            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
         if action == "log":
-            content = "\n".join(record.output) or "(no output)"
-            payload = self._process_payload(record, include_output=True)
+            tail = call.arguments.get("tail")
+            log = self.job_runtime.log(job_id, tail=int(tail) if tail is not None else None)
+            content = "\n".join(log) or "(no output)"
+            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=content, data=payload, model_output=content)
         if action == "wait":
             timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
             try:
-                await asyncio.wait_for(record.process.wait(), timeout=timeout)
-                if not record.reader_task.done():
-                    await asyncio.wait_for(record.reader_task, timeout=1)
+                record = await self.job_runtime.wait(job_id, timeout_seconds=timeout)
             except asyncio.TimeoutError:
-                payload = self._process_payload(record, include_output=True)
+                payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
                 payload["timed_out"] = True
                 return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=True)
-            payload = self._process_payload(record, include_output=True)
+            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=payload["running"])
-        if action == "kill":
-            if record.process.returncode is None:
-                record.process.terminate()
-                try:
-                    await asyncio.wait_for(record.process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    record.process.kill()
-                    await record.process.wait()
-            payload = self._process_payload(record, include_output=True)
+        if action == "cancel":
+            record = await self.job_runtime.cancel(job_id)
+            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
-        return ToolResult(content=f"unsupported process action: {action}", is_error=True)
+        label = "process" if compatibility_process else "job"
+        return ToolResult(content=f"unsupported {label} action: {action}", is_error=True)
 
-    def _process_payload(self, record: BackgroundProcessRecord, *, include_output: bool) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "process_id": record.process_id,
-            "pid": record.process.pid,
-            "command": record.command,
-            "cwd": record.cwd,
-            "started_at": record.started_at,
-            "running": record.process.returncode is None,
-            "returncode": record.process.returncode,
-        }
-        if include_output:
-            payload["output"] = list(record.output)
+    def _job_payload(self, record: Any, *, include_log: bool, compatibility_process: bool) -> dict[str, Any]:
+        log = self.job_runtime.log(record.job_id) if include_log else None
+        payload = record.to_payload(include_log=include_log, log=log)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if compatibility_process:
+            payload["process_id"] = record.job_id
+            payload["pid"] = metadata.get("pid")
+            payload["command"] = metadata.get("command", "")
+            payload["cwd"] = metadata.get("cwd", "")
+            payload["returncode"] = metadata.get("returncode")
+            if include_log:
+                payload["output"] = list(log or [])
         return payload
 
     def _skills_list(self, call: ToolCall, *, core: LoadedCore) -> ToolResult:

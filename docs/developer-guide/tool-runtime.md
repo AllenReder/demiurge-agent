@@ -28,6 +28,26 @@ The runtime:
 5. executes the built-in, authored, or MCP tool
 6. converts the result for model history and user display
 
+## Background Jobs
+
+`ToolRuntime` does not own per-tool background state. Background-capable tools
+submit work to the shared `JobRuntime`:
+
+- `terminal(background=true)` creates a `terminal` backend job and captures
+  stdout/stderr into the job log.
+- `evolve_core(background=true)` creates an `evolve` backend job and runs with
+  `auto_promote=false`; it produces a candidate and report but does not switch
+  the active core.
+- `ctx.agents.spawn(...)` is routed by the runner into an `agent` backend job.
+
+`job` is the general control tool for `list`, `poll`, `log`, `wait`, and
+`cancel`. `process` remains only as a compatibility view over terminal jobs.
+Jobs are in-memory only and are not recovered after process restart.
+
+Each job records `backend`, owner session/turn, `source_tool`, status, summary,
+bounded log tail, result reference, and an optional `write_scope`. A new active
+background job with the same non-empty `write_scope` is rejected.
+
 ## Authored Tools
 
 Authored tools are adapters. They use the same host-owned dispatch path as

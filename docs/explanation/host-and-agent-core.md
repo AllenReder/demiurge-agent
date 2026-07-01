@@ -9,7 +9,7 @@ Demiurge separates the runtime harness from the authored agent surface.
 
 The **host** is stable infrastructure. It owns sessions, turns, provider calls,
 tool execution, approvals, state, delivery, schedules, package installation,
-promotion, and rollback.
+background jobs, promotion, and rollback.
 
 An **Agent Core** is the authored filesystem surface. It owns identity,
 instructions, slot modules, skills, tools, schedules, MCP declarations, tests,
@@ -39,6 +39,7 @@ The host owns:
 - provider request construction
 - provider calls
 - tool registry and dispatch
+- in-memory background job runtime
 - approval and capability checks
 - workspace enforcement
 - external channel bridges
@@ -66,6 +67,10 @@ The core owns:
 Agent Core files may describe desired behavior, but they do not own provider
 calls, direct state mutation, dependency installation, production promotion, or
 rollback. Those remain host functions.
+
+Background `evolve_core` work follows the same boundary: it may create a
+candidate and report, but it does not switch the active core unless a later
+foreground turn asks the host to do so.
 
 For exact edit rules, read
 [/docs/reference/contracts/authored-surface](/docs/reference/contracts/authored-surface).

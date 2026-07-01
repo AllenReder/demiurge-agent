@@ -21,6 +21,7 @@ SessionTurnStepRunner
         +--> ContextAssembler
         +--> Provider
         +--> ToolRuntime
+        +--> JobRuntime
         +--> Delivery/session stores
         +--> SchedulerService
 ```
@@ -35,6 +36,7 @@ SessionTurnStepRunner
 | Runner | Own session, turn, step, bootstrap, input, model/tool loop, output, and delivery flow. |
 | Context assembler | Build provider messages from soul, skills, bootstrap, input, history, and current turn. |
 | Tool runtime | Build the visible registry and execute built-in, authored, and MCP tools. |
+| Job runtime | Track in-memory background jobs, logs, write scopes, and completion events. |
 | Delivery runtime | Convert authored delivery requests into session records, events, artifacts, and channel output. |
 | Scheduler | Claim due schedules and run fresh sessions. |
 | Package manager | Preview, install, uninstall, and record package repository components. |
@@ -45,6 +47,7 @@ SessionTurnStepRunner
 - `demiurge/app/__init__.py`
 - `demiurge/runtime/runner.py`
 - `demiurge/tools/runtime.py`
+- `demiurge/jobs.py`
 - `demiurge/channels/gateway.py`
 - `demiurge/packages.py`
 - `demiurge/scheduler/__init__.py`

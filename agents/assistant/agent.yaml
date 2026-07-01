@@ -126,6 +126,8 @@ capabilities:
       scope: workspace
     terminal.exec:
       scope: workspace
+    job.control:
+      scope: session
     tool.call:evolve_core:
       max_calls_per_turn: 1
     tool.call:rollback_core:

@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from demiurge.jobs import JobConflictError, JobContext, JobOutcome, JobRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition, load_slot_callable
@@ -1152,6 +1153,7 @@ class SessionTurnStepRunner:
         initial_core_path: Path | None = None,
         show_system_prompt: bool = False,
         runtime_timezone: RuntimeTimezone | None = None,
+        job_runtime: JobRuntime | None = None,
     ):
         self.home = home
         self.version_store = version_store
@@ -1167,6 +1169,7 @@ class SessionTurnStepRunner:
         self.initial_core_path = initial_core_path
         self.show_system_prompt = show_system_prompt
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
+        self.job_runtime = job_runtime or getattr(tool_runtime, "job_runtime", None) or JobRuntime()
         self.session_store = SessionStore(home)
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
@@ -2133,8 +2136,11 @@ class SessionTurnStepRunner:
             provider_name=self.provider_name,
             workspace=self.workspace,
             show_system_prompt=self.show_system_prompt,
+            runtime_timezone=self.runtime_timezone,
+            job_runtime=self.job_runtime,
         )
         result = await child_runner.run_turn(raw_input, injected_system_context=context)
+        needs_user = result.needs_user or self._turn_result_needs_user(result)
         return AgentRunResult(
             content="\n\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip(),
             core_id=result.core_id,
@@ -2158,7 +2164,7 @@ class SessionTurnStepRunner:
                 )
                 for record in result.tool_results
             ),
-            metadata={"parent_turn_id": parent_turn.turn_id, "parent_slot": parent_slot_path},
+            metadata={"parent_turn_id": parent_turn.turn_id, "parent_slot": parent_slot_path, "needs_user": needs_user},
         )
 
     def _spawn_child_agent(
@@ -2170,20 +2176,19 @@ class SessionTurnStepRunner:
         parent_slot_path: str,
         context: list[str],
     ) -> AgentSpawnHandle:
-        job_id = utc_id("agent_job_")
         session_id = utc_id("session_child_")
 
-        async def run_job() -> None:
+        async def run_job(ctx: JobContext) -> JobOutcome:
             self.event_log.emit(
                 "agent_spawn.started",
                 turn_id=parent_turn.turn_id,
                 slot=parent_slot_path,
-                job_id=job_id,
+                job_id=ctx.job_id,
                 child_core_id=core_id,
                 child_session_id=session_id,
             )
             try:
-                await self._run_child_agent(
+                result = await self._run_child_agent(
                     core_id=core_id,
                     raw_input=raw_input,
                     parent_turn=parent_turn,
@@ -2191,29 +2196,87 @@ class SessionTurnStepRunner:
                     context=context,
                     session_id=session_id,
                 )
+                summary = result.content or f"child agent {core_id} completed"
+                ctx.update_metadata(
+                    {
+                        "child_core_id": core_id,
+                        "child_session_id": session_id,
+                        "child_turn_id": result.turn_id,
+                        "needs_user": bool(result.metadata.get("needs_user")),
+                    }
+                )
+                needs_user = bool(result.metadata.get("needs_user"))
+                event_name = "agent_spawn.blocked" if needs_user else "agent_spawn.completed"
+                if needs_user:
+                    summary = summary or f"child agent {core_id} needs user input"
+                    ctx.mark_blocked(summary, metadata={"needs_user": True})
                 self.event_log.emit(
-                    "agent_spawn.completed",
+                    event_name,
                     turn_id=parent_turn.turn_id,
                     slot=parent_slot_path,
-                    job_id=job_id,
+                    job_id=ctx.job_id,
                     child_core_id=core_id,
                     child_session_id=session_id,
+                    child_turn_id=result.turn_id,
+                )
+                return JobOutcome(
+                    summary=summary,
+                    result_ref=f"session:{session_id}:{result.turn_id}",
+                    metadata={
+                        "child_core_id": core_id,
+                        "child_session_id": session_id,
+                        "child_turn_id": result.turn_id,
+                        "needs_user": needs_user,
+                    },
                 )
             except Exception as exc:
                 self.event_log.emit(
                     "agent_spawn.failed",
                     turn_id=parent_turn.turn_id,
                     slot=parent_slot_path,
-                    job_id=job_id,
+                    job_id=ctx.job_id,
                     child_core_id=core_id,
                     child_session_id=session_id,
                     error=str(exc),
                 )
+                raise
 
-        task = asyncio.create_task(run_job())
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        return AgentSpawnHandle(job_id=job_id, core_id=core_id, session_id=session_id)
+        try:
+            record = self.job_runtime.start_task(
+                backend="agent",
+                owner_session_id=parent_turn.session_id,
+                owner_turn_id=parent_turn.turn_id,
+                source_tool="agents.spawn",
+                task_factory=run_job,
+                write_scope=f"session:{parent_turn.session_id}",
+                notify_on_complete=True,
+                metadata={"child_core_id": core_id, "child_session_id": session_id, "parent_slot": parent_slot_path},
+            )
+        except JobConflictError as exc:
+            self.event_log.emit(
+                "agent_spawn.rejected",
+                turn_id=parent_turn.turn_id,
+                slot=parent_slot_path,
+                child_core_id=core_id,
+                child_session_id=session_id,
+                error=str(exc),
+            )
+            return AgentSpawnHandle(job_id="", core_id=core_id, session_id=session_id, status="failed")
+        return AgentSpawnHandle(job_id=record.job_id, core_id=core_id, session_id=session_id)
+
+    def _turn_result_needs_user(self, result: TurnResult) -> bool:
+        for record in result.tool_results:
+            data = record.result.data
+            if not isinstance(data, Mapping):
+                continue
+            if data.get("needs_user"):
+                return True
+            approval = data.get("approval")
+            if isinstance(approval, Mapping):
+                reason = str(approval.get("reason") or "").lower()
+                if approval.get("value") == "deny" and "no active interaction bridge" in reason:
+                    return True
+        return False
 
     async def _run_input_slots(
         self,
@@ -3062,10 +3125,11 @@ class SessionTurnStepRunner:
     async def drain_background_tasks(self) -> None:
         while self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
+        await self.job_runtime.drain()
 
     @property
     def background_task_count(self) -> int:
-        return sum(1 for task in self._background_tasks if not task.done())
+        return sum(1 for task in self._background_tasks if not task.done()) + self.job_runtime.active_count
 
     def _interaction_item_outbound_metadata(
         self,

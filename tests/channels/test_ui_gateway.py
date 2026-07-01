@@ -55,6 +55,16 @@ class BlockingProvider:
         return LLMResponse(content=f"[next] {user_text}")
 
 
+class RecordingEchoProvider:
+    def __init__(self):
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        user_text = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
+        return LLMResponse(content=f"[echo] {user_text}")
+
+
 async def _wait_for(predicate, *, timeout: float = 2.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -62,6 +72,22 @@ async def _wait_for(predicate, *, timeout: float = 2.0):
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition timed out")
+
+
+async def _complete_background_job(app, *, summary: str = "background complete"):
+    async def task(ctx):
+        ctx.append_log("background tail")
+        return summary
+
+    record = app.job_runtime.start_task(
+        backend="test",
+        owner_session_id=app.runner.session_id,
+        owner_turn_id="turn_origin",
+        source_tool="test",
+        task_factory=task,
+    )
+    await app.job_runtime.wait(record.job_id, timeout_seconds=1)
+    return record
 
 
 def test_parse_approval_response():
@@ -368,6 +394,51 @@ async def test_tui_bridge_renders_progress_and_background_delivery(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tui_bridge_runs_background_completion_turn_when_idle(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = RecordingEchoProvider()
+    app.runner.provider = provider
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.initialize()
+    record = await _complete_background_job(app)
+
+    await _wait_for(lambda: len(provider.requests) == 1 and not bridge.running)
+
+    user_text = next(message.content for message in provider.requests[0].messages if message.role == "user")
+    assert "[SYSTEM: Background job event]" in user_text
+    assert record.job_id in user_text
+    assert "background complete" in user_text
+    assert sink.payloads("interaction.message") == []
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_prioritizes_user_input_over_pending_completion(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = BlockingProvider()
+    app.runner.provider = provider
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.initialize()
+    await bridge.submit("first")
+    await provider.started.wait()
+    record = await _complete_background_job(app)
+    await _wait_for(lambda: bridge._queued_inputs.qsize() == 1)
+
+    accepted = await bridge.submit("second")
+
+    assert accepted == {"accepted": True, "queued": True}
+    await provider.cancelled.wait()
+    await _wait_for(lambda: "[next]" in sink.texts() and not bridge.running)
+    user_text = next(message.content for message in reversed(provider.requests[-1].messages) if message.role == "user")
+    assert user_text.startswith("second")
+    assert "[SYSTEM: Pending background job events merged into this user turn]" in user_text
+    assert record.job_id in user_text
+
+
+@pytest.mark.asyncio
 async def test_tui_bridge_queue_mode_runs_next_input_after_current_turn(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -401,7 +472,7 @@ async def test_tui_bridge_interrupt_mode_cancels_current_turn_and_runs_next(tmp_
     await provider.started.wait()
     await bridge.submit("second")
     await provider.cancelled.wait()
-    await _wait_for(lambda: len(provider.requests) == 2 and not bridge.running)
+    await _wait_for(lambda: "[next] second" in sink.texts() and not bridge.running)
 
     output = sink.texts()
     assert "interrupting current turn: new input" in output

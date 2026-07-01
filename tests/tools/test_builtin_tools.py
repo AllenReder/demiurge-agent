@@ -4,6 +4,7 @@ import yaml
 import pytest
 
 from demiurge.app import create_app
+from demiurge.evolution import EvolverRunResult
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import BUILTIN_TOOLSETS
@@ -100,7 +101,7 @@ def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
 
     assert set(core.builtin_tool_names) == expected
     defaults = core.raw_manifest["capabilities"]["defaults"]
-    assert {"fs.read", "fs.write", "terminal.exec", "network.fetch", "schedule.manage"}.issubset(defaults)
+    assert {"fs.read", "fs.write", "terminal.exec", "job.control", "network.fetch", "schedule.manage"}.issubset(defaults)
 
 
 @pytest.mark.asyncio
@@ -516,6 +517,58 @@ async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
     assert waited.data["running"] is False
     assert "ready" in log.content
     assert process_id in listed.content
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_job_can_be_managed_with_job_tool_and_notifies(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    started = await _execute(app, core, "terminal", {"command": "printf job-ready", "background": True})
+    job_id = started.data["job_id"]
+    waited = await _execute(app, core, "job", {"action": "wait", "job_id": job_id, "timeout_seconds": 5})
+    log = await _execute(app, core, "job", {"action": "log", "job_id": job_id})
+    listed = await _execute(app, core, "job", {"action": "list", "backend": "terminal"})
+
+    assert started.data["process_id"] == job_id
+    assert waited.is_error is False
+    assert waited.data["status"] == "succeeded"
+    assert waited.data["running"] is False
+    assert "job-ready" in log.content
+    assert job_id in listed.content
+    events = app.job_runtime.pending_events_for_session("session_test")
+    assert [event.job_id for event in events] == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    before = app.version_store.active_pointer("assistant").active_version
+
+    class EditingEvolver:
+        async def run(self, *, candidate_path, **kwargs):
+            soul = candidate_path / "agent" / "SOUL.md"
+            soul.write_text(soul.read_text(encoding="utf-8") + "\n\nBackground evolve edit.\n", encoding="utf-8")
+            return EvolverRunResult(summary="edited candidate", session_id="child_session", turn_id="child_turn")
+
+    app.evolution_runtime.evolver_runner = EditingEvolver()
+
+    started = await _execute(app, core, "evolve_core", {"goal": "edit soul in background", "background": True})
+    job_id = started.data["job_id"]
+    waited = await _execute(app, core, "job", {"action": "wait", "job_id": job_id, "timeout_seconds": 5})
+
+    assert waited.is_error is False
+    assert waited.data["status"] == "succeeded"
+    assert waited.data["metadata"]["promoted"] is False
+    assert waited.data["metadata"]["new_version"] is None
+    assert "ready for review" in waited.data["summary"]
+    assert app.version_store.active_pointer("assistant").active_version == before
+    candidate_soul = tmp_path / waited.data["metadata"]["candidate_path"] / "agent" / "SOUL.md"
+    assert "Background evolve edit." in candidate_soul.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

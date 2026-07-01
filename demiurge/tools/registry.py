@@ -25,8 +25,18 @@ def _schema(
 BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "evolve_core": ToolDefinition(
         name="evolve_core",
-        description="Create, gate, and promote a candidate version of the active agent core.",
-        input_schema=_schema({"goal": {"type": "string"}}, required=["goal"]),
+        description=(
+            "Create and gate a candidate version of the active agent core. Foreground calls promote loadable "
+            "candidates; background=true leaves the candidate for review and reports through a background job."
+        ),
+        input_schema=_schema(
+            {
+                "goal": {"type": "string"},
+                "background": {"type": "boolean", "default": False},
+                "notify_on_complete": {"type": "boolean", "default": True},
+            },
+            required=["goal"],
+        ),
     ),
     "rollback_core": ToolDefinition(
         name="rollback_core",
@@ -106,7 +116,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="terminal",
         description=(
             "Run a shell command inside the configured workspace. Set background=true for long-running commands "
-            "and use process with the returned process_id to inspect or stop them."
+            "and use job with the returned job_id to inspect or stop them."
         ),
         input_schema=_schema(
             {
@@ -114,14 +124,29 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "default": 30},
                 "background": {"type": "boolean", "default": False},
+                "notify_on_complete": {"type": "boolean", "default": True},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
             },
             required=["command"],
         ),
     ),
+    "job": ToolDefinition(
+        name="job",
+        description="List, poll, read logs, wait for, or cancel background jobs.",
+        input_schema=_schema(
+            {
+                "action": {"type": "string", "enum": ["list", "poll", "log", "wait", "cancel"], "default": "list"},
+                "job_id": {"type": "string"},
+                "backend": {"type": "string"},
+                "owner_session_id": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 30},
+                "tail": {"type": "integer"},
+            }
+        ),
+    ),
     "process": ToolDefinition(
         name="process",
-        description="List, poll, read logs, wait for, or kill background processes started by terminal(background=true).",
+        description="Compatibility alias for terminal background jobs. Prefer job for new code.",
         input_schema=_schema(
             {
                 "action": {"type": "string", "enum": ["list", "poll", "log", "wait", "kill"], "default": "list"},
@@ -252,6 +277,7 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "write_file": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},
     "patch": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},
     "terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
+    "job": {"risk": "medium", "capability": "job.control", "approval_policy": "auto"},
     "process": {"risk": "medium", "capability": "terminal.exec", "approval_policy": "auto"},
     "skills_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_view": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},

@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from demiurge.jobs import JobCompletionEvent, JobRuntime
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -38,6 +39,10 @@ class GatewayBridge(Protocol):
 class TextConversationState:
     runtime: InteractionRuntime
     busy_mode: str
+    conversation_key: str = ""
+    source: str = ""
+    reply_to: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     active_task: asyncio.Task[None] | None = None
     queue: asyncio.Queue[InteractionInbound] = field(default_factory=asyncio.Queue)
 
@@ -60,6 +65,8 @@ class TextChannelBridgeBase:
         self.tool_display = _normalize_tool_display(tool_display)
         self._pending_choices: dict[str, list[str]] = {}
         self._conversations: dict[str, TextConversationState] = {}
+        self._job_runtime: JobRuntime | None = None
+        self._job_unsubscribe: Callable[[], None] | None = None
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             f"demiurge_{channel_name}_active_inbound",
             default=None,
@@ -70,6 +77,7 @@ class TextChannelBridgeBase:
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"{self.channel_name}:{inbound.source}")
+        self._remember_route(state, inbound)
         command = parse_slash_command(inbound.text)
         if command:
             if command.name == "ask" and command.args:
@@ -226,12 +234,16 @@ class TextChannelBridgeBase:
             state = TextConversationState(
                 runtime=self._runtime_factory(conversation_key),
                 busy_mode=self.default_busy_mode,
+                conversation_key=conversation_key,
             )
             self._conversations[conversation_key] = state
+            self._subscribe_job_runtime(state.runtime)
         return state
 
     async def _handle_busy_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         await state.queue.put(inbound)
+        if _is_background_completion(inbound):
+            return
         if state.busy_mode == "queue":
             await self._send_text(
                 inbound.source,
@@ -278,7 +290,7 @@ class TextChannelBridgeBase:
             return
         if state.queue.empty():
             return
-        next_inbound = await state.queue.get()
+        next_inbound = self._next_queued_input(state)
         self._start_turn(state, next_inbound)
 
     async def _handle_command(self, command: SlashCommand, inbound: InteractionInbound, state: TextConversationState) -> None:
@@ -337,7 +349,7 @@ class TextChannelBridgeBase:
 
     async def _command_new(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         await self._cancel_active(state)
-        self._clear_queue(state)
+        self._clear_queue(state, preserve_completions=False)
         runner = state.runtime.runner
         if not hasattr(runner, "start_new_session"):
             await self._send_text(inbound.source, "Session reset is not available.", reply_to=inbound.reply_to, metadata=inbound.metadata)
@@ -352,7 +364,7 @@ class TextChannelBridgeBase:
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         running = bool(state.active_task and not state.active_task.done())
-        queued = self._clear_queue(state)
+        queued = self._clear_queue(state, preserve_completions=True)
         if running:
             await self._cancel_active(state)
             await self._send_text(
@@ -363,6 +375,7 @@ class TextChannelBridgeBase:
             )
             return
         await self._send_text(inbound.source, f"No running turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to, metadata=inbound.metadata)
+        await self._drain_next_queued_input(state)
 
     async def _command_queue(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         text = args.strip()
@@ -477,13 +490,89 @@ class TextChannelBridgeBase:
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
-    def _clear_queue(self, state: TextConversationState) -> int:
+    def _clear_queue(self, state: TextConversationState, *, preserve_completions: bool) -> int:
         count = 0
+        preserved: list[InteractionInbound] = []
         while not state.queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
-                state.queue.get_nowait()
-                count += 1
+                inbound = state.queue.get_nowait()
+                if preserve_completions and _is_background_completion(inbound):
+                    preserved.append(inbound)
+                else:
+                    count += 1
+        for inbound in preserved:
+            state.queue.put_nowait(inbound)
         return count
+
+    def _next_queued_input(self, state: TextConversationState) -> InteractionInbound:
+        pending: list[InteractionInbound] = []
+        while not state.queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                pending.append(state.queue.get_nowait())
+        user_index = next((index for index, item in enumerate(pending) if not _is_background_completion(item)), None)
+        selected_index = user_index if user_index is not None else 0
+        selected = pending.pop(selected_index)
+        if not _is_background_completion(selected):
+            completions = [item for item in pending if _is_background_completion(item)]
+            pending = [item for item in pending if not _is_background_completion(item)]
+            if completions:
+                selected = _merge_completion_inbounds(selected, completions)
+        for item in pending:
+            state.queue.put_nowait(item)
+        return selected
+
+    def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
+        state.source = inbound.source
+        state.reply_to = inbound.reply_to
+        state.metadata = dict(inbound.metadata)
+        state.conversation_key = inbound.conversation_key or state.conversation_key
+
+    def _subscribe_job_runtime(self, runtime: InteractionRuntime) -> None:
+        job_runtime = getattr(getattr(runtime, "runner", None), "job_runtime", None)
+        if job_runtime is None or job_runtime is self._job_runtime:
+            return
+        if self._job_unsubscribe is not None:
+            self._job_unsubscribe()
+        self._job_runtime = job_runtime
+        self._job_unsubscribe = job_runtime.subscribe(self._on_job_completion)
+
+    def _on_job_completion(self, event: JobCompletionEvent) -> None:
+        state = self._state_for_session(event.owner_session_id)
+        if state is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._enqueue_job_completion(state, event))
+        except RuntimeError:
+            return
+
+    async def _enqueue_job_completion(self, state: TextConversationState, event: JobCompletionEvent) -> None:
+        if not state.source:
+            return
+        inbound = _job_completion_inbound(
+            event,
+            channel=self.channel_name,
+            source=state.source,
+            reply_to=state.reply_to,
+            conversation_key=state.conversation_key,
+            metadata=state.metadata,
+        )
+        if self._job_runtime is not None:
+            self._job_runtime.clear_pending_event(event.event_id)
+        if state.active_task and not state.active_task.done():
+            await state.queue.put(inbound)
+            return
+        if not state.queue.empty():
+            await state.queue.put(inbound)
+            await self._drain_next_queued_input(state)
+            return
+        self._start_turn(state, inbound)
+
+    def _state_for_session(self, session_id: str) -> TextConversationState | None:
+        for state in self._conversations.values():
+            runner = getattr(state.runtime, "runner", None)
+            if getattr(runner, "session_id", None) == session_id:
+                return state
+        return None
 
     def _sessions_text(self, records: Any, active_session_id: str | None) -> str:
         if not records:
@@ -626,3 +715,52 @@ def _media_block_fallback(block: dict[str, Any]) -> str:
     caption = block.get("text")
     prefix = f"{caption}\n" if caption else ""
     return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
+
+
+def _job_completion_inbound(
+    event: JobCompletionEvent,
+    *,
+    channel: str,
+    source: str,
+    reply_to: str | None,
+    conversation_key: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> InteractionInbound:
+    return InteractionInbound(
+        channel=channel,
+        text=event.to_inbound_text(),
+        source=source,
+        reply_to=reply_to,
+        conversation_key=conversation_key,
+        metadata={**dict(metadata or {}), **event.to_metadata()},
+    )
+
+
+def _is_background_completion(inbound: InteractionInbound) -> bool:
+    return inbound.metadata.get("trigger") == "background_job"
+
+
+def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
+    metadata = dict(user_inbound.metadata)
+    metadata["merged_background_jobs"] = [
+        item.metadata.get("job_id") for item in completions if item.metadata.get("job_id")
+    ]
+    completion_text = "\n\n".join(item.text for item in completions if item.text)
+    text = "\n\n".join(
+        part
+        for part in [
+            user_inbound.text,
+            "[SYSTEM: Pending background job events merged into this user turn]",
+            completion_text,
+        ]
+        if part
+    )
+    return InteractionInbound(
+        channel=user_inbound.channel,
+        text=text,
+        source=user_inbound.source,
+        reply_to=user_inbound.reply_to,
+        conversation_key=user_inbound.conversation_key,
+        metadata=metadata,
+        attachments=list(user_inbound.attachments),
+    )

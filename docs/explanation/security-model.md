@@ -24,6 +24,7 @@ Capabilities describe effect classes such as:
 - `fs.read`
 - `fs.write`
 - `terminal.exec`
+- `job.control`
 - `network.fetch`
 - `schedule.manage`
 - `tool.call:evolve_core`
@@ -31,6 +32,9 @@ Capabilities describe effect classes such as:
 
 The host resolves capabilities and applies approval policy before the effect
 runs.
+
+Background completion turns use the originating session's normal capabilities
+and approvals. Background jobs do not auto-approve dangerous actions.
 
 ## Secrets
 
@@ -54,4 +58,5 @@ Telegram is deny-by-default through `allowed_users` and `allowed_chats`.
 The current alpha runtime does not promise a hardened multi-tenant sandbox.
 Agent Core code slots run in the host-shared Python environment by default.
 Per-core environments and subprocess workers are future isolation options, not
-the default runtime mode.
+the default runtime mode. Background jobs are in-memory only and are not
+recovered after host process restart.

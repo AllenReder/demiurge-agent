@@ -1243,12 +1243,54 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     assert not any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
     provider.release_child.set()
     await app.runner.drain_background_tasks()
+    agent_jobs = app.job_runtime.list_jobs(backend="agent")
+    assert len(agent_jobs) == 1
+    assert agent_jobs[0].status == "succeeded"
+    assert app.job_runtime.pending_events_for_session(app.runner.session_id)[0].job_id == agent_jobs[0].job_id
     messages = app.runner.session_store.read_messages(app.runner.session_id)
     assert [message.content for message in messages if message.role == "assistant"] == [
         "parent",
         "spawn:running:evolver",
     ]
     assert any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
+
+
+@pytest.mark.asyncio
+async def test_agents_spawn_marks_job_blocked_when_child_needs_user(tmp_path):
+    agents = _copy_agents(tmp_path)
+    evolver_manifest = agents / "evolver" / "agent.yaml"
+    raw = yaml.safe_load(evolver_manifest.read_text(encoding="utf-8"))
+    raw["tools"]["metadata"]["clarify"] = {"enabled": True}
+    evolver_manifest.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _write_module(
+        agents,
+        "assistant/agent/output/spawn_probe/module.py",
+        "def process(ctx):\n"
+        "    handle = ctx.agents.spawn('evolver', 'spawn raw')\n"
+        "    ctx.output.send_text(f'spawn:{handle.status}:{handle.core_id}', history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/spawn_probe/slot.yaml",
+        _slot_text(capabilities=["agents.spawn:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "spawn_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(
+        responses=[
+            "parent",
+            LLMResponse(tool_calls=[ToolCall(id="clarify_1", name="clarify", arguments={"question": "Need input?"})]),
+        ]
+    )
+
+    await app.runner.run_turn("hello")
+    await app.runner.drain_background_tasks()
+
+    agent_jobs = app.job_runtime.list_jobs(backend="agent")
+    assert len(agent_jobs) == 1
+    assert agent_jobs[0].status == "blocked_needs_user"
+    assert app.job_runtime.pending_events_for_session(app.runner.session_id)[0].status == "blocked_needs_user"
+    assert any(event["type"] == "agent_spawn.blocked" for event in app.runner.event_log.tail(50))
 
 
 @pytest.mark.asyncio

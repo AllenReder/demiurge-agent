@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
@@ -16,6 +16,7 @@ from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
+from demiurge.jobs import JobRuntime
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
@@ -218,6 +219,7 @@ class DemiurgeApp:
     core_loader: CoreLoader
     gate_runner: GateRunner
     evolution_runtime: EvolutionRuntime
+    job_runtime: JobRuntime
     tool_runtime: ToolRuntime
     approval_runtime: ApprovalRuntime
     workspace: WorkspaceScope
@@ -294,6 +296,7 @@ class DemiurgeApp:
             "debug_show_system_prompt_source": self.debug_show_system_prompt_source,
             "approval_mode": self.approval_runtime.mode,
             "approval_cached_allows": self.approval_runtime.cached_allow_count,
+            "background_jobs": self.job_runtime.active_count,
             "session_id": self.runner.session_id,
             "session_store": str(self.home / "sessions" / self.runner.session_id),
             "session_messages": self.runner.session_store.message_count(self.runner.session_id),
@@ -318,6 +321,7 @@ class HostEvolverRunner:
         fallback: AgentFallbackConfig,
         runtime_timezone: RuntimeTimezone,
         api_key_override: str | None,
+        job_runtime: JobRuntime | None = None,
     ):
         self.home = home
         self.project_root = project_root
@@ -327,6 +331,7 @@ class HostEvolverRunner:
         self.fallback = fallback
         self.runtime_timezone = runtime_timezone
         self.api_key_override = api_key_override
+        self.job_runtime = job_runtime or JobRuntime()
 
     async def run(
         self,
@@ -366,6 +371,7 @@ class HostEvolverRunner:
             approval_runtime=ApprovalRuntime(),
             global_approval=ApprovalInfo(default="auto"),
             runtime_timezone=self.runtime_timezone,
+            job_runtime=self.job_runtime,
         )
         runner = SessionTurnStepRunner(
             home=self.home,
@@ -379,6 +385,7 @@ class HostEvolverRunner:
             initial_core_path=evolver_core_path,
             model_resolver=lambda core_model: resolve_model_name(core_model, self.fallback.model)[0],
             runtime_timezone=self.runtime_timezone,
+            job_runtime=self.job_runtime,
         )
         try:
             result = await runner.run_turn(
@@ -397,7 +404,12 @@ class HostEvolverRunner:
         summary = "\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip()
         if not summary:
             summary = result.agent_result if isinstance(result.agent_result, str) else ""
-        return EvolverRunResult(summary=summary, session_id=result.session_id, turn_id=result.turn_id)
+        return EvolverRunResult(
+            summary=summary,
+            session_id=result.session_id,
+            turn_id=result.turn_id,
+            needs_user=_turn_result_needs_user(result),
+        )
 
     def _fake_script(self, core_path: Path, script: str | None) -> Path | None:
         if not script:
@@ -439,6 +451,23 @@ class HostEvolverRunner:
                 "When finished, respond with a short summary and the candidate files you changed.",
             ]
         )
+
+
+def _turn_result_needs_user(result: Any) -> bool:
+    if bool(getattr(result, "needs_user", False)):
+        return True
+    for record in getattr(result, "tool_results", []):
+        data = getattr(getattr(record, "result", None), "data", None)
+        if not isinstance(data, Mapping):
+            continue
+        if data.get("needs_user"):
+            return True
+        approval = data.get("approval")
+        if isinstance(approval, Mapping):
+            reason = str(approval.get("reason") or "").lower()
+            if approval.get("value") == "deny" and "no active interaction bridge" in reason:
+                return True
+    return False
 
 
 def create_app(
@@ -502,6 +531,7 @@ def create_app(
     )
     gate_runner = GateRunner(project_root=project_root)
     mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
+    job_runtime = JobRuntime()
     tool_runtime = ToolRuntime(
         version_store,
         workspace=workspace_scope,
@@ -509,6 +539,7 @@ def create_app(
         global_approval=fallback.approval,
         mcp_runtime=mcp_runtime,
         runtime_timezone=runtime_timezone,
+        job_runtime=job_runtime,
     )
     evolution_runtime = EvolutionRuntime(
         version_store=version_store,
@@ -522,6 +553,7 @@ def create_app(
             fallback=fallback,
             runtime_timezone=runtime_timezone,
             api_key_override=api_key,
+            job_runtime=job_runtime,
         ),
     )
     tool_runtime.evolution_runtime = evolution_runtime
@@ -539,6 +571,7 @@ def create_app(
         workspace=str(workspace_scope.root),
         show_system_prompt=host_config.debug.show_system_prompt,
         runtime_timezone=runtime_timezone,
+        job_runtime=job_runtime,
     )
     return DemiurgeApp(
         home=home,
@@ -547,6 +580,7 @@ def create_app(
         core_loader=core_loader,
         gate_runner=gate_runner,
         evolution_runtime=evolution_runtime,
+        job_runtime=job_runtime,
         tool_runtime=tool_runtime,
         approval_runtime=approval_runtime,
         workspace=workspace_scope,

@@ -18,6 +18,7 @@ class EvolverRunResult:
     summary: str
     session_id: str | None = None
     turn_id: str | None = None
+    needs_user: bool = False
 
 
 class EvolverRunner(Protocol):
@@ -68,6 +69,7 @@ class EvolutionRuntime:
         target_core_id: str,
         goal: str,
         source_turn_id: str | None = None,
+        auto_promote: bool = True,
     ) -> EvolveResult:
         if target_core_id in self._active_runs:
             raise RuntimeError(f"evolve already running for core: {target_core_id}")
@@ -96,7 +98,8 @@ class EvolutionRuntime:
             )
             changed_files = self._changed_files(baseline, candidate_path)
             manifest_check = self._manifest_check(candidate_path)
-            promoted = bool(changed_files) and bool(manifest_check["passed"])
+            candidate_promotable = bool(changed_files) and bool(manifest_check["passed"])
+            promoted = candidate_promotable and auto_promote
             if promoted:
                 new_version = self.version_store.promote_candidate(
                     target_core_id,
@@ -108,12 +111,15 @@ class EvolutionRuntime:
                 new_version = None
                 if not changed_files:
                     summary = f"evolve made no candidate changes for {target_core_id}"
+                elif candidate_promotable and not auto_promote:
+                    summary = f"evolve candidate ready for review for {target_core_id}"
                 else:
                     summary = f"evolve candidate failed manifest check for {target_core_id}"
             evolver_payload = {
                 "summary": evolver_result.summary,
                 "session_id": evolver_result.session_id,
                 "turn_id": evolver_result.turn_id,
+                "needs_user": evolver_result.needs_user,
             }
             write_json(
                 run_root / "result.json",
@@ -122,6 +128,7 @@ class EvolutionRuntime:
                     "changed_files": changed_files,
                     "evolver": evolver_payload,
                     "promoted": promoted,
+                    "auto_promote": auto_promote,
                     "new_version": new_version,
                 },
             )
@@ -152,6 +159,7 @@ class EvolutionRuntime:
                     "type": "evolve",
                     "run_id": run_id,
                     "promoted": result.promoted,
+                    "auto_promote": auto_promote,
                     "new_version": new_version,
                     "changed_files": changed_files,
                     "manifest_check": manifest_check,

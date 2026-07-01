@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 
 from demiurge.app import DemiurgeApp, load_host_config
 from demiurge.diagnostics.doctor import DoctorRuntime
+from demiurge.jobs import JobCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
@@ -82,7 +83,7 @@ class TuiInteractionBridge:
         resolved_busy_mode = busy_mode or app.channel_busy_mode
         self.busy_mode = resolved_busy_mode if resolved_busy_mode in {"interrupt", "queue"} else "interrupt"
         self._running_task: asyncio.Task[None] | None = None
-        self._queued_inputs: asyncio.Queue[str] = asyncio.Queue()
+        self._queued_inputs: asyncio.Queue[InteractionInbound] = asyncio.Queue()
         self._pending_prompts: dict[str, PendingPrompt] = {}
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._prompt_counter = 0
@@ -90,6 +91,7 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
+        self._job_unsubscribe = self.app.job_runtime.subscribe(self._on_job_completion)
 
     @property
     def running(self) -> bool:
@@ -105,14 +107,18 @@ class TuiInteractionBridge:
         text = str(text or "").strip()
         if not text:
             return {"accepted": False, "reason": "empty"}
+        inbound = self._user_inbound(text)
         if self.running:
             if self.busy_mode == "queue":
-                await self._queued_inputs.put(text)
+                await self._queued_inputs.put(inbound)
                 await self._emit_notice(f"queued input: {shorten_text(text, 100)}")
                 await self._emit_status()
                 return {"accepted": True, "queued": True}
+            await self._queued_inputs.put(inbound)
             await self.interrupt_current_turn(reason="new input")
-        self._running_task = asyncio.create_task(self._run_message(text))
+            return {"accepted": True, "queued": True}
+        inbound = self._merge_pending_completions_into(inbound)
+        self._running_task = asyncio.create_task(self._run_inbound(inbound))
         await self._emit_status()
         return {"accepted": True, "queued": False}
 
@@ -240,6 +246,9 @@ class TuiInteractionBridge:
         for prompt in self._pending_prompts.values():
             if prompt.future is not None and not prompt.future.done():
                 prompt.future.set_result("")
+        if self._job_unsubscribe is not None:
+            self._job_unsubscribe()
+            self._job_unsubscribe = None
         await self.emit("channel.shutdown", {})
 
     def _start_scheduler(self) -> None:
@@ -278,18 +287,13 @@ class TuiInteractionBridge:
         return await handler(command.args)
 
     async def _run_message(self, text: str) -> None:
+        await self._run_inbound(self._user_inbound(text))
+
+    async def _run_inbound(self, inbound: InteractionInbound) -> None:
         try:
-            await self.emit("interaction.message", {"role": "user", "text": text})
-            result = await self.runtime.handle(
-                InteractionInbound(
-                    channel="tui",
-                    text=text,
-                    source="local",
-                    reply_to=None,
-                    conversation_key=self._conversation_key(),
-                ),
-                bridge=self,
-            )
+            if not _is_background_completion(inbound):
+                await self.emit("interaction.message", {"role": "user", "text": inbound.text})
+            result = await self.runtime.handle(inbound, bridge=self)
             await self.deliver(result)
         except asyncio.CancelledError:
             raise
@@ -304,8 +308,64 @@ class TuiInteractionBridge:
     async def _drain_next_queued_input(self) -> None:
         if self.running or self._queued_inputs.empty() or self.should_exit:
             return
-        text = await self._queued_inputs.get()
-        self._running_task = asyncio.create_task(self._run_message(text))
+        inbound = await self._next_queued_input()
+        self._running_task = asyncio.create_task(self._run_inbound(inbound))
+        await self._emit_status()
+
+    async def _next_queued_input(self) -> InteractionInbound:
+        pending: list[InteractionInbound] = []
+        while not self._queued_inputs.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                pending.append(self._queued_inputs.get_nowait())
+        user_index = next((index for index, item in enumerate(pending) if not _is_background_completion(item)), None)
+        selected_index = user_index if user_index is not None else 0
+        selected = pending.pop(selected_index)
+        if not _is_background_completion(selected):
+            completions = [item for item in pending if _is_background_completion(item)]
+            pending = [item for item in pending if not _is_background_completion(item)]
+            if completions:
+                selected = _merge_completion_inbounds(selected, completions)
+        for item in pending:
+            self._queued_inputs.put_nowait(item)
+        return selected
+
+    def _merge_pending_completions_into(self, inbound: InteractionInbound) -> InteractionInbound:
+        if self._queued_inputs.empty():
+            return inbound
+        pending: list[InteractionInbound] = []
+        while not self._queued_inputs.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                pending.append(self._queued_inputs.get_nowait())
+        completions = [item for item in pending if _is_background_completion(item)]
+        for item in [item for item in pending if not _is_background_completion(item)]:
+            self._queued_inputs.put_nowait(item)
+        if not completions:
+            return inbound
+        return _merge_completion_inbounds(inbound, completions)
+
+    def _on_job_completion(self, event: JobCompletionEvent) -> None:
+        if event.owner_session_id != self.app.runner.session_id or self.should_exit:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._enqueue_job_completion(event))
+        except RuntimeError:
+            return
+
+    async def _enqueue_job_completion(self, event: JobCompletionEvent) -> None:
+        inbound = _job_completion_inbound(
+            event,
+            channel="tui",
+            source="local",
+            reply_to=None,
+            conversation_key=self._conversation_key(),
+        )
+        self.app.job_runtime.clear_pending_event(event.event_id)
+        await self._emit_notice(f"background job {event.job_id} {event.status}: {shorten_text(event.summary, 100)}")
+        if self.running or not self._queued_inputs.empty():
+            await self._queued_inputs.put(inbound)
+            await self._emit_status()
+            return
+        self._running_task = asyncio.create_task(self._run_inbound(inbound))
         await self._emit_status()
 
     async def _open_prompt(self, prompt: UserPromptRequest, *, kind: str, wait: bool) -> PendingPrompt:
@@ -715,6 +775,15 @@ class TuiInteractionBridge:
     def _conversation_key(self) -> str:
         return f"tui:{self.app.runner.session_id}"
 
+    def _user_inbound(self, text: str) -> InteractionInbound:
+        return InteractionInbound(
+            channel="tui",
+            text=text,
+            source="local",
+            reply_to=None,
+            conversation_key=self._conversation_key(),
+        )
+
     def _normalize_prompt_answer(self, answer: str, choices: list[str]) -> str:
         text = str(answer or "").strip()
         if text.isdigit():
@@ -778,6 +847,54 @@ def _delivery_dict(delivery: Any) -> dict[str, Any]:
         "history_policy": delivery.history_policy,
         "metadata": _json_safe(delivery.metadata),
     }
+
+
+def _job_completion_inbound(
+    event: JobCompletionEvent,
+    *,
+    channel: str,
+    source: str,
+    reply_to: str | None,
+    conversation_key: str | None,
+) -> InteractionInbound:
+    return InteractionInbound(
+        channel=channel,
+        text=event.to_inbound_text(),
+        source=source,
+        reply_to=reply_to,
+        conversation_key=conversation_key,
+        metadata=event.to_metadata(),
+    )
+
+
+def _is_background_completion(inbound: InteractionInbound) -> bool:
+    return inbound.metadata.get("trigger") == "background_job"
+
+
+def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
+    metadata = dict(user_inbound.metadata)
+    metadata["merged_background_jobs"] = [
+        item.metadata.get("job_id") for item in completions if item.metadata.get("job_id")
+    ]
+    completion_text = "\n\n".join(item.text for item in completions if item.text)
+    text = "\n\n".join(
+        part
+        for part in [
+            user_inbound.text,
+            "[SYSTEM: Pending background job events merged into this user turn]",
+            completion_text,
+        ]
+        if part
+    )
+    return InteractionInbound(
+        channel=user_inbound.channel,
+        text=text,
+        source=user_inbound.source,
+        reply_to=user_inbound.reply_to,
+        conversation_key=user_inbound.conversation_key,
+        metadata=metadata,
+        attachments=list(user_inbound.attachments),
+    )
 
 
 def _tool_record_dict(index: int, record: ToolExecutionRecord, *, full: bool) -> dict[str, Any]:
