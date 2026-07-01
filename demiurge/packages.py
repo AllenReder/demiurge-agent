@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 import shutil
 import subprocess
@@ -508,6 +509,18 @@ def default_package_repository_configs() -> dict[str, dict[str, str]]:
 
 def package_repository_cache_root(home: Path) -> Path:
     return home.expanduser().resolve() / "package-repositories"
+
+
+def inspect_package_repository_candidate(*, home: Path, config: Mapping[str, Any]) -> PackageRepositoryStatus:
+    candidate_config = dict(config)
+    source_type = str(candidate_config.get("type") or "").strip()
+    probe_alias = "probe-" + hashlib.sha256(repr(sorted(candidate_config.items())).encode("utf-8")).hexdigest()[:12]
+    trusted_config = {**candidate_config, "trusted": True}
+    try:
+        return sync_package_repository(home=home, alias=probe_alias, config=trusted_config)
+    finally:
+        if source_type == "git":
+            shutil.rmtree(package_repository_cache_root(home) / probe_alias, ignore_errors=True)
 
 
 def load_package_repository_collection(

@@ -6,7 +6,7 @@ import pytest
 import yaml
 from rich.console import Console
 
-from demiurge.app import create_app, load_host_config
+from demiurge.app import HostPackageRepositoryConfig, create_app, load_host_config
 from demiurge.cli import main
 from demiurge.package_wizard import PackageWizard
 from demiurge.packages import (
@@ -864,28 +864,64 @@ def test_cli_package_repo_add_list_remove_path_repository(tmp_path, capsys):
     repository_root = tmp_path / "repository"
     _write_test_repository(repository_root)
 
-    main(["--home", str(home), "package", "repo", "add", "local", str(repository_root), "--trust", "--json"])
+    main(["--home", str(home), "package", "repo", "add", str(repository_root), "--trust", "--json"])
     added = json.loads(capsys.readouterr().out)
-    assert added["alias"] == "local"
+    assert added["alias"] == "test_repository"
     assert added["repository_id"] == "test_repository"
     assert added["ready"] is True
 
     main(["--home", str(home), "package", "repo", "list", "--json"])
     listed = json.loads(capsys.readouterr().out)
-    assert {item["alias"] for item in listed["repositories"]} == {"builtin", "local"}
+    assert {item["alias"] for item in listed["repositories"]} == {"builtin", "test_repository"}
 
-    main(["--home", str(home), "package", "install", "local/first", "--core", "assistant", "--json"])
+    main(["--home", str(home), "package", "install", "test_repository/first", "--core", "assistant", "--json"])
     installed = json.loads(capsys.readouterr().out)
-    assert installed["package_ref"] == "local/first"
-    assert installed["repository_alias"] == "local"
+    assert installed["package_ref"] == "test_repository/first"
+    assert installed["repository_alias"] == "test_repository"
 
     with pytest.raises(SystemExit, match="still referenced"):
-        main(["--home", str(home), "package", "repo", "remove", "local"])
+        main(["--home", str(home), "package", "repo", "remove", "test_repository"])
 
-    main(["--home", str(home), "package", "repo", "remove", "local", "--force", "--json"])
+    main(["--home", str(home), "package", "repo", "remove", "test_repository", "--force", "--json"])
     removed = json.loads(capsys.readouterr().out)
-    assert removed["removed"] == "local"
+    assert removed["removed"] == "test_repository"
     assert removed["forced"] is True
+
+
+def test_cli_package_repo_add_allows_custom_alias(tmp_path, capsys):
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+
+    main(
+        [
+            "--home",
+            str(tmp_path / "home"),
+            "package",
+            "repo",
+            "add",
+            str(repository_root),
+            "--alias",
+            "local",
+            "--trust",
+            "--json",
+        ]
+    )
+
+    added = json.loads(capsys.readouterr().out)
+    assert added["alias"] == "local"
+    assert added["repository_id"] == "test_repository"
+
+
+def test_cli_package_repo_add_default_alias_conflict_requires_alias(tmp_path, capsys):
+    home = tmp_path / "home"
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+
+    main(["--home", str(home), "package", "repo", "add", str(repository_root), "--trust", "--json"])
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit, match="rerun with --alias"):
+        main(["--home", str(home), "package", "repo", "add", str(repository_root), "--trust", "--json"])
 
 
 def test_cli_package_repo_add_requires_trust_for_noninteractive_external_repo(tmp_path):
@@ -893,7 +929,7 @@ def test_cli_package_repo_add_requires_trust_for_noninteractive_external_repo(tm
     _write_test_repository(repository_root)
 
     with pytest.raises(SystemExit, match="require --trust"):
-        main(["--home", str(tmp_path / "home"), "package", "repo", "add", "local", str(repository_root), "--json"])
+        main(["--home", str(tmp_path / "home"), "package", "repo", "add", str(repository_root), "--json"])
 
 
 def test_cli_package_without_subcommand_runs_interactive_wizard(tmp_path, monkeypatch):
@@ -914,8 +950,8 @@ def test_wizard_installs_with_option_answers(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
     prompt = _FakePrompt(
-        selections=["assistant", "all", "builtin/minimax_tts", "install", "direct", "back", "exit"],
-        confirms=[False, True],
+        selections=["packages", "assistant", "builtin/minimax_tts", "direct", "install", "__back__", "exit"],
+        confirms=[False],
         inputs=["wizard-secret"],
     )
     console = Console(record=True)
@@ -937,7 +973,12 @@ def test_wizard_installs_with_option_answers(tmp_path):
     registry = yaml.safe_load((app.version_store.active_core_path("assistant") / "packages.yaml").read_text())
     assert registry["installed"][0]["options"]["api_key"] == REDACTED_SECRET
     main_menu = next(call for call in prompt.select_calls if call["title"] == "Package manager")
-    assert [choice.value for choice in main_menu["choices"][:3]] == ["all", "search", "tags"]
+    assert [choice.value for choice in main_menu["choices"]] == ["packages", "repos", "exit"]
+    core_select = next(call for call in prompt.select_calls if call["title"] == "Select agent core")
+    assert core_select["choices"][0].value == "assistant"
+    assert "default" in core_select["choices"][0].label
+    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
+    assert "__search__" in {choice.value for choice in package_select["choices"]}
     mode_select = next(call for call in prompt.select_calls if call["title"] == "TTS mode")
     assert mode_select["choices"][0].description
     assert mode_select["choices"][1].description
@@ -948,8 +989,7 @@ def test_wizard_uninstalls_installed_package(tmp_path):
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="minimax_tts")
     prompt = _FakePrompt(
-        selections=["assistant", "installed", "builtin/minimax_tts", "uninstall", "exit"],
-        confirms=[True],
+        selections=["packages", "assistant", "builtin/minimax_tts", "uninstall", "__back__", "exit"],
     )
 
     host_config = load_host_config(app.host_config_path)[0]
@@ -963,6 +1003,139 @@ def test_wizard_uninstalls_installed_package(tmp_path):
     ).run()
 
     assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax").exists()
+    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
+    installed_choice = next(choice for choice in package_select["choices"] if choice.value == "builtin/minimax_tts")
+    assert "[installed]" in installed_choice.label
+
+
+def test_wizard_blocks_same_package_id_from_different_repository(tmp_path):
+    first_root = tmp_path / "first-repository"
+    second_root = tmp_path / "second-repository"
+    _write_test_repository(first_root)
+    _write_test_repository(second_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    repositories = load_package_repository_collection(
+        home=app.home,
+        repository_configs={
+            "one": {"type": "path", "path": str(first_root), "trusted": True},
+            "two": {"type": "path", "path": str(second_root), "trusted": True},
+        },
+    )
+    manager = PackageManager(version_store=app.version_store, repository=repositories)
+    manager.install(core_id="assistant", package_id="one/first")
+    prompt = _FakePrompt(selections=["packages", "assistant", "two/first", "__back__", "exit"])
+    console = Console(record=True)
+
+    PackageWizard(
+        manager=manager,
+        version_store=app.version_store,
+        home=app.home,
+        host_config=load_host_config(app.host_config_path)[0],
+        console=console,
+        prompt=prompt,
+    ).run()
+
+    output = console.export_text()
+    assert "Blocked" in output
+    assert "one/first is already installed" in output
+    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
+    blocked = next(choice for choice in package_select["choices"] if choice.value == "two/first")
+    assert "[blocked: package id installed]" in blocked.label
+
+
+def test_wizard_repo_add_uses_repository_id_default_alias_without_core_selection(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+    prompt = _FakePrompt(
+        selections=["repos", "__add__", "__back__", "exit"],
+        confirms=[True],
+        inputs=[str(repository_root), "", ""],
+    )
+
+    PackageWizard(
+        manager=_manager(app),
+        version_store=app.version_store,
+        home=app.home,
+        host_config=load_host_config(app.host_config_path)[0],
+        console=Console(record=True),
+        prompt=prompt,
+    ).run()
+
+    raw = yaml.safe_load((app.home / "config.yaml").read_text(encoding="utf-8"))
+    assert "test_repository" in raw["packages"]["repositories"]
+    assert all(call["title"] != "Select agent core" for call in prompt.select_calls)
+    alias_input = next(call for call in prompt.input_calls if call["message"] == "Repository alias")
+    assert alias_input["default"] == "test_repository"
+
+
+def test_wizard_repo_add_conflict_prompts_for_new_alias(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    existing_root = tmp_path / "existing"
+    new_root = tmp_path / "new"
+    _write_test_repository(existing_root)
+    _write_test_repository(new_root)
+    host_config = load_host_config(app.host_config_path)[0]
+    host_config.packages.repositories["test_repository"] = HostPackageRepositoryConfig(
+        type="path",
+        path=str(existing_root),
+        trusted=True,
+    )
+    manager = PackageManager(
+        version_store=app.version_store,
+        repository=load_package_repository_collection(home=app.home, repository_configs=host_config.packages.repositories),
+    )
+    prompt = _FakePrompt(
+        selections=["repos", "__add__", "__back__", "exit"],
+        confirms=[True],
+        inputs=[str(new_root), "", "", "custom_repository"],
+    )
+
+    PackageWizard(
+        manager=manager,
+        version_store=app.version_store,
+        home=app.home,
+        host_config=host_config,
+        console=Console(record=True),
+        prompt=prompt,
+    ).run()
+
+    raw = yaml.safe_load((app.home / "config.yaml").read_text(encoding="utf-8"))
+    assert "custom_repository" in raw["packages"]["repositories"]
+
+
+def test_wizard_repo_remove_referenced_repo_requires_force_source_removal(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    repository_root = tmp_path / "repository"
+    _write_test_repository(repository_root)
+    host_config = load_host_config(app.host_config_path)[0]
+    host_config.packages.repositories["local"] = HostPackageRepositoryConfig(
+        type="path",
+        path=str(repository_root),
+        trusted=True,
+    )
+    manager = PackageManager(
+        version_store=app.version_store,
+        repository=load_package_repository_collection(home=app.home, repository_configs=host_config.packages.repositories),
+    )
+    manager.install(core_id="assistant", package_id="local/first")
+    prompt = _FakePrompt(selections=["repos", "local", "remove", "force", "__back__", "exit"])
+
+    PackageWizard(
+        manager=manager,
+        version_store=app.version_store,
+        home=app.home,
+        host_config=host_config,
+        console=Console(record=True),
+        prompt=prompt,
+    ).run()
+
+    raw = yaml.safe_load((app.home / "config.yaml").read_text(encoding="utf-8"))
+    assert "local" not in raw["packages"]["repositories"]
+    registry = yaml.safe_load((app.version_store.active_core_path("assistant") / "packages.yaml").read_text())
+    assert registry["installed"][0]["repository_alias"] == "local"
+    force_select = next(call for call in prompt.select_calls if call["title"] == "Remove repository local")
+    assert [choice.value for choice in force_select["choices"]] == ["force", "back"]
 
 
 @pytest.mark.asyncio
@@ -1544,6 +1717,7 @@ class _FakePrompt:
         self.confirms = list(confirms or [])
         self.inputs = list(inputs or [])
         self.select_calls = []
+        self.input_calls = []
 
     def select(self, title, choices, *, default_index=0):
         self.select_calls.append({"title": title, "choices": list(choices), "default_index": default_index})
@@ -1559,6 +1733,7 @@ class _FakePrompt:
         return self.confirms.pop(0)
 
     def input(self, message, *, default=None, secret=False):
+        self.input_calls.append({"message": message, "default": default, "secret": secret})
         if not self.inputs:
             return default or ""
         return self.inputs.pop(0)

@@ -25,6 +25,7 @@ from demiurge.packages import (
     PackageManager,
     PackageOperationPreview,
     PackageRepositoryError,
+    inspect_package_repository_candidate,
     installed_repository_dependents,
     list_package_repository_statuses,
     load_package_repository_collection,
@@ -108,8 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     package_repo_list = package_repo_subparsers.add_parser("list", help="List configured package repositories")
     package_repo_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_repo_add = package_repo_subparsers.add_parser("add", help="Add a path or git package repository")
-    package_repo_add.add_argument("alias", help="Local repository alias")
     package_repo_add.add_argument("location", help="Git URL or local path")
+    package_repo_add.add_argument("--alias", default=None, help="Local repository alias; defaults to repository.yaml id")
     package_repo_add.add_argument("--ref", default=None, help="Git branch, tag, or commit to sync")
     package_repo_add.add_argument("--subdir", default=None, help="Repository subdirectory containing repository.yaml")
     package_repo_add.add_argument("--trust", action="store_true", help="Trust this external repository's local code")
@@ -454,18 +455,31 @@ def _handle_package_repo_command(
         if config.type != "builtin" and not config.trusted:
             if args.json or not sys.stdin.isatty():
                 raise SystemExit("external package repositories require --trust in non-interactive mode")
-            if not _confirm_trust(args.alias, args.location):
+        try:
+            candidate = inspect_package_repository_candidate(
+                home=home,
+                config=config.model_dump(mode="python", exclude_none=True),
+            )
+        except PackageRepositoryError as exc:
+            raise SystemExit(str(exc)) from None
+        alias = str(args.alias or candidate.repository_id or "").strip()
+        if not alias:
+            raise SystemExit("package repository metadata did not include an id; rerun with --alias")
+        if alias in host_config.packages.repositories:
+            if args.alias:
+                raise SystemExit(f"package repository already exists: {alias}")
+            raise SystemExit(f"package repository alias already exists: {alias}; rerun with --alias")
+        if config.type != "builtin" and not config.trusted:
+            if not _confirm_trust(alias, args.location, candidate):
                 raise SystemExit("package repository was not trusted")
             config.trusted = True
-        if args.alias in host_config.packages.repositories:
-            raise SystemExit(f"package repository already exists: {args.alias}")
-        status = sync_package_repository(home=home, alias=args.alias, config=config.model_dump(mode="python", exclude_none=True))
-        host_config.packages.repositories[args.alias] = config
+        status = sync_package_repository(home=home, alias=alias, config=config.model_dump(mode="python", exclude_none=True))
+        host_config.packages.repositories[alias] = config
         write_host_config(home / "config.yaml", host_config)
         if args.json:
             print(json.dumps(_repository_status_to_dict(status), indent=2, ensure_ascii=False))
             return
-        print(f"added package repository {args.alias}: {status.name or status.repository_id}")
+        print(f"added package repository {alias}: {status.name or status.repository_id}")
         return
     if command == "remove":
         if args.alias == "builtin":
@@ -678,8 +692,9 @@ def _looks_like_git_url(value: str) -> bool:
     )
 
 
-def _confirm_trust(alias: str, location: str) -> bool:
-    print(f"Package repository {alias} can install local code into host-shared agent slots.")
+def _confirm_trust(alias: str, location: str, status) -> bool:
+    name = status.name or status.repository_id or alias
+    print(f"Package repository {alias} ({name}) can install local code into host-shared agent slots.")
     answer = input(f"Trust {location}? [y/N] ").strip().lower()
     return answer in {"y", "yes", "true", "1", "on"}
 

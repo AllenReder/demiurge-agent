@@ -9,8 +9,11 @@ package repository packages into runtime cores.
 uv run demiurge package
 ```
 
-The wizard selects a target core, manages package repositories, searches or
-browses packages, collects options, shows a preview, then asks for confirmation.
+The wizard starts with `Packages` and `Repos`. `Repos` manages host-level
+package repository sources. `Packages` first selects an agent core, then shows
+all available packages with installed or blocked status. Selecting an available
+package collects options and ends on an `Install now` preview menu; selecting an
+installed package ends on an `Uninstall now` preview menu.
 
 ## Scripted Commands
 
@@ -28,7 +31,8 @@ Repository management:
 
 ```bash
 uv run demiurge package repo list
-uv run demiurge package repo add community https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo add https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo add ./local-packages --alias local --trust
 uv run demiurge package repo sync community
 uv run demiurge package repo remove community
 ```

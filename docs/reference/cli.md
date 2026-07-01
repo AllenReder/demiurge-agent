@@ -67,7 +67,8 @@ uv run demiurge package list --repo builtin
 uv run demiurge package install <package_id|repo/package_id> --core assistant --preview
 uv run demiurge package uninstall <package_id|repo/package_id> --core assistant
 uv run demiurge package repo list
-uv run demiurge package repo add community https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo add https://github.com/user/demiurge-packages.git --trust
+uv run demiurge package repo add ./local-packages --alias local --trust
 uv run demiurge package repo sync community
 uv run demiurge package repo remove community
 ```
