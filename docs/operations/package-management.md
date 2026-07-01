@@ -56,6 +56,9 @@ kinds:
   notes across sessions, saved only when explicitly requested by default.
 - `minimax_tts`, `tts_openai`, `tts_xai`, and `tts_gemini`: shared lib + output
   + optional provider-specific tool/skill/core package for speech artifacts.
+- `stt_openai`, `stt_groq`, `stt_deepgram`, `stt_assemblyai`, and
+  `stt_gemini`: shared lib + input + skill packages for transcribing voice or
+  audio attachments before the model request.
 
 These packages are optional runtime-core overlays. They showcase composable
 agent-core modules without changing source templates or installing host Python

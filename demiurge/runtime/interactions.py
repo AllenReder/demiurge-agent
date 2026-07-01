@@ -17,6 +17,7 @@ class InteractionInbound:
     reply_to: str | None = None
     conversation_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    attachments: list[Any] = field(default_factory=list)
 
 
 @dataclass(slots=True)

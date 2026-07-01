@@ -1204,7 +1204,11 @@ class SessionTurnStepRunner:
         await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
 
         turn_id = utc_id("turn_")
-        input_envelope = InputEnvelope(raw_text=text, metadata=interaction_metadata)
+        input_envelope = InputEnvelope(
+            raw_text=text,
+            metadata=interaction_metadata,
+            attachments=list(interaction.attachments) if interaction is not None else [],
+        )
         user_input = AgentInput(content=text, metadata=interaction_metadata)
         state_store = StateStore(self.home, core.core_id)
         state = state_store.read()

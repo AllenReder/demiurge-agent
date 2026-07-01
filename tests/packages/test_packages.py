@@ -189,6 +189,34 @@ def _mock_provider_tts_http(
     return calls
 
 
+def _mock_openai_stt_http(monkeypatch, *, transcript: str = "transcribed voice") -> list[dict[str, object]]:
+    monkeypatch.setenv("DEMIURGE_OPENAI_API_KEY", "test-openai-key")
+    calls: list[dict[str, object]] = []
+
+    def fake_urlopen(request: Request, timeout=60):
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "authorization": request.get_header("Authorization"),
+                "content_type": request.get_header("Content-type") or request.get_header("Content-Type"),
+                "body": request.data or b"",
+            }
+        )
+        return _FakeHTTPResponse(
+            json.dumps(
+                {
+                    "text": transcript,
+                    "language": "en",
+                    "duration": 1.25,
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
 def test_builtin_repository_lists_minimax_tts_package():
     repository = PackageRepository.load(default_package_repository_root())
 
@@ -225,6 +253,30 @@ def test_builtin_repository_lists_provider_tts_packages(package_id, provider, to
     assert {component.target for component in output_components} == {f"agent/output/tts_{provider}"}
     tool_component = next(component for component in package.components if component.kind == "tool")
     assert tool_component.target == f"agent/tools/{tool_id}"
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider"),
+    [
+        ("stt_openai", "openai"),
+        ("stt_groq", "groq"),
+        ("stt_deepgram", "deepgram"),
+        ("stt_assemblyai", "assemblyai"),
+        ("stt_gemini", "gemini"),
+    ],
+)
+def test_builtin_repository_lists_provider_stt_packages(package_id, provider):
+    repository = PackageRepository.load(default_package_repository_root())
+
+    package = repository.packages[package_id]
+    assert {"audio", "stt", "speech-to-text", "input", f"provider:{provider}"}.issubset(package.tags)
+    assert package.components[0].source == "stt_common"
+    assert package.components[1].source == f"stt_{provider}"
+    assert package.components[2].source == f"stt_{provider}"
+    assert package.components[2].target == "agent/input/speech_to_text"
+    assert package.components[2].pipeline == {"group": "serial", "before": "base_input"}
+    assert package.components[3].source == "stt_transcription"
+    assert {component.kind for component in package.components} == {"lib", "input", "skill"}
 
 
 def test_builtin_repository_lists_memory_basic_package():
@@ -476,6 +528,55 @@ def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id,
     assert not (core_path / "agent" / "lib" / f"tts_{provider}").exists()
     pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
     assert pipeline["parallel"] == []
+
+
+@pytest.mark.parametrize(
+    ("package_id", "provider", "env_name"),
+    [
+        ("stt_openai", "openai", "DEMIURGE_OPENAI_API_KEY"),
+        ("stt_groq", "groq", "DEMIURGE_GROQ_API_KEY"),
+        ("stt_deepgram", "deepgram", "DEMIURGE_DEEPGRAM_API_KEY"),
+        ("stt_assemblyai", "assemblyai", "DEMIURGE_ASSEMBLYAI_API_KEY"),
+        ("stt_gemini", "gemini", "DEMIURGE_GEMINI_API_KEY"),
+    ],
+)
+def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provider, env_name):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    result = manager.install(core_id="assistant", package_id=package_id)
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert result.package_ref == f"builtin/{package_id}"
+    assert result.repository_alias == "builtin"
+    assert result.repository_id == "builtin"
+    assert (core_path / "agent" / "lib" / "stt_common" / "transcriber.py").exists()
+    assert (core_path / "agent" / "lib" / f"stt_{provider}" / "transcriber.py").exists()
+    assert (core_path / "agent" / "input" / "speech_to_text" / "module.py").exists()
+    assert (core_path / "agent" / "skills" / "stt_transcription" / "SKILL.md").exists()
+    lib_config = yaml.safe_load((core_path / "agent" / "lib" / f"stt_{provider}" / "config.yaml").read_text())
+    assert lib_config["provider"] == f"stt_{provider}"
+    assert lib_config["api_key_env"] == env_name
+    assert lib_config["api_key"] is None
+    input_slot = yaml.safe_load((core_path / "agent" / "input" / "speech_to_text" / "slot.yaml").read_text())
+    assert input_slot["capabilities"] == ["network.fetch", "skill.activate:stt_transcription"]
+    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
+    assert pipeline["serial"] == ["speech_to_text", "base_input"]
+    registry = yaml.safe_load((core_path / "packages.yaml").read_text())
+    assert registry["installed"][0]["package_id"] == package_id
+    assert registry["installed"][0]["repository_alias"] == "builtin"
+    assert registry["installed"][0]["repository_id"] == "builtin"
+    assert registry["installed"][0]["options"]["api_key"] is None
+
+    removed = manager.uninstall(core_id="assistant", package_id=package_id)
+
+    assert removed.action == "uninstall"
+    assert not (core_path / "agent" / "input" / "speech_to_text").exists()
+    assert not (core_path / "agent" / "lib" / f"stt_{provider}").exists()
+    assert not (core_path / "agent" / "lib" / "stt_common").exists()
+    assert not (core_path / "agent" / "skills" / "stt_transcription").exists()
+    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
+    assert pipeline["serial"] == ["base_input"]
 
 
 def test_install_provider_tts_summary_reuses_shared_summarizer_core(tmp_path):
@@ -1266,6 +1367,50 @@ async def test_context_reseed_rejects_symlink_storage_escape(tmp_path):
         and "must resolve inside the core root" in event["error"]
         for event in app.runner.event_log.tail(30)
     )
+
+
+@pytest.mark.asyncio
+async def test_openai_stt_transcribes_interaction_attachment_into_prompt(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    audio_path = workspace / "voice.mp3"
+    audio_path.write_bytes(b"VOICE-DATA")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _manager(app).install(core_id="assistant", package_id="stt_openai")
+    provider = _RecordingProvider(default="heard")
+    app.runner.provider = provider
+    calls = _mock_openai_stt_http(monkeypatch, transcript="please remember this")
+
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(
+            channel="tui",
+            text="audio attached",
+            source="local",
+            conversation_key="pkg:stt",
+            attachments=[
+                {
+                    "id": "voice-1",
+                    "filename": "voice.mp3",
+                    "media_type": "audio/mpeg",
+                    "path": str(audio_path),
+                    "size_bytes": len(b"VOICE-DATA"),
+                    "duration_seconds": 1.25,
+                }
+            ],
+        )
+    )
+
+    assert calls[0]["url"] == "https://api.openai.com/v1/audio/transcriptions"
+    assert calls[0]["authorization"] == "Bearer test-openai-key"
+    assert b'name="model"' in calls[0]["body"]
+    assert b"gpt-4o-mini-transcribe" in calls[0]["body"]
+    assert b'filename="voice.mp3"' in calls[0]["body"]
+    request_text = "\n".join(message.content for message in provider.requests[0].messages)
+    assert "Voice message transcript (stt_openai):" in request_text
+    assert "please remember this" in request_text
+    assert "Transcript metadata:" in request_text
+    assert "audio attached" in request_text
+    assert "# Speech-to-Text Transcription" in request_text
 
 
 @pytest.mark.asyncio
