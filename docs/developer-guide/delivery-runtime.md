@@ -1,55 +1,37 @@
+---
+title: Delivery Runtime
+description: Contributor notes for session records, live output, artifacts, and channels.
+---
+
 # Delivery Runtime
 
-Authored modules and tools describe delivery intent. The host turns that intent
-into artifacts, session messages, events, and channel items.
+Delivery runtime converts output requests into durable session records, live
+events, artifacts, and channel items.
 
-## Core Types
+## Sources
 
-Delivery data is represented by:
+Delivery requests can come from:
 
-- `DeliveryRequest`
-- `ContentBlock`
-- `ArtifactInput`
-- `ArtifactRef`
-- `DeliveryRouteContext`
-- `InteractionDelivery`
-
-## Flow
-
-```text
-ctx.output.send_* / ctx.input.send_*
-  -> DeliveryRequest
-  -> history policy applied
-  -> artifacts registered if needed
-  -> session message/event written
-  -> InteractionItem returned
-  -> channel bridge renders item
-```
+- output modules
+- authored tools
+- schedule runs
+- channel bridge logic
 
 ## History Policy
 
-The host decides whether a delivery is written to `messages.jsonl` and whether
-it is model-visible later:
-
-- `persist`
-- `model_hidden`
-- `transient`
-
-See [../reference/history-policy-and-delivery.md](../reference/history-policy-and-delivery.md).
+Persisted delivery becomes durable assistant history. Transient delivery is
+useful for progress, notices, and live-only output.
 
 ## Artifacts
 
-Media/file deliveries accept workspace paths, session paths, URLs, or
-host-returned `ArtifactRef` values. The host registers paths as artifacts before
-delivery.
+Artifacts are represented by host-owned records. Output modules may request
+artifact delivery, but the host owns paths, metadata, and persistence.
 
-## Route Context
+## Channels
 
-The inbound interaction supplies channel, conversation key, source, reply target
-and metadata. Async delivery uses this route context so output can return to the
-right channel conversation.
+Channel bridges adapt delivery into platform-specific messages. They also carry
+route context for scheduled and asynchronous delivery.
 
 ## Boundary
 
-Delivery requests are not platform sends. Channel bridges decide final
-rendering for TUI or Telegram.
+Do not let output modules write session history or channel state directly.

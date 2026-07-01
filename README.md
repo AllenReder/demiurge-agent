@@ -5,7 +5,7 @@
 <h1 align="center">Demiurge</h1>
 
 <p align="center">
-  <strong>Build self-evolving agents with independent Agent Cores, modular capabilities, and installable capability packages.</strong>
+  <strong>A local-first Python framework for file-backed, self-evolving Agent Cores.</strong>
 </p>
 
 <p align="center">
@@ -15,71 +15,70 @@
 
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">Website</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/">Docs Site</a> ·
-  <a href="docs/README.md">Docs</a> ·
-  <a href="docs/getting-started/quickstart.md">Quickstart</a> ·
-  <a href="docs/authoring/agent-core-layout.md">Authoring</a> ·
-  <a href="docs/operations/channels.md">Channels</a> ·
-  <a href="docs/concepts/security-model.md">Security</a>
+  <a href="https://allenreder.github.io/demiurge-agent/docs/">Manual</a> ·
+  <a href="docs/tutorials/first-local-run.md">First Run</a> ·
+  <a href="docs/tutorials/customize-agent-core.md">Customize a Core</a> ·
+  <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
+  <a href="docs/releases/0.3.3.md">Latest Release</a>
 </p>
 
-Demiurge is a Python agent framework for building self-evolving agents. Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.
+Demiurge is an alpha agent framework for building agents whose behavior lives in
+files and can evolve under host control. The host owns the runtime harness:
+sessions, turns, provider calls, tools, approvals, state, delivery, promotion,
+and rollback. An Agent Core owns the authored surface: `agent.yaml`, `SOUL.md`,
+slot modules, skills, tools, schedules, MCP declarations, tests, and local
+libraries.
 
-The host owns sessions, turns, provider calls, tools, approvals, state, delivery, promotion, and rollback, keeping capability evolution inside a clear runtime boundary.
+Use Demiurge when you want a local agent runtime where capabilities are
+installable and inspectable, but dangerous effects stay behind a stable host
+boundary.
 
-Status: **alpha / developer preview**. APIs, runtime layout, and authoring contracts may still change.
+Status: **alpha / developer preview**. Runtime layout, authoring contracts, and
+package behavior may still change before `1.0.0`.
 
-## Why Demiurge?
+## Start
 
-| Capability | What it means |
-| --- | --- |
-| Modular IO | Agent cores can shape input, format output, emit local artifacts, and route delivery without taking over host-owned capabilities or approvals. |
-| Controlled evolution | Core changes are designed to be file-backed, diffable, testable, and promotable through host-owned version controls. |
-| Host-owned harness | Provider calls, tool execution, approvals, state writes, sessions, and delivery stay under a stable runtime boundary. |
-| Authored surface | Agent behavior lives in readable files: `SOUL.md`, skills, tools, schedules, IO modules, optional MCP declarations, tests, and optional code slots. |
-| Capability packages | Reusable tools, IO modules, skills, libraries, and child cores can be installed into runtime agent cores through package recipes. |
-| Local-first runtime | Live cores, sessions, configuration, and non-local fallback workspace live under `~/.demiurge` by default. |
-
-The built-in `package-repository/` includes optional packages such as local
-memory, conversation style hints, context reseed notes, provider-specific web
-search, and provider-specific speech output for MiniMax, OpenAI, xAI, and
-Gemini. They install into runtime cores as composable
-bootstrap/input/output/tool/skill/lib components rather than changing source
-templates.
-
-## Quickstart
-
-Managed install is the default path. It creates a runtime home, installs the managed checkout, and starts with the fake provider:
+Managed install is the default user path:
 
 ```bash
 scripts/install.sh
 ~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
 ```
 
-This creates:
-
-- a managed checkout at `~/.demiurge/demiurge-agent`;
-- live runtime cores under `~/.demiurge/agents`;
-- the non-local fallback tool workspace at `~/.demiurge/workspace`.
-
-Update the managed checkout later:
+Source checkout development uses `uv`:
 
 ```bash
-~/.demiurge/demiurge-agent/.venv/bin/demiurge update
+uv sync --all-groups
+uv run demiurge --provider fake
 ```
 
-`demiurge update` updates code and dependencies, then runs a read-only runtime drift check. It does not overwrite live agent cores.
+The fake provider verifies the runtime without an API key. Use
+[`docs/tutorials/first-local-run.md`](docs/tutorials/first-local-run.md) for the
+full first-run path.
 
-## Agent Core and IO
+## Documentation Map
 
-An agent core is the authored surface under `~/.demiurge/agents/<core>/`: `agent.yaml` plus an `agent/` directory.
+| Goal | Start here |
+| --- | --- |
+| Run Demiurge locally | [First local run](docs/tutorials/first-local-run.md) |
+| Modify an Agent Core | [Customize an Agent Core](docs/tutorials/customize-agent-core.md) |
+| Build a package repository | [Create an external package repository](docs/tutorials/external-package-repository.md) |
+| Configure a real provider | [Configure a provider](docs/how-to/configure-provider.md) |
+| Install reusable capabilities | [Install packages](docs/how-to/install-packages.md) |
+| Read stable authoring rules | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
+| Inspect CLI behavior | [CLI reference](docs/reference/cli.md) |
+
+The hosted manual is available at
+[allenreder.github.io/demiurge-agent/docs](https://allenreder.github.io/demiurge-agent/docs/).
+
+## Core Shape
 
 ```text
 assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
-    ├── bootstrap/  # optional session-start context
+    ├── bootstrap/
     ├── input/
     ├── output/
     ├── tools/
@@ -90,72 +89,21 @@ assistant/
     └── tests/
 ```
 
-The host owns execution, provider calls, tools, approvals, state, sessions, and delivery. The core declares its soul, optional bootstrap context modules, skills, authored tools, channels, schedules, IO modules, optional MCP server tools, and optional code slots.
+The runtime copies source templates into `~/.demiurge/agents`. Edits to runtime
+cores are file-backed, diffable, and gateable. Package recipes install reusable
+components into those runtime cores without modifying the source templates.
 
-IO modules are core-local extension points for input shaping and output delivery. They let a core adapt channel input, format responses, emit local artifacts, or route output while still going through host-owned capabilities and approvals.
+The built-in package repository includes optional packages for local memory,
+conversation style hints, context reseed notes, provider-owned web search, and
+provider-specific speech output.
 
-MCP servers can be declared with `agent/mcp/*.yaml`. The core owns those declarations, while the host owns MCP transports, tool execution, capability checks, approvals, and logging.
+## Contributor Path
 
-See [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md), [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md), [docs/authoring/input-modules.md](docs/authoring/input-modules.md), and [docs/operations/channels.md](docs/operations/channels.md) for the full authoring model.
-
-## Evolution Boundary
-
-Demiurge treats an agent core as a versionable filesystem surface. The intended evolution path is to propose candidate core changes, evaluate them with tests or runtime checks, then promote or roll them back through the host.
-
-Authored slots should not bypass host-owned controls for dependency changes, dangerous capabilities, production state mutation, provider calls, or tool execution. This keeps agent behavior open to iteration without making the runtime loop itself self-modifying.
-
-## Configure a Real Provider
-
-Demiurge stores provider connection details in host config. Run the setup
-wizard to create a provider profile and set the active core model:
-
-```bash
-~/.demiurge/demiurge-agent/.venv/bin/demiurge setup
-```
-
-Scripted setup is available too:
-
-```bash
-uv run demiurge setup providers add openai --preset openai --set-default
-uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
-uv run demiurge --provider openai
-```
-
-Secrets may live in `~/.demiurge/.env`, environment variables, or direct host
-config values. `/status` shows secret sources, not secret values.
-
-## External Gateway
-
-Enable one or more channels in the target core:
-
-```yaml
-channels:
-  telegram:
-    enabled: true
-    bot_token_env: DEMIURGE_TELEGRAM_BOT_TOKEN
-  webhook:
-    enabled: true
-    token_env: DEMIURGE_WEBHOOK_TOKEN
-```
-
-Then run:
-
-```bash
-export DEMIURGE_TELEGRAM_BOT_TOKEN="..."
-export DEMIURGE_WEBHOOK_TOKEN="..."
-demiurge gateway --core assistant
-```
-
-The gateway supports Telegram, generic webhooks, Slack, Mattermost, Matrix, and email. Channels are disabled by default, secrets should live in environment variables, and inbound channels verify platform tokens/signatures before accepting input. Telegram access is deny-by-default; see [docs/operations/channels.md](docs/operations/channels.md) for all channel setup guides.
-
-## Developer Workflow
-
-For source checkout development:
+For local development:
 
 ```bash
 uv sync --all-groups
 uv run pytest
-uv run demiurge --provider fake
 ```
 
 If you change the TUI:
@@ -167,29 +115,12 @@ npm test -- --run
 npm run typecheck
 npm run build
 cd ..
+cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification workflow.
-
-## Documentation
-
-| Page | Purpose |
-| --- | --- |
-| [Project website](https://allenreder.github.io/demiurge-agent/) | Public project homepage and hosted documentation site. |
-| [Hosted docs](https://allenreder.github.io/demiurge-agent/docs/) | GitHub Pages version of the manual. |
-| [docs/README.md](docs/README.md) | User documentation index. |
-| [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | Install, initialize runtime home, and start the TUI. |
-| [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | Host-owned harness and agent-core authored-surface boundary. |
-| [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md) | Agent core layout and authored module roots. |
-| [docs/operations/channels.md](docs/operations/channels.md) | Local TUI and external gateway channel behavior. |
-| [docs/concepts/security-model.md](docs/concepts/security-model.md) | Workspace scope, approvals, and channel trust boundaries. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development and verification workflow. |
-| [RELEASE.md](RELEASE.md) | Release checklist. |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository workflow and verification
+rules.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
-## Acknowledgements
-
-Demiurge's design has been informed by [OpenClaw](https://github.com/openclaw/openclaw), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Eve](https://github.com/vercel/eve), and [OpenCode](https://github.com/anomalyco/opencode).

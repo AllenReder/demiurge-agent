@@ -3,7 +3,7 @@ import type {Options as ClassicPresetOptions, ThemeConfig} from '@docusaurus/pre
 
 const config: Config = {
   title: 'Demiurge',
-  tagline: 'Build self-evolving agents with independent Agent Cores, modular capabilities, and installable capability packages.',
+  tagline: 'Build file-backed, self-evolving Agent Cores under a host-owned runtime boundary.',
   favicon: 'img/demiurge-icon-rounded.png',
 
   url: 'https://allenreder.github.io',
@@ -82,13 +82,18 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/getting-started/quickstart',
-          label: 'Quickstart',
+          to: '/docs/tutorials/first-local-run',
+          label: 'First Run',
           position: 'left',
         },
         {
-          to: '/docs/authoring/agent-core-layout',
-          label: 'Authoring',
+          to: '/docs/reference/contracts/authored-surface',
+          label: 'Contracts',
+          position: 'left',
+        },
+        {
+          to: '/docs/tutorials/external-package-repository',
+          label: 'Packages',
           position: 'left',
         },
         {
@@ -109,33 +114,33 @@ const config: Config = {
           title: 'Docs',
           items: [
             {
-              label: 'Quickstart',
-              to: '/docs/getting-started/quickstart',
+              label: 'First Run',
+              to: '/docs/tutorials/first-local-run',
             },
             {
-              label: 'Agent Core',
-              to: '/docs/concepts/host-and-agent-core',
+              label: 'Customize a Core',
+              to: '/docs/tutorials/customize-agent-core',
             },
             {
-              label: 'Authoring',
-              to: '/docs/authoring/agent-core-layout',
+              label: 'Contracts',
+              to: '/docs/reference/contracts/authored-surface',
             },
           ],
         },
         {
-          title: 'Operations',
+          title: 'How-to',
           items: [
             {
-              label: 'Configuration',
-              to: '/docs/operations/configuration',
+              label: 'Provider Setup',
+              to: '/docs/how-to/configure-provider',
             },
             {
-              label: 'Telegram',
-              to: '/docs/operations/telegram',
+              label: 'Packages',
+              to: '/docs/how-to/install-packages',
             },
             {
               label: 'Security',
-              to: '/docs/concepts/security-model',
+              to: '/docs/explanation/security-model',
             },
           ],
         },

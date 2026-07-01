@@ -1,68 +1,81 @@
+---
+title: slot.yaml Reference
+description: Reference for bootstrap, input, output, and authored tool slot metadata.
+---
+
 # `slot.yaml` Reference
 
-Slots describe input modules, output modules, bootstrap modules, and authored
-tools. The slot directory name is the slot id.
+Slots are discovered from directories under configured slot roots. A slot
+directory is loaded only when it contains `slot.yaml`.
 
 ## Module Slot
 
 ```yaml
 entrypoint: module:process
-description: "Short human-readable description."
-failure_policy: soft
-history_policy: transient
+description: "Adds a short current-turn hint."
 capabilities: []
-timeout_seconds: null
+timeout_seconds: 10
+failure_policy: soft
+default_placement: pre_current_user
+history_policy: persist
 ```
 
-Fields:
-
-| Field | Purpose |
-| --- | --- |
-| `entrypoint` | Python callable in `module:function` form. |
-| `description` | Human-readable summary. |
-| `failure_policy` | `soft` continues after failure; `hard` blocks the phase/turn. |
-| `history_policy` | Default for delivery calls from this slot. |
-| `capabilities` | Host capabilities granted to this slot. |
-| `timeout_seconds` | Optional execution timeout. |
-| `default_placement` | Default context placement for input contributions. |
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `entrypoint` | `null` | Python entrypoint in `module:function` form. |
+| `description` | `""` | Human and model-facing description. |
+| `capabilities` | `[]` | Host capabilities requested by the slot. |
+| `timeout_seconds` | `null` | Optional timeout for the slot. |
+| `failure_policy` | `soft` | Failure behavior. Use `hard` only for required slots. |
+| `default_placement` | `pre_current_user` | Default input placement for input modules. |
+| `history_policy` | `persist` | Default output history policy. |
 
 ## Authored Tool Slot
 
 ```yaml
-entrypoint: module:run
+entrypoint: module:execute
 description: "Return project information."
 input_schema:
   type: object
   properties:
     topic:
       type: string
-  required:
-    - topic
+  additionalProperties: false
 capabilities: []
-risk: medium
-approval_policy: prompt
-model_output_policy: content
-display_policy: summary
-enabled: true
 ```
 
-Tool-specific fields:
+Authored tools use `execute(ctx, args)` and return a `ToolResult` or compatible
+result.
 
-| Field | Purpose |
-| --- | --- |
-| `input_schema` | Model-facing JSON schema. |
-| `risk` | `low`, `medium`, `high`, or `critical`. |
-| `approval_policy` | `auto`, `prompt`, or `deny`. |
-| `capability` | Optional explicit capability name. |
-| `model_output_policy` | How tool output enters model context. |
-| `display_policy` | UI display preference. |
-| `enabled` | Whether the tool is exposed. |
+## Pipeline Files
 
-## Success Check
+Input and output pipelines support `serial` and `parallel`:
 
-```bash
-uv run demiurge init --check
-uv run demiurge --provider fake
+```yaml
+serial:
+  - base_input
+parallel: []
 ```
 
-Use `/tools` for authored tools and `/events` for module failures.
+Bootstrap pipelines support only `serial`:
+
+```yaml
+serial:
+  - session_context
+```
+
+The loader rejects unknown pipeline keys, duplicate slot ids, and unknown slot
+ids.
+
+## Discovery Rules
+
+- Slot id is the directory name.
+- Slot roots are configured in `agent.yaml` `slots`.
+- Non-directory children are ignored.
+- Directories without `slot.yaml` are ignored.
+- Duplicate slot ids for the same kind are rejected.
+
+## Boundary
+
+`slot.yaml` declares metadata. It does not grant effects by itself; effects are
+checked by the host capability and approval system.

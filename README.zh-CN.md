@@ -5,7 +5,7 @@
 <h1 align="center">Demiurge - 德谬歌</h1>
 
 <p align="center">
-  <strong>自由打造会自我进化的 Agent。</strong>
+  <strong>用于文件化、自进化 Agent Core 的 local-first Python framework。</strong>
 </p>
 
 <p align="center">
@@ -15,64 +15,68 @@
 
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">网站</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/">文档站</a> ·
-  <a href="docs/README.md">文档</a> ·
-  <a href="docs/getting-started/quickstart.md">快速开始</a> ·
-  <a href="docs/authoring/agent-core-layout.md">Core 编写</a> ·
-  <a href="docs/operations/channels.md">Channels</a> ·
-  <a href="docs/concepts/security-model.md">安全模型</a>
+  <a href="https://allenreder.github.io/demiurge-agent/docs/">手册</a> ·
+  <a href="docs/tutorials/first-local-run.md">首次运行</a> ·
+  <a href="docs/tutorials/customize-agent-core.md">修改 Core</a> ·
+  <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
+  <a href="docs/releases/0.3.3.md">最新发布</a>
 </p>
 
-Demiurge 是一个用于打造会自我进化的 Agent 的 Python agent framework。独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。
+Demiurge 是一个 alpha 阶段的 agent framework。agent 行为保存在文件中，
+并通过 host 控制的版本、审批和 gate 流程进行演进。host 负责 runtime
+harness：session、turn、provider 调用、工具、审批、状态、delivery、
+promotion 和 rollback。Agent Core 负责 authored surface：`agent.yaml`、
+`SOUL.md`、slot modules、skills、tools、schedules、MCP declarations、tests
+和本地库。
 
-host 负责 session、turn、provider 调用、工具、审批、状态、delivery、promotion 和 rollback，让能力进化始终发生在清晰的 runtime 边界内。
+如果你希望 agent 能安装、组合、检查能力，同时又不让危险效果绕过 runtime
+边界，Demiurge 就是为这个方向设计的。
 
-状态：**alpha / developer preview**。API、runtime 布局和 authoring contract 仍可能变化。
+状态：**alpha / developer preview**。在 `1.0.0` 之前，runtime layout、
+authoring contracts 和 package behavior 都仍可能变化。
 
-## 为什么是 Demiurge？
+## 开始
 
-| 能力 | 含义 |
-| --- | --- |
-| 可拓展 IO | Agent core 可以整理输入、格式化输出、生成本地 artifact、路由 delivery，而不接管 host 拥有的 capabilities 和 approvals。 |
-| 受控进化 | Core 变更以文件为边界，天然可 diff、可测试，并通过 host 拥有的版本控制进行 promote 或 rollback。 |
-| Host-owned harness | Provider 调用、工具执行、审批、状态写入、session 和 delivery 始终处在稳定 runtime 边界内。 |
-| Authored surface | Agent 行为存在于可读文件中：`SOUL.md`、skills、tools、schedules、IO modules、可选 MCP declarations、tests 和可选 code slots。 |
-| 能力包管理 | 可复用的 tools、IO modules、skills、libraries 和子 Core 可以通过 package recipes 安装进 runtime agent core。 |
-| Local-first runtime | live cores、sessions、配置和 workspace 默认放在本机 `~/.demiurge` 下。 |
-
-## 快速开始
-
-默认推荐 managed install。它会创建 runtime home、安装 managed checkout，并用 fake provider 启动：
+默认用户路径是 managed install：
 
 ```bash
 scripts/install.sh
 ~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
 ```
 
-这会创建：
-
-- managed checkout：`~/.demiurge/demiurge-agent`
-- live runtime cores：`~/.demiurge/agents`
-- 默认工具 workspace：`~/.demiurge/workspace`
-
-后续更新 managed checkout：
+源码 checkout 开发使用 `uv`：
 
 ```bash
-~/.demiurge/demiurge-agent/.venv/bin/demiurge update
+uv sync --all-groups
+uv run demiurge --provider fake
 ```
 
-`demiurge update` 会更新代码和依赖，然后运行只读 runtime drift check。它不会覆盖 live agent cores。
+fake provider 不需要 API key，适合先验证 runtime。完整路径见
+[first local run](docs/tutorials/first-local-run.md)。
 
-## Agent Core 和 IO
+## 文档入口
 
-agent core 是 `~/.demiurge/agents/<core>/` 下的 authored surface：`agent.yaml` 加一个 `agent/` 目录。
+| 目标 | 入口 |
+| --- | --- |
+| 本地运行 Demiurge | [First local run](docs/tutorials/first-local-run.md) |
+| 修改 Agent Core | [Customize an Agent Core](docs/tutorials/customize-agent-core.md) |
+| 创建外部 package repository | [Create an external package repository](docs/tutorials/external-package-repository.md) |
+| 配置真实 provider | [Configure a provider](docs/how-to/configure-provider.md) |
+| 安装可复用能力 | [Install packages](docs/how-to/install-packages.md) |
+| 阅读稳定 authoring 规则 | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
+| 查看 CLI 行为 | [CLI reference](docs/reference/cli.md) |
+
+托管手册位于
+[allenreder.github.io/demiurge-agent/docs](https://allenreder.github.io/demiurge-agent/docs/)。
+
+## Core 结构
 
 ```text
 assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
-    ├── bootstrap/  # 可选 session-start context
+    ├── bootstrap/
     ├── input/
     ├── output/
     ├── tools/
@@ -83,72 +87,15 @@ assistant/
     └── tests/
 ```
 
-host 负责执行、provider 调用、工具、审批、状态、session 和 delivery。core 声明 soul、可选 bootstrap context modules、skills、authored tools、channels、schedules、IO modules、可选 MCP server tools 和可选 code slots。
+runtime 会把 source templates 复制到 `~/.demiurge/agents`。runtime core
+的改动是文件化、可 diff、可 gate 的。Package recipes 会把可复用组件安装进
+runtime cores，不修改 source templates。
 
-IO modules 是 core-local 的 input shaping 和 output delivery 扩展点。它们让 core 能适配 channel input、格式化回复、产生本地 artifact，或路由 output，同时仍经过宿主负责的 capabilities 和 approvals。
-
-MCP servers 可以通过 `agent/mcp/*.yaml` 声明。core 拥有这些声明；MCP transports、tool execution、capability checks、approvals 和 logging 仍由 host 拥有。
-
-完整 authoring model 见 [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md)、[docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md)、[docs/authoring/input-modules.md](docs/authoring/input-modules.md) 和 [docs/operations/channels.md](docs/operations/channels.md)。
-
-## 进化边界
-
-Demiurge 把 agent core 当作可版本化的文件系统 surface。预期的进化路径是：先提出候选 core 变更，用测试或 runtime check 评估，再由 host 负责 promote 或 rollback。
-
-authored slots 不应绕过 host 对 dependency change、危险 capability、production state mutation、provider 调用或工具执行的控制。这样 agent 行为可以持续迭代，但 runtime loop 本身不会变成随意自修改的对象。
-
-## 配置真实 Provider
-
-Demiurge 把 provider 连接细节保存在 host config。使用 setup 向导创建
-provider profile，并设置当前 core 的模型：
-
-```bash
-~/.demiurge/demiurge-agent/.venv/bin/demiurge setup
-```
-
-也可以使用脚本化命令：
-
-```bash
-uv run demiurge setup providers add openai --preset openai --set-default
-uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
-uv run demiurge --provider openai
-```
-
-密钥可以放在 `~/.demiurge/.env`、环境变量或 host config 明文字段中。
-`/status` 只显示密钥来源，不显示密钥值。
-
-## External Gateway
-
-在目标 core 中启用一个或多个 channel：
-
-```yaml
-channels:
-  telegram:
-    enabled: true
-    bot_token_env: DEMIURGE_TELEGRAM_BOT_TOKEN
-  webhook:
-    enabled: true
-    token_env: DEMIURGE_WEBHOOK_TOKEN
-```
-
-然后运行：
-
-```bash
-export DEMIURGE_TELEGRAM_BOT_TOKEN="..."
-export DEMIURGE_WEBHOOK_TOKEN="..."
-demiurge gateway --core assistant
-```
-
-Gateway 支持 Telegram、通用 webhook、Slack、Mattermost、Matrix 和 email。所有 channel 默认关闭，密钥应放在环境变量中，外部输入会先校验平台 token/signature。Telegram 默认拒绝未授权访问；完整配置见 [docs/operations/channels.md](docs/operations/channels.md)。
-
-## 开发者工作流
-
-源码 checkout 开发：
+## 开发者路径
 
 ```bash
 uv sync --all-groups
 uv run pytest
-uv run demiurge --provider fake
 ```
 
 如果修改 TUI：
@@ -160,29 +107,11 @@ npm test -- --run
 npm run typecheck
 npm run build
 cd ..
+cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 ```
 
-完整验证流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 文档
-
-| 页面 | 内容 |
-| --- | --- |
-| [项目网站](https://allenreder.github.io/demiurge-agent/) | 公开项目首页和托管文档站入口。 |
-| [托管文档](https://allenreder.github.io/demiurge-agent/docs/) | GitHub Pages 上的手册版本。 |
-| [docs/README.md](docs/README.md) | 用户文档入口。 |
-| [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) | 安装、初始化 runtime home 和启动 TUI。 |
-| [docs/concepts/host-and-agent-core.md](docs/concepts/host-and-agent-core.md) | host-owned harness 和 agent-core authored surface 边界。 |
-| [docs/authoring/agent-core-layout.md](docs/authoring/agent-core-layout.md) | agent core 目录结构和 authored module roots。 |
-| [docs/operations/channels.md](docs/operations/channels.md) | 本地 TUI 和外部 gateway channel 行为。 |
-| [docs/concepts/security-model.md](docs/concepts/security-model.md) | workspace scope、审批和 channel trust boundary。 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发与验证流程。 |
-| [RELEASE.md](RELEASE.md) | 发布检查清单。 |
+仓库工作流和验证规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-
-## 鸣谢
-
-Demiurge 的设计受到 [OpenClaw](https://github.com/openclaw/openclaw)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)、[Eve](https://github.com/vercel/eve) 和 [OpenCode](https://github.com/anomalyco/opencode) 的启发。

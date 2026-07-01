@@ -1,46 +1,66 @@
+---
+title: Package Recipe Reference
+description: Reference for package repository recipes and components.
+---
+
 # Package Recipe Reference
 
 Package recipes live under:
 
 ```text
-package-repository/packages/<package_id>.yaml
+packages/<package_id>.yaml
 ```
 
-They describe installable component sets for runtime cores.
+They describe files to install into runtime Agent Cores.
 
 ## Recipe Shape
 
 ```yaml
 schema_version: 2
-id: minimax_tts
-name: MiniMax TTS
-summary: Generate speech audio with MiniMax.
+id: reply_style
+name: Reply Style
+summary: Add a reply style input module.
 tags:
-  - audio
-  - tts
+  - style
 manual_dependencies: []
 options:
-  - id: mode
+  - id: tone
     type: choice
-    description: Choose direct or summary mode.
+    prompt: Tone
+    description: Choose the reply tone.
     default: direct
     choices:
       - value: direct
-        description: Generate speech from the assistant reply.
-      - value: summary
-        description: Summarize before generating speech.
+        description: Prefer direct answers.
+      - value: detailed
+        description: Prefer detailed answers.
 components:
-  - id: tts_output
-    kind: output
-    source: tts_minimax
-    target: agent/output/tts_minimax
+  - id: reply_style_input
+    kind: input
+    source: reply_style
+    target: agent/input/reply_style
     pipeline:
-      group: parallel
+      before: base_input
+    config:
+      tone: ${options.tone}
 ```
+
+## Top-Level Fields
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Recipe schema version. Current built-in recipes use `2`. |
+| `id` | Package id. Must be unique in the repository. |
+| `name` | Display name. |
+| `summary` | Short package summary. |
+| `tags` | List of string tags. |
+| `manual_dependencies` | Warning strings for dependencies Demiurge will not install. |
+| `options` | User-provided install options. |
+| `components` | Files or cores to install. |
 
 ## Option Types
 
-Supported types:
+Supported option types:
 
 - `string`
 - `bool`
@@ -48,62 +68,54 @@ Supported types:
 - `path`
 - `secret`
 
-Secret option values may be written to target component config, but
-`packages.yaml` records only `<redacted>`.
+`choice` options require `choices`. Secret values are redacted in
+`packages.yaml`.
 
 ## Component Kinds
 
-| Kind | Target |
+| Kind | Default target root |
 | --- | --- |
-| `bootstrap` | `agent/bootstrap/<slot_id>` |
-| `input` | `agent/input/<slot_id>` |
-| `output` | `agent/output/<slot_id>` |
-| `tool` | `agent/tools/<tool_id>` |
-| `skill` | `agent/skills/<skill_id>` |
-| `lib` | `agent/lib/<name>` |
-| `core` | another runtime active core identified by `target_core_id` |
+| `bootstrap` | `agent/bootstrap` |
+| `input` | `agent/input` |
+| `output` | `agent/output` |
+| `tool` | `agent/tools` |
+| `skill` | `agent/skills` |
+| `lib` | `agent/lib` |
+| `core` | Another runtime core by `target_core_id`. |
 
-For core-local component kinds, `target` is the runtime-core-relative path to
-write. For `kind: core`, use `target_core_id`; `target` is ignored.
+## Component Fields
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Component id, unique within the recipe. |
+| `kind` | Component kind. |
+| `source` | Repository-relative component source id. |
+| `target` | Runtime-core-relative target path for core-local kinds. |
+| `target_core_id` | Target core id for `kind: core`. |
+| `pipeline` | Pipeline edit for bootstrap/input/output components. |
+| `config` | Config written into the installed component. |
+| `when` | Option condition that includes or skips the component. |
+| `config_when` | Conditional config merge list. |
 
 ## Conditions and Config
 
-`when` includes or skips a component based on resolved option values.
-`config_when` conditionally merges extra config into a component config.
-Config values can reference options with `${options.<id>}`.
+`when` maps option ids to expected values. `config_when` merges extra config
+when its condition matches.
+
+Config values can reference an option exactly:
+
+```yaml
+api_key: ${options.api_key}
+```
+
+or inside strings where supported by the installer.
 
 ## Validation Rules
 
 - Component sources must stay inside the package repository.
 - Component sources cannot be symlinks.
-- Existing target paths are rejected unless reused by another installed package
-  with the same source and target.
-- Pipeline edits are allowed only for bootstrap/input/output components.
+- Existing targets are rejected unless reused by another installed package with
+  the same source and target.
+- Pipeline edits are allowed only for `bootstrap`, `input`, and `output`.
 - Bootstrap pipeline edits are serial-only.
-- `manual_dependencies` entries are warnings only; Demiurge does not install
-  Python dependencies or edit the host lock file.
-
-## Recipe Examples
-
-`conversation_style` is a small input + skill recipe: it inserts an input module
-before `base_input`, writes option-backed `config.yaml`, and installs a
-progressive style skill.
-
-`context_reseed` combines lib + output + bootstrap + skill components: the output
-slot refreshes a bounded continuity note, while the bootstrap slot reads that
-note as reference-only session context.
-
-A core component recipe uses `target_core_id`:
-
-```yaml
-components:
-  - id: tts_summarizer
-    kind: core
-    source: tts_summarizer
-    target_core_id: tts_summarizer
-```
-
-## Boundary
-
-Recipes describe runtime file installation. They do not install Python
-dependencies or edit the host uv lock.
+- Recipes do not install Python dependencies or edit the host lock file.

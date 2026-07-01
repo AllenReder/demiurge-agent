@@ -1,62 +1,51 @@
-# Package Installer Internals
+---
+title: Package Installer
+description: Contributor notes for package repository loading, previews, installs, and uninstalls.
+---
 
-The package manager installs reusable package repository components into runtime cores.
-It does not modify source templates or manage Python dependencies.
+# Package Installer
 
-## Repository Load
+The package installer manages user-controlled runtime-core edits from package
+repositories.
 
-`PackageRepository.load()` reads one repository root:
+## Load
 
-```text
-package-repository/repository.yaml
-package-repository/packages/*.yaml
-```
-
-`load_package_repository_collection()` resolves configured repositories from
-host config, then loads the ready repositories. It validates package ids,
-options, component sources, conditions, and duplicate targets. Component sources
-must stay inside their repository and cannot be symlinks.
-
-Repository source definitions live in `<home>/config.yaml` under
-`packages.repositories`. Git caches live under
-`<home>/package-repositories/<alias>/`.
-
-## Preview Flow
+The loader reads:
 
 ```text
-resolve package
-  -> normalize option answers
-  -> apply when/config_when
-  -> render config
-  -> plan component targets
-  -> validate pipeline inserts and target conflicts
-  -> return PackageOperationPreview
+repository.yaml
+packages/*.yaml
 ```
 
-Preview does not write files.
+It validates repository identity, package ids, options, components, conditions,
+and component source paths.
 
-## Install Flow
+## Preview
 
-Install copies components into the active runtime core, writes optional
-`config.yaml` files, inserts bootstrap/input/output pipeline entries, installs
-child cores when requested, and records ownership in:
+Preview resolves:
 
-```text
-~/.demiurge/agents/<core>/packages.yaml
-```
+- package reference
+- selected options
+- included components
+- config writes
+- pipeline edits
+- warnings
+- target paths
 
-If install fails after copying components, copied non-reused components are
-removed in reverse order.
+Preview must not write runtime files.
 
-## Uninstall Flow
+## Install
 
-Uninstall reads `packages.yaml`, removes owned components and pipeline entries,
-and keeps reused shared targets until the final referencing package is removed.
-Repository sources are not removed by uninstall.
+Install copies component files, writes component `config.yaml` when needed,
+applies pipeline edits, installs child cores when requested, and records state
+in the target core's `packages.yaml`.
+
+## Uninstall
+
+Uninstall removes package-owned component targets and updates `packages.yaml`.
+It should not delete package data written outside component-owned targets.
 
 ## Boundary
 
-Package recipes can install files and edit bootstrap/input/output pipelines.
-Bootstrap pipelines are serial-only. Recipes do not run migrations, install host
-dependencies, edit `uv.lock`, or create git commits. Manual dependencies are
-warnings only.
+The installer does not install dependencies or edit `uv.lock`. Use
+`manual_dependencies` for dependency review warnings.

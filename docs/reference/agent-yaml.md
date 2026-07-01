@@ -1,171 +1,137 @@
+---
+title: agent.yaml Reference
+description: Reference for global fallback and concrete Agent Core manifests.
+---
+
 # `agent.yaml` Reference
 
-There are two different `agent.yaml` roles.
+`agent.yaml` appears in two roles:
 
-## Global Fallback Config
+- `~/.demiurge/agents/agent.yaml` is a global fallback layer.
+- `~/.demiurge/agents/<core>/agent.yaml` is a concrete Agent Core manifest.
 
-Path:
+The fallback file is not an Agent Core. It provides defaults.
 
-```text
-~/.demiurge/agents/agent.yaml
-```
-
-Allowed top-level fields:
-
-- `model`
-- `ui`
-- `approval`
-
-Do not put concrete agent-bound fields here.
-
-Example:
-
-```yaml
-model:
-  provider: auto
-  model_name: null
-  model_options: {}
-ui:
-  tool_display: summary
-approval:
-  tools:
-    terminal: prompt
-```
-
-## Concrete Core Config
-
-Path:
-
-```text
-~/.demiurge/agents/<core>/agent.yaml
-```
-
-Common top-level fields:
-
-- `schema_version`
-- `agent`
-- `runtime`
-- `model`
-- `ui`
-- `channels`
-- `slots`
-- `tools`
-- `approval`
-- `capabilities`
-- `dependencies`
-- `tests`
-
-Minimal shape:
+## Concrete Core Shape
 
 ```yaml
 schema_version: 1
 agent:
   id: assistant
-  version: 0.1.0
-  summary: Local assistant
+  version: "0001"
+  parent: null
+  summary: "Initial Demiurge assistant core."
 runtime:
   surface_root: agent
   max_model_steps: 90
+  workspace: null
+model:
+  provider: auto
+  model_name: null
+  model_options: {}
+ui:
+  tool_display: null
+channels: {}
 slots:
+  soul: agent/SOUL.md
   input: agent/input
   output: agent/output
   tools: agent/tools
   skills: agent/skills
+  mcp: agent/mcp
+  schedules: agent/schedules
 tools:
   toolsets:
     - coding
     - demiurge_control
     - schedule
-capabilities:
-  defaults: {}
+  metadata: {}
+approval:
+  default: null
+  tools: {}
+  capabilities: {}
+  risks: {}
+capabilities: {}
+dependencies:
+  mode: host_shared
+  allow_additional_dependencies: false
+tests:
+  commands: []
+  smoke:
+    fake_llm_script: agent/tests/fixtures/fake_llm/basic_turn.json
+```
+
+## Top-Level Fields
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Manifest schema version. Current default is `1`. |
+| `agent` | Core identity and version metadata. Required for concrete cores. |
+| `runtime` | Runtime parameters owned by the host. |
+| `model` | Provider and model defaults. |
+| `ui` | UI preferences such as tool display level. |
+| `channels` | External channel configuration. |
+| `slots` | Core-relative authored surface roots. |
+| `tools` | Built-in toolsets and tool metadata overrides. |
+| `approval` | Approval policy overrides. |
+| `capabilities` | Capability configuration. |
+| `dependencies` | Runtime dependency mode. |
+| `tests` | Candidate test and smoke metadata. |
+
+## Runtime Fields
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `surface_root` | `agent` | Directory containing the authored surface. |
+| `max_model_steps` | `90` | Maximum model/tool loop steps. |
+| `workspace` | `null` | Core default workspace for non-local runs. |
+
+`runtime.workspace` must be a non-empty string or `null`.
+
+## Model Fields
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | Provider profile id, `auto`, `fake`, or `null`. |
+| `model_name` | Model name override for this core. |
+| `model_options` | Provider-specific options passed by the host. |
+
+## Toolsets
+
+Built-in toolsets:
+
+| Toolset | Includes |
+| --- | --- |
+| `coding` | File, terminal, search, process, web extract, skills, todo, clarify, session search. |
+| `demiurge_control` | `tools_list`, `evolve_core`, `rollback_core`. |
+| `schedule` | `schedule_manage`. |
+
+## Channel Sections
+
+Supported channel names:
+
+- `telegram`
+- `webhook`
+- `slack`
+- `mattermost`
+- `matrix`
+- `email`
+
+Unknown channel configs are loaded as disabled or opaque configs, but only known
+channel types have runtime bridges.
+
+## Dependency Fields
+
+```yaml
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
 ```
 
-## Runtime Fields
-
-`runtime.max_model_steps` supports `1..90`; default and hard limit are `90`.
-
-`runtime.workspace` is optional. Relative paths resolve from the runtime core
-directory. It is mainly for gateway, Telegram, scheduler, and other non-local
-channel runs.
-
-## Model Fields
-
-Core model config selects a host provider profile and model name:
-
-```yaml
-model:
-  provider: deepseek
-  model_name: deepseek-v4-pro
-  model_options: {}
-```
-
-`model.provider` is a provider profile id from host config, or `auto`/`fake`.
-`model.model_name` is a free-form provider model id. Provider endpoints and API
-keys belong in `~/.demiurge/config.yaml` provider profiles, not in
-`agent.yaml`.
-
-## Channel Fields
-
-External channel configs live under `channels.<name>`. Supported names are
-`telegram`, `webhook`, `slack`, `mattermost`, `matrix`, and `email`. Each channel
-is disabled by default and should read secrets from environment variables.
-
-```yaml
-channels:
-  telegram:
-    enabled: true
-    bot_token_env: DEMIURGE_TELEGRAM_BOT_TOKEN
-    allowed_users: [123456789]
-    allowed_chats: []
-    reply_to_mode: "off"
-  webhook:
-    enabled: false
-    token_env: DEMIURGE_WEBHOOK_TOKEN
-    host: 127.0.0.1
-    port: 8765
-    path: /demiurge
-    delivery_targets: {}
-  slack:
-    enabled: false
-    bot_token_env: SLACK_BOT_TOKEN
-    signing_secret_env: SLACK_SIGNING_SECRET
-    host: 127.0.0.1
-    port: 8766
-    path: /slack/events
-    allowed_channels: []
-  mattermost:
-    enabled: false
-    base_url: https://mattermost.example.com
-    token_env: MATTERMOST_BOT_TOKEN
-    webhook_token_env: MATTERMOST_WEBHOOK_TOKEN
-    allowed_channels: []
-  matrix:
-    enabled: false
-    homeserver_url: https://matrix.example.org
-    access_token_env: MATRIX_ACCESS_TOKEN
-    user_id: "@demiurge:example.org"
-    allowed_rooms: []
-  email:
-    enabled: false
-    smtp_host: smtp.example.com
-    imap_host: imap.example.com
-    smtp_username_env: DEMIURGE_SMTP_USERNAME
-    smtp_password_env: DEMIURGE_SMTP_PASSWORD
-    imap_username_env: DEMIURGE_IMAP_USERNAME
-    imap_password_env: DEMIURGE_IMAP_PASSWORD
-    allowed_senders: []
-    allowed_recipients: []
-```
-
-Schedules use `delivery.mode: telegram` plus `chat_id` for Telegram, or
-`delivery.mode: <channel>` plus `target` for the other external channels.
-Schedule cron expressions use the host runtime timezone; there is no
-timezone field on individual schedule files.
+`host_shared` is the default runtime mode. Candidate cores must not add Python
+dependencies automatically.
 
 ## Boundary
 
-`dependencies.mode` defaults to `host_shared`. Candidate cores cannot
-automatically add Python dependencies.
+`agent.yaml` is core-owned configuration. It does not give slots permission to
+own provider calls, dependency installation, promotion, rollback, or host state.

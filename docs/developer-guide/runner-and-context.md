@@ -1,72 +1,54 @@
+---
+title: Runner and Context
+description: Contributor notes for turn execution and provider context assembly.
+---
+
 # Runner and Context
 
-The runner owns session, turn, phase, model-step, tool-call, and output
-execution. Agent cores provide declarations and code slots; the runner decides
-when and how they execute.
+The runner owns the turn lifecycle. Agent Core slots participate through
+controlled interfaces; they do not own the lifecycle.
 
-## Runner Responsibilities
-
-`SessionTurnStepRunner` coordinates:
-
-- session creation/resume;
-- bootstrap snapshot generation;
-- input pipeline execution;
-- context assembly;
-- provider requests;
-- tool-call/result loop;
-- output pipeline execution;
-- delivery and event recording;
-- child core `run`/`spawn` calls.
-
-## Phase Order
+## Turn Flow
 
 ```text
-ensure session
-  -> run bootstrap once if configured
-  -> run input serial then parallel
-  -> assemble context
+inbound interaction
+  -> create or resume session
+  -> run bootstrap when needed
+  -> run input pipeline
+  -> assemble provider context
   -> call provider
-  -> execute requested tools
-  -> repeat until final response or max_model_steps
-  -> run output serial then parallel
-  -> return TurnResult
+  -> execute tool calls through ToolRuntime
+  -> continue model/tool loop until final response
+  -> run output pipeline
+  -> record deliveries and session events
 ```
-
-Provider responses are completed before output modules run. User-visible text
-is delivered by output modules through the host IO surface; the runner does not
-send provider token deltas directly to channels.
 
 ## Context Layers
 
-`ContextAssembler` builds provider messages in this order:
+Provider context can include:
 
-1. core soul;
-2. skill index;
-3. bootstrap context;
-4. input contributions with `system_context` placement;
-5. compaction summary;
-6. input contributions with `pre_history` placement;
-7. session history;
-8. input contributions with `pre_current_user` placement;
-9. current turn and `post_current_user` contributions.
+- soul text
+- skill index and loaded skills
+- bootstrap output
+- input module placements
+- session history
+- current user turn
+- tool call and tool result history
 
-System layers are merged into one provider-facing `role="system"` message by
-joining their contents with newlines and no added headings.
+The context assembler decides final provider message order and content.
 
-## Tool Calls in History
+## Bootstrap
 
-Assistant tool-call steps and tool results are written by the host so later
-provider requests can reconstruct valid tool-call/result pairs. Tool results
-are usually hidden from the user but model-visible.
+Bootstrap modules are session-start context producers. They should be stable
+within a session and safe to quote as reference context.
 
-## Bootstrap Snapshot
+## Failure Handling
 
-Bootstrap context is a system-prompt layer, not a transcript message. It is
-stored in `bootstrap_context.md`, reused on resume, and not compacted.
+Slot `failure_policy` determines whether a failed slot is soft or hard. Provider
+errors, tool errors, channel delivery errors, and schedule errors are handled at
+their host-owned layers.
 
-## Failure Modes
+## Boundary
 
-- Missing input/output pipeline blocks core load.
-- Hard bootstrap or module failures block the relevant model request/phase.
-- A schedule run that requests user input is recorded as an error.
-- Exceeding `max_model_steps` stops the model loop.
+Do not move provider request construction or session ownership into Agent Core
+code.

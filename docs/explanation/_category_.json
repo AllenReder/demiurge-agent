@@ -1,0 +1,8 @@
+{
+  "label": "Explanation",
+  "position": 3,
+  "link": {
+    "type": "generated-index",
+    "description": "Conceptual documentation for understanding the Demiurge runtime model."
+  }
+}

@@ -1,66 +1,43 @@
-# Scheduler Internals
+---
+title: Scheduler
+description: Contributor notes for host-owned schedule claims and runs.
+---
 
-The scheduler is host-owned. Agent cores declare schedules, but the host claims,
-runs, logs, and delivers them.
+# Scheduler
+
+Schedules are declared by Agent Cores and executed by the host.
 
 ## Runtime Files
 
+Core-authored schedules live under:
+
 ```text
-~/.demiurge/scheduler/<core_id>/
-  state.json
-  runs.jsonl
-  lock
+agent/schedules/*.yaml
 ```
 
-`state.json` stores next-run state and schedule signatures. `runs.jsonl` stores
-claim/completion/error events. `lock` prevents overlapping claims.
+Host scheduler state lives under:
 
-Cron is evaluated in the app's resolved runtime timezone. State and run logs
-store UTC instants plus local formatted fields and the runtime timezone name, so
-changing the host runtime timezone resets next-run state for the affected
-schedule.
+```text
+~/.demiurge/scheduler/<core_id>/
+```
 
 ## Claim Flow
 
-```text
-load active core
-  -> scan enabled schedules
-  -> compare signature and next_run_at
-  -> claim one due run under file lock
-  -> advance next_run_at
-  -> run fresh session
-  -> record completed/error
-```
-
-If a schedule signature changes, the scheduler resets next run state and does
-not immediately run the changed schedule.
-
-Long-running TUI and gateway processes start the scheduler loop even when the
-active core has no schedules yet. This lets newly authored schedule YAML become
-visible on a later scan without restarting the process.
+The scheduler computes due times from cron expressions and runtime timezone.
+When a schedule is due, the host records a claim and advances the next run time.
 
 ## Run Flow
 
-Each claimed run creates a fresh `SessionTurnStepRunner` with a schedule session
-id. The prompt becomes `raw_input.text`. Metadata includes trigger, schedule id,
-run id, UTC due/scheduled times, local due/scheduled times, runtime timezone
-source, and delivery mode.
-
-Schedule module lists are serial-only overrides for that run. They do not run
-the full core pipeline or parallel modules.
+Each run creates a fresh scheduled session with synthetic inbound metadata. The
+runner executes the schedule prompt using the schedule-selected input and output
+modules.
 
 ## Delivery
 
-`local` delivery records session output and scheduler logs only. External
-channel delivery validates the target against the same core's channel config and
-routes output through the active gateway bridge when available. If the scheduler
-runs without an active gateway bridge, it builds the configured channel bridge on
-demand.
+Local delivery stays in local session records. External delivery validates the
+configured channel and target before sending.
 
-Telegram uses `chat_id`; other external channels use `target`.
+## Boundary
 
-## Failure Modes
-
-- Interactive clarification or approval in a schedule run fails closed.
-- External delivery without an allowed target records an error.
-- Process downtime coalesces missed fires into one claimed run.
+The Agent Core declares schedules. The host owns durable job state, claims, run
+records, session creation, and channel delivery.

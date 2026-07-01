@@ -1,59 +1,41 @@
+---
+title: MCP Runtime
+description: Contributor notes for MCP server discovery, naming, transports, and result conversion.
+---
+
 # MCP Runtime
 
-`McpRuntime` discovers tools from core-local MCP declarations and routes calls
-through persistent per-turn server connections.
+The MCP runtime discovers server declarations from Agent Cores and exposes
+filtered tools through the host tool registry.
 
-## Discovery Flow
+## Discovery
 
-```text
-core.mcp_servers
-  -> fingerprint declarations
-  -> interpolate env/header values
-  -> start or connect server
-  -> list tools
-  -> filter include/exclude
-  -> expose safe names
-```
-
-Catalogs are cached by session id, core root, workspace, and declaration
-fingerprint.
-
-## Tool Naming
-
-Server and tool names are sanitized. Exposed names use:
+Declarations live under:
 
 ```text
-<safe_server_name>__<safe_tool_name>
+agent/mcp/*.yaml
 ```
 
-The original MCP tool name is used when calling the server.
+Disabled declarations are ignored. Stdio declarations require `command`.
+Streamable HTTP declarations require an `http://` or `https://` URL.
 
-## Environment Interpolation
+## Naming
 
-Only `env` and `headers` support `${ENV_VAR}` interpolation. Missing
-environment variables skip that server and emit `mcp.server_failed`.
+Tool names are normalized and namespaced to avoid collisions with built-in and
+authored tools. Include/exclude filters are applied before tools become visible.
 
-## Transports
+## Environment and Headers
 
-Current transports:
-
-- `stdio`
-- `streamable_http`
-
-Stdio MCP server stderr is appended to:
-
-```text
-~/.demiurge/logs/mcp-stderr.log
-```
+Declarations can provide environment variables, headers, cwd, timeouts, risk,
+approval policy, and parallel-call support. Secrets should come from the host
+environment.
 
 ## Result Conversion
 
-Structured MCP content becomes JSON model output. Text blocks become text.
-Image/audio/resource blocks are summarized into model-safe text markers or
-links.
+MCP results are converted into Demiurge tool results before model replay and
+display.
 
 ## Boundary
 
-The first MCP implementation exposes tools only. MCP resources, prompts, OAuth,
-dynamic discovery, and CLI management commands are not part of the core-YAML
-surface.
+The core declares MCP servers. The host owns transport lifecycle, discovery,
+timeouts, approval policy, and tool execution.

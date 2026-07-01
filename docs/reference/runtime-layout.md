@@ -1,36 +1,46 @@
+---
+title: Runtime Layout Reference
+description: Reference for source checkout and runtime-home file locations.
+---
+
 # Runtime Layout Reference
 
 ## Source Checkout
 
 ```text
 demiurge-agent/
-  agents/
-    agent.yaml
-    assistant/
-    evolver/
-  package-repository/
   demiurge/
+  agents/
+  package-repository/
   docs/
+  website/
   ui-tui/
+  scripts/
+  tests/
 ```
 
-`agents/` contains source templates. `package-repository/` contains the built-in
-package repository: reusable package components and package recipes.
+`demiurge/` is the Python package. `agents/` contains source Agent Core
+templates. `package-repository/` contains the built-in package repository.
 
 ## Runtime Home
 
+Default:
+
 ```text
 ~/.demiurge/
-  config.yaml
-  agents/
-  registry/
-  sessions/
-  scheduler/
-  logs/
-  workspace/
-  history/
-  package-repositories/
 ```
+
+Common children:
+
+| Path | Owner |
+| --- | --- |
+| `config.yaml` | Host config. |
+| `.env` | Local secret environment file. |
+| `agents/` | Runtime Agent Cores. |
+| `sessions/` | Session records. |
+| `scheduler/` | Scheduler state and run records. |
+| `workspace/` | Non-local fallback workspace. |
+| `logs/` | Runtime logs such as MCP stderr logs. |
 
 ## Runtime Core
 
@@ -51,33 +61,27 @@ package repository: reusable package components and package recipes.
     tests/
 ```
 
-## Session
+## Package Repository
 
 ```text
-~/.demiurge/sessions/<session_id>/
-  session.json
-  bootstrap_context.md
-  messages.jsonl
-  events.jsonl
-  artifacts/
+package-repository/
+  repository.yaml
+  packages/
+  bootstrap/
+  input/
+  output/
+  tool/
+  skill/
+  lib/
+  core/
 ```
 
-## Scheduler
+## Managed Checkout
+
+Managed install uses:
 
 ```text
-~/.demiurge/scheduler/<core_id>/
-  state.json
-  runs.jsonl
-  lock
+~/.demiurge/demiurge-agent/
 ```
 
-## MCP Logs
-
-```text
-~/.demiurge/logs/mcp-stderr.log
-```
-
-## Boundary
-
-Runtime state files are host-owned. Authored behavior belongs in runtime cores,
-not direct edits to session, registry, scheduler, or log files.
+Runtime cores stay under `~/.demiurge/agents/`.

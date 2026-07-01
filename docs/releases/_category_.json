@@ -1,0 +1,8 @@
+{
+  "label": "Releases",
+  "position": 6,
+  "link": {
+    "type": "generated-index",
+    "description": "Historical release notes for published Demiurge versions."
+  }
+}

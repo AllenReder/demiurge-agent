@@ -1,58 +1,65 @@
+---
+title: Capabilities and Approvals
+description: Reference for host-owned capability and approval behavior.
+---
+
 # Capabilities and Approvals
 
-Capabilities describe what a slot or tool is allowed to request. Approval
-policy decides whether the host should allow, prompt, or deny a risky action.
+Capabilities describe effect classes. Approval policy decides whether a call can
+run automatically, must prompt, or is denied.
 
-## Built-In Capability Examples
+## Common Capabilities
 
-| Capability | Typical use |
+| Capability | Meaning |
 | --- | --- |
 | `fs.read` | Read workspace files. |
-| `fs.write` | Write or patch workspace files. |
-| `terminal.exec` | Run shell commands or manage processes. |
-| `network.fetch` | Fetch URLs. |
-| `schedule.manage` | Create, update, enable, disable, or delete authored schedule YAML. |
-| `state.read` | Read host-managed state. |
-| `state.write` | Submit typed state proposals. |
-| `tool.call:<name>` | Call a host-visible tool from authored code. |
-| `agents.run:<core>` | Run a child core and await the result. |
-| `agents.spawn:<core>` | Spawn a child core. |
-| `mcp.call:<server_id>` | Call tools from a declared MCP server. |
+| `fs.write` | Write workspace files. |
+| `terminal.exec` | Run terminal commands in workspace scope. |
+| `network.fetch` | Fetch network content. |
+| `schedule.manage` | Manage core schedule files. |
+| `tool.call:evolve_core` | Create and promote a candidate core through the host. |
+| `tool.call:rollback_core` | Roll back active core pointer through the host. |
 
-## Approval Order
+## Approval Policy
 
-Policy values:
+Approval policy order:
 
-- `auto`
-- `prompt`
-- `deny`
+```text
+auto < prompt < deny
+```
 
-Agent cores can make built-in tool policy stricter. They cannot weaken the host
-security baseline for built-in tools.
+Risk order:
 
-## Risk Order
+```text
+low < medium < high < critical
+```
 
-Risk values:
+More restrictive policy wins when multiple layers apply.
 
-- `low`
-- `medium`
-- `high`
-- `critical`
+## Tool Metadata
 
-Core metadata can raise built-in tool risk. Authored and MCP tools can declare
-their own risk and approval policy.
+`agent.yaml` can override metadata:
 
-## Terminal Guard
+```yaml
+tools:
+  metadata:
+    web_extract:
+      approval_policy: prompt
+      risk: medium
+      capability: network.fetch
+```
 
-Terminal commands pass through a host command guard. Safe inspect/test/build
-commands may run automatically. Promptable dangerous commands require approval.
-Hardline catastrophic commands are blocked before approval.
+Supported metadata keys:
 
-## Success Check
-
-Use `/tools` to inspect visible tools and `/events` to inspect approval events.
+- `risk`
+- `capability`
+- `approval_policy`
+- `model_output_policy`
+- `display_policy`
+- `enabled`
 
 ## Boundary
 
-Approval config never allows workspace escapes, unknown tools, undeclared
-capabilities, or hardline terminal blocks.
+Declaring a capability is not the same as receiving it. The host checks
+workspace scope, sensitive paths, approval policy, and tool runtime rules before
+executing effects.

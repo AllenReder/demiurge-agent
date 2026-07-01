@@ -1,4 +1,12 @@
+---
+title: CLI Reference
+description: Command and option reference for the Demiurge CLI.
+---
+
 # CLI Reference
+
+All Python commands should be run through `uv` from a source checkout unless you
+are using a managed installed binary.
 
 ## Main TUI Command
 
@@ -8,23 +16,26 @@ uv run demiurge [options]
 
 Common options:
 
-- `--home PATH`
-- `--core CORE_ID`
-- `--agents-root PATH`
-- `--provider PROFILE_ID|auto|fake`
-- `--model MODEL`
-- `--fake-script PATH`
-- `--workspace PATH`
-- `--timezone IANA_NAME`
-- `--session SESSION_ID`
-- `--resume SESSION_ID`
-- `--tool-display quiet|summary|full`
+| Option | Meaning |
+| --- | --- |
+| `--home HOME` | Runtime home directory. |
+| `--core CORE` | Core id to run. |
+| `--agents-root AGENTS_ROOT` | Source agents root override. |
+| `--provider PROVIDER` | Provider profile id, `auto`, or `fake`. |
+| `--model MODEL` | Model override. |
+| `--fake-script FAKE_SCRIPT` | Fake provider script JSON. |
+| `--workspace WORKSPACE` | Workspace root for file and terminal tools. |
+| `--timezone TIMEZONE` | Runtime IANA timezone override. |
+| `--session SESSION` | Session id to create or resume. |
+| `--resume RESUME` | Existing session id to resume. |
+| `--tool-display quiet|summary|full` | TUI tool call display level. |
 
 ## `init`
 
 ```bash
 uv run demiurge init
 uv run demiurge init --check
+uv run demiurge init --json
 uv run demiurge init --refresh assistant
 uv run demiurge init --refresh all
 ```
@@ -36,6 +47,7 @@ read-only.
 
 ```bash
 uv run demiurge doctor
+uv run demiurge doctor --core assistant
 uv run demiurge doctor --json
 ```
 
@@ -44,48 +56,49 @@ Checks runtime/source template drift.
 ## `setup`
 
 ```bash
-uv run demiurge setup
-uv run demiurge setup status --json
-uv run demiurge setup providers list --json
-uv run demiurge setup providers add deepseek --preset deepseek --set-default
-uv run demiurge setup providers edit deepseek --base-url https://api.deepseek.com
-uv run demiurge setup providers remove deepseek
-uv run demiurge setup providers set-default deepseek
-uv run demiurge setup providers test deepseek --model deepseek-v4-pro
-uv run demiurge setup model set --core assistant --provider deepseek --model deepseek-v4-pro
+uv run demiurge setup status
+uv run demiurge setup providers list
+uv run demiurge setup providers add openai --preset openai --set-default
+uv run demiurge setup providers edit openai --base-url https://api.openai.com/v1
+uv run demiurge setup providers remove openai
+uv run demiurge setup providers set-default openai
+uv run demiurge setup providers test openai --model gpt-5.5
+uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
 uv run demiurge setup timezone set Asia/Shanghai
 uv run demiurge setup timezone clear
 ```
 
-Configures host-owned provider profiles and core model defaults. Provider
-secrets can live in `~/.demiurge/.env`, shell environment variables, or direct
-host config values. `setup timezone` writes `<home>/config.yaml`
-`runtime.timezone`; use `--timezone` for a process-only override. JSON output
-redacts direct API keys.
+Provider presets currently include:
+
+```text
+dashscope, deepseek, minimax, minimax-cn, moonshot, openai, openrouter,
+siliconflow, zai
+```
 
 ## `package`
 
 ```bash
-uv run demiurge package
 uv run demiurge package list --core assistant
 uv run demiurge package list --repo builtin
+uv run demiurge package install <package_id|repo/package_id> --core assistant
 uv run demiurge package install <package_id|repo/package_id> --core assistant --preview
+uv run demiurge package install <package_id|repo/package_id> --core assistant --option key=value
 uv run demiurge package uninstall <package_id|repo/package_id> --core assistant
 uv run demiurge package repo list
-uv run demiurge package repo add https://github.com/user/demiurge-packages.git --trust
 uv run demiurge package repo add ./local-packages --alias local --trust
+uv run demiurge package repo add https://github.com/user/demiurge-packages.git --alias community --ref main --trust
 uv run demiurge package repo sync community
 uv run demiurge package repo remove community
 ```
 
-Manages package repository packages for runtime cores. External path and git
-repositories must be trusted before they can install local code slots.
+External path and git repositories must be trusted before they can install local
+code slots.
 
 ## `update`
 
 ```bash
 demiurge update
-demiurge update --ref v0.2.0
+demiurge update --ref v0.3.3
 demiurge update --skip-init-check
 ```
 
@@ -95,13 +108,15 @@ Updates a managed checkout and optionally runs a read-only runtime drift check.
 
 ```bash
 uv run demiurge gateway --core assistant
-uv run demiurge gateway --timezone Asia/Shanghai
+uv run demiurge gateway --core assistant --provider fake
+uv run demiurge gateway --core assistant --timezone Asia/Shanghai
 ```
 
-Runs enabled external channels for the selected core. Supported external
-channels are Telegram, generic webhook, Slack, Mattermost, Matrix, and email.
+Runs enabled external channels for the selected core.
 
-## Success Check
+## Verification Commands
+
+Use these after documentation or CLI-surface changes:
 
 ```bash
 uv run demiurge --help

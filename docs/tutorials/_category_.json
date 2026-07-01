@@ -1,0 +1,8 @@
+{
+  "label": "Tutorials",
+  "position": 1,
+  "link": {
+    "type": "generated-index",
+    "description": "Learning paths that take you from a blank state to a working Demiurge result."
+  }
+}

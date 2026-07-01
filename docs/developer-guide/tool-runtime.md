@@ -1,57 +1,44 @@
+---
+title: Tool Runtime
+description: Contributor notes for tool discovery, metadata, dispatch, approvals, and results.
+---
+
 # Tool Runtime
 
-`ToolRuntime` builds the visible tool registry and executes tool calls through
-host-owned checks.
+The tool runtime builds the visible tool registry and executes calls.
 
 ## Registry Sources
 
-Visible tools come from:
+Tools can come from:
 
-1. enabled built-in toolsets in the core manifest;
-2. authored tools under `agent/tools/`;
-3. MCP tools discovered from `agent/mcp/*.yaml`.
+- built-in toolsets
+- authored tools under `agent/tools/`
+- MCP tools discovered from `agent/mcp/*.yaml`
 
-The registry entry records name, description, schema, source, risk, capability,
-approval policy, model output policy, display policy, and slot path if
-applicable.
+`agent.yaml` chooses built-in toolsets and can override tool metadata.
 
-## Dispatch Flow
+## Dispatch
 
-```text
-ToolCall
-  -> visible tool check
-  -> built-in / authored / MCP dispatch
-  -> capability check
-  -> approval and workspace guard when needed
-  -> ToolResult
-  -> session message + event
-```
+The runtime:
 
-## Built-In Tools
-
-Built-in schemas and baseline metadata live in `demiurge/tools/registry.py`.
-Execution lives in `demiurge/tools/runtime.py`.
-
-Core metadata can make built-in tools stricter but cannot lower their baseline
-risk or approval policy.
+1. resolves the tool registry entry
+2. checks enabled state
+3. applies capability and approval policy
+4. enforces workspace and safety rules where relevant
+5. executes the built-in, authored, or MCP tool
+6. converts the result for model history and user display
 
 ## Authored Tools
 
-Authored tools are loaded from slot definitions. Their `slot.yaml` controls
-schema, risk, approval policy, capabilities, output shaping, and enabled state.
-
-Authored tools receive host-injected context and delivery clients. They should
-return `ToolResult`.
+Authored tools are adapters. They use the same host-owned dispatch path as
+built-ins after discovery.
 
 ## MCP Tools
 
-MCP tool calls are routed through `McpRuntime`. Each tool defaults to capability
-`mcp.call:<server_id>` unless the server declaration sets another capability.
+MCP tools are namespaced and filtered to avoid collisions. Transport, discovery,
+timeouts, and result conversion are host-owned.
 
-## Failure Modes
+## Boundary
 
-- Unknown tool: returns a model-visible error.
-- Tool not enabled for core: returns an allowlist error.
-- Workspace escape or denied capability: returns a host error without executing
-  the requested effect.
-- Terminal hardline blocks cannot be bypassed by approval config.
+The Agent Core can declare tools. It does not own tool-call replay,
+authorization, or provider-specific tool message formatting.

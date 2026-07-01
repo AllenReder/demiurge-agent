@@ -11,13 +11,17 @@
     "message": "文档",
     "description": "Navbar item with label Docs"
   },
-  "item.label.Quickstart": {
-    "message": "快速开始",
-    "description": "Navbar item with label Quickstart"
+  "item.label.First Run": {
+    "message": "首次运行",
+    "description": "Navbar item with label First Run"
   },
-  "item.label.Authoring": {
-    "message": "Core 编写",
-    "description": "Navbar item with label Authoring"
+  "item.label.Contracts": {
+    "message": "Contracts",
+    "description": "Navbar item with label Contracts"
+  },
+  "item.label.Packages": {
+    "message": "Packages",
+    "description": "Navbar item with label Packages"
   },
   "item.label.GitHub": {
     "message": "GitHub",

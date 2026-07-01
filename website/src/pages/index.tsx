@@ -26,18 +26,18 @@ type Copy = {
 const copy: Record<string, Copy> = {
   en: {
     badge: 'Alpha developer preview',
-    title: 'Build self-evolving agents, your way.',
+    title: 'Build file-backed, self-evolving Agent Cores.',
     subtitle:
-      'Independent Agent Cores carry identity and boundaries, while modular design and capability package management make tools, IO, skills, and child cores installable, composable, and iterative.',
-    primary: 'Read the docs',
-    secondary: 'Quick Start',
+      'Demiurge keeps the host runtime in control while Agent Cores, slot modules, and package repositories stay readable, installable, and evolvable as files.',
+    primary: 'Read the manual',
+    secondary: 'First Run',
     github: 'View on GitHub',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
     previewLabel: 'agent core surface',
-    pillarsTitle: 'Designed for modular capability evolution.',
+    pillarsTitle: 'A manual-first runtime for people and Agent Cores.',
     pillarsBody:
-      'Agent behavior stays readable and file-backed, while capabilities can be installed, composed, and evolved under host control.',
+      'The public manual documents both user workflows and the stable contracts that the evolver core can read before editing a candidate core.',
     pillars: [
       {
         title: 'Host-owned harness',
@@ -70,21 +70,21 @@ const copy: Record<string, Copy> = {
       'Tools run through host registry, workspace, and approval checks.',
       'Output modules deliver text, media, artifacts, or structured results.',
     ],
-    installTitle: 'Local quickstart',
+    installTitle: 'First local run',
     installBody: 'Use the fake provider first to verify the runtime without an API key.',
   },
   'zh-CN': {
     badge: 'Alpha 开发者预览',
-    title: '自由打造会自我进化的 Agent',
+    title: '打造文件化、可自进化的 Agent Core',
     subtitle:
-      '独立 Agent Core 承载个性与边界，模块化设计和能力包管理让工具、IO、技能与子 Core 可安装、可组合、可迭代。',
-    primary: '阅读文档',
-    secondary: '快速上手',
+      'Demiurge 让 host runtime 保持控制，同时让 Agent Core、slot modules 和 package repositories 作为可读、可安装、可演进的文件存在。',
+    primary: '阅读手册',
+    secondary: '首次运行',
     github: '查看 GitHub',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
     previewLabel: 'agent core surface',
-    pillarsTitle: '为模块化能力进化而设计。',
-    pillarsBody: 'Agent 行为保持文件化、可检查；能力则可以在 host 控制下安装、组合、演化。',
+    pillarsTitle: '同时服务人类作者和 Agent Core 的手册。',
+    pillarsBody: '公开手册既覆盖用户 workflow，也记录 evolver core 修改 candidate core 前可读取的稳定 contracts。',
     pillars: [
       {
         title: 'Host-owned harness',
@@ -112,7 +112,7 @@ const copy: Record<string, Copy> = {
       'tools 通过 host registry、workspace 和 approval checks 执行。',
       'output modules 交付文本、媒体、artifact 或结构化结果。',
     ],
-    installTitle: '本地快速开始',
+    installTitle: '首次本地运行',
     installBody: '先使用 fake provider 验证 runtime，不需要 API key。',
   },
 };
@@ -134,7 +134,7 @@ function HomepageHeader() {
             <Link className="button button--lg heroButton heroButton--primary" to="/docs/">
               {text.primary}
             </Link>
-            <Link className="button button--lg heroButton heroButton--soft" to="/docs/getting-started/quickstart">
+            <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/first-local-run">
               {text.secondary}
             </Link>
             <Link className="button button--lg heroButton heroButton--ghost" href="https://github.com/AllenReder/demiurge-agent">

@@ -3,25 +3,25 @@
     "message": "当前",
     "description": "The label for version current"
   },
-  "sidebar.docs.category.Getting Started": {
-    "message": "快速开始",
-    "description": "The label for category 'Getting Started' in sidebar 'docs'"
+  "sidebar.docs.category.Tutorials": {
+    "message": "教程",
+    "description": "The label for category 'Tutorials' in sidebar 'docs'"
   },
-  "sidebar.docs.category.Concepts": {
-    "message": "概念",
-    "description": "The label for category 'Concepts' in sidebar 'docs'"
+  "sidebar.docs.category.How-to Guides": {
+    "message": "操作指南",
+    "description": "The label for category 'How-to Guides' in sidebar 'docs'"
   },
-  "sidebar.docs.category.Authoring": {
-    "message": "Core 编写",
-    "description": "The label for category 'Authoring' in sidebar 'docs'"
-  },
-  "sidebar.docs.category.Operations": {
-    "message": "运维",
-    "description": "The label for category 'Operations' in sidebar 'docs'"
+  "sidebar.docs.category.Explanation": {
+    "message": "解释",
+    "description": "The label for category 'Explanation' in sidebar 'docs'"
   },
   "sidebar.docs.category.Reference": {
     "message": "参考",
     "description": "The label for category 'Reference' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Contracts": {
+    "message": "Contracts",
+    "description": "The label for category 'Contracts' in sidebar 'docs'"
   },
   "sidebar.docs.category.Developer Guide": {
     "message": "开发者指南",

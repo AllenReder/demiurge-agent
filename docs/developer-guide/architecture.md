@@ -1,6 +1,11 @@
+---
+title: Architecture
+description: Map the current Demiurge host runtime for contributors.
+---
+
 # Architecture
 
-This page maps the current Demiurge implementation for contributors.
+This guide maps the current implementation. It is not a stable plugin API.
 
 ## System Overview
 
@@ -22,51 +27,39 @@ SessionTurnStepRunner
 
 ## Major Subsystems
 
-| Subsystem | Primary responsibility |
+| Subsystem | Responsibility |
 | --- | --- |
-| CLI | Parse commands, create app, start TUI/gateway/package/update/doctor flows. |
-| App factory | Resolve runtime home, source templates, core, workspace, provider, tool runtime, approvals. |
-| Core loader | Load `agent.yaml`, slot roots, pipelines, skills, schedules, MCP declarations. |
-| Runner | Own session/turn/step flow, bootstrap, input phase, model loop, output phase, delivery records. |
-| Context assembler | Build provider messages from soul, skill index, bootstrap, input placements, history, current turn. |
-| Tool runtime | Build visible registry and execute built-in, authored, and MCP tools. |
-| Delivery runtime | Convert authored delivery requests into artifacts, session messages, events, and channel items. |
-| Scheduler | Claim due core-authored schedules and run fresh sessions. |
-| Package manager | Preview, install, and uninstall package repository components into runtime cores. |
+| CLI | Parse commands and start TUI, gateway, setup, package, update, and doctor flows. |
+| App factory | Resolve runtime home, config, source templates, core, workspace, provider, approvals, and tools. |
+| Core loader | Load `agent.yaml`, slots, pipelines, skills, schedules, and MCP declarations. |
+| Runner | Own session, turn, step, bootstrap, input, model/tool loop, output, and delivery flow. |
+| Context assembler | Build provider messages from soul, skills, bootstrap, input, history, and current turn. |
+| Tool runtime | Build the visible registry and execute built-in, authored, and MCP tools. |
+| Delivery runtime | Convert authored delivery requests into session records, events, artifacts, and channel output. |
+| Scheduler | Claim due schedules and run fresh sessions. |
+| Package manager | Preview, install, uninstall, and record package repository components. |
 
 ## Entry Points
 
-- `demiurge/cli.py`: `demiurge`, `init`, `doctor`, `package`, `update`, `gateway`.
-- `demiurge/app/__init__.py`: `create_app`, runtime initialization, provider/config resolution.
-- `demiurge/ui/tui_launcher.py` and `demiurge/ui_gateway/`: TUI process bridge.
-- `demiurge/channels/gateway.py`: external channel startup.
+- `demiurge/cli.py`
+- `demiurge/app/__init__.py`
+- `demiurge/runtime/runner.py`
+- `demiurge/tools/runtime.py`
+- `demiurge/channels/gateway.py`
+- `demiurge/packages.py`
+- `demiurge/scheduler/__init__.py`
 
-## Data Flow
-
-```text
-User/channel input
-  -> InteractionInbound
-  -> SessionTurnStepRunner.run_turn()
-  -> bootstrap if needed
-  -> input pipeline
-  -> ContextAssembler
-  -> provider request
-  -> tool calls through ToolRuntime until final response
-  -> output pipeline
-  -> InteractionOutbound / session records / events
-```
-
-## Recommended Reading Order
+## Reading Order
 
 1. [runner-and-context.md](runner-and-context.md)
 2. [tool-runtime.md](tool-runtime.md)
 3. [delivery-runtime.md](delivery-runtime.md)
-4. [scheduler.md](scheduler.md)
-5. [mcp-runtime.md](mcp-runtime.md)
-6. [package-installer.md](package-installer.md)
+4. [package-installer.md](package-installer.md)
+5. [scheduler.md](scheduler.md)
+6. [mcp-runtime.md](mcp-runtime.md)
 
 ## Boundary
 
-This guide documents current implementation shape. It does not define a stable
-plugin API or promise compatibility with old runtime layouts during the current
-alpha phase.
+When a runtime change affects user-visible behavior, CLI/configuration, package
+recipes, runtime layout, security policy, provider behavior, state/versioning,
+or test/gate workflow, update the public manual in the same change.
