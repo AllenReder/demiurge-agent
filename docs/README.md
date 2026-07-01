@@ -54,7 +54,8 @@ Package and repository authors should read:
 1. [Package model](explanation/package-model.md)
 2. [Create an external package repository](tutorials/external-package-repository.md)
 3. [Install packages](how-to/install-packages.md)
-4. [Package repository contract](reference/contracts/package-repositories.md)
+4. [Built-in memory packages](builtin-packages/memory/memory_honcho.md)
+5. [Package repository contract](reference/contracts/package-repositories.md)
 
 Contributors should read:
 

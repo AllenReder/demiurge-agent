@@ -62,7 +62,9 @@ that dependency according to your host environment policy, then set
 `HONCHO_API_KEY` or pass a secret `api_key` option during package installation.
 The package installs automatic recall, turn sync, and `honcho_*` tools by
 default. Uninstall removes package-owned slots, tools, skill, and lib files, but
-leaves `memory/honcho/` cache and outbox data in place.
+leaves `memory/honcho/` cache and outbox data in place. See
+[memory_honcho](../builtin-packages/memory/memory_honcho.md) for the full usage
+guide.
 
 Use a repository-qualified package id when package names are ambiguous:
 

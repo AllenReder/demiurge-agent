@@ -1,0 +1,8 @@
+{
+  "label": "Built-in Packages",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Usage guides for packages shipped in the built-in Demiurge package repository."
+  }
+}
