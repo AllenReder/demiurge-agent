@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">Website</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/">Manual</a> ·
-  <a href="docs/tutorials/first-local-run.md">First Run</a> ·
+  <a href="docs/tutorials/first-local-run.md">Quick Start</a> ·
   <a href="docs/tutorials/customize-agent-core.md">Customize a Core</a> ·
   <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
   <a href="docs/releases/0.3.3.md">Latest Release</a>
@@ -54,13 +54,13 @@ uv run demiurge --provider fake
 
 The fake provider verifies the runtime without an API key. Use
 [`docs/tutorials/first-local-run.md`](docs/tutorials/first-local-run.md) for the
-full first-run path.
+short quick start, then configure a provider or install packages from there.
 
 ## Documentation Map
 
 | Goal | Start here |
 | --- | --- |
-| Run Demiurge locally | [First local run](docs/tutorials/first-local-run.md) |
+| Run Demiurge locally | [Quick Start](docs/tutorials/first-local-run.md) |
 | Modify an Agent Core | [Customize an Agent Core](docs/tutorials/customize-agent-core.md) |
 | Build a package repository | [Create an external package repository](docs/tutorials/external-package-repository.md) |
 | Configure a real provider | [Configure a provider](docs/how-to/configure-provider.md) |

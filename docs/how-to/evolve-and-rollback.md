@@ -54,7 +54,7 @@ version store.
 ## Contract
 
 For exact rules, read
-[../reference/contracts/evolver-safe-edits.md](../reference/contracts/evolver-safe-edits.md).
+[/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits).
 
 The evolver may edit the authored surface of a candidate core. It must not
 promote, roll back, edit host state, change dependencies, or edit files outside

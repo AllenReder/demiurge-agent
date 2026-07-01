@@ -83,7 +83,7 @@ const config: Config = {
         },
         {
           to: '/docs/tutorials/first-local-run',
-          label: 'First Run',
+          label: 'Quick Start',
           position: 'left',
         },
         {
@@ -114,7 +114,7 @@ const config: Config = {
           title: 'Docs',
           items: [
             {
-              label: 'First Run',
+              label: 'Quick Start',
               to: '/docs/tutorials/first-local-run',
             },
             {

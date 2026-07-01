@@ -1,106 +1,97 @@
 ---
-title: 首次本地运行
-description: 安装或同步 Demiurge，初始化 runtime home，并用 fake provider 启动 TUI。
+title: 快速开始
+description: 用 fake provider 在本地启动 Demiurge，然后选择下一步配置。
 ---
 
-# 首次本地运行
+# 快速开始
 
-本教程会在不需要 API key 的情况下让 Demiurge 在本地跑起来。它会验证 host
-runtime、runtime home、source templates、TUI bridge 和 session storage。
+这是打开 Demiurge TUI 的最短路径。它使用 fake provider，所以暂时不需要 API key。
 
-先使用 fake provider。只有这条路径跑通后，再配置真实模型。
+TUI 能打开以后，再根据文末链接配置真实 provider 或安装 packages。
 
-## 1. 安装或同步
+## 1. 选择运行方式
 
-如果你要做 managed user install：
+Managed user install：
 
 ```bash
 scripts/install.sh
 ```
 
-Managed checkout 位于：
+Installer 会打印 managed command path。默认是：
 
-```text
-~/.demiurge/demiurge-agent
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
 ```
 
-如果你在 source checkout 中开发：
+Source checkout 开发：
 
 ```bash
 uv sync --all-groups
 ```
 
-确认命令可用：
+后续命令使用 `uv run demiurge`。
+
+## 2. 初始化一次
+
+Managed install：
 
 ```bash
-uv run demiurge --help
+~/.demiurge/demiurge-agent/.venv/bin/demiurge init
 ```
 
-## 2. 初始化 Runtime Home
+Source checkout：
 
 ```bash
 uv run demiurge init
 ```
 
-这会创建或刷新本地 runtime 结构：
+## 3. 启动 TUI
 
-```text
-~/.demiurge/
-  config.yaml
-  .env
-  agents/
-    agent.yaml
-    assistant/
-    evolver/
-  workspace/
+Managed install：
+
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
 ```
 
-不写入文件，只检查 template drift：
+Source checkout：
+
+```bash
+uv run demiurge --provider fake
+```
+
+TUI 应该能打开，并且不要求任何 provider secrets。
+
+## 4. 确认可用
+
+在 TUI 中运行：
+
+```text
+/status
+/exit
+```
+
+`/status` 应显示当前 core、runtime home、workspace、provider 和 session path。
+
+## 5. 下一步
+
+选择下一项任务：
+
+- 用 [配置 Provider](../how-to/configure-provider.md) 配置真实模型 provider。
+- 用 [安装 Packages](../how-to/install-packages.md) 安装可复用能力。
+- 用 [修改 Agent Core](customize-agent-core.md) 修改 runtime Agent Core。
+- 用 [故障排查](../how-to/troubleshoot.md) 诊断启动问题。
+
+## 常用检查
+
+如果启动失败，运行：
 
 ```bash
 uv run demiurge init --check
 uv run demiurge doctor
 ```
 
-## 3. 启动 TUI
+Managed install 时，把 `uv run demiurge` 替换成：
 
 ```bash
-uv run demiurge --provider fake
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
 ```
-
-默认本地界面是 TUI。它通过 stdio JSON-RPC 连接到 Python host。Wheel 包含已构建
-的 TUI asset，所以只有在编辑 `ui-tui/` 时才需要 Node.js。
-
-在 TUI 中运行：
-
-```text
-/status
-/tools
-/sessions
-/exit
-```
-
-`/status` 应显示当前 core、runtime home、workspace、provider、model source
-和 session path。
-
-## 4. 找到 Live Agent Core
-
-Runtime Agent Core 位于：
-
-```text
-~/.demiurge/agents/<core_id>/
-```
-
-默认 assistant core 是：
-
-```text
-~/.demiurge/agents/assistant/
-```
-
-实验 live agent 时，不要编辑仓库里的 source templates。请编辑
-`~/.demiurge/agents` 下的 runtime core。
-
-## 5. 下一步
-
-继续阅读 [修改 Agent Core](customize-agent-core.md)。它会做一次小的文件化修改，
-并验证 core 仍能加载。

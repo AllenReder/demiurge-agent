@@ -68,4 +68,4 @@ calls, direct state mutation, dependency installation, production promotion, or
 rollback. Those remain host functions.
 
 For exact edit rules, read
-[../reference/contracts/authored-surface.md](../reference/contracts/authored-surface.md).
+[/docs/reference/contracts/authored-surface](/docs/reference/contracts/authored-surface).

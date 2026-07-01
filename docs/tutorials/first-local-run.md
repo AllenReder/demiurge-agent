@@ -1,107 +1,100 @@
 ---
-title: First Local Run
-description: Install or sync Demiurge, initialize the runtime home, and start the TUI with the fake provider.
+title: Quick Start
+description: Start Demiurge locally with the fake provider, then choose the next setup step.
 ---
 
-# First Local Run
+# Quick Start
 
-This tutorial gets Demiurge running locally without an API key. It verifies the
-host runtime, runtime home, source templates, TUI bridge, and session storage.
+This is the shortest path to a running Demiurge TUI. It uses the fake provider,
+so you do not need an API key yet.
 
-Use the fake provider first. Configure a real model only after this path works.
+After the TUI opens, configure a real provider or install packages from the
+links at the end.
 
-## 1. Install or Sync
+## 1. Choose How You Run Demiurge
 
-For a managed user install:
+For a managed user install, run:
 
 ```bash
 scripts/install.sh
 ```
 
-The managed checkout lives at:
+The installer prints the managed command path. By default it is:
 
-```text
-~/.demiurge/demiurge-agent
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
 ```
 
-For source checkout development:
+For source checkout development, run:
 
 ```bash
 uv sync --all-groups
 ```
 
-Confirm the command is available:
+Then use `uv run demiurge` for the commands below.
+
+## 2. Initialize Once
+
+Managed install:
 
 ```bash
-uv run demiurge --help
+~/.demiurge/demiurge-agent/.venv/bin/demiurge init
 ```
 
-## 2. Initialize the Runtime Home
+Source checkout:
 
 ```bash
 uv run demiurge init
 ```
 
-This creates or refreshes the local runtime structure:
+## 3. Start the TUI
 
-```text
-~/.demiurge/
-  config.yaml
-  .env
-  agents/
-    agent.yaml
-    assistant/
-    evolver/
-  workspace/
+Managed install:
+
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
 ```
 
-Check for template drift without writing files:
+Source checkout:
+
+```bash
+uv run demiurge --provider fake
+```
+
+The TUI should open without requiring any provider secrets.
+
+## 4. Confirm It Works
+
+Inside the TUI, run:
+
+```text
+/status
+/exit
+```
+
+`/status` should show the selected core, runtime home, workspace, provider, and
+session path.
+
+## 5. Next Steps
+
+Choose the next task:
+
+- Configure a real model provider with [Configure a Provider](../how-to/configure-provider.md).
+- Install reusable capabilities with [Install Packages](../how-to/install-packages.md).
+- Change the runtime Agent Core with [Customize an Agent Core](customize-agent-core.md).
+- Diagnose startup issues with [Troubleshoot](../how-to/troubleshoot.md).
+
+## Useful Checks
+
+If startup fails, run:
 
 ```bash
 uv run demiurge init --check
 uv run demiurge doctor
 ```
 
-## 3. Start the TUI
+For a managed install, replace `uv run demiurge` with:
 
 ```bash
-uv run demiurge --provider fake
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
 ```
-
-The default local interface is the TUI. It connects to the Python host over
-stdio JSON-RPC. Wheels include the built TUI asset, so Node.js is only needed
-when you edit `ui-tui/`.
-
-Inside the TUI, run:
-
-```text
-/status
-/tools
-/sessions
-/exit
-```
-
-`/status` should show the selected core, runtime home, workspace, provider,
-model source, and session path.
-
-## 4. Locate the Live Agent Core
-
-Runtime Agent Cores live under:
-
-```text
-~/.demiurge/agents/<core_id>/
-```
-
-The default assistant core is:
-
-```text
-~/.demiurge/agents/assistant/
-```
-
-Do not edit repository source templates when you are experimenting with a live
-agent. Edit the runtime core under `~/.demiurge/agents` instead.
-
-## 5. Next Step
-
-Continue with [Customize an Agent Core](customize-agent-core.md). It makes a
-small file-backed change and verifies that the core still loads.

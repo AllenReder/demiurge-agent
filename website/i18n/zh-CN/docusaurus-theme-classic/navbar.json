@@ -11,9 +11,9 @@
     "message": "文档",
     "description": "Navbar item with label Docs"
   },
-  "item.label.First Run": {
-    "message": "首次运行",
-    "description": "Navbar item with label First Run"
+  "item.label.Quick Start": {
+    "message": "快速开始",
+    "description": "Navbar item with label Quick Start"
   },
   "item.label.Contracts": {
     "message": "契约",

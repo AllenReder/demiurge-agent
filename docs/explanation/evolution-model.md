@@ -56,4 +56,4 @@ capabilities.
 ## Contract
 
 The exact agent-readable rules live in
-[../reference/contracts/evolver-safe-edits.md](../reference/contracts/evolver-safe-edits.md).
+[/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits).

@@ -79,7 +79,7 @@ uv run demiurge --provider fake
 ```
 
 For candidate evolution, keep changes limited to the authored surface and read
-[../reference/contracts/evolver-safe-edits.md](../reference/contracts/evolver-safe-edits.md).
+[/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits).
 
 ## Boundary
 

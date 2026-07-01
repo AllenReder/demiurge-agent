@@ -25,7 +25,7 @@ core when it receives project docs as read-only context.
 
 | Goal | Page |
 | --- | --- |
-| Run Demiurge locally for the first time | [tutorials/first-local-run.md](tutorials/first-local-run.md) |
+| Start Demiurge locally | [tutorials/first-local-run.md](tutorials/first-local-run.md) |
 | Make a safe Agent Core change | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
 | Create an external package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
 | Configure a real model provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
@@ -36,7 +36,7 @@ core when it receives project docs as read-only context.
 
 Alpha users should read:
 
-1. [First local run](tutorials/first-local-run.md)
+1. [Quick Start](tutorials/first-local-run.md)
 2. [Configure a provider](how-to/configure-provider.md)
 3. [Choose a workspace](how-to/choose-workspace.md)
 4. [Troubleshoot](how-to/troubleshoot.md)
