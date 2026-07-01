@@ -18,7 +18,7 @@
   <a href="https://allenreder.github.io/demiurge-agent/docs/">手册</a> ·
   <a href="docs/tutorials/first-local-run.md">首次运行</a> ·
   <a href="docs/tutorials/customize-agent-core.md">修改 Core</a> ·
-  <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
+  <a href="docs/reference/contracts/authored-surface.md">契约</a> ·
   <a href="docs/releases/0.3.3.md">最新发布</a>
 </p>
 
@@ -33,7 +33,7 @@ promotion 和 rollback。Agent Core 负责 authored surface：`agent.yaml`、
 边界，Demiurge 就是为这个方向设计的。
 
 状态：**alpha / developer preview**。在 `1.0.0` 之前，runtime layout、
-authoring contracts 和 package behavior 都仍可能变化。
+authored-surface contracts 和 package behavior 都仍可能变化。
 
 ## 开始
 
@@ -58,12 +58,12 @@ fake provider 不需要 API key，适合先验证 runtime。完整路径见
 
 | 目标 | 入口 |
 | --- | --- |
-| 本地运行 Demiurge | [First local run](docs/tutorials/first-local-run.md) |
-| 修改 Agent Core | [Customize an Agent Core](docs/tutorials/customize-agent-core.md) |
-| 创建外部 package repository | [Create an external package repository](docs/tutorials/external-package-repository.md) |
-| 配置真实 provider | [Configure a provider](docs/how-to/configure-provider.md) |
-| 安装可复用能力 | [Install packages](docs/how-to/install-packages.md) |
-| 阅读稳定 authoring 规则 | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
+| 本地运行 Demiurge | [首次本地运行](docs/tutorials/first-local-run.md) |
+| 修改 Agent Core | [修改 Agent Core](docs/tutorials/customize-agent-core.md) |
+| 创建外部 package repository | [创建外部 package repository](docs/tutorials/external-package-repository.md) |
+| 配置真实 provider | [配置 provider](docs/how-to/configure-provider.md) |
+| 安装可复用能力 | [安装 packages](docs/how-to/install-packages.md) |
+| 阅读稳定 authored-surface 规则 | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
 | 查看 CLI 行为 | [CLI reference](docs/reference/cli.md) |
 
 托管手册位于
