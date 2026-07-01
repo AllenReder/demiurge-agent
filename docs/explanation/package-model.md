@@ -11,6 +11,10 @@ Cores.
 They are not Python packages. They do not install dependencies. They do not
 modify the host lock file.
 
+Packages distribute capabilities. Agent Slots define where Core-defined behavior
+enters the agent loop. A package can install slots together with tools, skills,
+libraries, and child cores.
+
 ## Repository
 
 A package repository is a directory or git checkout with:

@@ -6,7 +6,7 @@ description: Preview, install, list, and uninstall reusable Agent Core packages.
 # Install Packages
 
 Packages install reusable components into runtime Agent Cores. They can install
-bootstrap modules, input modules, output modules, tools, skills, libraries, and
+Agent Slots, tools, skills, libraries, and
 child cores.
 
 ## List Packages
@@ -22,7 +22,7 @@ uv run demiurge package list --repo builtin
 uv run demiurge package install memory_basic --core assistant --preview
 ```
 
-Use preview before installing packages that add code slots, tools, or external
+Use preview before installing packages that add Agent Slots, tools, or external
 provider integration.
 
 ## Install

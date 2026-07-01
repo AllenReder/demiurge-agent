@@ -13,6 +13,9 @@ Package repositories are for reusable Agent Core components. They install files
 into runtime cores; they do not modify source templates or install Python
 dependencies.
 
+Packages can combine Agent Slots with tools, skills, libraries, and child
+cores. This tutorial installs one input slot.
+
 ## 1. Create the Repository
 
 Choose a local path:
@@ -79,7 +82,7 @@ uv run demiurge package repo add ~/demiurge-packages --alias local --trust
 uv run demiurge package repo list
 ```
 
-Trust is explicit because repositories can install executable Python code slots
+Trust is explicit because repositories can install executable Python slot code
 into runtime cores.
 
 ## 5. Preview and Install

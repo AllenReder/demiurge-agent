@@ -1,12 +1,12 @@
 ---
-title: Slot Module Contract
-description: Bootstrap、input、output 和 authored tool modules 的稳定规则。
+title: Agent Slot Contract
+description: Bootstrap、input 和 output slots 的稳定规则。
 ---
 
-# Slot Module Contract
+# Agent Slot Contract
 
-Slot modules 是由 host 加载的 core-local extension points。它们必须留在 Agent
-Core authored surface 内。
+Agent Slots 是由 Host 加载的可演化交互边界。它们让 Core 定义的行为逻辑在受
+治理的位置介入 agent loop。Slot code 必须留在 Agent Core authored surface 内。
 
 ## Directory Contract
 
@@ -16,12 +16,11 @@ agent/input/<slot_id>/
   module.py
 ```
 
-同样的形状适用于：
+同样的形状适用于当前 Agent Slot kinds：
 
 - `agent/bootstrap/<slot_id>/`
 - `agent/input/<slot_id>/`
 - `agent/output/<slot_id>/`
-- `agent/tools/<tool_id>/`
 
 ## Entrypoints
 
@@ -33,17 +32,6 @@ entrypoint: module:process
 
 ```python
 def process(ctx):
-    ...
-```
-
-Authored tools 通常使用：
-
-```yaml
-entrypoint: module:execute
-```
-
-```python
-def execute(ctx, args):
     ...
 ```
 
@@ -76,6 +64,9 @@ Slots 应该在 `slot.yaml` 中声明它们需要的 capabilities，但是否允
 
 当 host capability 已经覆盖某个效果时，不要通过直接访问 paths、network 或 process
 state 来绕过 host tools。
+
+Slots 可以通过 host-owned interfaces 组合 tools、skills、MCP、state 或其他 agents，
+前提是所需 capabilities 允许。
 
 ## Failure Rule
 

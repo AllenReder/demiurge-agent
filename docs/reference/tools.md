@@ -35,6 +35,9 @@ def execute(ctx, args):
     ...
 ```
 
+The file name is shared with Agent Slot metadata, but authored tools are tools:
+model-callable actions executed through the host tool runtime.
+
 ## Built-In Tools
 
 | Tool | Purpose |

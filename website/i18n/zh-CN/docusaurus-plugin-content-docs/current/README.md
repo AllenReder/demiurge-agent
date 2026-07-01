@@ -29,6 +29,7 @@ runtime core。
 | 做一次安全的 Agent Core 修改 | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
 | 创建外部 package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
 | 配置真实模型 provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
+| 理解 Agent Slots | [explanation/agent-slots.md](explanation/agent-slots.md) |
 | 理解 host/core 边界 | [explanation/host-and-agent-core.md](explanation/host-and-agent-core.md) |
 | 阅读稳定 authored-surface 规则 | [reference/contracts/authored-surface.md](reference/contracts/authored-surface.md) |
 
@@ -45,7 +46,7 @@ Agent Core 作者建议阅读：
 
 1. [Host 和 Agent Core](explanation/host-and-agent-core.md)
 2. [修改 Agent Core](tutorials/customize-agent-core.md)
-3. [编写 slot module](how-to/write-slot-module.md)
+3. [编写 Agent Slot](how-to/write-slot-module.md)
 4. [Authored surface contract](reference/contracts/authored-surface.md)
 
 Package 和 repository 作者建议阅读：
@@ -65,7 +66,7 @@ Package 和 repository 作者建议阅读：
 ## 当前 Alpha 边界
 
 - Python dependencies 由 host 拥有，并由 source checkout 锁定。
-- Agent Core code slot 运行在 host-shared Python environment 中。
+- Agent Slot code 运行在 host-shared Python environment 中。
 - Candidate Agent Core evolution 不能自动添加 dependencies。
 - Package recipes 会把文件安装进 runtime cores；它们不会修改 host lock file。
 - Release notes 保留在 [releases/](releases/0.4.0.md) 下。

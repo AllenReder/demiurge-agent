@@ -82,5 +82,5 @@ uv run demiurge setup timezone clear
 ## 边界
 
 Provider profiles 是 host-owned configuration。Agent Core 可以在 `agent.yaml`
-中声明 model defaults，但 code slot 不应该直接构造 provider requests 或读取
+中声明 model defaults，但 Agent Slots 不应该直接构造 provider requests 或读取
 secrets。

@@ -12,8 +12,12 @@ tool execution, approvals, state, delivery, schedules, package installation,
 background jobs, promotion, and rollback.
 
 An **Agent Core** is the authored filesystem surface. It owns identity,
-instructions, slot modules, skills, tools, schedules, MCP declarations, tests,
+instructions, Agent Slots, skills, tools, schedules, MCP declarations, tests,
 and local libraries.
+
+An **Agent Slot** is the core's evolvable interaction boundary. It lets
+Core-defined behavior enter the agent loop at a governed point and compose
+tools, skills, MCP, state, or other agents without changing the host harness.
 
 ## Why This Boundary Exists
 
@@ -53,7 +57,7 @@ The core owns:
 
 - `agent.yaml`
 - `agent/SOUL.md`
-- bootstrap, input, and output slots
+- Agent Slots, currently bootstrap, input, and output slots
 - authored tools
 - skills
 - schedules

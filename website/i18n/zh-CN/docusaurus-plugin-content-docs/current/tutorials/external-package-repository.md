@@ -11,6 +11,9 @@ repository 会把一个 input module 安装到 runtime `assistant` core。
 Package repository 用来复用 Agent Core components。它们会把文件安装进 runtime
 cores；不会修改 source templates，也不会安装 Python dependencies。
 
+Packages 可以组合 Agent Slots、tools、skills、libraries 和 child cores。本教程安装
+一个 input slot。
+
 ## 1. 创建 Repository
 
 选择一个本地路径：
@@ -77,7 +80,7 @@ uv run demiurge package repo add ~/demiurge-packages --alias local --trust
 uv run demiurge package repo list
 ```
 
-Trust 必须显式授予，因为 repository 可以把可执行 Python code slot 安装进
+Trust 必须显式授予，因为 repository 可以把可执行 Python slot code 安装进
 runtime core。
 
 ## 5. Preview 并安装

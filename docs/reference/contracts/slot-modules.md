@@ -1,12 +1,13 @@
 ---
-title: Slot Module Contract
-description: Stable rules for bootstrap, input, output, and authored tool modules.
+title: Agent Slot Contract
+description: Stable rules for bootstrap, input, and output slots.
 ---
 
-# Slot Module Contract
+# Agent Slot Contract
 
-Slot modules are core-local extension points loaded by the host. They must stay
-inside the Agent Core authored surface.
+Agent Slots are evolvable interaction boundaries loaded by the host. They let
+Core-defined behavior enter the agent loop at governed points. Slot code must
+stay inside the Agent Core authored surface.
 
 ## Directory Contract
 
@@ -16,12 +17,11 @@ agent/input/<slot_id>/
   module.py
 ```
 
-The same shape applies to:
+The same shape applies to current Agent Slot kinds:
 
 - `agent/bootstrap/<slot_id>/`
 - `agent/input/<slot_id>/`
 - `agent/output/<slot_id>/`
-- `agent/tools/<tool_id>/`
 
 ## Entrypoints
 
@@ -33,17 +33,6 @@ entrypoint: module:process
 
 ```python
 def process(ctx):
-    ...
-```
-
-Authored tools normally use:
-
-```yaml
-entrypoint: module:execute
-```
-
-```python
-def execute(ctx, args):
     ...
 ```
 
@@ -76,6 +65,9 @@ whether the effect is allowed.
 
 Do not bypass host tools by directly touching paths, network, or process state
 when a host capability exists for the effect.
+
+Slots may compose tools, skills, MCP, state, or other agents through host-owned
+interfaces when the required capabilities allow it.
 
 ## Failure Rule
 

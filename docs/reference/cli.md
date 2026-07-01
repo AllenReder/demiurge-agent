@@ -92,7 +92,7 @@ uv run demiurge package repo remove community
 ```
 
 External path and git repositories must be trusted before they can install local
-code slots.
+Agent Slot code.
 
 ## `update`
 

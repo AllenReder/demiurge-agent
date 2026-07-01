@@ -56,7 +56,7 @@ Telegram is deny-by-default through `allowed_users` and `allowed_chats`.
 ## Non-Goals
 
 The current alpha runtime does not promise a hardened multi-tenant sandbox.
-Agent Core code slots run in the host-shared Python environment by default.
+Agent Slot code runs in the host-shared Python environment by default.
 Per-core environments and subprocess workers are future isolation options, not
 the default runtime mode. Background jobs are in-memory only and are not
 recovered after host process restart.

@@ -11,6 +11,10 @@ Evolution is not arbitrary self-modification of the host runtime. It is a
 host-owned workflow that edits a candidate copy of a core and promotes it only
 after checks pass.
 
+Agent Slots are a primary evolution surface. A candidate core can replace,
+reorder, or compose slot behavior while the host keeps provider calls, tools,
+approvals, state, promotion, and rollback behind stable contracts.
+
 ## Current Flow
 
 1. The active core asks for evolution through the host tool runtime.

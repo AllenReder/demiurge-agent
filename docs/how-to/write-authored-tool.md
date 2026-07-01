@@ -32,6 +32,10 @@ capabilities: []
 The tool id is the directory name. The model sees the description and input
 schema when the host exposes the tool.
 
+Authored tools reuse the `slot.yaml` metadata format, but they are not Agent
+Slots. A tool is a model-callable action; a slot is a governed interaction
+boundary in the agent loop.
+
 ## Implement `module.py`
 
 ```python

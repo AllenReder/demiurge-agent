@@ -72,7 +72,8 @@ repository.yaml
 packages/<package_id>.yaml
 ```
 
-External repositories must be trusted before they can install local code slots.
+External repositories must be trusted before they can install local Agent Slot
+code.
 
 ## File or Terminal Tool Is Rejected
 

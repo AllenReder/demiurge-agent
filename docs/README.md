@@ -29,6 +29,7 @@ core when it receives project docs as read-only context.
 | Make a safe Agent Core change | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
 | Create an external package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
 | Configure a real model provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
+| Understand Agent Slots | [explanation/agent-slots.md](explanation/agent-slots.md) |
 | Understand the host/core boundary | [explanation/host-and-agent-core.md](explanation/host-and-agent-core.md) |
 | Read the stable authored-surface rules | [reference/contracts/authored-surface.md](reference/contracts/authored-surface.md) |
 
@@ -45,7 +46,7 @@ Agent Core authors should read:
 
 1. [Host and Agent Core](explanation/host-and-agent-core.md)
 2. [Customize an Agent Core](tutorials/customize-agent-core.md)
-3. [Write a slot module](how-to/write-slot-module.md)
+3. [Write an Agent Slot](how-to/write-slot-module.md)
 4. [Authored surface contract](reference/contracts/authored-surface.md)
 
 Package and repository authors should read:
@@ -65,7 +66,7 @@ Contributors should read:
 ## Current Alpha Boundaries
 
 - Python dependencies are host-owned and locked by the source checkout.
-- Agent Core code slots run in the host-shared Python environment.
+- Agent Slot code runs in the host-shared Python environment.
 - Candidate Agent Core evolution cannot add dependencies automatically.
 - Package recipes install files into runtime cores; they do not modify the host
   lock file.

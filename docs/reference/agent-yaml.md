@@ -71,7 +71,7 @@ tests:
 | `model` | Provider and model defaults. |
 | `ui` | UI preferences such as tool display level. |
 | `channels` | External channel configuration. |
-| `slots` | Core-relative authored surface roots. |
+| `slots` | Core-relative authored surface roots. This maps roots such as `agent/input`; it is not a list of individual Agent Slots. |
 | `tools` | Built-in toolsets and tool metadata overrides. |
 | `approval` | Approval policy overrides. |
 | `capabilities` | Capability configuration. |

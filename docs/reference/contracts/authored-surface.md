@@ -66,7 +66,7 @@ Agent Core authors must not take ownership of:
 
 ## Dependency Rule
 
-Current runtime mode is `host_shared`. Agent Core code slots run in the host
+Current runtime mode is `host_shared`. Agent Slot code runs in the host
 Python environment. Candidate cores must not add Python dependencies
 automatically. If a change needs a dependency, document it as a manual dependency
 review item.

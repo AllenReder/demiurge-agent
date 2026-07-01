@@ -1,14 +1,14 @@
 ---
 title: slot.yaml Reference
-description: Reference for bootstrap, input, output, and authored tool slot metadata.
+description: Reference for Agent Slot and authored tool metadata.
 ---
 
 # `slot.yaml` Reference
 
-Slots are discovered from directories under configured slot roots. A slot
+Agent Slots are discovered from directories under configured slot roots. A slot
 directory is loaded only when it contains `slot.yaml`.
 
-## Module Slot
+## Agent Slot Metadata
 
 ```yaml
 entrypoint: module:process
@@ -27,10 +27,10 @@ history_policy: persist
 | `capabilities` | `[]` | Host capabilities requested by the slot. |
 | `timeout_seconds` | `null` | Optional timeout for the slot. |
 | `failure_policy` | `soft` | Failure behavior. Use `hard` only for required slots. |
-| `default_placement` | `pre_current_user` | Default input placement for input modules. |
+| `default_placement` | `pre_current_user` | Default input placement for input slots. |
 | `history_policy` | `persist` | Default output history policy. |
 
-## Authored Tool Slot
+## Authored Tool Metadata
 
 ```yaml
 entrypoint: module:execute
@@ -45,7 +45,8 @@ capabilities: []
 ```
 
 Authored tools use `execute(ctx, args)` and return a `ToolResult` or compatible
-result.
+result. They use the same `slot.yaml` file format for metadata, but a tool is a
+model-callable action rather than an Agent Slot.
 
 ## Pipeline Files
 

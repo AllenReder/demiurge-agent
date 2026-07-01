@@ -13,6 +13,10 @@ packages/<package_id>.yaml
 
 They describe files to install into runtime Agent Cores.
 
+Recipes can combine Agent Slots with tools, skills, libraries, and child cores.
+The package is the distribution unit; the slot is the governed interaction
+boundary inside the agent loop.
+
 ## Recipe Shape
 
 ```yaml

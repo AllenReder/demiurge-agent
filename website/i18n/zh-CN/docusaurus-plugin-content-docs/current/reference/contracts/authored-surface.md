@@ -65,7 +65,7 @@ Agent Core 作者不能接管：
 
 ## Dependency Rule
 
-当前 runtime mode 是 `host_shared`。Agent Core code slots 运行在 host Python
+当前 runtime mode 是 `host_shared`。Agent Slot code 运行在 host Python
 environment 中。Candidate cores 不能自动添加 Python dependencies。如果某次修改需要
 dependency，把它记录为 manual dependency review item。
 

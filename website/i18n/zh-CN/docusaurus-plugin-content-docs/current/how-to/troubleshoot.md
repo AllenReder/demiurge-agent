@@ -71,7 +71,7 @@ repository.yaml
 packages/<package_id>.yaml
 ```
 
-External repositories 必须先被 trust，才能安装本地 code slots。
+External repositories 必须先被 trust，才能安装本地 Agent Slot code。
 
 ## File 或 Terminal Tool 被拒绝
 

@@ -87,8 +87,8 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/reference/contracts/authored-surface',
-          label: 'Contracts',
+          to: '/docs/explanation/agent-slots',
+          label: 'Agent Slots',
           position: 'left',
         },
         {

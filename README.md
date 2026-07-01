@@ -26,7 +26,7 @@ Demiurge is an alpha agent framework for building agents whose behavior lives in
 files and can evolve under host control. The host owns the runtime harness:
 sessions, turns, provider calls, tools, approvals, state, delivery, promotion,
 and rollback. An Agent Core owns the authored surface: `agent.yaml`, `SOUL.md`,
-slot modules, skills, tools, schedules, MCP declarations, tests, and local
+Agent Slots, skills, tools, schedules, MCP declarations, tests, and local
 libraries.
 
 Use Demiurge when you want a local agent runtime where capabilities are

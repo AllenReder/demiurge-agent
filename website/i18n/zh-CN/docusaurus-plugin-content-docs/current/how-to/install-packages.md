@@ -5,8 +5,8 @@ description: Preview、安装、列出和卸载可复用 Agent Core packages。
 
 # 安装 Packages
 
-Packages 会把可复用 components 安装进 runtime Agent Core。它们可以安装 bootstrap
-modules、input modules、output modules、tools、skills、libraries 和 child cores。
+Packages 会把可复用 components 安装进 runtime Agent Core。它们可以安装 Agent
+Slots、tools、skills、libraries 和 child cores。
 
 ## 列出 Packages
 
@@ -21,7 +21,7 @@ uv run demiurge package list --repo builtin
 uv run demiurge package install memory_basic --core assistant --preview
 ```
 
-安装会添加 code slots、tools 或外部 provider integration 的 package 前，先使用
+安装会添加 Agent Slots、tools 或外部 provider integration 的 package 前，先使用
 preview。
 
 ## 安装

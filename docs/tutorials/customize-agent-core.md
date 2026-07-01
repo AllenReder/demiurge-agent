@@ -107,7 +107,7 @@ uv run demiurge --provider fake
 ## What You Learned
 
 - Runtime cores are the live editable surface.
-- Slot modules are ordinary files loaded by the host.
+- Agent Slots are governed interaction boundaries loaded by the host.
 - Pipelines decide when input and output modules run.
 - Host-owned checks still control provider calls, tools, approvals, state, and
   promotion.

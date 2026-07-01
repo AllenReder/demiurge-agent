@@ -160,7 +160,7 @@
   margin: 0;
 }
 
-.corePreview {
+.slotMap {
   background: var(--demiurge-surface);
   border: 1px solid var(--demiurge-line);
   border-radius: 8px;
@@ -169,7 +169,7 @@
   padding: 1.1rem;
 }
 
-.corePreview__header {
+.slotMap__header {
   align-items: center;
   border-bottom: 1px solid var(--demiurge-line);
   color: var(--demiurge-muted);
@@ -181,13 +181,12 @@
   padding: 0.85rem 1rem;
 }
 
-.corePreview__logo {
+.slotMap__logo {
   border-radius: 10px;
   height: 44px;
   width: 44px;
 }
 
-.corePreview pre,
 .installBlock pre {
   background: var(--demiurge-code-bg);
   border: 1px solid rgba(255, 154, 252, 0.12);
@@ -198,6 +197,97 @@
   margin: 0;
   overflow: auto;
   padding: 1.15rem;
+}
+
+.slotMap__loop {
+  display: grid;
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.slotNode {
+  align-items: center;
+  border: 1px solid var(--demiurge-line);
+  border-radius: 8px;
+  color: var(--demiurge-ink);
+  display: grid;
+  font-weight: 760;
+  min-height: 52px;
+  padding: 0.85rem 1rem;
+  position: relative;
+}
+
+.slotNode + .slotNode::before {
+  color: var(--demiurge-muted);
+  content: '↓';
+  font-weight: 900;
+  left: 50%;
+  line-height: 1;
+  position: absolute;
+  top: -0.82rem;
+  transform: translateX(-50%);
+}
+
+.slotNode--inbound {
+  background: #fff7ed;
+  border-color: #f3c178;
+}
+
+.slotNode--slot {
+  background: var(--demiurge-pink-tint);
+  border-color: var(--demiurge-line-strong);
+}
+
+.slotNode--host {
+  background: var(--demiurge-blue-tint);
+  border-color: #adccea;
+}
+
+[data-theme='dark'] .slotNode--inbound {
+  background: #2b2114;
+  border-color: #7f6339;
+}
+
+[data-theme='dark'] .slotNode--host {
+  border-color: #42627d;
+}
+
+.slotMap__compose,
+.slotMap__governance {
+  border-top: 1px solid var(--demiurge-line);
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 0.9rem;
+}
+
+.slotMap__governance {
+  margin-top: 0.9rem;
+}
+
+.slotMap__compose span,
+.slotMap__governance span {
+  color: var(--demiurge-muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.slotMap__compose div,
+.slotMap__governance div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.slotMap__compose b,
+.slotMap__governance b {
+  background: var(--demiurge-surface-soft);
+  border: 1px solid var(--demiurge-line);
+  border-radius: 999px;
+  color: var(--demiurge-ink);
+  font-size: 0.82rem;
+  line-height: 1;
+  padding: 0.48rem 0.62rem;
 }
 
 .section {

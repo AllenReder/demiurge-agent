@@ -1,12 +1,13 @@
 ---
-title: Write a Slot Module
+title: Write an Agent Slot
 description: Add bootstrap, input, or output behavior to an Agent Core.
 ---
 
-# Write a Slot Module
+# Write an Agent Slot
 
-Slot modules are core-local Python files loaded by the host. Use them to add
-session-start context, shape current-turn input, or deliver output.
+An Agent Slot is an evolvable interaction boundary in an Agent Core. Use a slot
+to let Core-defined behavior enter the agent loop at a governed point: add
+session-start context, shape current-turn input, or handle final output.
 
 ## Choose a Slot Root
 
@@ -83,5 +84,5 @@ For candidate evolution, keep changes limited to the authored surface and read
 
 ## Boundary
 
-Slot modules do not own the provider call, tool execution, session storage, or
+Agent Slots do not own the provider call, tool execution, session storage, or
 approval flow. They run through host-owned context and delivery interfaces.

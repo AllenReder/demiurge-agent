@@ -13,6 +13,11 @@ type Copy = {
   github: string;
   alpha: string;
   previewLabel: string;
+  composeTitle: string;
+  composeItems: string[];
+  governanceTitle: string;
+  governanceItems: string[];
+  loopItems: string[];
   pillarsTitle: string;
   pillarsBody: string;
   pillars: Array<{title: string; body: string}>;
@@ -26,93 +31,105 @@ type Copy = {
 const copy: Record<string, Copy> = {
   en: {
     badge: 'Alpha developer preview',
-    title: 'Build file-backed, self-evolving Agent Cores.',
+    title: 'Build self-evolving agents with Agent Slots.',
     subtitle:
-      'Demiurge keeps the host runtime in control while Agent Cores, slot modules, and package repositories stay readable, installable, and evolvable as files.',
-    primary: 'Read the manual',
+      'Agent Slots are governed interaction boundaries where an Agent Core can shape the loop, compose tools, skills, MCP, state, or child agents, and evolve without changing the host harness.',
+    primary: 'Understand Agent Slots',
     secondary: 'Quick Start',
     github: 'View on GitHub',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
-    previewLabel: 'agent core surface',
-    pillarsTitle: 'A manual-first runtime for people and Agent Cores.',
+    previewLabel: 'agent slot loop',
+    composeTitle: 'Slots can compose',
+    composeItems: ['tools', 'skills', 'MCP', 'state', 'child agents'],
+    governanceTitle: 'Host governance',
+    governanceItems: ['approvals', 'delivery', 'rollback'],
+    loopItems: ['Inbound', 'Bootstrap / input slots', 'Provider + tool loop', 'Output slots'],
+    pillarsTitle: 'A runtime shaped around evolvable agent boundaries.',
     pillarsBody:
-      'The public manual documents both user workflows and the stable contracts that the evolver core can read before editing a candidate core.',
+      'Demiurge keeps feature behavior in Agent Core files and packages while the host owns the risky runtime machinery.',
     pillars: [
       {
-        title: 'Host-owned harness',
+        title: 'Agent Slots',
         body:
-          'The host owns sessions, turns, provider requests, tool execution, approvals, state, delivery, and rollback.',
+          'Slots define where Core-defined behavior enters the loop and what governed effects it may request.',
       },
       {
-        title: 'Independent Agent Cores',
+        title: 'Package-composed capabilities',
         body:
-          'Each core carries identity, instructions, modules, skills, tools, schedules, MCP declarations, lib code, and tests.',
+          'Packages install slots, tools, skills, libraries, and child cores without adding feature code to the harness.',
       },
       {
-        title: 'Modular capabilities',
+        title: 'Host-governed effects',
         body:
-          'Input and output modules shape prompts, responses, artifacts, and routes without taking over host-owned capabilities.',
+          'Provider calls, tool dispatch, approvals, state, delivery, promotion, and rollback stay host-owned.',
       },
       {
-        title: 'Capability packages',
+        title: 'Versionable Core files',
         body:
-          'Package recipes install reusable tools, IO modules, skills, libraries, and child cores into runtime agent cores.',
+          'Agent Cores stay readable, diffable, testable, and promotable as ordinary files.',
       },
     ],
-    flowTitle: 'The core boundary',
+    flowTitle: 'How Slots fit the loop',
     flowBody:
-      'Demiurge is built around one rule: agent cores can evolve quickly, but risky effects stay behind host controls.',
+      'Tools act. Skills guide. MCP connects. Slots decide where behavior enters the agent loop.',
     flowItems: [
-      'User or channel input enters the host runner.',
-      'Input modules add current-turn context.',
-      'The host assembles context and calls the provider.',
-      'Tools run through host registry, workspace, and approval checks.',
-      'Output modules deliver text, media, artifacts, or structured results.',
+      'User, channel, or schedule input enters the host runner.',
+      'Bootstrap and input slots shape session and turn context.',
+      'The provider and tool loop runs under host governance.',
+      'Slots can compose tools, MCP, state, skills, or child agents.',
+      'Output slots deliver text, media, artifacts, or structured results.',
+      'The evolver can propose slot changes; the host gates promotion.',
     ],
-    installTitle: 'Quick Start',
+    installTitle: 'Try it locally',
     installBody: 'Use the fake provider first to verify the runtime without an API key.',
   },
   'zh-CN': {
     badge: 'Alpha 开发者预览',
-    title: '打造文件化、可自进化的 Agent Core',
+    title: '用 Agent Slots 构建可自进化 Agent',
     subtitle:
-      'Demiurge 让 host runtime 保持控制，同时让 Agent Core、slot modules 和 package repositories 作为可读、可安装、可演进的文件存在。',
-    primary: '阅读手册',
+      'Agent Slots 是受 Host 治理的交互边界，让 Agent Core 可以塑造 loop，组合 tools、skills、MCP、state 或子 Agent，并在不修改 harness 的情况下演进。',
+    primary: '理解 Agent Slots',
     secondary: '快速开始',
     github: '查看 GitHub',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
-    previewLabel: 'agent core surface',
-    pillarsTitle: '同时服务人类作者和 Agent Core 的手册。',
-    pillarsBody: '公开手册既覆盖用户 workflow，也记录 evolver core 修改 candidate core 前可读取的稳定 contracts。',
+    previewLabel: 'agent slot loop',
+    composeTitle: 'Slots 可以组合',
+    composeItems: ['tools', 'skills', 'MCP', 'state', '子 Agent'],
+    governanceTitle: 'Host 治理',
+    governanceItems: ['approvals', 'delivery', 'rollback'],
+    loopItems: ['Inbound', 'Bootstrap / input slots', 'Provider + tool loop', 'Output slots'],
+    pillarsTitle: '围绕可演化 Agent 边界设计的 runtime。',
+    pillarsBody: 'Demiurge 把具体能力留在 Agent Core 文件和 packages 中，把高风险 runtime 机制留给 Host 治理。',
     pillars: [
       {
-        title: 'Host-owned harness',
-        body: 'host 负责 session、turn、provider request、工具执行、审批、状态、delivery 和 rollback。',
+        title: 'Agent Slots',
+        body: 'Slot 定义 Core 定义的行为逻辑在哪里介入 loop，以及它可以请求哪些受治理的效果。',
       },
       {
-        title: '独立 Agent Core',
-        body: '每个 core 承载个性、指令、模块、skills、tools、schedules、MCP 声明、lib 和 tests。',
+        title: 'Package 组合能力',
+        body: 'Package 可以安装 slots、tools、skills、libraries 和子 Core，而不把具体 feature 写进 harness。',
       },
       {
-        title: '模块化能力',
-        body: 'input/output 模块可以塑造 prompt、回复、artifact 和路由，同时不接管 host-owned capabilities。',
+        title: 'Host 治理效果',
+        body: 'Provider calls、tool dispatch、approvals、state、delivery、promotion 和 rollback 都保持 host-owned。',
       },
       {
-        title: '能力包管理',
-        body: 'Package recipes 可以把可复用 tools、IO 模块、skills、libraries 和子 Core 安装进 runtime agent core。',
+        title: '可版本化 Core 文件',
+        body: 'Agent Core 作为普通文件保持可读、可 diff、可测试、可 promote。',
       },
     ],
-    flowTitle: '核心边界',
-    flowBody: 'Demiurge 的核心规则是：agent core 可以快速演进，但危险效果必须经过 host 控制。',
+    flowTitle: 'Slots 如何进入 loop',
+    flowBody: 'Tool 负责行动，Skill 负责指导，MCP 负责连接；Slot 决定行为在 agent loop 的哪里介入。',
     flowItems: [
-      '用户或 channel input 进入 host runner。',
-      'input modules 添加当前 turn context。',
-      'host 组装 context 并调用 provider。',
-      'tools 通过 host registry、workspace 和 approval checks 执行。',
-      'output modules 交付文本、媒体、artifact 或结构化结果。',
+      '用户、channel 或 schedule input 进入 host runner。',
+      'Bootstrap 和 input slots 塑造 session 与 turn context。',
+      'Provider 和 tool loop 在 Host 治理下运行。',
+      'Slots 可以组合 tools、MCP、state、skills 或子 Agent。',
+      'Output slots 交付文本、媒体、artifact 或结构化结果。',
+      'Evolver 可以提出 slot 修改，host 负责 gate 和 promotion。',
     ],
-    installTitle: '快速开始',
+    installTitle: '本地试运行',
     installBody: '先使用 fake provider 验证 runtime，不需要 API key。',
   },
 };
@@ -131,7 +148,7 @@ function HomepageHeader() {
           </Heading>
           <p className="hero__subtitle">{text.subtitle}</p>
           <div className="hero__actions">
-            <Link className="button button--lg heroButton heroButton--primary" to="/docs/">
+            <Link className="button button--lg heroButton heroButton--primary" to="/docs/explanation/agent-slots">
               {text.primary}
             </Link>
             <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/quick-start">
@@ -143,24 +160,34 @@ function HomepageHeader() {
           </div>
           <p className="hero__note">{text.alpha}</p>
         </div>
-        <div className="corePreview" aria-label="Demiurge agent core layout">
-          <div className="corePreview__header">
-            <img src={logoUrl} alt="" className="corePreview__logo" />
+        <div className="slotMap" aria-label="Demiurge Agent Slot loop">
+          <div className="slotMap__header">
+            <img src={logoUrl} alt="" className="slotMap__logo" />
             <span>{text.previewLabel}</span>
           </div>
-          <pre>{`assistant/
-  agent.yaml
-  agent/
-    SOUL.md
-    bootstrap/
-    input/
-    output/
-    tools/
-    skills/
-    schedules/
-    mcp/
-    lib/
-    tests/`}</pre>
+          <div className="slotMap__loop">
+            {text.loopItems.map((item, index) => (
+              <div className={`slotNode slotNode--${index === 0 ? 'inbound' : index === 2 ? 'host' : 'slot'}`} key={item}>
+                {item}
+              </div>
+            ))}
+          </div>
+          <div className="slotMap__compose">
+            <span>{text.composeTitle}</span>
+            <div>
+              {text.composeItems.map((item) => (
+                <b key={item}>{item}</b>
+              ))}
+            </div>
+          </div>
+          <div className="slotMap__governance">
+            <span>{text.governanceTitle}</span>
+            <div>
+              {text.governanceItems.map((item) => (
+                <b key={item}>{item}</b>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </header>

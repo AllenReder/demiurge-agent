@@ -82,5 +82,5 @@ uv run demiurge setup timezone clear
 ## Boundary
 
 Provider profiles are host-owned configuration. Agent Cores can declare model
-defaults in `agent.yaml`, but code slots should not construct provider requests
+defaults in `agent.yaml`, but Agent Slots should not construct provider requests
 or read secrets directly.

@@ -106,7 +106,7 @@ uv run demiurge --provider fake
 ## 你学到了什么
 
 - Runtime core 是 live editable surface。
-- Slot module 是由 host 加载的普通文件。
+- Agent Slots 是由 host 加载的受治理交互边界。
 - Pipeline 决定 input 和 output module 何时运行。
 - Provider calls、tools、approvals、state 和 promotion 仍由 host-owned checks
   控制。
