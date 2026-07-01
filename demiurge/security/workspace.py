@@ -21,8 +21,18 @@ class ResolvedPath:
 
 
 class WorkspaceScope:
-    def __init__(self, root: Path):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        write_root: Path | None = None,
+        read_roots: Iterable[Path] | None = None,
+        blocked_write_names: Iterable[str] | None = None,
+    ):
         self.root = root.expanduser().resolve()
+        self.write_root = (write_root or self.root).expanduser().resolve()
+        self.read_roots = [self.root, *[(path.expanduser().resolve()) for path in (read_roots or [])]]
+        self.blocked_write_names = {name.lower() for name in (blocked_write_names or [])}
 
     def resolve_path(
         self,
@@ -36,29 +46,38 @@ class WorkspaceScope:
         if not raw.is_absolute():
             raw = base_path / raw
         resolved = raw.expanduser().resolve(strict=False)
-        self.require_within_workspace(resolved)
+        self.require_within_workspace(resolved, operation=operation)
+        if operation != "read" and resolved.name.lower() in self.blocked_write_names:
+            raise WorkspaceScopeError(f"write blocked for protected file: {resolved.name}")
         return ResolvedPath(
             path=resolved,
             relative=self.relative_display(resolved),
             sensitive=self.is_sensitive_path(resolved, operation=operation),
         )
 
-    def require_within_workspace(self, path: Path) -> None:
-        try:
-            path.resolve(strict=False).relative_to(self.root)
-        except ValueError as exc:
-            raise WorkspaceScopeError(f"path escapes workspace: {path}") from exc
+    def require_within_workspace(self, path: Path, *, operation: str = "read") -> None:
+        resolved = path.resolve(strict=False)
+        roots = [self.write_root] if operation != "read" else self.read_roots
+        if any(self._is_within_root(resolved, root) for root in roots):
+            return
+        raise WorkspaceScopeError(f"path escapes workspace: {path}")
 
     def relative_display(self, path: Path) -> str:
-        try:
-            return path.resolve(strict=False).relative_to(self.root).as_posix()
-        except ValueError:
-            return str(path)
+        resolved = path.resolve(strict=False)
+        for root in [self.root, *self.read_roots]:
+            try:
+                return resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return str(path)
 
     def is_sensitive_path(self, path: Path, *, operation: str = "read") -> bool:
         resolved = path.resolve(strict=False)
+        root = self.write_root if operation != "read" else self._containing_read_root(resolved)
+        if root is None:
+            return True
         try:
-            relative = resolved.relative_to(self.root)
+            relative = resolved.relative_to(root)
         except ValueError:
             return True
         names = list(relative.parts)
@@ -72,6 +91,21 @@ class WorkspaceScope:
         if operation != "read" and lowered and lowered[-1] in {"pyproject.toml", "uv.lock"}:
             return True
         return False
+
+    def _containing_read_root(self, path: Path) -> Path | None:
+        for root in self.read_roots:
+            if self._is_within_root(path, root):
+                return root
+        return None
+
+    def _is_within_root(self, path: Path, root: Path) -> bool:
+        if path == root:
+            return True
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
     def contains_sensitive_children(self, path: Path, *, operation: str = "read") -> bool:
         resolved = path.resolve(strict=False)

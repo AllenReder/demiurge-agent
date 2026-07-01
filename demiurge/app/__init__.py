@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, 
 from demiurge.env_file import load_runtime_env
 from demiurge.provider_presets import get_provider_preset
 from demiurge.security.approval import ApprovalRuntime
-from demiurge.core import AgentFallbackConfig, CoreLoader, ModelInfo, UiInfo
-from demiurge.evolution import EvolutionRuntime
+from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
+from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
@@ -230,6 +230,137 @@ class DemiurgeApp:
         }
 
 
+class HostEvolverRunner:
+    def __init__(
+        self,
+        *,
+        home: Path,
+        project_root: Path,
+        version_store: VersionStore,
+        core_loader: CoreLoader,
+        host_config: HostConfig,
+        fallback: AgentFallbackConfig,
+        api_key_override: str | None,
+    ):
+        self.home = home
+        self.project_root = project_root
+        self.version_store = version_store
+        self.core_loader = core_loader
+        self.host_config = host_config
+        self.fallback = fallback
+        self.api_key_override = api_key_override
+
+    async def run(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        target_core_id: str,
+        candidate_path: Path,
+        reference_core_path: Path,
+        run_root: Path,
+    ) -> EvolverRunResult:
+        evolver_core_path = self.version_store.active_core_path("evolver")
+        evolver_core = self.core_loader.load(evolver_core_path)
+        provider_config = resolve_provider_config(
+            self.host_config,
+            evolver_core.manifest.model,
+            self.fallback.model,
+            api_key_override=self.api_key_override,
+        )
+        provider, provider_name = create_provider(
+            provider_config=provider_config,
+            fake_script=self._fake_script(evolver_core_path, evolver_core.manifest.tests.smoke.fake_llm_script),
+        )
+        workspace = WorkspaceScope(
+            candidate_path,
+            write_root=candidate_path,
+            read_roots=[
+                reference_core_path,
+                self.project_root / "README.md",
+                self.project_root / "docs",
+            ],
+            blocked_write_names=PROTECTED_DEPENDENCY_FILES,
+        )
+        tool_runtime = ToolRuntime(
+            self.version_store,
+            workspace=workspace,
+            approval_runtime=ApprovalRuntime(),
+            global_approval=ApprovalInfo(default="auto"),
+        )
+        runner = SessionTurnStepRunner(
+            home=self.home,
+            version_store=self.version_store,
+            core_loader=self.core_loader,
+            provider=provider,
+            tool_runtime=tool_runtime,
+            core_id="evolver",
+            provider_name=provider_name,
+            workspace=str(candidate_path),
+            initial_core_path=evolver_core_path,
+            model_resolver=lambda core_model: resolve_model_name(core_model, self.fallback.model)[0],
+        )
+        try:
+            result = await runner.run_turn(
+                self._prompt(
+                    run_id=run_id,
+                    goal=goal,
+                    target_core_id=target_core_id,
+                    candidate_path=candidate_path,
+                    reference_core_path=reference_core_path,
+                    run_root=run_root,
+                ),
+                core_path=evolver_core_path,
+            )
+        finally:
+            await tool_runtime.close()
+        summary = "\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip()
+        if not summary:
+            summary = result.agent_result if isinstance(result.agent_result, str) else ""
+        return EvolverRunResult(summary=summary, session_id=result.session_id, turn_id=result.turn_id)
+
+    def _fake_script(self, core_path: Path, script: str | None) -> Path | None:
+        if not script:
+            return None
+        return core_path / script
+
+    def _prompt(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        target_core_id: str,
+        candidate_path: Path,
+        reference_core_path: Path,
+        run_root: Path,
+    ) -> str:
+        docs_path = self.project_root / "docs"
+        readme_path = self.project_root / "README.md"
+        return "\n".join(
+            [
+                f"Evolution run: {run_id}",
+                f"Target core: {target_core_id}",
+                "",
+                "Goal:",
+                goal.strip() or "Make the requested agent-core improvement.",
+                "",
+                "Editable candidate workspace:",
+                str(candidate_path),
+                "",
+                "Read-only reference paths:",
+                f"- Previous active core: {reference_core_path}",
+                f"- README: {readme_path}",
+                f"- Docs: {docs_path}",
+                "",
+                "Edit only the candidate core. Focus on agent/skills, agent/tools, agent/input, agent/output, and agent/bootstrap.",
+                "Do not edit host config, registry, sessions, state, source checkout files, .temp, or dependency files.",
+                "Use terminal only with cwd inside the candidate workspace.",
+                f"The host writes reports under this run directory; do not edit it: {run_root}",
+                "When finished, respond with a short summary and the candidate files you changed.",
+            ]
+        )
+
+
 def create_app(
     *,
     home: Path | None = None,
@@ -292,7 +423,19 @@ def create_app(
         global_approval=fallback.approval,
         mcp_runtime=mcp_runtime,
     )
-    evolution_runtime = EvolutionRuntime(version_store=version_store, gate_runner=gate_runner)
+    evolution_runtime = EvolutionRuntime(
+        version_store=version_store,
+        core_loader=core_loader,
+        evolver_runner=HostEvolverRunner(
+            home=home,
+            project_root=project_root,
+            version_store=version_store,
+            core_loader=core_loader,
+            host_config=host_config,
+            fallback=fallback,
+            api_key_override=api_key,
+        ),
+    )
     tool_runtime.evolution_runtime = evolution_runtime
     runner = SessionTurnStepRunner(
         home=home,

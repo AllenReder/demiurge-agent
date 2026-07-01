@@ -55,6 +55,12 @@ The core can evolve quickly because it is file-backed, diffable, testable, and
 replaceable. The host stays stable enough to enforce approvals, workspace
 scope, provider request shape, session history, and rollback.
 
+The first-stage `evolve_core` path is host-owned: the host copies the active
+core to a candidate directory, runs the `evolver` core with candidate-scoped
+editing tools, checks that the candidate manifest loads, and then promotes the
+candidate if that check passes. Broader pytest gates, smoke checks, repair loops,
+and diff approval are separate hardening work.
+
 Candidate core changes must not add Python dependencies automatically. The
 default runtime mode is `host_shared`: authored code runs in the host's
 uv-managed Python environment. Per-core environments and subprocess workers are

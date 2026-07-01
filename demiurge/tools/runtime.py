@@ -541,7 +541,7 @@ class ToolRuntime:
         command = str(call.arguments.get("command") or "").strip()
         if not command:
             return ToolResult(content="command is required", is_error=True)
-        cwd = self.workspace.resolve_path(call.arguments.get("cwd") or ".", operation="read")
+        cwd = self.workspace.resolve_path(call.arguments.get("cwd") or ".", operation="write")
         env_overlay = call.arguments.get("env") or {}
         if not isinstance(env_overlay, Mapping):
             return ToolResult(content="env must be an object", is_error=True)

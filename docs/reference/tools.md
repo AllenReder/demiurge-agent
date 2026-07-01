@@ -42,7 +42,7 @@ cron schedule YAML files in the active core.
 | `session_search` | Search or browse local session messages. |
 | `schedule_manage` | List, create, update, enable, disable, or delete core-authored schedule YAML. |
 | `tools_list` | List tools visible to the active core. |
-| `evolve_core` | Create, gate, and promote a candidate core. |
+| `evolve_core` | Ask the host to create a candidate core, run the `evolver` core against it, manifest-check it, and promote it if it loads. |
 | `rollback_core` | Switch back to a previous stable core version. |
 
 `schedule_manage` only manages cron expressions and prompts. Created schedules
@@ -82,5 +82,7 @@ uv run demiurge --tool-display full
 ## Permissions
 
 File writes, skill management, promptable terminal commands, network access,
-evolution, and rollback require approval by default. Workspace escapes,
-undeclared capabilities, and unknown tools are never allowed by config.
+evolution, and rollback require approval by default. `evolve_core` gives the
+internal `evolver` core a candidate-scoped workspace; promotion remains
+host-owned. Workspace escapes, undeclared capabilities, and unknown tools are
+never allowed by config.

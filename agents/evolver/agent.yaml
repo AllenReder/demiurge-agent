@@ -3,7 +3,7 @@ agent:
   id: evolver
   version: "0001"
   parent: null
-  summary: "Host-managed seed evolver core. v1 EvolutionRuntime applies structured file ops."
+  summary: "Host-managed evolver core for editing candidate agent-core versions."
 runtime:
   surface_root: agent
   max_model_steps: 90
@@ -24,15 +24,29 @@ slots:
   schedules: agent/schedules
   mcp: agent/mcp
 tools:
-  toolsets: []
-  metadata: {}
+  toolsets:
+    - coding
+  metadata:
+    clarify:
+      enabled: false
+    session_search:
+      enabled: false
+    skill_manage:
+      enabled: false
+    todo:
+      enabled: false
+    web_extract:
+      enabled: false
 approval:
   default: null
   tools: {}
   capabilities: {}
   risks: {}
 capabilities:
-  defaults: {}
+  defaults:
+    fs.read: {}
+    fs.write: {}
+    terminal.exec: {}
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
