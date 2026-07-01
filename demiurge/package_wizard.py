@@ -28,8 +28,24 @@ class SelectChoice:
     description: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class TableColumn:
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class TableRow:
+    value: str
+    cells: tuple[str, ...]
+    description: str = ""
+    row_type: str = "item"
+
+
 class PackagePrompt(Protocol):
     def select(self, title: str, choices: list[SelectChoice], *, default_index: int = 0) -> str:
+        ...
+
+    def select_table(self, title: str, columns: list[TableColumn], rows: list[TableRow], *, default_index: int = 0) -> str:
         ...
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
@@ -89,6 +105,94 @@ class PromptToolkitPackagePrompt:
             layout=Layout(Window(FormattedTextControl(_text), dont_extend_height=True)),
             key_bindings=kb,
             style=Style.from_dict({"description": "ansibrightblack", "title": "bold"}),
+            full_screen=False,
+            erase_when_done=True,
+        )
+        result = app.run()
+        if result is None:
+            raise KeyboardInterrupt
+        return str(result)
+
+    def select_table(self, title: str, columns: list[TableColumn], rows: list[TableRow], *, default_index: int = 0) -> str:
+        if not rows:
+            raise ValueError("select_table requires at least one row")
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+
+        index = {"value": max(0, min(default_index, len(rows) - 1))}
+
+        def _table_widths() -> list[int]:
+            widths = [len(column.label) for column in columns]
+            for row in rows:
+                if row.row_type != "item":
+                    continue
+                for offset, cell in enumerate(row.cells[: len(widths)]):
+                    widths[offset] = max(widths[offset], len(cell))
+            return widths
+
+        def _format_item_row(row: TableRow, widths: list[int]) -> str:
+            cells = list(row.cells)
+            cells.extend([""] * max(0, len(columns) - len(cells)))
+            rendered = []
+            for offset, cell in enumerate(cells[: len(columns)]):
+                if offset == len(columns) - 1:
+                    rendered.append(cell)
+                else:
+                    rendered.append(cell.ljust(widths[offset]))
+            return "  ".join(rendered).rstrip()
+
+        def _format_action_row(row: TableRow) -> str:
+            label = row.cells[0] if row.cells else row.value
+            return f"{label} - {row.description}" if row.description else label
+
+        def _text():
+            widths = _table_widths()
+            header = _format_item_row(TableRow("", tuple(column.label for column in columns)), widths)
+            rows_out: list[tuple[str, str]] = [("class:title", f"{title}\n")]
+            rows_out.append(("class:header", f"  {header}\n"))
+            action_started = False
+            for offset, row in enumerate(rows):
+                selected = offset == index["value"]
+                prefix = "> " if selected else "  "
+                style = "reverse" if selected else ""
+                if row.row_type != "item":
+                    if not action_started:
+                        rows_out.append(("", "\n"))
+                        action_started = True
+                    text = _format_action_row(row)
+                    rows_out.append((style or "class:action", f"{prefix}{text}\n"))
+                    continue
+                rows_out.append((style, f"{prefix}{_format_item_row(row, widths)}\n"))
+            rows_out.append(("", "\nUp/Down to choose, Enter to confirm, Ctrl-C to cancel."))
+            return rows_out
+
+        kb = KeyBindings()
+
+        @kb.add("up", eager=True)
+        def _up(event):
+            index["value"] = (index["value"] - 1) % len(rows)
+            event.app.invalidate()
+
+        @kb.add("down", eager=True)
+        def _down(event):
+            index["value"] = (index["value"] + 1) % len(rows)
+            event.app.invalidate()
+
+        @kb.add("enter", eager=True)
+        def _enter(event):
+            event.app.exit(result=rows[index["value"]].value)
+
+        @kb.add("c-c", eager=True)
+        def _cancel(event):
+            event.app.exit(result=None)
+
+        app = Application(
+            layout=Layout(Window(FormattedTextControl(_text), dont_extend_height=True)),
+            key_bindings=kb,
+            style=Style.from_dict({"action": "ansibrightblack", "header": "ansibrightblack bold", "title": "bold"}),
             full_screen=False,
             erase_when_done=True,
         )
@@ -163,21 +267,25 @@ class PackageWizard:
         self._manage_core_packages(core_id)
 
     def _select_core(self) -> str:
-        core_ids = [
+        core_ids = sorted(
             core_id
             for core_id in self.version_store.list_core_ids()
             if (self.version_store.active_core_path(core_id) / "agent.yaml").exists()
-        ]
+        )
         if not core_ids:
             raise PackageOperationError("no runtime cores found")
         default_index = core_ids.index(self.default_core_id) if self.default_core_id in core_ids else 0
-        return self.prompt.select(
+        return self.prompt.select_table(
             "Select agent core",
+            [TableColumn("Status"), TableColumn("Core"), TableColumn("Path")],
             [
-                SelectChoice(
+                TableRow(
                     core_id,
-                    f"{core_id} [default]" if core_id == self.default_core_id else core_id,
-                    str(self.version_store.active_core_path(core_id)),
+                    (
+                        "default" if core_id == self.default_core_id else "",
+                        core_id,
+                        str(self.version_store.active_core_path(core_id)),
+                    ),
                 )
                 for core_id in core_ids
             ],
@@ -193,24 +301,32 @@ class PackageWizard:
             installed_by_ref = {self._installed_ref(item): item for item in result.installed}
             installed_by_id = {item.package_id: item for item in result.installed}
             packages = self._filtered_packages(result.packages, query=search_query, repository_alias=repo_filter, tag=tag_filter)
-            choices = [
-                SelectChoice(
+            rows = [
+                TableRow(
                     package.ref,
-                    f"{package.ref} {self._package_state_label(package, installed_by_ref, installed_by_id)}".rstrip(),
-                    self._package_choice_description(package),
+                    (
+                        self._package_state_marker(package, installed_by_ref, installed_by_id),
+                        package.repository_alias,
+                        package.package_id,
+                        self._package_table_detail(package, installed_by_ref, installed_by_id),
+                    ),
                 )
                 for package in packages
             ]
-            choices.extend(
+            rows.extend(
                 [
-                    SelectChoice("__search__", "Search", search_query or "Filter by id, name, summary, or tag"),
-                    SelectChoice("__filter_repo__", "Filter repo", repo_filter or "All repositories"),
-                    SelectChoice("__filter_tag__", "Filter tag", tag_filter or "All tags"),
-                    SelectChoice("__clear_filters__", "Clear filters"),
-                    SelectChoice("__back__", "Back"),
+                    TableRow("__search__", ("Search",), search_query or "Filter by id, name, summary, or tag", row_type="action"),
+                    TableRow("__filter_repo__", ("Filter repo",), repo_filter or "All repositories", row_type="action"),
+                    TableRow("__filter_tag__", ("Filter tag",), tag_filter or "All tags", row_type="action"),
+                    TableRow("__clear_filters__", ("Clear filters",), row_type="action"),
+                    TableRow("__back__", ("Back",), row_type="action"),
                 ]
             )
-            selected = self.prompt.select(self._package_list_title(core_id, search_query, repo_filter, tag_filter), choices)
+            selected = self.prompt.select_table(
+                self._package_list_title(core_id, search_query, repo_filter, tag_filter),
+                [TableColumn(""), TableColumn("Repo"), TableColumn("Package"), TableColumn("Tags / Summary")],
+                rows,
+            )
             if selected == "__back__":
                 return
             if selected == "__search__":
@@ -266,15 +382,21 @@ class PackageWizard:
             ]
         return filtered
 
-    def _package_state_label(self, package: PackageInfo, installed_by_ref: dict[str, object], installed_by_id: dict[str, object]) -> str:
+    def _package_state_marker(self, package: PackageInfo, installed_by_ref: dict[str, object], installed_by_id: dict[str, object]) -> str:
         if package.ref in installed_by_ref:
-            return "[installed]"
+            return "✓"
         if package.package_id in installed_by_id:
-            return "[blocked: package id installed]"
+            return "!"
         return ""
 
-    def _package_choice_description(self, package: PackageInfo) -> str:
+    def _package_table_detail(self, package: PackageInfo, installed_by_ref: dict[str, object], installed_by_id: dict[str, object]) -> str:
         tags = ", ".join(package.tags) or "no tags"
+        if package.ref in installed_by_ref:
+            return f"{tags} - {package.summary}"
+        conflicting = installed_by_id.get(package.package_id)
+        if conflicting is not None:
+            conflict_ref = self._installed_ref(conflicting)
+            return f"blocked: {conflict_ref} already installed - {tags} - {package.summary}"
         return f"{tags} - {package.summary}"
 
     def _package_list_title(self, core_id: str, query: str | None, repository_alias: str | None, tag: str | None) -> str:
@@ -360,21 +482,38 @@ class PackageWizard:
 
     def _repositories(self) -> None:
         while True:
-            self._print_repositories()
-            choices = [
-                SelectChoice(status.alias, status.alias, status.name or status.repository_id or status.error or "")
+            rows = [
+                TableRow(
+                    status.alias,
+                    (
+                        "ready" if status.ready else "error",
+                        status.alias,
+                        status.name or status.repository_id or "(unknown)",
+                        status.source_type,
+                        str(status.package_count),
+                        self._repository_ref_root(status),
+                    ),
+                )
                 for status in self.manager.repositories.statuses
             ]
-            choices.extend(
+            rows.extend(
                 [
-                    SelectChoice("__add__", "Add repo", "Add a trusted path or git package repository"),
-                    SelectChoice("__sync_all__", "Sync all", "Fetch git repositories and validate configured repositories"),
-                    SelectChoice("__back__", "Back"),
+                    TableRow("__add__", ("Add repo",), "Add a trusted path or git package repository", row_type="action"),
+                    TableRow("__sync_all__", ("Sync all",), "Fetch git repositories and validate configured repositories", row_type="action"),
+                    TableRow("__back__", ("Back",), row_type="action"),
                 ]
             )
-            selected = self.prompt.select(
+            selected = self.prompt.select_table(
                 "Package repositories",
-                choices,
+                [
+                    TableColumn("Status"),
+                    TableColumn("Alias"),
+                    TableColumn("Repository"),
+                    TableColumn("Type"),
+                    TableColumn("Packages"),
+                    TableColumn("Ref / Root"),
+                ],
+                rows,
             )
             if selected == "__back__":
                 return
@@ -646,6 +785,18 @@ class PackageWizard:
 
     def _repository_status(self, alias: str):
         return next((status for status in self.manager.repositories.statuses if status.alias == alias), None)
+
+    def _repository_ref_root(self, status) -> str:
+        parts = []
+        if status.ref:
+            parts.append(f"ref={status.ref}")
+        if status.commit:
+            parts.append(f"commit={status.commit[:12]}")
+        if status.root:
+            parts.append(str(status.root))
+        if status.error and not status.ready:
+            parts.append(str(status.error))
+        return " | ".join(parts)
 
     def _reload_manager(self) -> None:
         repositories = load_package_repository_collection(

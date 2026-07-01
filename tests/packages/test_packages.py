@@ -1075,11 +1075,18 @@ def test_wizard_installs_with_option_answers(tmp_path):
     assert registry["installed"][0]["options"]["api_key"] == REDACTED_SECRET
     main_menu = next(call for call in prompt.select_calls if call["title"] == "Package manager")
     assert [choice.value for choice in main_menu["choices"]] == ["packages", "repos", "exit"]
-    core_select = next(call for call in prompt.select_calls if call["title"] == "Select agent core")
-    assert core_select["choices"][0].value == "assistant"
-    assert "default" in core_select["choices"][0].label
-    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
-    assert "__search__" in {choice.value for choice in package_select["choices"]}
+    core_select = next(call for call in prompt.table_calls if call["title"] == "Select agent core")
+    assert [column.label for column in core_select["columns"]] == ["Status", "Core", "Path"]
+    assert core_select["rows"][0].value == "assistant"
+    assert core_select["rows"][0].cells[0] == "default"
+    package_select = next(call for call in prompt.table_calls if call["title"] == "Packages for assistant")
+    assert [column.label for column in package_select["columns"]] == ["", "Repo", "Package", "Tags / Summary"]
+    assert "__search__" in {row.value for row in package_select["rows"]}
+    assert next(row for row in package_select["rows"] if row.value == "__search__").row_type == "action"
+    minimax_row = next(row for row in package_select["rows"] if row.value == "builtin/minimax_tts")
+    assert minimax_row.cells[0] == ""
+    assert minimax_row.cells[1] == "builtin"
+    assert minimax_row.cells[2] == "minimax_tts"
     mode_select = next(call for call in prompt.select_calls if call["title"] == "TTS mode")
     assert mode_select["choices"][0].description
     assert mode_select["choices"][1].description
@@ -1104,9 +1111,12 @@ def test_wizard_uninstalls_installed_package(tmp_path):
     ).run()
 
     assert not (app.version_store.active_core_path("assistant") / "agent" / "output" / "tts_minimax").exists()
-    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
-    installed_choice = next(choice for choice in package_select["choices"] if choice.value == "builtin/minimax_tts")
-    assert "[installed]" in installed_choice.label
+    package_select = next(call for call in prompt.table_calls if call["title"] == "Packages for assistant")
+    installed_row = next(row for row in package_select["rows"] if row.value == "builtin/minimax_tts")
+    assert installed_row.cells[0] == "✓"
+    assert installed_row.cells[1] == "builtin"
+    assert installed_row.cells[2] == "minimax_tts"
+    assert "[installed]" not in " ".join(installed_row.cells)
 
 
 def test_wizard_blocks_same_package_id_from_different_repository(tmp_path):
@@ -1139,9 +1149,12 @@ def test_wizard_blocks_same_package_id_from_different_repository(tmp_path):
     output = console.export_text()
     assert "Blocked" in output
     assert "one/first is already installed" in output
-    package_select = next(call for call in prompt.select_calls if call["title"] == "Packages for assistant")
-    blocked = next(choice for choice in package_select["choices"] if choice.value == "two/first")
-    assert "[blocked: package id installed]" in blocked.label
+    package_select = next(call for call in prompt.table_calls if call["title"] == "Packages for assistant")
+    blocked = next(row for row in package_select["rows"] if row.value == "two/first")
+    assert blocked.cells[0] == "!"
+    assert blocked.cells[1] == "two"
+    assert blocked.cells[2] == "first"
+    assert "blocked: one/first already installed" in blocked.cells[3]
 
 
 def test_wizard_repo_add_uses_repository_id_default_alias_without_core_selection(tmp_path):
@@ -1166,6 +1179,10 @@ def test_wizard_repo_add_uses_repository_id_default_alias_without_core_selection
     raw = yaml.safe_load((app.home / "config.yaml").read_text(encoding="utf-8"))
     assert "test_repository" in raw["packages"]["repositories"]
     assert all(call["title"] != "Select agent core" for call in prompt.select_calls)
+    assert all(call["title"] != "Select agent core" for call in prompt.table_calls)
+    repo_select = next(call for call in prompt.table_calls if call["title"] == "Package repositories")
+    assert [column.label for column in repo_select["columns"]] == ["Status", "Alias", "Repository", "Type", "Packages", "Ref / Root"]
+    assert next(row for row in repo_select["rows"] if row.value == "__add__").row_type == "action"
     alias_input = next(call for call in prompt.input_calls if call["message"] == "Repository alias")
     assert alias_input["default"] == "test_repository"
 
@@ -1862,6 +1879,7 @@ class _FakePrompt:
         self.confirms = list(confirms or [])
         self.inputs = list(inputs or [])
         self.select_calls = []
+        self.table_calls = []
         self.input_calls = []
 
     def select(self, title, choices, *, default_index=0):
@@ -1870,6 +1888,21 @@ class _FakePrompt:
             return choices[default_index].value
         value = self.selections.pop(0)
         assert value in {choice.value for choice in choices}
+        return value
+
+    def select_table(self, title, columns, rows, *, default_index=0):
+        self.table_calls.append(
+            {
+                "title": title,
+                "columns": list(columns),
+                "rows": list(rows),
+                "default_index": default_index,
+            }
+        )
+        if not self.selections:
+            return rows[default_index].value
+        value = self.selections.pop(0)
+        assert value in {row.value for row in rows}
         return value
 
     def confirm(self, message, *, default=False):

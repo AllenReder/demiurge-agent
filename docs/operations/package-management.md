@@ -11,9 +11,10 @@ uv run demiurge package
 
 The wizard starts with `Packages` and `Repos`. `Repos` manages host-level
 package repository sources. `Packages` first selects an agent core, then shows
-all available packages with installed or blocked status. Selecting an available
-package collects options and ends on an `Install now` preview menu; selecting an
-installed package ends on an `Uninstall now` preview menu.
+aligned package rows with installed or blocked status, repository alias, package
+id, tags, and summary. Selecting an available package collects options and ends
+on an `Install now` preview menu; selecting an installed package ends on an
+`Uninstall now` preview menu.
 
 ## Scripted Commands
 
