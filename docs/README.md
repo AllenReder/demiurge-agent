@@ -7,9 +7,9 @@ description: English-first manual for running Demiurge, authoring Agent Cores, a
 
 # Demiurge Manual
 
-Demiurge is a local-first Python framework for file-backed, self-evolving Agent
-Cores. The host owns the runtime harness. Agent Cores own the authored surface.
-Package repositories install reusable capabilities into runtime cores.
+Demiurge helps you build file-backed, self-evolving Agent Cores. The host owns
+the runtime harness. Agent Cores own the authored surface. Package repositories
+install reusable capabilities into runtime cores.
 
 This manual is organized with the Diataxis documentation model:
 

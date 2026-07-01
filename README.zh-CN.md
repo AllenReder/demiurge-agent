@@ -5,7 +5,7 @@
 <h1 align="center">Demiurge - 德谬歌</h1>
 
 <p align="center">
-  <strong>用于文件化、自进化 Agent Core 的 local-first Python framework。</strong>
+  <strong>打造文件化、可自进化的 Agent Core。</strong>
 </p>
 
 <p align="center">

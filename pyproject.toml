@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "demiurge"
 version = "0.4.0"
-description = "A host-owned, self-evolving agent framework with Eve-style authored cores."
+description = "Build file-backed, self-evolving Agent Cores."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"

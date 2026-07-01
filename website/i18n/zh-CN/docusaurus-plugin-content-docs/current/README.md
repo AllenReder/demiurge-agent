@@ -7,9 +7,9 @@ description: 面向运行 Demiurge、编写 Agent Core 和构建 package reposit
 
 # Demiurge 手册
 
-Demiurge 是一个 local-first Python framework，用于文件化、自进化的 Agent
-Core。host 拥有 runtime harness。Agent Core 拥有 authored surface。
-Package repository 会把可复用能力安装进 runtime core。
+Demiurge 用于打造文件化、可自进化的 Agent Core。host 拥有 runtime
+harness。Agent Core 拥有 authored surface。Package repository 会把可复用能力安装进
+runtime core。
 
 本手册按 Diataxis 文档模型组织：
 

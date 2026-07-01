@@ -5,7 +5,7 @@
 <h1 align="center">Demiurge</h1>
 
 <p align="center">
-  <strong>A local-first Python framework for file-backed, self-evolving Agent Cores.</strong>
+  <strong>Build file-backed, self-evolving Agent Cores.</strong>
 </p>
 
 <p align="center">
