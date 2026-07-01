@@ -4,4 +4,3 @@ failure_policy: soft
 history_policy: persist
 capabilities:
   - network.fetch
-  - skill.activate:stt_transcription

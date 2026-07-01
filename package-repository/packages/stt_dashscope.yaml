@@ -79,7 +79,3 @@ components:
     pipeline:
       group: serial
       before: base_input
-  - id: stt_skill
-    kind: skill
-    source: stt_transcription
-    target: agent/skills/stt_transcription

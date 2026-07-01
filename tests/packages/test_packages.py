@@ -422,8 +422,8 @@ def test_builtin_repository_lists_provider_stt_packages(package_id, provider):
     assert package.components[2].source == f"stt_{provider}"
     assert package.components[2].target == "agent/input/speech_to_text"
     assert package.components[2].pipeline == {"group": "serial", "before": "base_input"}
-    assert package.components[3].source == "stt_transcription"
-    assert {component.kind for component in package.components} == {"lib", "input", "skill"}
+    assert len(package.components) == 3
+    assert {component.kind for component in package.components} == {"lib", "input"}
 
 
 @pytest.mark.parametrize(
@@ -777,9 +777,9 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     assert result.repository_alias == "builtin"
     assert result.repository_id == "builtin"
     assert (core_path / "agent" / "lib" / "stt_common" / "transcriber.py").exists()
+    assert (core_path / "agent" / "lib" / "stt_common" / "input.py").exists()
     assert (core_path / "agent" / "lib" / f"stt_{provider}" / "transcriber.py").exists()
     assert (core_path / "agent" / "input" / "speech_to_text" / "module.py").exists()
-    assert (core_path / "agent" / "skills" / "stt_transcription" / "SKILL.md").exists()
     lib_config = yaml.safe_load((core_path / "agent" / "lib" / f"stt_{provider}" / "config.yaml").read_text())
     assert lib_config["provider"] == f"stt_{provider}"
     if provider == "tencent":
@@ -791,7 +791,7 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
         assert lib_config["api_key_env"] == env_name
         assert lib_config["api_key"] is None
     input_slot = yaml.safe_load((core_path / "agent" / "input" / "speech_to_text" / "slot.yaml").read_text())
-    assert input_slot["capabilities"] == ["network.fetch", "skill.activate:stt_transcription"]
+    assert input_slot["capabilities"] == ["network.fetch"]
     pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["speech_to_text", "base_input"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
@@ -811,7 +811,6 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     assert not (core_path / "agent" / "input" / "speech_to_text").exists()
     assert not (core_path / "agent" / "lib" / f"stt_{provider}").exists()
     assert not (core_path / "agent" / "lib" / "stt_common").exists()
-    assert not (core_path / "agent" / "skills" / "stt_transcription").exists()
     pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
     assert pipeline["serial"] == ["base_input"]
 
@@ -1880,7 +1879,6 @@ async def test_openai_stt_transcribes_interaction_attachment_into_prompt(tmp_pat
     assert "please remember this" in request_text
     assert "Transcript metadata:" in request_text
     assert "audio attached" in request_text
-    assert "# Speech-to-Text Transcription" in request_text
 
 
 @pytest.mark.asyncio
