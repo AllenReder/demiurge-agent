@@ -82,7 +82,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/tutorials/first-local-run',
+          to: '/docs/tutorials/quick-start',
           label: 'Quick Start',
           position: 'left',
         },
@@ -115,7 +115,7 @@ const config: Config = {
           items: [
             {
               label: 'Quick Start',
-              to: '/docs/tutorials/first-local-run',
+              to: '/docs/tutorials/quick-start',
             },
             {
               label: 'Customize a Core',

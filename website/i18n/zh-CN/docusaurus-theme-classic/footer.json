@@ -13,7 +13,7 @@
   },
   "link.item.label.Quick Start": {
     "message": "快速开始",
-    "description": "The label of footer link with label=Quick Start linking to /docs/tutorials/first-local-run"
+    "description": "The label of footer link with label=Quick Start linking to /docs/tutorials/quick-start"
   },
   "link.item.label.Customize a Core": {
     "message": "修改 Core",

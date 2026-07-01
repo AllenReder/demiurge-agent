@@ -25,7 +25,7 @@ Package repository 会把可复用能力安装进 runtime core。
 
 | 目标 | 页面 |
 | --- | --- |
-| 在本地启动 Demiurge | [tutorials/first-local-run.md](tutorials/first-local-run.md) |
+| 在本地启动 Demiurge | [tutorials/quick-start.md](tutorials/quick-start.md) |
 | 做一次安全的 Agent Core 修改 | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
 | 创建外部 package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
 | 配置真实模型 provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
@@ -36,7 +36,7 @@ Package repository 会把可复用能力安装进 runtime core。
 
 Alpha 用户建议阅读：
 
-1. [快速开始](tutorials/first-local-run.md)
+1. [快速开始](tutorials/quick-start.md)
 2. [配置 provider](how-to/configure-provider.md)
 3. [选择 workspace](how-to/choose-workspace.md)
 4. [故障排查](how-to/troubleshoot.md)

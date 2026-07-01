@@ -30,7 +30,7 @@ const copy: Record<string, Copy> = {
     subtitle:
       'Demiurge keeps the host runtime in control while Agent Cores, slot modules, and package repositories stay readable, installable, and evolvable as files.',
     primary: 'Read the manual',
-    secondary: 'First Run',
+    secondary: 'Quick Start',
     github: 'View on GitHub',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
@@ -70,7 +70,7 @@ const copy: Record<string, Copy> = {
       'Tools run through host registry, workspace, and approval checks.',
       'Output modules deliver text, media, artifacts, or structured results.',
     ],
-    installTitle: 'First local run',
+    installTitle: 'Quick Start',
     installBody: 'Use the fake provider first to verify the runtime without an API key.',
   },
   'zh-CN': {
@@ -79,7 +79,7 @@ const copy: Record<string, Copy> = {
     subtitle:
       'Demiurge 让 host runtime 保持控制，同时让 Agent Core、slot modules 和 package repositories 作为可读、可安装、可演进的文件存在。',
     primary: '阅读手册',
-    secondary: '首次运行',
+    secondary: '快速开始',
     github: '查看 GitHub',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
     previewLabel: 'agent core surface',
@@ -112,7 +112,7 @@ const copy: Record<string, Copy> = {
       'tools 通过 host registry、workspace 和 approval checks 执行。',
       'output modules 交付文本、媒体、artifact 或结构化结果。',
     ],
-    installTitle: '首次本地运行',
+    installTitle: '快速开始',
     installBody: '先使用 fake provider 验证 runtime，不需要 API key。',
   },
 };
@@ -134,7 +134,7 @@ function HomepageHeader() {
             <Link className="button button--lg heroButton heroButton--primary" to="/docs/">
               {text.primary}
             </Link>
-            <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/first-local-run">
+            <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/quick-start">
               {text.secondary}
             </Link>
             <Link className="button button--lg heroButton heroButton--ghost" href="https://github.com/AllenReder/demiurge-agent">

@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">网站</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/">手册</a> ·
-  <a href="docs/tutorials/first-local-run.md">快速开始</a> ·
+  <a href="docs/tutorials/quick-start.md">快速开始</a> ·
   <a href="docs/tutorials/customize-agent-core.md">修改 Core</a> ·
   <a href="docs/reference/contracts/authored-surface.md">契约</a> ·
   <a href="docs/releases/0.3.3.md">最新发布</a>
@@ -52,13 +52,13 @@ uv run demiurge --provider fake
 ```
 
 fake provider 不需要 API key，适合先验证 runtime。短启动路径见
-[快速开始](docs/tutorials/first-local-run.md)，然后再配置 provider 或安装 packages。
+[快速开始](docs/tutorials/quick-start.md)，然后再配置 provider 或安装 packages。
 
 ## 文档入口
 
 | 目标 | 入口 |
 | --- | --- |
-| 本地运行 Demiurge | [快速开始](docs/tutorials/first-local-run.md) |
+| 本地运行 Demiurge | [快速开始](docs/tutorials/quick-start.md) |
 | 修改 Agent Core | [修改 Agent Core](docs/tutorials/customize-agent-core.md) |
 | 创建外部 package repository | [创建外部 package repository](docs/tutorials/external-package-repository.md) |
 | 配置真实 provider | [配置 provider](docs/how-to/configure-provider.md) |
