@@ -110,6 +110,7 @@ tools:
   toolsets:
     - coding
     - demiurge_control
+    - schedule
   metadata: {}
 approval:
   default: null
@@ -131,6 +132,8 @@ capabilities:
       max_calls_per_turn: 1
     network.fetch:
       requires_approval: true
+    schedule.manage:
+      scope: core
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false

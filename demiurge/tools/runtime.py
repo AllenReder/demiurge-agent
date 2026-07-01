@@ -22,6 +22,7 @@ from demiurge.security.command_guard import CommandGuardDecision, review_command
 from demiurge.core import ApprovalInfo, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
+from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
 from demiurge.storage import SessionStore, VersionStore
 from demiurge.tools.records import BackgroundProcessRecord
 from demiurge.tools.registry import (
@@ -272,6 +273,8 @@ class ToolRuntime:
             return await self._web_extract(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "session_search":
             return self._session_search(call)
+        if call.name == "schedule_manage":
+            return await self._schedule_manage(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "tools_list":
             return self._tools_list(core)
         return ToolResult(content=f"unsupported builtin tool: {call.name}", is_error=True)
@@ -1074,6 +1077,75 @@ class ToolRuntime:
             model_output=content,
         )
 
+    async def _schedule_manage(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult:
+        action = str(call.arguments.get("action") or "list").strip().lower()
+        if action not in {"list", "create", "update", "enable", "disable", "delete"}:
+            return ToolResult(content=f"unsupported schedule_manage action: {action}", is_error=True)
+        manager = ScheduleManager(core)
+        try:
+            if action == "list":
+                return self._schedule_manage_result(manager.list())
+
+            capability.require("schedule.manage")
+            schedule_id = str(call.arguments.get("schedule_id") or "").strip() or None
+            schedule = call.arguments.get("schedule")
+            prompt = call.arguments.get("prompt")
+            if action == "create":
+                if schedule is None or not str(schedule).strip():
+                    return ToolResult(content="schedule is required for create", is_error=True)
+                if prompt is None or not str(prompt).strip():
+                    return ToolResult(content="prompt is required for create", is_error=True)
+            elif action in {"update", "enable", "disable", "delete"} and not schedule_id:
+                return ToolResult(content=f"schedule_id is required for {action}", is_error=True)
+            if action == "update" and schedule is None and prompt is None:
+                return ToolResult(content="update requires schedule or prompt", is_error=True)
+
+            target = f"schedules/{schedule_id or '(auto)'}"
+            denied = await self._approval_for_schedule_manage(
+                call,
+                core=core,
+                turn=turn,
+                action=action,
+                target=target,
+                emit_event=emit_event,
+            )
+            if denied:
+                return denied
+
+            if action == "create":
+                payload = manager.create(
+                    schedule_id=schedule_id,
+                    schedule=str(schedule),
+                    prompt=str(prompt),
+                )
+            elif action == "update":
+                payload = manager.update(
+                    schedule_id=str(schedule_id),
+                    schedule=None if schedule is None else str(schedule),
+                    prompt=None if prompt is None else str(prompt),
+                )
+            elif action == "enable":
+                payload = manager.set_enabled(schedule_id=str(schedule_id), enabled=True)
+            elif action == "disable":
+                payload = manager.set_enabled(schedule_id=str(schedule_id), enabled=False)
+            else:
+                payload = manager.delete(schedule_id=str(schedule_id))
+            return self._schedule_manage_result(payload)
+        except ScheduleManagementError as exc:
+            return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+
+    def _schedule_manage_result(self, payload: dict[str, Any]) -> ToolResult:
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        return ToolResult(content=content, data=payload, model_output=content)
+
     async def _approval_for_path(
         self,
         call: ToolCall,
@@ -1296,6 +1368,52 @@ class ToolRuntime:
             return None
         return ToolResult(
             content=f"approval denied: {action} skill {target}",
+            data={"executionStarted": False, "approval": asdict(decision)},
+            is_error=True,
+        )
+
+    async def _approval_for_schedule_manage(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        action: str,
+        target: str,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        policy = self._effective_approval_policy(
+            core,
+            tool_name=call.name,
+            capability_name="schedule.manage",
+            risk="high",
+            default_auto=False,
+        )
+        prompt = str(call.arguments.get("prompt") or "")
+        request = ApprovalRequest(
+            tool_name=call.name,
+            tool_call_id=call.id,
+            turn_id=turn.turn_id,
+            capability="schedule.manage",
+            action=f"schedule.{action}",
+            risk="high",
+            summary=f"{action} schedule {target}",
+            target=target,
+            arguments_preview={
+                "action": action,
+                "schedule_id": call.arguments.get("schedule_id"),
+                "schedule": call.arguments.get("schedule"),
+                "prompt_preview": truncate_text(prompt, limit=200) if prompt else None,
+            },
+            cache_key=f"schedule_manage:schedule.manage:{action}:{target}",
+            auto_approve=policy == "auto",
+            policy=policy,
+        )
+        decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
+        if decision.allowed:
+            return None
+        return ToolResult(
+            content=f"approval denied: {action} schedule {target}",
             data={"executionStarted": False, "approval": asdict(decision)},
             is_error=True,
         )

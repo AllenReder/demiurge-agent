@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 from datetime import datetime, timezone
 
@@ -8,7 +9,7 @@ from demiurge.app import create_app, source_agents_root
 from demiurge.channels.telegram import TelegramInteractionBridge
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionRuntime
-from demiurge.scheduler import SchedulerService, SchedulerStore, next_fire_after, parse_instant
+from demiurge.scheduler import SchedulerService, SchedulerStore, next_fire_after, parse_instant, start_scheduler_for_app
 from demiurge.storage import EventLog
 
 
@@ -267,3 +268,29 @@ async def test_scheduler_telegram_delivery_uses_telegram_bridge(tmp_path):
             "reply_markup": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_scheduler_for_app_runs_even_before_schedules_exist_and_loads_new_schedule(tmp_path):
+    agents = _copy_agents(tmp_path)
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="late schedule output")
+    service = start_scheduler_for_app(app, poll_interval_seconds=3600)
+    try:
+        assert service.running is True
+        await asyncio.sleep(0)
+
+        schedule_dir = app.version_store.active_core_path(app.runner.core_id) / "agent" / "schedules"
+        schedule_dir.mkdir(parents=True, exist_ok=True)
+        (schedule_dir / "daily.yaml").write_text('schedule: "* * * * *"\nprompt: "Late schedule"\n', encoding="utf-8")
+        schedule = _schedule(app)
+        service.store.set_next_run(schedule, datetime(2026, 6, 28, 10, 0, tzinfo=UTC))
+
+        results = await service.run_due_once(now=datetime(2026, 6, 28, 10, 1, tzinfo=UTC))
+
+        assert len(results) == 1
+        assert results[0].status == "completed"
+        user_messages = [message.content for message in app.runner.provider.requests[0].messages if message.role == "user"]
+        assert user_messages[-1] == "Late schedule"
+    finally:
+        await service.stop()

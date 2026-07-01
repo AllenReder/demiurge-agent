@@ -30,6 +30,10 @@ load active core
 If a schedule signature changes, the scheduler resets next run state and does
 not immediately run the changed schedule.
 
+Long-running TUI and gateway processes start the scheduler loop even when the
+active core has no schedules yet. This lets newly authored schedule YAML become
+visible on a later scan without restarting the process.
+
 ## Run Flow
 
 Each claimed run creates a fresh `SessionTurnStepRunner` with a schedule session

@@ -11,6 +11,7 @@ policy decides whether the host should allow, prompt, or deny a risky action.
 | `fs.write` | Write or patch workspace files. |
 | `terminal.exec` | Run shell commands or manage processes. |
 | `network.fetch` | Fetch URLs. |
+| `schedule.manage` | Create, update, enable, disable, or delete authored schedule YAML. |
 | `state.read` | Read host-managed state. |
 | `state.write` | Submit typed state proposals. |
 | `tool.call:<name>` | Call a host-visible tool from authored code. |

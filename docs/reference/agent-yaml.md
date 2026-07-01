@@ -75,6 +75,7 @@ tools:
   toolsets:
     - coding
     - demiurge_control
+    - schedule
 capabilities:
   defaults: {}
 dependencies:

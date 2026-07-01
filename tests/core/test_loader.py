@@ -33,7 +33,7 @@ def test_loader_discovers_source_agent_slots():
     assert core.manifest.channels["mattermost"].webhook_token_env == "MATTERMOST_WEBHOOK_TOKEN"
     assert core.manifest.channels["matrix"].access_token_env == "MATRIX_ACCESS_TOKEN"
     assert core.manifest.channels["email"].smtp_username_env == "DEMIURGE_SMTP_USERNAME"
-    assert core.manifest.tools.toolsets == ["coding", "demiurge_control"]
+    assert core.manifest.tools.toolsets == ["coding", "demiurge_control", "schedule"]
     assert [slot.slot_id for slot in core.input_slots] == ["base_input"]
     assert [slot.slot_id for slot in core.input_pipeline.serial] == ["base_input"]
     assert [slot.slot_id for slot in core.input_pipeline.parallel] == []

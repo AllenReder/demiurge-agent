@@ -206,6 +206,36 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             }
         ),
     ),
+    "schedule_manage": ToolDefinition(
+        name="schedule_manage",
+        description=(
+            "List, create, update, enable, disable, or delete authored cron schedules in the active agent core. "
+            "This manages agent/schedules/*.yaml, not runtime-created jobs. "
+            "Create and update accept only standard cron expressions and self-contained prompts."
+        ),
+        input_schema=_schema(
+            {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "update", "enable", "disable", "delete"],
+                    "default": "list",
+                },
+                "schedule_id": {
+                    "type": "string",
+                    "description": "Required for update, enable, disable, and delete. Optional for create.",
+                },
+                "schedule": {
+                    "type": "string",
+                    "description": "Standard cron expression. Required for create; optional for update.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Self-contained prompt for the scheduled run. Required for create; optional for update.",
+                },
+            },
+            required=["action"],
+        ),
+    ),
     "tools_list": ToolDefinition(
         name="tools_list",
         description="List the tools currently visible to this agent core.",
@@ -230,6 +260,7 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "clarify": {"risk": "low", "approval_policy": "auto"},
     "web_extract": {"risk": "medium", "capability": "network.fetch", "approval_policy": "prompt"},
     "session_search": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
+    "schedule_manage": {"risk": "high", "capability": "schedule.manage", "approval_policy": "prompt"},
     "tools_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
 }
 

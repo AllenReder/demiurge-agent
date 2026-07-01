@@ -12,12 +12,16 @@ tools:
   toolsets:
     - coding
     - demiurge_control
+    - schedule
 ```
 
 `coding` includes file/search, terminal/process, web extract, skills, todo,
 clarify, and session search tools.
 
 `demiurge_control` includes `tools_list`, `evolve_core`, and `rollback_core`.
+
+`schedule` includes `schedule_manage` for controlled management of authored
+cron schedule YAML files in the active core.
 
 ## Built-In Tools
 
@@ -36,9 +40,14 @@ clarify, and session search tools.
 | `todo` | Maintain a per-session todo list. |
 | `clarify` | Ask the user for needed input. |
 | `session_search` | Search or browse local session messages. |
+| `schedule_manage` | List, create, update, enable, disable, or delete core-authored schedule YAML. |
 | `tools_list` | List tools visible to the active core. |
 | `evolve_core` | Create, gate, and promote a candidate core. |
 | `rollback_core` | Switch back to a previous stable core version. |
+
+`schedule_manage` only manages cron expressions and prompts. Created schedules
+use the existing schedule defaults: UTC, `base_input`, `base_output`, and local
+delivery. It is not a Hermes-style runtime job store.
 
 ## Authored and MCP Tools
 

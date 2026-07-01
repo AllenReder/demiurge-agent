@@ -37,6 +37,9 @@ BUILTIN_TOOLSETS: dict[str, list[str]] = {
         "evolve_core",
         "rollback_core",
     ],
+    "schedule": [
+        "schedule_manage",
+    ],
 }
 
 

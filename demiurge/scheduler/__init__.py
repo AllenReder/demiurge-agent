@@ -462,10 +462,7 @@ def start_scheduler_for_app(
     *,
     delivery_bridge: Any | None = None,
     poll_interval_seconds: float = 30.0,
-) -> SchedulerService | None:
-    core = app.core_loader.load(app.version_store.active_core_path(app.runner.core_id))
-    if not any(schedule.enabled for schedule in core.schedules):
-        return None
+) -> SchedulerService:
     service = SchedulerService(
         app,
         delivery_bridge=delivery_bridge,

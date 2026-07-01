@@ -96,11 +96,196 @@ def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
 
-    expected = set(BUILTIN_TOOLSETS["coding"] + BUILTIN_TOOLSETS["demiurge_control"])
+    expected = set(BUILTIN_TOOLSETS["coding"] + BUILTIN_TOOLSETS["demiurge_control"] + BUILTIN_TOOLSETS["schedule"])
 
     assert set(core.builtin_tool_names) == expected
     defaults = core.raw_manifest["capabilities"]["defaults"]
-    assert {"fs.read", "fs.write", "terminal.exec", "network.fetch"}.issubset(defaults)
+    assert {"fs.read", "fs.write", "terminal.exec", "network.fetch", "schedule.manage"}.issubset(defaults)
+
+
+@pytest.mark.asyncio
+async def test_schedule_manage_creates_lists_updates_disables_enables_and_deletes_schedule(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    schedule_dir = app.version_store.active_core_path("assistant") / "agent" / "schedules"
+
+    created = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {"action": "create", "schedule": "0 9 * * *", "prompt": "Write a daily summary."},
+    )
+    schedule_id = created.data["schedule"]["schedule_id"]
+    schedule_path = schedule_dir / f"{schedule_id}.yaml"
+
+    assert created.is_error is False
+    assert schedule_path.exists()
+    assert yaml.safe_load(schedule_path.read_text(encoding="utf-8")) == {
+        "schedule": "0 9 * * *",
+        "prompt": "Write a daily summary.",
+    }
+
+    listed = await _execute(app, core, "schedule_manage", {"action": "list"})
+    assert listed.is_error is False
+    assert [item["schedule_id"] for item in listed.data["schedules"]] == [schedule_id]
+
+    raw = yaml.safe_load(schedule_path.read_text(encoding="utf-8"))
+    raw["delivery"] = {"mode": "local"}
+    raw["modules"] = {"input": ["base_input"], "output": ["base_output"]}
+    schedule_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    updated = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "update",
+            "schedule_id": schedule_id,
+            "schedule": "30 10 * * *",
+            "prompt": "Write an updated summary.",
+        },
+    )
+    updated_raw = yaml.safe_load(schedule_path.read_text(encoding="utf-8"))
+
+    assert updated.is_error is False
+    assert updated_raw["schedule"] == "30 10 * * *"
+    assert updated_raw["prompt"] == "Write an updated summary."
+    assert updated_raw["delivery"] == {"mode": "local"}
+    assert updated_raw["modules"] == {"input": ["base_input"], "output": ["base_output"]}
+
+    disabled = await _execute(app, core, "schedule_manage", {"action": "disable", "schedule_id": schedule_id})
+    assert disabled.is_error is False
+    assert yaml.safe_load(schedule_path.read_text(encoding="utf-8"))["enabled"] is False
+
+    enabled = await _execute(app, core, "schedule_manage", {"action": "enable", "schedule_id": schedule_id})
+    assert enabled.is_error is False
+    assert yaml.safe_load(schedule_path.read_text(encoding="utf-8"))["enabled"] is True
+
+    deleted = await _execute(app, core, "schedule_manage", {"action": "delete", "schedule_id": schedule_id})
+    assert deleted.is_error is False
+    assert not schedule_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_schedule_manage_rejects_invalid_cron_id_and_duplicates(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    invalid_cron = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "daily",
+            "schedule": "not cron",
+            "prompt": "Bad schedule",
+        },
+    )
+    invalid_id = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "../daily",
+            "schedule": "0 9 * * *",
+            "prompt": "Bad id",
+        },
+    )
+    first = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "daily",
+            "schedule": "0 9 * * *",
+            "prompt": "Daily",
+        },
+    )
+    duplicate = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "daily",
+            "schedule": "0 10 * * *",
+            "prompt": "Duplicate",
+        },
+    )
+
+    assert invalid_cron.is_error is True
+    assert "invalid cron expression" in invalid_cron.content
+    assert invalid_id.is_error is True
+    assert "schedule_id must" in invalid_id.content
+    assert first.is_error is False
+    assert duplicate.is_error is True
+    assert "already exists" in duplicate.content
+
+
+@pytest.mark.asyncio
+async def test_schedule_manage_write_requires_capability_and_approval(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["capabilities"]["defaults"].pop("schedule.manage")
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    denied_by_capability = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "daily",
+            "schedule": "0 9 * * *",
+            "prompt": "Daily",
+        },
+    )
+
+    assert denied_by_capability.is_error is True
+    assert "capability denied" in denied_by_capability.content
+
+    raw["capabilities"]["defaults"]["schedule.manage"] = {"scope": "core"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+
+    denied_by_approval = await _execute(
+        app,
+        core,
+        "schedule_manage",
+        {
+            "action": "create",
+            "schedule_id": "daily",
+            "schedule": "0 9 * * *",
+            "prompt": "Daily",
+        },
+    )
+
+    assert denied_by_approval.is_error is True
+    assert denied_by_approval.data["executionStarted"] is False
+    assert not (app.version_store.active_core_path("assistant") / "agent" / "schedules" / "daily.yaml").exists()
+
+
+@pytest.mark.asyncio
+async def test_schedule_manage_list_does_not_require_schedule_manage_capability(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["capabilities"]["defaults"].pop("schedule.manage")
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "schedule_manage", {"action": "list"})
+
+    assert result.is_error is False
+    assert result.data == {"success": True, "count": 0, "schedules": []}
 
 
 @pytest.mark.asyncio

@@ -82,6 +82,17 @@ Start a long-running TUI or gateway process for the selected core. Then inspect:
 tail -n 20 ~/.demiurge/scheduler/<core_id>/runs.jsonl
 ```
 
+## Managed Updates
+
+The default assistant exposes the built-in `schedule_manage` tool. It can list,
+create, update, enable, disable, and delete YAML files in the active core's
+schedule slot.
+
+The tool intentionally manages only the cron expression and prompt. Created
+schedules rely on the standard defaults: UTC, `base_input`, `base_output`, and
+local delivery. Edit YAML directly when a schedule needs custom modules,
+timezone, or external delivery.
+
 ## Boundary
 
 Schedules are not Hermes-style runtime-created jobs. They are authored YAML
