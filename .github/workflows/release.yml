@@ -165,26 +165,6 @@ jobs:
       - name: Check whitespace
         run: git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 
-      - name: Build release artifacts
-        run: uv build
-
-      - name: Verify release artifacts
-        run: |
-          set -euo pipefail
-          wheel="dist/demiurge-${RELEASE_VERSION}-py3-none-any.whl"
-          sdist="dist/demiurge-${RELEASE_VERSION}.tar.gz"
-
-          test -f "$wheel"
-          test -f "$sdist"
-          uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
-          if tar -tzf "$sdist" | rg '^demiurge-[^/]+/\.temp/'; then
-            echo "sdist includes .temp content" >&2
-            exit 1
-          fi
-
-      - name: Smoke test wheel install
-        run: scripts/smoke_wheel_install.sh
-
       - name: Create annotated tag
         run: |
           set -euo pipefail
@@ -207,9 +187,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --title "Demiurge ${RELEASE_VERSION}" \
             --notes-file "$RELEASE_NOTES" \
-            "${args[@]}" \
-            "dist/demiurge-${RELEASE_VERSION}-py3-none-any.whl" \
-            "dist/demiurge-${RELEASE_VERSION}.tar.gz"
+            "${args[@]}"
 
       - name: Verify published release
         env:

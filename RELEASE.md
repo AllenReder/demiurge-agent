@@ -28,18 +28,6 @@ uv run demiurge init --help
 cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 (cd website && npm ci && npm run build)
 git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
-uv build
-version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-wheel="dist/demiurge-${version}-py3-none-any.whl"
-sdist="dist/demiurge-${version}.tar.gz"
-test -f "$wheel"
-test -f "$sdist"
-uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
-if tar -tzf "$sdist" | rg '^demiurge-[^/]+/\.temp/'; then
-  echo "sdist includes .temp content" >&2
-  exit 1
-fi
-scripts/smoke_wheel_install.sh
 ```
 
 ## Version and Tag Flow
@@ -54,13 +42,12 @@ The workflow verifies that:
 - `docs/releases/<version>.md` exists and has the matching release heading;
 - the website release link points at `docs/releases/<version>`;
 - the target tag and GitHub Release do not already exist;
-- Python tests, TUI checks, website build, package build, and wheel smoke test
-  all pass.
+- Python tests, TUI checks, website build, and diff checks all pass.
 
 If all checks pass, the workflow creates an annotated `v<version>` tag, pushes
 it to `origin`, creates the GitHub Release with
-`docs/releases/<version>.md` as the release body, attaches the wheel and sdist,
-and verifies the remote tag and release object.
+`docs/releases/<version>.md` as the release body, and verifies the remote tag
+and release object.
 
 Manual fallback, if GitHub Actions is unavailable:
 
@@ -71,31 +58,28 @@ Manual fallback, if GitHub Actions is unavailable:
    checklist accurate when the release process changes.
 3. Update website or README release links that should point at the latest
    release notes.
-4. Rebuild artifacts with `uv build`.
-5. Run `scripts/smoke_wheel_install.sh` against the built wheel.
-6. Create a signed or annotated tag when possible:
+4. Run the local release checks above.
+5. Create a signed or annotated tag when possible:
 
 ```bash
 version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 git tag -a "v${version}" -m "demiurge ${version}"
 ```
 
-7. Push the tag and verify it exists remotely:
+6. Push the tag and verify it exists remotely:
 
 ```bash
 git push origin "v${version}"
 git ls-remote --tags origin "v${version}*"
 ```
 
-8. Create a GitHub release for that tag, pass the release note file as the
-   release body, attach `dist/*.whl` and `dist/*.tar.gz`, and verify it:
+7. Create a GitHub release for that tag, pass the release note file as the
+   release body, and verify it:
 
 ```bash
 gh release create "v${version}" \
   --title "Demiurge ${version}" \
-  --notes-file "docs/releases/${version}.md" \
-  "dist/demiurge-${version}-py3-none-any.whl" \
-  "dist/demiurge-${version}.tar.gz"
+  --notes-file "docs/releases/${version}.md"
 gh release view "v${version}" --json tagName,name,isDraft,isPrerelease,publishedAt,url
 ```
 
@@ -122,6 +106,6 @@ Do not publish the first public alpha to PyPI automatically. Treat PyPI as a
 separate release decision after:
 
 - package name ownership is confirmed;
-- GitHub release artifacts pass wheel smoke testing;
+- wheel/sdist artifact production is intentionally enabled and tested;
 - README, license, security policy, and repository metadata are visible;
 - at least one install path is tested outside the source checkout.
