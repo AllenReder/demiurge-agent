@@ -3,6 +3,7 @@ AGENTS.md
 CLAUDE.md
 .agents/
 .claude/
+skills-lock.json
 .temp/
 .demiurge/
 
