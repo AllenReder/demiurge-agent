@@ -1079,6 +1079,188 @@ def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
     assert pipeline == {"serial": ["session_context"]}
 
 
+def test_mcp_package_installs_normalized_manifest_under_configured_slot_root(tmp_path):
+    repository_root = tmp_path / "repository"
+    _write_manifest_file_repository(repository_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core_path = app.version_store.active_core_path("assistant")
+    manifest_path = core_path / "agent.yaml"
+    raw_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw_manifest.setdefault("slots", {})["mcp"] = "custom/mcp"
+    manifest_path.write_text(yaml.safe_dump(raw_manifest, sort_keys=False), encoding="utf-8")
+    manager = _manager(app, repository_root)
+
+    preview = manager.preview_install(
+        core_id="assistant",
+        package_id="docs_mcp",
+        option_answers={"url": "https://example.test/custom-mcp"},
+    )
+    assert preview.components[0]["kind"] == "mcp"
+    assert preview.components[0]["target"] == "custom/mcp/docs.yaml"
+    assert preview.components[0]["manifest_id"] == "docs"
+    assert "config_path" not in preview.components[0]
+
+    result = manager.install(
+        core_id="assistant",
+        package_id="docs_mcp",
+        option_answers={"url": "https://example.test/custom-mcp"},
+    )
+
+    target = core_path / "custom" / "mcp" / "docs.yaml"
+    raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert result.components[0]["target"] == "custom/mcp/docs.yaml"
+    assert raw == {
+        "enabled": True,
+        "transport": "streamable_http",
+        "args": [],
+        "env": {},
+        "url": "https://example.test/custom-mcp",
+        "headers": {},
+        "tools": {"include": [], "exclude": []},
+        "risk": "medium",
+        "approval_policy": "prompt",
+        "connect_timeout_seconds": 30.0,
+        "timeout_seconds": 60.0,
+        "supports_parallel_tool_calls": False,
+    }
+    core = app.core_loader.load(core_path)
+    assert [server.relative_path for server in core.mcp_servers] == ["custom/mcp/docs.yaml"]
+    assert core.mcp_servers[0].manifest.url == "https://example.test/custom-mcp"
+
+    manager.uninstall(core_id="assistant", package_id="docs_mcp")
+    assert not target.exists()
+
+
+def test_schedule_package_installs_normalized_manifest_under_configured_slot_root(tmp_path):
+    repository_root = tmp_path / "repository"
+    _write_manifest_file_repository(repository_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core_path = app.version_store.active_core_path("assistant")
+    manifest_path = core_path / "agent.yaml"
+    raw_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw_manifest.setdefault("slots", {})["schedules"] = "custom/schedules"
+    manifest_path.write_text(yaml.safe_dump(raw_manifest, sort_keys=False), encoding="utf-8")
+    manager = _manager(app, repository_root)
+
+    result = manager.install(
+        core_id="assistant",
+        package_id="daily_schedule",
+        option_answers={"cron": "30 8 * * 1-5", "prompt": "Write a weekday summary."},
+    )
+
+    target = core_path / "custom" / "schedules" / "daily.yaml"
+    raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert result.components[0]["kind"] == "schedule"
+    assert result.components[0]["target"] == "custom/schedules/daily.yaml"
+    assert raw == {
+        "enabled": True,
+        "schedule": "30 8 * * 1-5",
+        "prompt": "Write a weekday summary.",
+        "modules": {"input": ["base_input"], "output": ["base_output"]},
+        "delivery": {"mode": "local"},
+    }
+    core = app.core_loader.load(core_path)
+    assert [schedule.relative_path for schedule in core.schedules] == ["custom/schedules/daily.yaml"]
+    assert core.schedules[0].schedule == "30 8 * * 1-5"
+
+    manager.uninstall(core_id="assistant", package_id="daily_schedule")
+    assert not target.exists()
+
+
+def test_manifest_file_package_rejects_invalid_final_manifest(tmp_path):
+    repository_root = tmp_path / "repository"
+    (repository_root / "packages").mkdir(parents=True)
+    (repository_root / "mcp").mkdir()
+    (repository_root / "mcp" / "bad.yaml").write_text("transport: stdio\n", encoding="utf-8")
+    (repository_root / "repository.yaml").write_text("id: bad_manifest\nname: Bad\n", encoding="utf-8")
+    (repository_root / "packages" / "bad.yaml").write_text(
+        "id: bad\n"
+        "components:\n"
+        "  - id: bad\n"
+        "    kind: mcp\n"
+        "    source: bad.yaml\n",
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, repository_root)
+
+    with pytest.raises(PackageOperationError, match="invalid mcp manifest"):
+        manager.preview_install(core_id="assistant", package_id="bad")
+
+
+@pytest.mark.parametrize(
+    ("source_name", "source_is_dir", "expected"),
+    [
+        ("bad.txt", False, "mcp component source must be a YAML file"),
+        ("bad.yaml", True, "mcp component source must be a YAML file"),
+    ],
+)
+def test_manifest_file_package_rejects_non_yaml_or_directory_source(tmp_path, source_name, source_is_dir, expected):
+    repository_root = tmp_path / "repository"
+    (repository_root / "packages").mkdir(parents=True)
+    source_root = repository_root / "mcp"
+    source_root.mkdir()
+    source_path = source_root / source_name
+    if source_is_dir:
+        source_path.mkdir()
+    else:
+        source_path.write_text("transport: stdio\ncommand: node\n", encoding="utf-8")
+    (repository_root / "repository.yaml").write_text("id: bad_source\nname: Bad Source\n", encoding="utf-8")
+    (repository_root / "packages" / "bad.yaml").write_text(
+        "id: bad\n"
+        "components:\n"
+        "  - id: bad\n"
+        "    kind: mcp\n"
+        f"    source: {source_name}\n",
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+
+    with pytest.raises(PackageRepositoryError, match=expected):
+        _manager(app, repository_root)
+
+
+def test_manifest_file_package_rejects_target_outside_slot_root(tmp_path):
+    repository_root = tmp_path / "repository"
+    _write_manifest_file_repository(repository_root)
+    (repository_root / "packages" / "docs_mcp.yaml").write_text(
+        "id: docs_mcp\n"
+        "components:\n"
+        "  - id: docs\n"
+        "    kind: mcp\n"
+        "    source: docs.yaml\n"
+        "    target: agent/tools/docs.yaml\n"
+        "    config:\n"
+        "      url: https://example.test/mcp\n",
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app, repository_root)
+
+    with pytest.raises(PackageOperationError, match="mcp target must stay inside agent/mcp"):
+        manager.preview_install(core_id="assistant", package_id="docs_mcp")
+
+
+def test_manifest_file_package_rejects_existing_target_and_same_stem_conflict(tmp_path):
+    repository_root = tmp_path / "repository"
+    _write_manifest_file_repository(repository_root)
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core_path = app.version_store.active_core_path("assistant")
+    mcp_root = core_path / "agent" / "mcp"
+    mcp_root.mkdir(parents=True)
+    (mcp_root / "docs.yaml").write_text("transport: stdio\ncommand: node\n", encoding="utf-8")
+    manager = _manager(app, repository_root)
+
+    with pytest.raises(PackageOperationError, match="target already exists: agent/mcp/docs.yaml"):
+        manager.preview_install(core_id="assistant", package_id="docs_mcp")
+
+    (mcp_root / "docs.yaml").unlink()
+    (mcp_root / "docs.yml").write_text("transport: stdio\ncommand: node\n", encoding="utf-8")
+
+    with pytest.raises(PackageOperationError, match="mcp id already exists: docs.yml"):
+        manager.preview_install(core_id="assistant", package_id="docs_mcp")
+
+
 def test_multi_repository_requires_qualified_ref_for_duplicate_package_ids(tmp_path):
     first_root = tmp_path / "first-repository"
     second_root = tmp_path / "second-repository"

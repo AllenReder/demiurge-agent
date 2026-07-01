@@ -27,6 +27,8 @@ tool/
 skill/
 lib/
 core/
+mcp/
+schedule/
 ```
 
 ## `repository.yaml`
@@ -57,8 +59,39 @@ Rules:
 - Component sources cannot be symlinks.
 - Pipeline edits are allowed only for bootstrap, input, and output components.
 - Bootstrap pipeline edits are serial-only.
+- `mcp` and `schedule` components install one YAML file each.
+- `mcp` defaults to the target core's `slots.mcp` root.
+- `schedule` defaults to the target core's `slots.schedules` root.
+- `mcp` and `schedule` targets must be YAML files directly inside their slot
+  root.
+- `mcp` and `schedule` component `config` is rendered with package options and
+  applied as a manifest overlay before validation.
 - `manual_dependencies` are warnings only.
 - Recipes do not edit host dependency files.
+
+## Manifest File Components
+
+MCP and schedule recipes install declarations, not runtime jobs or running
+servers. The host still owns MCP transport, schedule claims, approvals, and
+execution.
+
+```yaml
+components:
+  - id: docs
+    kind: mcp
+    source: docs.yaml
+    config:
+      url: ${options.url}
+  - id: daily
+    kind: schedule
+    source: daily.yaml
+    config:
+      schedule: "0 9 * * *"
+      prompt: "Write a daily summary."
+```
+
+The source files may be incomplete bases as long as the rendered final manifest
+is valid. Installed files are normalized with explicit schema defaults.
 
 ## Trust Rule
 

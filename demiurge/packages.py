@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+from pydantic import ValidationError
 
+from demiurge.core import McpServerManifestInfo, ScheduleManifestInfo
 from demiurge.storage import VersionStore
 from demiurge.util import ensure_dir, require_relative_path, utc_id
 
@@ -26,8 +28,10 @@ class PackageOperationError(RuntimeError):
 
 REDACTED_SECRET = "<redacted>"
 OPTION_TYPES = {"string", "bool", "choice", "path", "secret"}
-COMPONENT_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib", "core"}
+MANIFEST_FILE_KINDS = {"mcp", "schedule"}
+COMPONENT_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib", "core", *MANIFEST_FILE_KINDS}
 CORE_LOCAL_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib"}
+CORE_TARGET_KINDS = CORE_LOCAL_KINDS | MANIFEST_FILE_KINDS
 PIPELINE_KINDS = {"bootstrap", "input", "output"}
 DEFAULT_TARGET_ROOTS = {
     "bootstrap": "agent/bootstrap",
@@ -37,6 +41,11 @@ DEFAULT_TARGET_ROOTS = {
     "skill": "agent/skills",
     "lib": "agent/lib",
 }
+MANIFEST_SLOT_NAMES = {
+    "mcp": "mcp",
+    "schedule": "schedules",
+}
+YAML_SUFFIXES = {".yaml", ".yml"}
 _COPYTREE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
 _OPTION_REF = re.compile(r"^\$\{options\.([A-Za-z0-9_-]+)\}$")
 _OPTION_REF_ANYWHERE = re.compile(r"\$\{options\.([A-Za-z0-9_-]+)\}")
@@ -231,7 +240,7 @@ class PackageRepository:
         packages = cls._load_packages(root, repository=repository, source=source)
         for package in packages.values():
             for component in package.components:
-                cls._validate_component_tree(root, cls._component_source_path(root, component))
+                cls._validate_component_tree(root, component, cls._component_source_path(root, component))
         return cls(root=root, repository=repository, packages=packages, source=source)
 
     @staticmethod
@@ -449,7 +458,14 @@ class PackageRepository:
         return self._component_source_path(self.root, component)
 
     @staticmethod
-    def _validate_component_tree(root: Path, source_path: Path) -> None:
+    def _validate_component_tree(root: Path, component: PackageComponent, source_path: Path) -> None:
+        if component.kind in MANIFEST_FILE_KINDS:
+            if not source_path.is_file():
+                raise PackageRepositoryError(f"{component.kind} component source must be a YAML file: {source_path}")
+            if source_path.suffix.lower() not in YAML_SUFFIXES:
+                raise PackageRepositoryError(f"{component.kind} component source must be a YAML file: {source_path}")
+            require_relative_path(source_path, root)
+            return
         if source_path.is_symlink():
             raise PackageRepositoryError(f"component source cannot be a symlink: {source_path}")
         if source_path.is_file():
@@ -1001,6 +1017,8 @@ class PackageManager:
         source_path = repository.component_source_path(component)
         source_key = f"{component.kind}/{component.source}"
         config = self._render_component_config(component, resolved_options)
+        if component.kind in MANIFEST_FILE_KINDS:
+            return self._plan_manifest_file_component(core_path, package, component, source_path, source_key, config)
         if component.kind in CORE_LOCAL_KINDS:
             target_rel = component.target or f"{DEFAULT_TARGET_ROOTS[component.kind]}/{Path(component.source).name}"
             target_path = self._relative_target(core_path, target_rel)
@@ -1036,6 +1054,100 @@ class PackageManager:
             "reused": False,
         }
 
+    def _plan_manifest_file_component(
+        self,
+        core_path: Path,
+        package: PackageInfo,
+        component: PackageComponent,
+        source_path: Path,
+        source_key: str,
+        config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        target_root = self._manifest_target_root(core_path, component.kind)
+        target_root_rel = target_root.relative_to(core_path).as_posix()
+        target_rel = component.target or f"{target_root_rel}/{Path(component.source).name}"
+        target_path = self._relative_target(core_path, target_rel)
+        self._validate_manifest_target_path(
+            core_path,
+            kind=component.kind,
+            target_root=target_root,
+            target_path=target_path,
+            target_rel=target_rel,
+        )
+        manifest = self._render_manifest_file(component.kind, source_path, config)
+        return {
+            "kind": component.kind,
+            "component_id": component.component_id,
+            "package_id": package.package_id,
+            "repository_alias": package.repository_alias,
+            "source": source_key,
+            "source_path": str(source_path),
+            "target": target_path.relative_to(core_path).as_posix(),
+            "target_path": str(target_path),
+            "manifest": manifest,
+            "manifest_id": target_path.stem,
+            "manifest_root": target_root_rel,
+            "reused": False,
+        }
+
+    def _manifest_target_root(self, core_path: Path, kind: str) -> Path:
+        slot_name = MANIFEST_SLOT_NAMES[kind]
+        try:
+            raw = _read_yaml_mapping(core_path / "agent.yaml")
+        except PackageRepositoryError as exc:
+            raise PackageOperationError(str(exc)) from exc
+        raw_slots = raw.get("slots") or {}
+        if raw_slots and not isinstance(raw_slots, Mapping):
+            raise PackageOperationError("agent.yaml slots must be a mapping")
+        configured = raw_slots.get(slot_name) if isinstance(raw_slots, Mapping) else None
+        if configured is None or not str(configured).strip():
+            raw_runtime = raw.get("runtime") or {}
+            if raw_runtime and not isinstance(raw_runtime, Mapping):
+                raise PackageOperationError("agent.yaml runtime must be a mapping")
+            surface_root = str(raw_runtime.get("surface_root") or "agent").strip() if isinstance(raw_runtime, Mapping) else "agent"
+            configured = f"{surface_root or 'agent'}/{slot_name}"
+        if not isinstance(configured, str):
+            raise PackageOperationError(f"agent.yaml slots.{slot_name} must be a string")
+        return self._relative_target(core_path, configured)
+
+    def _validate_manifest_target_path(
+        self,
+        core_path: Path,
+        *,
+        kind: str,
+        target_root: Path,
+        target_path: Path,
+        target_rel: str,
+    ) -> None:
+        if target_path.suffix.lower() not in YAML_SUFFIXES:
+            raise PackageOperationError(f"{kind} target must be a YAML file: {target_rel}")
+        try:
+            target_path.relative_to(target_root)
+        except ValueError as exc:
+            root_rel = target_root.relative_to(core_path).as_posix()
+            raise PackageOperationError(f"{kind} target must stay inside {root_rel}: {target_rel}") from exc
+        if target_path.parent != target_root:
+            root_rel = target_root.relative_to(core_path).as_posix()
+            raise PackageOperationError(f"{kind} target must be directly inside {root_rel}: {target_rel}")
+
+    def _render_manifest_file(self, kind: str, source_path: Path, config: dict[str, Any] | None) -> dict[str, Any]:
+        try:
+            raw = _read_yaml_mapping(source_path)
+        except PackageRepositoryError as exc:
+            raise PackageOperationError(str(exc)) from exc
+        if config:
+            raw = self._merge_config(raw, config)
+        try:
+            if kind == "mcp":
+                manifest = McpServerManifestInfo.model_validate(raw)
+            elif kind == "schedule":
+                manifest = ScheduleManifestInfo.model_validate(raw)
+            else:
+                raise PackageOperationError(f"unsupported manifest component kind: {kind}")
+        except ValidationError as exc:
+            raise PackageOperationError(f"invalid {kind} manifest: {exc}") from exc
+        return manifest.model_dump(mode="python", exclude_none=True)
+
     def _validate_install_plan(
         self,
         core_path: Path,
@@ -1044,6 +1156,7 @@ class PackageManager:
         installed: list[InstalledPackage],
     ) -> None:
         seen_targets: set[str] = set()
+        seen_manifest_ids: set[str] = set()
         for operation in planned:
             target_key = self._target_key(operation)
             if target_key in seen_targets:
@@ -1057,14 +1170,44 @@ class PackageManager:
                 operation["reused"] = True
                 operation["reused_by"] = existing.get("package_id")
                 continue
+            if operation["kind"] in MANIFEST_FILE_KINDS:
+                manifest_key = self._manifest_key(operation)
+                if manifest_key in seen_manifest_ids:
+                    raise PackageOperationError(f"package contains duplicate {operation['kind']} id: {operation.get('manifest_id')}")
+                seen_manifest_ids.add(manifest_key)
+                conflict = self._manifest_sibling_conflict_path(operation)
+                if conflict is not None:
+                    raise PackageOperationError(f"{operation['kind']} id already exists: {conflict.name}")
             if operation["kind"] in PIPELINE_KINDS:
                 self._validate_pipeline_insert(core_path, operation)
+
+    def _manifest_key(self, operation: Mapping[str, Any]) -> str:
+        return f"{operation.get('kind')}:{operation.get('manifest_root')}:{operation.get('manifest_id')}"
+
+    def _manifest_sibling_conflict_path(self, operation: Mapping[str, Any]) -> Path | None:
+        root = Path(str(operation["target_path"])).parent
+        target_path = Path(str(operation["target_path"]))
+        manifest_id = str(operation.get("manifest_id") or target_path.stem)
+        for suffix in sorted(YAML_SUFFIXES):
+            candidate = root / f"{manifest_id}{suffix}"
+            if candidate == target_path:
+                continue
+            if candidate.exists():
+                return candidate
+        return None
 
     def _install_component(self, core_path: Path, operation: dict[str, Any]) -> dict[str, Any]:
         if operation.get("reused"):
             return self._component_record(operation)
         source_path = Path(str(operation["source_path"]))
         target_path = Path(str(operation["target_path"]))
+        if operation["kind"] in MANIFEST_FILE_KINDS:
+            ensure_dir(target_path.parent)
+            target_path.write_text(
+                yaml.safe_dump(operation["manifest"], sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            return self._component_record(operation)
         if operation["kind"] in CORE_LOCAL_KINDS:
             self._copy_component_source(source_path, target_path)
             config = operation.get("config")
@@ -1095,7 +1238,7 @@ class PackageManager:
             warnings.append(f"kept shared target: {component.get('target') or component.get('target_core_id')}")
             return warnings
         kind = str(component.get("kind") or "")
-        if kind in CORE_LOCAL_KINDS:
+        if kind in CORE_TARGET_KINDS:
             target = str(component.get("target") or "")
             if target:
                 target_path = self._relative_target(core_path, target)
@@ -1150,6 +1293,8 @@ class PackageManager:
             "target_core_id",
             "slot_id",
             "pipeline",
+            "manifest_id",
+            "manifest_root",
             "reused",
             "reused_by",
         }
@@ -1157,7 +1302,7 @@ class PackageManager:
 
     def _operation_preview(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         preview = self._component_record(operation)
-        if isinstance(operation.get("config"), dict):
+        if operation.get("kind") in CORE_LOCAL_KINDS and isinstance(operation.get("config"), dict):
             preview["config_path"] = "config.yaml"
         return preview
 

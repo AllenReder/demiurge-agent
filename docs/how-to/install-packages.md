@@ -6,8 +6,8 @@ description: Preview, install, list, and uninstall reusable Agent Core packages.
 # Install Packages
 
 Packages install reusable components into runtime Agent Cores. They can install
-Agent Slots, tools, skills, libraries, and
-child cores.
+Agent Slots, tools, skills, libraries, child cores, MCP declarations, and
+schedule declarations.
 
 ## Use the Interactive Package Manager
 
@@ -37,6 +37,11 @@ uv run demiurge package install memory_basic --core assistant --preview
 
 Use preview before installing packages that add Agent Slots, tools, or external
 provider integration.
+
+Packages can also install package-owned MCP server declarations and schedule
+declarations. The installed YAML files are owned by the package for uninstall,
+but the host still owns MCP transport, approvals, schedule claims, and schedule
+execution.
 
 ## Install
 
