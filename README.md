@@ -36,6 +36,21 @@ boundary.
 Status: **alpha / developer preview**. Runtime layout, authoring contracts, and
 package behavior may still change before `1.0.0`.
 
+## How Agent Slots Work
+
+Agent Slots let packages attach input and output behavior while the host keeps
+provider access, approvals, delivery, promotion, and rollback under control.
+
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Text-to-speech output</strong><br>
+  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
+
 ## Start
 
 Managed install is the default user path:

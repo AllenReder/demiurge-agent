@@ -310,6 +310,10 @@
   max-width: 720px;
 }
 
+.sectionHeader--wide {
+  max-width: 820px;
+}
+
 .sectionHeader h2,
 .split h2,
 .installBlock h2 {
@@ -320,6 +324,7 @@
 
 .sectionHeader p,
 .featureCard p,
+.demoPanel p,
 .sectionLead,
 .installBlock p {
   color: var(--demiurge-muted);
@@ -344,6 +349,44 @@
   font-size: 1.02rem;
   letter-spacing: 0;
   margin-bottom: 0.75rem;
+}
+
+.demoGrid {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.demoPanel {
+  background: var(--demiurge-surface);
+  border: 1px solid var(--demiurge-line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.demoPanel video {
+  aspect-ratio: 16 / 9;
+  background: var(--demiurge-code-bg);
+  border-bottom: 1px solid var(--demiurge-line);
+  display: block;
+  height: auto;
+  object-fit: cover;
+  width: 100%;
+}
+
+.demoPanel__copy {
+  padding: 1.05rem 1.1rem 1.15rem;
+}
+
+.demoPanel h3 {
+  color: var(--demiurge-ink);
+  font-size: 1.08rem;
+  letter-spacing: 0;
+  margin-bottom: 0.55rem;
+}
+
+.demoPanel p {
+  margin: 0;
 }
 
 .split,
@@ -421,6 +464,10 @@
 
   .featureGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .demoGrid {
+    grid-template-columns: 1fr;
   }
 
   .hero__title {

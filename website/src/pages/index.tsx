@@ -21,6 +21,9 @@ type Copy = {
   pillarsTitle: string;
   pillarsBody: string;
   pillars: Array<{title: string; body: string}>;
+  demoTitle: string;
+  demoBody: string;
+  demos: Array<{title: string; body: string; src: string; label: string}>;
   flowTitle: string;
   flowBody: string;
   flowItems: string[];
@@ -70,6 +73,25 @@ const copy: Record<string, Copy> = {
           'Agent Cores stay readable, diffable, testable, and promotable as ordinary files.',
       },
     ],
+    demoTitle: 'How Agent Slots Work',
+    demoBody:
+      'Input and output behavior can be installed as package-owned Agent Slots while the host keeps provider access, approvals, and delivery under control.',
+    demos: [
+      {
+        title: 'Speech-to-text input',
+        body:
+          'An STT package adds an input slot that turns voice into governed turn context without changing the host loop.',
+        src: '/media/slot-packages/stt-package-demo.mp4',
+        label: 'STT package Agent Slot demo',
+      },
+      {
+        title: 'Text-to-speech output',
+        body:
+          'A TTS package adds an output slot that renders spoken replies while delivery remains host-owned.',
+        src: '/media/slot-packages/tts-package-demo.mp4',
+        label: 'TTS package Agent Slot demo',
+      },
+    ],
     flowTitle: 'How Slots fit the loop',
     flowBody:
       'Tools act. Skills guide. MCP connects. Slots decide where behavior enters the agent loop.',
@@ -117,6 +139,23 @@ const copy: Record<string, Copy> = {
       {
         title: '可版本化 Core 文件',
         body: 'Agent Core 作为普通文件保持可读、可 diff、可测试、可 promote。',
+      },
+    ],
+    demoTitle: 'Agent Slots 如何工作',
+    demoBody:
+      'Input 和 output 行为可以作为 package-owned Agent Slots 安装；provider access、approvals 和 delivery 仍由 Host 治理。',
+    demos: [
+      {
+        title: 'Speech-to-text input',
+        body: 'STT package 添加 input slot，把语音转成受治理的 turn context，不需要改 host loop。',
+        src: '/media/slot-packages/stt-package-demo.mp4',
+        label: 'STT package Agent Slot 演示',
+      },
+      {
+        title: 'Text-to-speech output',
+        body: 'TTS package 添加 output slot，把回复渲染成语音，同时 delivery 仍保持 host-owned。',
+        src: '/media/slot-packages/tts-package-demo.mp4',
+        label: 'TTS package Agent Slot 演示',
       },
     ],
     flowTitle: 'Slots 如何进入 loop',
@@ -239,6 +278,51 @@ function BoundaryFlow() {
   );
 }
 
+function PackageDemoCard({
+  demo,
+}: {
+  demo: {title: string; body: string; src: string; label: string};
+}) {
+  const videoUrl = useBaseUrl(demo.src);
+  return (
+    <article className="demoPanel">
+      <video
+        aria-label={demo.label}
+        autoPlay
+        loop
+        muted
+        playsInline
+        preload="metadata"
+        src={videoUrl}
+      />
+      <div className="demoPanel__copy">
+        <Heading as="h3">{demo.title}</Heading>
+        <p>{demo.body}</p>
+      </div>
+    </article>
+  );
+}
+
+function PackageDemos() {
+  const {i18n} = useDocusaurusContext();
+  const text = copy[i18n.currentLocale] ?? copy.en;
+  return (
+    <section className="section section--demos" id="slot-package-demos">
+      <div className="container">
+        <div className="sectionHeader sectionHeader--wide">
+          <Heading as="h2">{text.demoTitle}</Heading>
+          <p>{text.demoBody}</p>
+        </div>
+        <div className="demoGrid">
+          {text.demos.map((demo) => (
+            <PackageDemoCard demo={demo} key={demo.src} />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function InstallBlock() {
   const {i18n} = useDocusaurusContext();
   const text = copy[i18n.currentLocale] ?? copy.en;
@@ -264,6 +348,7 @@ export default function Home(): JSX.Element {
       <HomepageHeader />
       <main>
         <Pillars />
+        <PackageDemos />
         <BoundaryFlow />
         <InstallBlock />
       </main>

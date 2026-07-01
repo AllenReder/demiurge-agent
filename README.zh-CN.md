@@ -35,6 +35,21 @@ promotion 和 rollback。Agent Core 负责 authored surface：`agent.yaml`、
 状态：**alpha / developer preview**。在 `1.0.0` 之前，runtime layout、
 authored-surface contracts 和 package behavior 都仍可能变化。
 
+## Agent Slots 如何工作
+
+Agent Slots 让 package 接入 input/output 行为，同时让 provider access、
+approvals、delivery、promotion 和 rollback 继续由 Host 治理。
+
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Text-to-speech output</strong><br>
+  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
+
 ## 开始
 
 默认用户路径是 managed install：
