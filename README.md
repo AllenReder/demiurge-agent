@@ -19,7 +19,7 @@
   <a href="docs/tutorials/quick-start.md">Quick Start</a> ·
   <a href="docs/tutorials/customize-agent-core.md">Customize a Core</a> ·
   <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
-  <a href="docs/releases/0.3.3.md">Latest Release</a>
+  <a href="docs/releases/0.4.0.md">Latest Release</a>
 </p>
 
 Demiurge is an alpha agent framework for building agents whose behavior lives in

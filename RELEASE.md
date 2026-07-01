@@ -21,25 +21,25 @@ Run from a clean worktree, excluding unrelated local files:
 ```bash
 git status --short
 uv run python -m compileall demiurge tests
-uv run pytest
-cd ui-tui && npm test -- --run
-cd ui-tui && npm run typecheck
-cd ui-tui && npm run build
-cd ..
+uv run pytest -vv --durations=20 -o faulthandler_timeout=60
+uv run demiurge --help
+uv run demiurge init --help
+(cd ui-tui && npm ci && npm run typecheck && npm test -- --run && npm run build)
 cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+(cd website && npm ci && npm run build)
+git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 uv build
 version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 wheel="dist/demiurge-${version}-py3-none-any.whl"
 sdist="dist/demiurge-${version}.tar.gz"
 test -f "$wheel"
 test -f "$sdist"
-uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|package-repository)|demiurge/ui/tui_dist/entry.js'
+uv run python -m zipfile -l "$wheel" | rg 'demiurge/resources/(agents|agent-catalog)|demiurge/ui/tui_dist/entry.js'
 if tar -tzf "$sdist" | rg '^demiurge-[^/]+/\.temp/'; then
   echo "sdist includes .temp content" >&2
   exit 1
 fi
 scripts/smoke_wheel_install.sh
-git diff --check
 ```
 
 ## Version and Tag Flow

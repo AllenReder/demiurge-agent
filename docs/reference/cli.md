@@ -98,7 +98,7 @@ code slots.
 
 ```bash
 demiurge update
-demiurge update --ref v0.3.3
+demiurge update --ref v0.4.0
 demiurge update --skip-init-check
 ```
 

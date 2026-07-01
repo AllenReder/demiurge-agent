@@ -19,7 +19,7 @@
   <a href="docs/tutorials/quick-start.md">快速开始</a> ·
   <a href="docs/tutorials/customize-agent-core.md">修改 Core</a> ·
   <a href="docs/reference/contracts/authored-surface.md">契约</a> ·
-  <a href="docs/releases/0.3.3.md">最新发布</a>
+  <a href="docs/releases/0.4.0.md">最新发布</a>
 </p>
 
 Demiurge 是一个 alpha 阶段的 agent framework。agent 行为保存在文件中，
