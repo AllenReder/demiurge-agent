@@ -49,7 +49,7 @@ files 或 `.temp/` 的 goals。
 
 Rollback 会通过 host version store 切回之前稳定的 core version。
 
-## 契约
+## 规则
 
 精确规则见
 [/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits)。

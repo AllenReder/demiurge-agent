@@ -15,11 +15,10 @@
 
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">网站</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/">手册</a> ·
-  <a href="docs/tutorials/quick-start.md">快速开始</a> ·
-  <a href="docs/tutorials/customize-agent-core.md">修改 Core</a> ·
-  <a href="docs/reference/contracts/authored-surface.md">契约</a> ·
-  <a href="docs/releases/0.4.0.md">最新发布</a>
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/">文档</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/quick-start">快速开始</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/customize-agent-core">修改 Core</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.4.0">最新发布</a>
 </p>
 
 Demiurge 是一个 alpha 阶段的 agent framework。agent 行为保存在文件中，
@@ -35,22 +34,7 @@ promotion 和 rollback。Agent Core 负责 authored surface：`agent.yaml`、
 状态：**alpha / developer preview**。在 `1.0.0` 之前，runtime layout、
 authored-surface contracts 和 package behavior 都仍可能变化。
 
-## Agent Slots 如何工作
-
-Agent Slots 让 package 接入 input/output 行为，同时让 provider access、
-approvals、delivery、promotion 和 rollback 继续由 Host 治理。
-
-<p>
-  <strong>Speech-to-text input</strong><br>
-  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
-</p>
-
-<p>
-  <strong>Text-to-speech output</strong><br>
-  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
-</p>
-
-## 开始
+## 快速开始
 
 默认用户路径是 managed install：
 
@@ -67,22 +51,23 @@ uv run demiurge --provider fake
 ```
 
 fake provider 不需要 API key，适合先验证 runtime。短启动路径见
-[快速开始](docs/tutorials/quick-start.md)，然后再配置 provider 或安装 packages。
+[快速开始](https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/quick-start)，
+然后再配置 provider 或安装 packages。
 
-## 文档入口
+## Agent Slots 如何工作
 
-| 目标 | 入口 |
-| --- | --- |
-| 本地运行 Demiurge | [快速开始](docs/tutorials/quick-start.md) |
-| 修改 Agent Core | [修改 Agent Core](docs/tutorials/customize-agent-core.md) |
-| 创建外部 package repository | [创建外部 package repository](docs/tutorials/external-package-repository.md) |
-| 配置真实 provider | [配置 provider](docs/how-to/configure-provider.md) |
-| 安装可复用能力 | [安装 packages](docs/how-to/install-packages.md) |
-| 阅读稳定 authored-surface 规则 | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
-| 查看 CLI 行为 | [CLI reference](docs/reference/cli.md) |
+Agent Slots 让 package 接入 input/output 行为，同时让 provider access、
+approvals、delivery、promotion 和 rollback 继续由 Host 治理。
 
-托管手册位于
-[allenreder.github.io/demiurge-agent/docs](https://allenreder.github.io/demiurge-agent/docs/)。
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Text-to-speech output</strong><br>
+  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
 
 ## Core 结构
 

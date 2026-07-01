@@ -15,11 +15,10 @@
 
 <p align="center">
   <a href="https://allenreder.github.io/demiurge-agent/">Website</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/">Manual</a> ·
-  <a href="docs/tutorials/quick-start.md">Quick Start</a> ·
-  <a href="docs/tutorials/customize-agent-core.md">Customize a Core</a> ·
-  <a href="docs/reference/contracts/authored-surface.md">Contracts</a> ·
-  <a href="docs/releases/0.4.0.md">Latest Release</a>
+  <a href="https://allenreder.github.io/demiurge-agent/docs/">Docs</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start">Quick Start</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/customize-agent-core">Customize a Core</a> ·
+  <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.4.0">Latest Release</a>
 </p>
 
 Demiurge is an alpha agent framework for building agents whose behavior lives in
@@ -36,22 +35,7 @@ boundary.
 Status: **alpha / developer preview**. Runtime layout, authoring contracts, and
 package behavior may still change before `1.0.0`.
 
-## How Agent Slots Work
-
-Agent Slots let packages attach input and output behavior while the host keeps
-provider access, approvals, delivery, promotion, and rollback under control.
-
-<p>
-  <strong>Speech-to-text input</strong><br>
-  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
-</p>
-
-<p>
-  <strong>Text-to-speech output</strong><br>
-  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
-</p>
-
-## Start
+## Quick Start
 
 Managed install is the default user path:
 
@@ -68,23 +52,23 @@ uv run demiurge --provider fake
 ```
 
 The fake provider verifies the runtime without an API key. Use
-[`docs/tutorials/quick-start.md`](docs/tutorials/quick-start.md) for the
-short quick start, then configure a provider or install packages from there.
+[Quick Start](https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start)
+for the short tutorial, then configure a provider or install packages from there.
 
-## Documentation Map
+## How Agent Slots Work
 
-| Goal | Start here |
-| --- | --- |
-| Run Demiurge locally | [Quick Start](docs/tutorials/quick-start.md) |
-| Modify an Agent Core | [Customize an Agent Core](docs/tutorials/customize-agent-core.md) |
-| Build a package repository | [Create an external package repository](docs/tutorials/external-package-repository.md) |
-| Configure a real provider | [Configure a provider](docs/how-to/configure-provider.md) |
-| Install reusable capabilities | [Install packages](docs/how-to/install-packages.md) |
-| Read stable authoring rules | [Authored surface contract](docs/reference/contracts/authored-surface.md) |
-| Inspect CLI behavior | [CLI reference](docs/reference/cli.md) |
+Agent Slots let packages attach input and output behavior while the host keeps
+provider access, approvals, delivery, promotion, and rollback under control.
 
-The hosted manual is available at
-[allenreder.github.io/demiurge-agent/docs](https://allenreder.github.io/demiurge-agent/docs/).
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Text-to-speech output</strong><br>
+  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
 
 ## Core Shape
 

@@ -1,9 +1,9 @@
 ---
-title: Agent Slot 契约
+title: Agent Slot 规则
 description: Bootstrap、input 和 output slots 的稳定规则。
 ---
 
-# Agent Slot 契约
+# Agent Slot 规则
 
 Agent Slots 是由 Host 加载的可演化交互边界。它们让 Core 定义的行为逻辑在受
 治理的位置介入 agent loop。Slot code 必须留在 Agent Core authored surface 内。

@@ -1,9 +1,9 @@
 ---
-title: Capability Boundary 契约
+title: Capability Boundary 规则
 description: 效果、approval、workspace scope 和 host-owned controls 的稳定规则。
 ---
 
-# Capability Boundary 契约
+# Capability Boundary 规则
 
 Demiurge capabilities 是 host-owned 的。authored files 可以请求 effects；是否运行由 host 决定。
 

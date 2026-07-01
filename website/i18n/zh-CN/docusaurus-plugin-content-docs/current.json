@@ -20,7 +20,7 @@
     "description": "The label for category 'Reference' in sidebar 'docs'"
   },
   "sidebar.docs.category.Contracts": {
-    "message": "契约",
+    "message": "规则",
     "description": "The label for category 'Contracts' in sidebar 'docs'"
   },
   "sidebar.docs.category.Developer Guide": {

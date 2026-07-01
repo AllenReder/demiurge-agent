@@ -1,9 +1,9 @@
 ---
-title: Evolver-Safe Edit 契约
+title: Evolver-Safe Edit 规则
 description: Host-managed evolver core 的稳定规则。
 ---
 
-# Evolver-Safe Edit 契约
+# Evolver-Safe Edit 规则
 
 `evolver` core 会在 active core 请求 evolution 后，编辑另一个 Agent Core 的
 candidate copy。本页定义安全 edit scope。
