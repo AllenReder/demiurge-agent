@@ -1,9 +1,9 @@
 ---
-title: Package Repository Contract
+title: Package Repository 契约
 description: 外部 package repositories 和 package recipes 的稳定规则。
 ---
 
-# Package Repository Contract
+# Package Repository 契约
 
 Package repository 会把可复用 authored-surface files 安装进 runtime Agent Core。
 它们必须可以安全地 inspect、preview 和 uninstall。

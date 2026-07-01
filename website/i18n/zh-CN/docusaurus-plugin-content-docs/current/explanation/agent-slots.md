@@ -1,9 +1,9 @@
 ---
-title: Agent Slots
+title: Agent Slots 说明
 description: 理解 Agent Slots 如何作为 Agent Core 的可演化交互边界。
 ---
 
-# Agent Slots
+# Agent Slots 说明
 
 **Agent Slot** 是 Agent Core 的可演化交互边界：它让 Core 定义的行为逻辑在受
 治理的位置介入 agent loop，并组合 tools、skills、MCP、state 或其他 agents，而不

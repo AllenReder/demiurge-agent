@@ -1,14 +1,14 @@
 ---
-title: Evolver-Safe Edit Contract
+title: Evolver-Safe Edit 契约
 description: Host-managed evolver core 的稳定规则。
 ---
 
-# Evolver-Safe Edit Contract
+# Evolver-Safe Edit 契约
 
 `evolver` core 会在 active core 请求 evolution 后，编辑另一个 Agent Core 的
 candidate copy。本页定义安全 edit scope。
 
-## Allowed Candidate Paths
+## 允许编辑的 Candidate 路径
 
 优先编辑：
 
@@ -33,7 +33,7 @@ agent/tests/
 只有当 authored-surface edit 后必须修改 `agent.yaml` 才能保持 candidate loadable
 时，才修改 `agent.yaml`。
 
-## Forbidden Paths
+## 禁止编辑的路径
 
 不要编辑：
 
@@ -50,7 +50,7 @@ agent/tests/
 - package repository source files，除非明确目标是编写 package，且 candidate
   workspace 中包含这些文件
 
-## Forbidden Actions
+## 禁止的操作
 
 不要：
 
@@ -62,7 +62,7 @@ agent/tests/
 - edit files outside the candidate workspace
 - bypass host file, terminal, network, or state capabilities
 
-## Good Evolution Goals
+## 好的 Evolution 目标
 
 好的目标是 functional 且 scoped：
 
@@ -73,7 +73,7 @@ Change only agent/input and agent/input/pipeline.yaml.
 
 坏目标会要求 host runtime changes、dependency changes、release changes 或无边界重写。
 
-## Finish Criteria
+## 完成标准
 
 Evolution run 结束时，总结：
 

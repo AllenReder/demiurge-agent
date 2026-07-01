@@ -1,23 +1,23 @@
 ---
-title: Security Model
+title: 安全模型
 description: 理解 host-owned capabilities、approvals、secrets 和 workspace scope。
 ---
 
-# Security Model
+# 安全模型
 
 Demiurge 把 capabilities 视为 host-owned。Agent Core code 可以请求效果，但是否执行由
 host 决定。
 
-## Capability Boundary
+## Capability 边界
 
 这些效果必须经过 host-owned interfaces：
 
-- filesystem reads and writes
-- terminal commands
-- network fetches
-- state mutation
+- 文件系统读写
+- 终端命令
+- 网络获取
+- 状态变更
 - agent evolution
-- version promotion and rollback
+- version promotion 和 rollback
 
 声明 capability 不等于获得权限。Host 会在执行前检查 capabilities 和 approval policy。
 

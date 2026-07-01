@@ -1,0 +1,8 @@
+{
+  "label": "解释",
+  "position": 3,
+  "link": {
+    "type": "generated-index",
+    "description": "用于理解 Demiurge runtime 模型的概念文档。"
+  }
+}

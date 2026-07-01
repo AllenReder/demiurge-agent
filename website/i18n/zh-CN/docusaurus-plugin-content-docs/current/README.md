@@ -51,7 +51,7 @@ Agent Core 作者建议阅读：
 
 Package 和 repository 作者建议阅读：
 
-1. [Package model](explanation/package-model.md)
+1. [Package 模型](explanation/package-model.md)
 2. [创建外部 package repository](tutorials/external-package-repository.md)
 3. [安装 package](how-to/install-packages.md)
 4. [Package repository contract](reference/contracts/package-repositories.md)

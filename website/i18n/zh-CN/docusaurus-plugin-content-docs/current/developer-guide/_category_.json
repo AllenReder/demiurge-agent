@@ -1,0 +1,8 @@
+{
+  "label": "开发者指南",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "面向 Demiurge host runtime 贡献者的实现说明。"
+  }
+}

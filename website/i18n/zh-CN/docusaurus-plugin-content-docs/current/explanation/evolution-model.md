@@ -1,9 +1,9 @@
 ---
-title: Evolution Model
+title: Evolution 模型
 description: 理解 candidate Agent Core evolution、promotion 和 rollback。
 ---
 
-# Evolution Model
+# Evolution 模型
 
 Demiurge 把 Agent Core 视为 versionable filesystem surface。
 
@@ -25,7 +25,7 @@ rollback 留在稳定 contracts 后面。
 
 Rollback 也由 host 拥有。
 
-## Evolver Scope
+## Evolver 范围
 
 `evolver` core 可以编辑 candidate workspace 内的 authored files，尤其是：
 

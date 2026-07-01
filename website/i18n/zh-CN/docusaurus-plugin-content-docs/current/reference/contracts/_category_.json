@@ -1,0 +1,8 @@
+{
+  "label": "契约",
+  "position": 90,
+  "link": {
+    "type": "generated-index",
+    "description": "面向人类作者和 evolver core 的稳定 authoring contracts。"
+  }
+}

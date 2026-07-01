@@ -1,9 +1,9 @@
 ---
-title: Authored Surface Contract
+title: Authored Surface 契约
 description: Agent Core 拥有的文件的稳定规则。
 ---
 
-# Authored Surface Contract
+# Authored Surface 契约
 
 本页定义 Demiurge Agent Core 的 authored surface。它面向人类作者，也面向在项目文档
 作为只读 reference context 提供时的 `evolver` core。

@@ -16,7 +16,7 @@
     "description": "The label of footer link with label=Quick Start linking to /docs/tutorials/quick-start"
   },
   "link.item.label.Customize a Core": {
-    "message": "修改 Core",
+    "message": "修改 Agent Core",
     "description": "The label of footer link with label=Customize a Core linking to /docs/tutorials/customize-agent-core"
   },
   "link.item.label.Contracts": {

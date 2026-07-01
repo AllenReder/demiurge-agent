@@ -1,9 +1,9 @@
 ---
-title: Package Model
+title: Package 模型
 description: 理解 package repositories、recipes、components、trust 和 install state。
 ---
 
-# Package Model
+# Package 模型
 
 Demiurge packages 是把可复用文件安装进 runtime Agent Core 的 recipes。
 
@@ -63,7 +63,7 @@ Core-local components 会写入目标 runtime core。`core` components 会通过
 External repositories 必须先被 trust，才能安装本地 executable code。Trust 是本地 host
 policy，不是 package 可以自授予的东西。
 
-## Install State
+## 安装状态
 
 每个目标 runtime core 会在这里记录 installed package state：
 

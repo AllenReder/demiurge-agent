@@ -31,13 +31,13 @@ Demiurge 允许 Agent Core 演化文件，但把高风险效果留在 Host-contr
 - Candidate changes 可以 diff 和 gate。
 - 高风险效果仍由 Host 治理。
 
-## Host-Owned Responsibilities
+## Host-Owned 职责
 
 Host 拥有：
 
-- runtime home resolution
-- source template initialization
-- core loading and validation
+- runtime home 解析
+- source template 初始化
+- core 加载与校验
 - session、turn 和 step storage
 - context assembly
 - provider request construction

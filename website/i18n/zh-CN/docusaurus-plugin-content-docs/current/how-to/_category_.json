@@ -1,0 +1,8 @@
+{
+  "label": "操作指南",
+  "position": 2,
+  "link": {
+    "type": "generated-index",
+    "description": "配置、编写、运行和排查 Demiurge 的任务型指南。"
+  }
+}
