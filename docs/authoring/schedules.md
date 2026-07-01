@@ -89,9 +89,9 @@ create, update, enable, disable, and delete YAML files in the active core's
 schedule slot.
 
 The tool intentionally manages only the cron expression and prompt. Created
-schedules rely on the standard defaults: UTC, `base_input`, `base_output`, and
-local delivery. Edit YAML directly when a schedule needs custom modules,
-timezone, or external delivery.
+schedules explicitly write the default fields: enabled, UTC, `base_input`,
+`base_output`, and local delivery. Edit YAML directly when a schedule needs
+custom modules, timezone, or external delivery.
 
 ## Boundary
 

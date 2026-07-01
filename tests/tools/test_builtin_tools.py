@@ -122,8 +122,12 @@ async def test_schedule_manage_creates_lists_updates_disables_enables_and_delete
     assert created.is_error is False
     assert schedule_path.exists()
     assert yaml.safe_load(schedule_path.read_text(encoding="utf-8")) == {
+        "enabled": True,
         "schedule": "0 9 * * *",
+        "timezone": "UTC",
         "prompt": "Write a daily summary.",
+        "modules": {"input": ["base_input"], "output": ["base_output"]},
+        "delivery": {"mode": "local"},
     }
 
     listed = await _execute(app, core, "schedule_manage", {"action": "list"})

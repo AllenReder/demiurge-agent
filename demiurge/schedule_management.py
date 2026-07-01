@@ -33,7 +33,7 @@ class ScheduleManager:
         path = self._new_schedule_path(schedule_id)
         manifest = self._validate_manifest({"schedule": schedule, "prompt": prompt})
         ensure_dir(path.parent)
-        self._write_yaml(path, {"schedule": manifest.schedule, "prompt": manifest.prompt})
+        self._write_yaml(path, self._manifest_yaml(manifest))
         return {
             "success": True,
             "action": "create",
@@ -167,6 +167,21 @@ class ScheduleManager:
         temp = target.with_name(f".{target.name}.tmp")
         temp.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
         temp.replace(target)
+
+    def _manifest_yaml(self, manifest: ScheduleManifestInfo) -> dict[str, Any]:
+        return {
+            "enabled": manifest.enabled,
+            "schedule": manifest.schedule,
+            "timezone": manifest.timezone,
+            "prompt": manifest.prompt,
+            "modules": {
+                "input": list(manifest.modules.input),
+                "output": list(manifest.modules.output),
+            },
+            "delivery": {
+                "mode": manifest.delivery.mode,
+            },
+        }
 
     def _payload(self, item: tuple[str, Path, ScheduleManifestInfo]) -> dict[str, Any]:
         schedule_id, path, manifest = item

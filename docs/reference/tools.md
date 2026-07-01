@@ -46,8 +46,8 @@ cron schedule YAML files in the active core.
 | `rollback_core` | Switch back to a previous stable core version. |
 
 `schedule_manage` only manages cron expressions and prompts. Created schedules
-use the existing schedule defaults: UTC, `base_input`, `base_output`, and local
-delivery. It is not a Hermes-style runtime job store.
+write the default fields explicitly: enabled, UTC, `base_input`, `base_output`,
+and local delivery. It is not a Hermes-style runtime job store.
 
 ## Authored and MCP Tools
 
