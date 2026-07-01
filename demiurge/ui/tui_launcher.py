@@ -63,6 +63,7 @@ def _gateway_config(args: argparse.Namespace) -> dict[str, Any]:
         "fake_script": path_value(args.fake_script),
         "workspace": path_value(args.workspace),
         "workspace_fallback": path_value(Path.cwd().resolve()),
+        "timezone": getattr(args, "timezone", None),
         "session": args.session,
         "resume": args.resume,
         "tool_display": args.tool_display,

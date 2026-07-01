@@ -130,10 +130,26 @@ def test_loader_discovers_schedule_defaults_and_path_id(tmp_path):
     schedule = core.schedules[0]
     assert schedule.enabled is True
     assert schedule.relative_path == "agent/schedules/daily.yaml"
-    assert schedule.timezone == "UTC"
     assert schedule.modules.input == ["base_input"]
     assert schedule.modules.output == ["base_output"]
     assert schedule.delivery.mode == "local"
+
+
+def test_loader_rejects_schedule_timezone_field(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    schedule_dir = target / "agent" / "schedules"
+    schedule_dir.mkdir()
+    (schedule_dir / "daily.yaml").write_text(
+        'schedule: "0 9 * * *"\n'
+        "timezone: UTC\n"
+        'prompt: "Daily report"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CoreLoadError, match="timezone"):
+        CoreLoader().load(target)
 
 
 def test_loader_schedule_root_can_be_overridden_by_slots(tmp_path):

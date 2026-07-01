@@ -15,6 +15,7 @@ Common options:
 - `--model MODEL`
 - `--fake-script PATH`
 - `--workspace PATH`
+- `--timezone IANA_NAME`
 - `--session SESSION_ID`
 - `--resume SESSION_ID`
 - `--tool-display quiet|summary|full`
@@ -52,11 +53,15 @@ uv run demiurge setup providers remove deepseek
 uv run demiurge setup providers set-default deepseek
 uv run demiurge setup providers test deepseek --model deepseek-v4-pro
 uv run demiurge setup model set --core assistant --provider deepseek --model deepseek-v4-pro
+uv run demiurge setup timezone set Asia/Shanghai
+uv run demiurge setup timezone clear
 ```
 
 Configures host-owned provider profiles and core model defaults. Provider
 secrets can live in `~/.demiurge/.env`, shell environment variables, or direct
-host config values. JSON output redacts direct API keys.
+host config values. `setup timezone` writes `<home>/config.yaml`
+`runtime.timezone`; use `--timezone` for a process-only override. JSON output
+redacts direct API keys.
 
 ## `package`
 
@@ -90,6 +95,7 @@ Updates a managed checkout and optionally runs a read-only runtime drift check.
 
 ```bash
 uv run demiurge gateway --core assistant
+uv run demiurge gateway --timezone Asia/Shanghai
 ```
 
 Runs enabled external channels for the selected core. Supported external

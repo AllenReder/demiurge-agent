@@ -43,6 +43,7 @@ async def async_main(argv: list[str] | None = None) -> None:
             workspace=Path(config["workspace"]) if config.get("workspace") else None,
             workspace_fallback=Path(config["workspace_fallback"]) if config.get("workspace_fallback") else None,
             tool_display=config.get("tool_display"),
+            timezone=config.get("timezone"),
             session_id=config.get("resume") or config.get("session"),
             resume_required=bool(config.get("resume")),
         )

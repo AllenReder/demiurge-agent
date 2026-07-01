@@ -16,6 +16,7 @@ Example:
 ```yaml
 runtime:
   default_core: assistant
+  timezone: null
 channel:
   busy_mode: interrupt
 ui:
@@ -34,6 +35,20 @@ packages:
 ```
 
 This file is not an agent core and not the global fallback agent config.
+
+`runtime.timezone` is the host-owned IANA timezone used for cron interpretation,
+tool metadata, and terminal subprocess `TZ` injection. `null` means use the
+server-local timezone.
+
+Runtime timezone priority is:
+
+1. `uv run demiurge --timezone Asia/Shanghai`
+2. `DEMIURGE_TIMEZONE` from `~/.demiurge/.env` or the shell environment
+3. `<home>/config.yaml` `runtime.timezone`
+4. server-local timezone
+
+Durable timestamps remain UTC even when cron is interpreted in a local runtime
+timezone. Explicit invalid timezone names fail startup.
 
 `debug.show_system_prompt` is a local troubleshooting switch. When enabled, the
 host sends each assembled system prompt to the active channel immediately before
@@ -152,7 +167,7 @@ uv run demiurge --provider fake
 ```
 
 Use `/status` to inspect config sources for home, workspace, provider, model, API key,
-tool display, UI settings, and debug switches.
+tool display, UI settings, runtime timezone, and debug switches.
 
 ## Reference
 

@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None, help="Model override")
     parser.add_argument("--fake-script", type=Path, default=None, help="Fake provider script JSON")
     parser.add_argument("--workspace", type=Path, default=None, help="Workspace root for file and terminal tools")
+    parser.add_argument("--timezone", default=None, help="Runtime IANA timezone override, e.g. Asia/Shanghai")
     parser.add_argument("--session", default=None, help="Session id to create or resume")
     parser.add_argument("--resume", default=None, help="Existing session id to resume")
     parser.add_argument(
@@ -222,6 +223,7 @@ def main(argv: list[str] | None = None) -> None:
             fake_script=args.fake_script,
             workspace=args.workspace,
             tool_display=args.tool_display,
+            timezone=getattr(args, "timezone", None),
             session_id=args.resume or args.session,
             resume_required=args.resume is not None,
         )
@@ -244,6 +246,7 @@ def _add_gateway_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default=argparse.SUPPRESS, help="Model override")
     parser.add_argument("--fake-script", type=Path, default=argparse.SUPPRESS, help="Fake provider script JSON")
     parser.add_argument("--workspace", type=Path, default=argparse.SUPPRESS, help="Workspace root for file and terminal tools")
+    parser.add_argument("--timezone", default=argparse.SUPPRESS, help="Runtime IANA timezone override, e.g. Asia/Shanghai")
     parser.add_argument("--session", default=argparse.SUPPRESS, help="Session id to create or resume")
     parser.add_argument("--resume", default=argparse.SUPPRESS, help="Existing session id to resume")
     parser.add_argument(
@@ -302,6 +305,14 @@ def _add_setup_parser(subparsers: argparse._SubParsersAction) -> None:
     model_set.add_argument("--provider", required=True, help="Provider profile id or fake")
     model_set.add_argument("--model", required=True, help="Model name")
     model_set.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    timezone_parser = setup_subparsers.add_parser("timezone", help="Manage host runtime timezone")
+    timezone_subparsers = timezone_parser.add_subparsers(dest="timezone_command")
+    timezone_set = timezone_subparsers.add_parser("set", help="Set runtime.timezone in host config")
+    timezone_set.add_argument("timezone", help="IANA timezone name, e.g. Asia/Shanghai")
+    timezone_set.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    timezone_clear = timezone_subparsers.add_parser("clear", help="Clear runtime.timezone from host config")
+    timezone_clear.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
 
 def _host_config_or_default(home: Path) -> HostConfig:

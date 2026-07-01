@@ -14,18 +14,17 @@ agent/schedules/daily_summary.yaml
 
 ```yaml
 schedule: "0 9 * * *"
-timezone: "UTC"
 prompt: "Write a daily project summary."
 ```
 
 The file stem is the schedule id. A schedule is enabled unless it sets
-`enabled: false`.
+`enabled: false`. Cron expressions are interpreted in the host runtime timezone,
+not in a timezone declared by the schedule file.
 
 ## Defaults
 
 ```yaml
 enabled: true
-timezone: "UTC"
 modules:
   input: [base_input]
   output: [base_output]
@@ -35,6 +34,21 @@ delivery:
 
 `modules.input` and `modules.output` are schedule-local serial lists. They do
 not run the core's full pipeline and do not run parallel modules.
+
+## Runtime Timezone
+
+Schedules do not accept a `timezone` field. The host resolves one runtime
+timezone for cron, tools, terminal commands, and authored module metadata:
+
+```text
+--timezone
+DEMIURGE_TIMEZONE
+<home>/config.yaml runtime.timezone
+server-local timezone
+```
+
+Durable scheduler state and run logs still store UTC instants. Run metadata also
+includes local formatted due/scheduled times plus the runtime timezone source.
 
 ## External Delivery
 
@@ -89,9 +103,11 @@ create, update, enable, disable, and delete YAML files in the active core's
 schedule slot.
 
 The tool intentionally manages only the cron expression and prompt. Created
-schedules explicitly write the default fields: enabled, UTC, `base_input`,
-`base_output`, and local delivery. Edit YAML directly when a schedule needs
-custom modules, timezone, or external delivery.
+schedules explicitly write the default fields: enabled, `base_input`,
+`base_output`, and local delivery. Its result includes the current runtime
+timezone and source so the model knows how the cron expression will be
+interpreted. Edit YAML directly when a schedule needs custom modules or external
+delivery.
 
 ## Boundary
 

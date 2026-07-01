@@ -17,11 +17,12 @@ def test_init_runtime_copies_fallback_assistant_and_evolver(tmp_path):
     assert result["host_config"] == str(home / "config.yaml")
     assert result["host_config_created"] is True
     assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) == {
-        "runtime": {"default_core": "assistant"},
+        "runtime": {"default_core": "assistant", "timezone": None},
         "channel": {"busy_mode": "interrupt"},
         "ui": {"user_message_align": "left", "demiurge_theme_color": "ff9afc", "user_theme_color": "9cc9ff"},
         "debug": {"show_system_prompt": False},
         "providers": {"default": None, "profiles": {}},
+        "packages": {"repositories": {"builtin": {"type": "builtin"}}},
     }
     assert (home / "agents" / "agent.yaml").exists()
     assert (home / "agents" / "assistant" / "agent.yaml").exists()
@@ -160,6 +161,82 @@ def test_host_config_defaults_user_message_align_left_without_file(tmp_path):
     assert not (home / "config.yaml").exists()
 
 
+def test_create_app_uses_server_local_timezone_fallback(monkeypatch, tmp_path):
+    monkeypatch.delenv("DEMIURGE_TIMEZONE", raising=False)
+    home = tmp_path / "home"
+
+    app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
+    status = app.status()
+
+    assert app.runtime_timezone.source == "server-local"
+    assert app.runtime_timezone.explicit is False
+    assert status["runtime_timezone"] == app.runtime_timezone.name
+    assert status["runtime_timezone_source"] == "server-local"
+    assert status["runtime_timezone_explicit"] is False
+    assert "runtime_local_now" in status
+
+
+def test_create_app_reads_host_config_runtime_timezone(monkeypatch, tmp_path):
+    monkeypatch.delenv("DEMIURGE_TIMEZONE", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("runtime:\n  timezone: Asia/Shanghai\n", encoding="utf-8")
+
+    app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
+
+    assert app.runtime_timezone.name == "Asia/Shanghai"
+    assert app.runtime_timezone.source == "config.yaml:runtime.timezone"
+    assert app.runtime_timezone.explicit is True
+    assert app.status()["runtime_timezone"] == "Asia/Shanghai"
+
+
+def test_create_app_runtime_env_timezone_overrides_shell_and_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMIURGE_TIMEZONE", "America/New_York")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text('DEMIURGE_TIMEZONE="Europe/Paris"\n', encoding="utf-8")
+    (home / "config.yaml").write_text("runtime:\n  timezone: UTC\n", encoding="utf-8")
+
+    app = create_app(home=home, provider_name="fake", agents_root=source_agents_root())
+
+    assert app.runtime_timezone.name == "Europe/Paris"
+    assert app.runtime_timezone.source == "env:DEMIURGE_TIMEZONE"
+
+
+def test_create_app_cli_timezone_overrides_env_and_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMIURGE_TIMEZONE", "Europe/Paris")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("runtime:\n  timezone: UTC\n", encoding="utf-8")
+
+    app = create_app(
+        home=home,
+        provider_name="fake",
+        agents_root=source_agents_root(),
+        timezone="Asia/Shanghai",
+    )
+
+    assert app.runtime_timezone.name == "Asia/Shanghai"
+    assert app.runtime_timezone.source == "cli"
+
+
+def test_create_app_rejects_invalid_env_timezone(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMIURGE_TIMEZONE", "Mars/Base")
+
+    with pytest.raises(ValueError, match="unknown timezone: Mars/Base"):
+        create_app(home=tmp_path / "home", provider_name="fake", agents_root=source_agents_root())
+
+
+def test_create_app_rejects_invalid_cli_timezone(tmp_path):
+    with pytest.raises(ValueError, match="unknown timezone: Mars/Base"):
+        create_app(
+            home=tmp_path / "home",
+            provider_name="fake",
+            agents_root=source_agents_root(),
+            timezone="Mars/Base",
+        )
+
+
 def test_create_app_reads_host_config_user_message_align(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -269,6 +346,7 @@ def test_create_app_workspace_fallback_overrides_core_manifest(tmp_path):
     ("content", "field"),
     [
         ("runtime:\n  default_core: ''\n", "runtime.default_core"),
+        ("runtime:\n  timezone: Mars/Base\n", "runtime.timezone"),
         ("runtime:\n  workspace: ''\n", "runtime.workspace"),
         ("channel:\n  busy_mode: later\n", "channel.busy_mode"),
         ("ui:\n  user_message_align: center\n", "ui.user_message_align"),

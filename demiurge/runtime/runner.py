@@ -32,6 +32,7 @@ from demiurge.runtime.interactions import (
     InteractionOutbound,
     get_current_bridge,
 )
+from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
     AgentInput,
@@ -1150,6 +1151,7 @@ class SessionTurnStepRunner:
         workspace: str | None = None,
         initial_core_path: Path | None = None,
         show_system_prompt: bool = False,
+        runtime_timezone: RuntimeTimezone | None = None,
     ):
         self.home = home
         self.version_store = version_store
@@ -1164,6 +1166,7 @@ class SessionTurnStepRunner:
         self.workspace = workspace
         self.initial_core_path = initial_core_path
         self.show_system_prompt = show_system_prompt
+        self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
         self.session_store = SessionStore(home)
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
@@ -1876,19 +1879,19 @@ class SessionTurnStepRunner:
             )
 
     def _interaction_metadata(self, interaction: InteractionInbound | None) -> dict[str, Any]:
-        if interaction is None:
-            return {}
-        return {
-            key: value
-            for key, value in {
-                "channel": interaction.channel,
-                "source": interaction.source,
-                "reply_to": interaction.reply_to,
-                "conversation_key": interaction.conversation_key,
-                **dict(interaction.metadata or {}),
-            }.items()
-            if value is not None
-        }
+        metadata: dict[str, Any] = {}
+        if interaction is not None:
+            metadata.update(
+                {
+                    "channel": interaction.channel,
+                    "source": interaction.source,
+                    "reply_to": interaction.reply_to,
+                    "conversation_key": interaction.conversation_key,
+                    **dict(interaction.metadata or {}),
+                }
+            )
+        metadata.update(self.runtime_timezone.metadata())
+        return {key: value for key, value in metadata.items() if value is not None}
 
     def _resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
         channel = interaction_metadata.get("channel")

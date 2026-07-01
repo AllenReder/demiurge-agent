@@ -108,18 +108,17 @@ def _schedule(app, schedule_id="daily"):
     return next(schedule for schedule in core.schedules if schedule.schedule_id == schedule_id)
 
 
-def test_next_fire_after_respects_schedule_timezone(tmp_path):
+def test_next_fire_after_uses_runtime_timezone(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_schedule(
         agents,
         'schedule: "0 9 * * *"\n'
-        'timezone: "Asia/Shanghai"\n'
         'prompt: "Daily report"\n',
     )
-    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="Asia/Shanghai")
     schedule = _schedule(app)
 
-    next_run = next_fire_after(schedule, datetime(2026, 6, 28, 0, 30, tzinfo=UTC))
+    next_run = next_fire_after(schedule, datetime(2026, 6, 28, 0, 30, tzinfo=UTC), runtime_timezone=app.runtime_timezone)
 
     assert next_run == datetime(2026, 6, 28, 1, 0, tzinfo=UTC)
 
@@ -127,9 +126,9 @@ def test_next_fire_after_respects_schedule_timezone(tmp_path):
 def test_scheduler_claim_coalesces_missed_runs_and_is_single_flight(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_schedule(agents, 'schedule: "* * * * *"\nprompt: "Tick"\n')
-    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="UTC")
     schedule = _schedule(app)
-    store = SchedulerStore(app.home, app.runner.core_id)
+    store = SchedulerStore(app.home, app.runner.core_id, runtime_timezone=app.runtime_timezone)
     due = datetime(2026, 6, 28, 10, 0, tzinfo=UTC)
     now = datetime(2026, 6, 28, 10, 5, 30, tzinfo=UTC)
     store.set_next_run(schedule, due)
@@ -145,6 +144,9 @@ def test_scheduler_claim_coalesces_missed_runs_and_is_single_flight(tmp_path):
     logs = store.read_run_logs()
     assert logs[0]["event"] == "claimed"
     assert logs[0]["run_id"] == claim.run_id
+    assert logs[0]["due_at"] == "2026-06-28T10:00:00Z"
+    assert logs[0]["due_at_local"] == "2026-06-28T10:00:00+00:00"
+    assert logs[0]["runtime_timezone"] == "UTC"
 
 
 @pytest.mark.asyncio
@@ -181,7 +183,7 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
         "  input: [base_input]\n"
         "  output: [base_output]\n",
     )
-    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="Asia/Shanghai")
     provider = RecordingProvider(default="model result")
     app.runner.provider = provider
     service = SchedulerService(app)
@@ -207,7 +209,15 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
     inbound = next(event for event in EventLog(app.home, result.session_id).read_all() if event["type"] == "message.inbound")
     assert inbound["trigger"] == "schedule"
     assert inbound["schedule_id"] == "daily"
-    assert service.store.read_run_logs()[-1]["event"] == "completed"
+    assert inbound["runtime_timezone"] == "Asia/Shanghai"
+    assert inbound["runtime_timezone_source"] == "cli"
+    assert inbound["due_at_local"] == "2026-06-28T18:00:00+08:00"
+    assert inbound["scheduled_at_local"] == "2026-06-28T18:01:00+08:00"
+    completed_log = service.store.read_run_logs()[-1]
+    assert completed_log["event"] == "completed"
+    assert completed_log["due_at"] == "2026-06-28T10:00:00Z"
+    assert completed_log["due_at_local"] == "2026-06-28T18:00:00+08:00"
+    assert completed_log["runtime_timezone"] == "Asia/Shanghai"
 
 
 @pytest.mark.asyncio

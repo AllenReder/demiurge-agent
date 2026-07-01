@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
-from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
 
 
@@ -54,8 +54,14 @@ def format_instant(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def next_fire_after(schedule: ScheduleDefinition, after: datetime) -> datetime:
-    zone = ZoneInfo(schedule.timezone)
+def next_fire_after(
+    schedule: ScheduleDefinition,
+    after: datetime,
+    *,
+    runtime_timezone: RuntimeTimezone | None = None,
+) -> datetime:
+    resolved_timezone = runtime_timezone or resolve_runtime_timezone()
+    zone = resolved_timezone.zone
     base = after.astimezone(zone)
     next_value = croniter(schedule.schedule, base).get_next(datetime)
     if next_value.tzinfo is None:
@@ -66,7 +72,6 @@ def next_fire_after(schedule: ScheduleDefinition, after: datetime) -> datetime:
 def schedule_signature(schedule: ScheduleDefinition) -> str:
     data = {
         "schedule": schedule.schedule,
-        "timezone": schedule.timezone,
         "prompt": schedule.prompt,
         "modules": {
             "input": list(schedule.modules.input),
@@ -83,9 +88,10 @@ def schedule_signature(schedule: ScheduleDefinition) -> str:
 
 
 class SchedulerStore:
-    def __init__(self, home: Path, core_id: str):
+    def __init__(self, home: Path, core_id: str, *, runtime_timezone: RuntimeTimezone | None = None):
         self.home = home
         self.core_id = core_id
+        self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
         self.root = home / "scheduler" / core_id
         self.state_path = self.root / "state.json"
         self.runs_path = self.root / "runs.jsonl"
@@ -121,6 +127,7 @@ class SchedulerStore:
                 "schedule_id": schedule.schedule_id,
                 "signature": schedule_signature(schedule),
                 "enabled": schedule.enabled,
+                "runtime_timezone": self.runtime_timezone.name,
                 "next_run_at": format_instant(next_run_at),
             }
             self.write_state(state)
@@ -134,19 +141,25 @@ class SchedulerStore:
             schedules = state.setdefault("schedules", {})
             entry = schedules.get(schedule.schedule_id)
             signature = schedule_signature(schedule)
-            if not isinstance(entry, dict) or entry.get("signature") != signature:
+            if (
+                not isinstance(entry, dict)
+                or entry.get("signature") != signature
+                or entry.get("runtime_timezone") != self.runtime_timezone.name
+            ):
                 schedules[schedule.schedule_id] = {
                     "schedule_id": schedule.schedule_id,
                     "signature": signature,
                     "enabled": schedule.enabled,
-                    "next_run_at": format_instant(next_fire_after(schedule, now)),
+                    "runtime_timezone": self.runtime_timezone.name,
+                    "next_run_at": format_instant(next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone)),
                 }
                 self.write_state(state)
                 return None
 
             next_run_raw = entry.get("next_run_at")
             if not isinstance(next_run_raw, str) or not next_run_raw:
-                entry["next_run_at"] = format_instant(next_fire_after(schedule, now))
+                entry["runtime_timezone"] = self.runtime_timezone.name
+                entry["next_run_at"] = format_instant(next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone))
                 self.write_state(state)
                 return None
             due_at = parse_instant(next_run_raw)
@@ -155,10 +168,11 @@ class SchedulerStore:
 
             run_id = utc_id("schedule_run_")
             scheduled_at = now
-            next_run_at = next_fire_after(schedule, now)
+            next_run_at = next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone)
             entry.update(
                 {
                     "enabled": schedule.enabled,
+                    "runtime_timezone": self.runtime_timezone.name,
                     "last_claimed_run_id": run_id,
                     "last_due_at": format_instant(due_at),
                     "last_scheduled_at": format_instant(scheduled_at),
@@ -174,8 +188,12 @@ class SchedulerStore:
                     "schedule_id": schedule.schedule_id,
                     "run_id": run_id,
                     "due_at": format_instant(due_at),
+                    "due_at_local": self.runtime_timezone.format_local(due_at),
                     "scheduled_at": format_instant(scheduled_at),
+                    "scheduled_at_local": self.runtime_timezone.format_local(scheduled_at),
                     "next_run_at": format_instant(next_run_at),
+                    "next_run_at_local": self.runtime_timezone.format_local(next_run_at),
+                    "runtime_timezone": self.runtime_timezone.name,
                 }
             )
             return ScheduleRunClaim(
@@ -217,8 +235,12 @@ class SchedulerStore:
                     "schedule_id": claim.schedule_id,
                     "run_id": claim.run_id,
                     "due_at": format_instant(claim.due_at),
+                    "due_at_local": self.runtime_timezone.format_local(claim.due_at),
                     "scheduled_at": format_instant(claim.scheduled_at),
+                    "scheduled_at_local": self.runtime_timezone.format_local(claim.scheduled_at),
                     "completed_at": format_instant(completed_at),
+                    "completed_at_local": self.runtime_timezone.format_local(completed_at),
+                    "runtime_timezone": self.runtime_timezone.name,
                     "session_id": session_id,
                     "turn_id": turn_id,
                     "deliveries": deliveries,
@@ -246,7 +268,7 @@ class SchedulerService:
         self.app = app
         self.delivery_bridge = delivery_bridge
         self.poll_interval_seconds = poll_interval_seconds
-        self.store = SchedulerStore(app.home, app.runner.core_id)
+        self.store = SchedulerStore(app.home, app.runner.core_id, runtime_timezone=app.runtime_timezone)
         self._task: asyncio.Task[None] | None = None
         self._bridges: dict[str, Any] = {}
 
@@ -366,6 +388,7 @@ class SchedulerService:
             provider_name=self.app.runner.provider_name,
             workspace=self.app.runner.workspace,
             show_system_prompt=self.app.runner.show_system_prompt,
+            runtime_timezone=self.app.runtime_timezone,
         )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:
@@ -398,10 +421,13 @@ class SchedulerService:
             "schedule_id": schedule.schedule_id,
             "run_id": claim.run_id,
             "due_at": format_instant(claim.due_at),
+            "due_at_local": self.store.runtime_timezone.format_local(claim.due_at),
             "scheduled_at": format_instant(claim.scheduled_at),
+            "scheduled_at_local": self.store.runtime_timezone.format_local(claim.scheduled_at),
             "delivery_mode": schedule.delivery.mode,
             "delivery_channel": schedule.delivery.channel_name,
             "delivery_target": schedule.delivery.delivery_target,
+            **self.store.runtime_timezone.metadata(now=claim.scheduled_at),
         }
 
     async def _deliver_if_needed(

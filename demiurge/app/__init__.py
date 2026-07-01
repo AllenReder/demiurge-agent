@@ -20,6 +20,7 @@ from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
+from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import SessionStore, VersionStore
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import default_home, ensure_dir
@@ -43,6 +44,7 @@ class HostRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default_core: str = "assistant"
+    timezone: str | None = None
 
     @field_validator("default_core")
     @classmethod
@@ -50,6 +52,18 @@ class HostRuntimeConfig(BaseModel):
         if not value.strip():
             raise ValueError("runtime.default_core must not be empty")
         return value.strip()
+
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def _timezone(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("runtime.timezone must be an IANA timezone string")
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return validate_timezone_name(normalized)
 
 
 class HostChannelConfig(BaseModel):
@@ -228,6 +242,7 @@ class DemiurgeApp:
     user_theme_color_source: str
     debug_show_system_prompt: bool
     debug_show_system_prompt_source: str
+    runtime_timezone: RuntimeTimezone
     host_config_path: Path
     fallback_config_path: Path
 
@@ -263,6 +278,10 @@ class DemiurgeApp:
             "api_key": self.api_key_source or "not configured",
             "tool_display": tool_display,
             "tool_display_source": tool_display_source,
+            "runtime_timezone": self.runtime_timezone.name,
+            "runtime_timezone_source": self.runtime_timezone.source,
+            "runtime_timezone_explicit": self.runtime_timezone.explicit,
+            "runtime_local_now": self.runtime_timezone.local_now().isoformat(),
             "channel_busy_mode": self.channel_busy_mode,
             "channel_busy_mode_source": self.channel_busy_mode_source,
             "user_message_align": self.user_message_align,
@@ -297,6 +316,7 @@ class HostEvolverRunner:
         core_loader: CoreLoader,
         host_config: HostConfig,
         fallback: AgentFallbackConfig,
+        runtime_timezone: RuntimeTimezone,
         api_key_override: str | None,
     ):
         self.home = home
@@ -305,6 +325,7 @@ class HostEvolverRunner:
         self.core_loader = core_loader
         self.host_config = host_config
         self.fallback = fallback
+        self.runtime_timezone = runtime_timezone
         self.api_key_override = api_key_override
 
     async def run(
@@ -344,6 +365,7 @@ class HostEvolverRunner:
             workspace=workspace,
             approval_runtime=ApprovalRuntime(),
             global_approval=ApprovalInfo(default="auto"),
+            runtime_timezone=self.runtime_timezone,
         )
         runner = SessionTurnStepRunner(
             home=self.home,
@@ -356,6 +378,7 @@ class HostEvolverRunner:
             workspace=str(candidate_path),
             initial_core_path=evolver_core_path,
             model_resolver=lambda core_model: resolve_model_name(core_model, self.fallback.model)[0],
+            runtime_timezone=self.runtime_timezone,
         )
         try:
             result = await runner.run_turn(
@@ -431,6 +454,7 @@ def create_app(
     workspace_fallback: Path | None = None,
     agents_root: Path | None = None,
     tool_display: str | None = None,
+    timezone: str | None = None,
     session_id: str | None = None,
     resume_required: bool = False,
 ) -> DemiurgeApp:
@@ -439,6 +463,11 @@ def create_app(
     load_runtime_env(home)
     host_config_path = home / "config.yaml"
     host_config, host_sources = load_host_config(host_config_path)
+    runtime_timezone = resolve_runtime_timezone(
+        override=timezone,
+        config_value=host_config.runtime.timezone,
+        config_source=host_sources.get("runtime.timezone", "config.yaml:runtime.timezone"),
+    )
     resolved_core_id = core_id or host_config.runtime.default_core or "assistant"
     source_agents = source_agents_root(agents_root)
     approval_runtime = ApprovalRuntime(BridgeApprovalProvider())
@@ -479,6 +508,7 @@ def create_app(
         approval_runtime=approval_runtime,
         global_approval=fallback.approval,
         mcp_runtime=mcp_runtime,
+        runtime_timezone=runtime_timezone,
     )
     evolution_runtime = EvolutionRuntime(
         version_store=version_store,
@@ -490,6 +520,7 @@ def create_app(
             core_loader=core_loader,
             host_config=host_config,
             fallback=fallback,
+            runtime_timezone=runtime_timezone,
             api_key_override=api_key,
         ),
     )
@@ -507,6 +538,7 @@ def create_app(
         provider_name=resolved_provider_name,
         workspace=str(workspace_scope.root),
         show_system_prompt=host_config.debug.show_system_prompt,
+        runtime_timezone=runtime_timezone,
     )
     return DemiurgeApp(
         home=home,
@@ -539,6 +571,7 @@ def create_app(
         user_theme_color_source=host_sources.get("ui.user_theme_color", "default"),
         debug_show_system_prompt=host_config.debug.show_system_prompt,
         debug_show_system_prompt_source=host_sources.get("debug.show_system_prompt", "default"),
+        runtime_timezone=runtime_timezone,
         host_config_path=host_config_path,
         fallback_config_path=version_store.fallback_config_path,
     )
@@ -663,13 +696,13 @@ def load_host_config(path: Path) -> tuple[HostConfig, dict[str, str]]:
         config = HostConfig.model_validate(raw)
     except ValidationError as exc:
         raise ValueError(
-            f"invalid host config {path}: supported fields are runtime.default_core, "
+            f"invalid host config {path}: supported fields are runtime.default_core, runtime.timezone, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
             f"ui.user_theme_color, debug.show_system_prompt, providers.*, and packages.repositories.*: {exc}"
         ) from exc
     except (ValueError, yaml.YAMLError) as exc:
         raise ValueError(
-            f"invalid host config {path}: supported fields are runtime.default_core, "
+            f"invalid host config {path}: supported fields are runtime.default_core, runtime.timezone, "
             f"channel.busy_mode, ui.user_message_align, ui.demiurge_theme_color, "
             f"ui.user_theme_color, debug.show_system_prompt, providers.*, and packages.repositories.*: {exc}"
         ) from exc
@@ -680,6 +713,7 @@ def default_host_config_dict() -> dict[str, object]:
     return {
         "runtime": {
             "default_core": "assistant",
+            "timezone": None,
         },
         "channel": {
             "busy_mode": "interrupt",
@@ -728,6 +762,7 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
     sources: dict[str, str] = {}
     for section, key in (
         ("runtime", "default_core"),
+        ("runtime", "timezone"),
         ("channel", "busy_mode"),
         ("ui", "user_message_align"),
         ("ui", "demiurge_theme_color"),

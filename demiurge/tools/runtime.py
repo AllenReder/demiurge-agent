@@ -23,6 +23,7 @@ from demiurge.core import ApprovalInfo, LoadedCore, SlotDefinition, ToolMetadata
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
 from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
+from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.storage import SessionStore, VersionStore
 from demiurge.tools.records import BackgroundProcessRecord
 from demiurge.tools.registry import (
@@ -55,6 +56,7 @@ class ToolRuntime:
         approval_runtime: ApprovalRuntime | None = None,
         global_approval: ApprovalInfo | None = None,
         mcp_runtime: McpRuntime | None = None,
+        runtime_timezone: RuntimeTimezone | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
@@ -62,6 +64,7 @@ class ToolRuntime:
         self.approval_runtime = approval_runtime or ApprovalRuntime()
         self.global_approval = global_approval or ApprovalInfo()
         self.mcp_runtime = mcp_runtime
+        self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
         self._processes: dict[str, BackgroundProcessRecord] = {}
 
     async def prepare_for_turn(
@@ -567,6 +570,7 @@ class ToolRuntime:
         timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
         env = os.environ.copy()
         env.update({str(key): str(value) for key, value in env_overlay.items()})
+        env = self.runtime_timezone.apply_subprocess_env(env)
         if bool(call.arguments.get("background", False)):
             return await self._start_background_process(command=command, cwd=cwd, env=env)
         try:
@@ -1143,6 +1147,12 @@ class ToolRuntime:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
 
     def _schedule_manage_result(self, payload: dict[str, Any]) -> ToolResult:
+        payload = {
+            **payload,
+            "runtime_timezone": self.runtime_timezone.name,
+            "runtime_timezone_source": self.runtime_timezone.source,
+            "runtime_local_now": self.runtime_timezone.local_now().isoformat(),
+        }
         content = json.dumps(payload, ensure_ascii=False, indent=2)
         return ToolResult(content=content, data=payload, model_output=content)
 

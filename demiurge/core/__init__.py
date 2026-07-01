@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from croniter import croniter
@@ -364,7 +363,6 @@ class ScheduleManifestInfo(BaseModel):
 
     enabled: bool = True
     schedule: str
-    timezone: str = "UTC"
     prompt: str
     modules: ScheduleModulesInfo = Field(default_factory=ScheduleModulesInfo)
     delivery: ScheduleDeliveryInfo = Field(default_factory=ScheduleDeliveryInfo)
@@ -377,16 +375,6 @@ class ScheduleManifestInfo(BaseModel):
             raise ValueError("schedule must not be empty")
         if not croniter.is_valid(normalized):
             raise ValueError(f"invalid cron expression: {normalized}")
-        return normalized
-
-    @field_validator("timezone")
-    @classmethod
-    def _timezone(cls, value: str) -> str:
-        normalized = value.strip() or "UTC"
-        try:
-            ZoneInfo(normalized)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"unknown timezone: {normalized}") from exc
         return normalized
 
     @field_validator("prompt")
@@ -568,10 +556,6 @@ class ScheduleDefinition:
     @property
     def schedule(self) -> str:
         return self.manifest.schedule
-
-    @property
-    def timezone(self) -> str:
-        return self.manifest.timezone
 
     @property
     def prompt(self) -> str:

@@ -15,6 +15,11 @@ runs, logs, and delivers them.
 `state.json` stores next-run state and schedule signatures. `runs.jsonl` stores
 claim/completion/error events. `lock` prevents overlapping claims.
 
+Cron is evaluated in the app's resolved runtime timezone. State and run logs
+store UTC instants plus local formatted fields and the runtime timezone name, so
+changing the host runtime timezone resets next-run state for the affected
+schedule.
+
 ## Claim Flow
 
 ```text
@@ -38,7 +43,8 @@ visible on a later scan without restarting the process.
 
 Each claimed run creates a fresh `SessionTurnStepRunner` with a schedule session
 id. The prompt becomes `raw_input.text`. Metadata includes trigger, schedule id,
-run id, due time, scheduled time, and delivery mode.
+run id, UTC due/scheduled times, local due/scheduled times, runtime timezone
+source, and delivery mode.
 
 Schedule module lists are serial-only overrides for that run. They do not run
 the full core pipeline or parallel modules.

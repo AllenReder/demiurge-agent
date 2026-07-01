@@ -172,7 +172,6 @@ class ScheduleManager:
         return {
             "enabled": manifest.enabled,
             "schedule": manifest.schedule,
-            "timezone": manifest.timezone,
             "prompt": manifest.prompt,
             "modules": {
                 "input": list(manifest.modules.input),

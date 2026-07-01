@@ -330,6 +330,9 @@ class TextChannelBridgeBase:
         provider_name = getattr(runner, "provider_name", None)
         if provider_name:
             lines.append(f"- provider: `{provider_name}`")
+        runtime_timezone = getattr(runner, "runtime_timezone", None)
+        if runtime_timezone is not None:
+            lines.append(f"- runtime timezone: `{runtime_timezone.name}` ({runtime_timezone.source})")
         await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_new(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:

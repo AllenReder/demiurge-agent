@@ -34,6 +34,7 @@ from demiurge.env_file import load_runtime_env, runtime_env_path, upsert_env_val
 from demiurge.package_wizard import PromptToolkitPackagePrompt, SelectChoice
 from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, ProviderPreset, get_provider_preset
 from demiurge.providers import LLMMessage, LLMRequest
+from demiurge.runtime_timezone import resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.util import default_home
 
@@ -64,7 +65,7 @@ def handle_setup_command(args: argparse.Namespace) -> None:
         run_setup_wizard(context)
         return
     if args.setup_command == "status":
-        data = setup_status(context, core_id=args.core)
+        data = setup_status(context, core_id=args.core, timezone_override=getattr(args, "timezone", None))
         _print_result(data, as_json=args.json)
         return
     if args.setup_command == "providers":
@@ -72,6 +73,9 @@ def handle_setup_command(args: argparse.Namespace) -> None:
         return
     if args.setup_command == "model":
         _handle_model_command(context, args)
+        return
+    if args.setup_command == "timezone":
+        _handle_timezone_command(context, args)
         return
     raise SystemExit(f"unknown setup command: {args.setup_command}")
 
@@ -132,6 +136,7 @@ class SetupWizard:
                         SelectChoice("add-provider", "Add provider", "Create or update a provider profile"),
                         SelectChoice("set-default", "Set default provider", "Choose the host default provider profile"),
                         SelectChoice("set-model", "Set core model", "Write model.provider and model.model_name for a core"),
+                        SelectChoice("set-timezone", "Set timezone", "Write runtime.timezone in host config"),
                         SelectChoice("exit", "Exit"),
                     ],
                 )
@@ -143,6 +148,8 @@ class SetupWizard:
                     self._set_default_provider()
                 elif action == "set-model":
                     self._set_core_model()
+                elif action == "set-timezone":
+                    self._set_timezone()
                 elif action == "exit":
                     return
         except KeyboardInterrupt:
@@ -193,6 +200,12 @@ class SetupWizard:
         result = set_core_model(self.context, core_id=core_id, provider_id=provider_id, model_name=model_name)
         self.console.print(f"updated {result['core']} model")
 
+    def _set_timezone(self) -> None:
+        current = self.context.host_config.runtime.timezone
+        timezone = self.prompt.input("Timezone", default=current or "").strip()
+        result = clear_runtime_timezone(self.context) if not timezone else set_runtime_timezone(self.context, timezone)
+        self.console.print(f"timezone: {result['runtime_timezone']}")
+
     def _set_core_model_for_provider(self, provider_id: str, *, preset: ProviderPreset | None) -> None:
         core_id = self.prompt.input("Core id", default=self.context.host_config.runtime.default_core or "assistant").strip()
         model_name = self._prompt_model_name(provider_id, preset=preset)
@@ -221,10 +234,16 @@ class SetupWizard:
         core = data.get("core_model", {})
         if isinstance(core, dict):
             self.console.print(f"core {core.get('core')}: {core.get('provider')} / {core.get('model')}")
+        self.console.print(f"timezone: {data.get('runtime_timezone')} ({data.get('runtime_timezone_source')})")
 
 
-def setup_status(context: SetupContext, *, core_id: str | None = None) -> dict[str, object]:
-    host_config = load_host_config(context.host_config_path)[0]
+def setup_status(context: SetupContext, *, core_id: str | None = None, timezone_override: str | None = None) -> dict[str, object]:
+    host_config, host_sources = load_host_config(context.host_config_path)
+    runtime_timezone = resolve_runtime_timezone(
+        override=timezone_override,
+        config_value=host_config.runtime.timezone,
+        config_source=host_sources.get("runtime.timezone", "config.yaml:runtime.timezone"),
+    )
     core_id = core_id or host_config.runtime.default_core or "assistant"
     core_path = context.version_store.active_core_path(core_id)
     core_model: dict[str, object] = {"core": core_id, "path": str(core_path), "provider": None, "model": None}
@@ -246,6 +265,10 @@ def setup_status(context: SetupContext, *, core_id: str | None = None) -> dict[s
         "host_config": str(context.host_config_path),
         "env_file": str(runtime_env_path(context.home)),
         "default_provider": host_config.providers.default,
+        "runtime_timezone": runtime_timezone.name,
+        "runtime_timezone_source": runtime_timezone.source,
+        "runtime_timezone_explicit": runtime_timezone.explicit,
+        "runtime_local_now": runtime_timezone.local_now().isoformat(),
         "providers": provider_profiles_dict(host_config),
         "core_model": core_model,
     }
@@ -305,6 +328,27 @@ def set_default_provider(context: SetupContext, provider_id: str) -> dict[str, o
     write_host_config(context.host_config_path, host_config)
     context.host_config = host_config
     return {"default_provider": provider_id}
+
+
+def set_runtime_timezone(context: SetupContext, timezone: str) -> dict[str, object]:
+    name = validate_timezone_name(timezone)
+    host_config = load_host_config(context.host_config_path)[0]
+    host_config.runtime.timezone = name
+    write_host_config(context.host_config_path, host_config)
+    context.host_config = host_config
+    return {"runtime_timezone": name, "runtime_timezone_source": "config.yaml:runtime.timezone"}
+
+
+def clear_runtime_timezone(context: SetupContext) -> dict[str, object]:
+    host_config = load_host_config(context.host_config_path)[0]
+    host_config.runtime.timezone = None
+    write_host_config(context.host_config_path, host_config)
+    context.host_config = host_config
+    runtime_timezone = resolve_runtime_timezone(config_value=None)
+    return {
+        "runtime_timezone": runtime_timezone.name,
+        "runtime_timezone_source": runtime_timezone.source,
+    }
 
 
 def remove_provider_profile(context: SetupContext, provider_id: str) -> dict[str, object]:
@@ -405,6 +449,16 @@ def _handle_model_command(context: SetupContext, args: argparse.Namespace) -> No
         raise SystemExit(f"unknown model command: {args.model_command}")
     result = set_core_model(context, core_id=args.core, provider_id=args.provider, model_name=args.model)
     _print_result(result, as_json=args.json)
+
+
+def _handle_timezone_command(context: SetupContext, args: argparse.Namespace) -> None:
+    if args.timezone_command == "set":
+        _print_result(set_runtime_timezone(context, args.timezone), as_json=args.json)
+        return
+    if args.timezone_command == "clear":
+        _print_result(clear_runtime_timezone(context), as_json=args.json)
+        return
+    raise SystemExit(f"unknown timezone command: {args.timezone_command}")
 
 
 def _test_provider(context: SetupContext, provider_id: str, *, model: str | None = None) -> dict[str, object]:

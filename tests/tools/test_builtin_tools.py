@@ -105,7 +105,7 @@ def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
 
 @pytest.mark.asyncio
 async def test_schedule_manage_creates_lists_updates_disables_enables_and_deletes_schedule(tmp_path):
-    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app = create_app(home=tmp_path / "home", provider_name="fake", timezone="Asia/Shanghai")
     app.approval_runtime.provider = StaticApprovalProvider("allow")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     schedule_dir = app.version_store.active_core_path("assistant") / "agent" / "schedules"
@@ -124,15 +124,17 @@ async def test_schedule_manage_creates_lists_updates_disables_enables_and_delete
     assert yaml.safe_load(schedule_path.read_text(encoding="utf-8")) == {
         "enabled": True,
         "schedule": "0 9 * * *",
-        "timezone": "UTC",
         "prompt": "Write a daily summary.",
         "modules": {"input": ["base_input"], "output": ["base_output"]},
         "delivery": {"mode": "local"},
     }
+    assert created.data["runtime_timezone"] == "Asia/Shanghai"
+    assert created.data["runtime_timezone_source"] == "cli"
 
     listed = await _execute(app, core, "schedule_manage", {"action": "list"})
     assert listed.is_error is False
     assert [item["schedule_id"] for item in listed.data["schedules"]] == [schedule_id]
+    assert listed.data["runtime_timezone"] == "Asia/Shanghai"
 
     raw = yaml.safe_load(schedule_path.read_text(encoding="utf-8"))
     raw["delivery"] = {"mode": "local"}
@@ -289,7 +291,11 @@ async def test_schedule_manage_list_does_not_require_schedule_manage_capability(
     result = await _execute(app, core, "schedule_manage", {"action": "list"})
 
     assert result.is_error is False
-    assert result.data == {"success": True, "count": 0, "schedules": []}
+    assert result.data["success"] is True
+    assert result.data["count"] == 0
+    assert result.data["schedules"] == []
+    assert "runtime_timezone" in result.data
+    assert "runtime_timezone_source" in result.data
 
 
 @pytest.mark.asyncio
@@ -422,6 +428,33 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert denied.is_error is True
     assert denied.data["executionStarted"] is False
     assert (workspace / "denied.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_terminal_injects_runtime_timezone_env(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("DEMIURGE_TIMEZONE", "Europe/Paris")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace, timezone="Asia/Shanghai")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+        captured["env"] = env
+        return Completed()
+
+    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+
+    result = await _execute(app, core, "terminal", {"command": "printf ok", "cwd": "."})
+
+    assert result.is_error is False
+    assert captured["env"]["TZ"] == "Asia/Shanghai"
+    assert "DEMIURGE_TIMEZONE" not in captured["env"]
 
 
 @pytest.mark.asyncio

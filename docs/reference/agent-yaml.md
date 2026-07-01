@@ -162,6 +162,8 @@ channels:
 
 Schedules use `delivery.mode: telegram` plus `chat_id` for Telegram, or
 `delivery.mode: <channel>` plus `target` for the other external channels.
+Schedule cron expressions use the host runtime timezone; there is no
+timezone field on individual schedule files.
 
 ## Boundary
 

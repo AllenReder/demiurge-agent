@@ -17,12 +17,24 @@ def test_default_cli_launches_ts_tui(monkeypatch, tmp_path):
     def fake_run_tui(args):
         called["provider"] = args.provider
         called["core"] = args.core
+        called["timezone"] = args.timezone
 
     monkeypatch.setattr(cli, "run_tui_from_args", fake_run_tui)
 
-    cli.main(["--home", str(tmp_path / "home"), "--provider", "fake", "--core", "assistant"])
+    cli.main(
+        [
+            "--home",
+            str(tmp_path / "home"),
+            "--provider",
+            "fake",
+            "--core",
+            "assistant",
+            "--timezone",
+            "Asia/Shanghai",
+        ]
+    )
 
-    assert called == {"provider": "fake", "core": "assistant"}
+    assert called == {"provider": "fake", "core": "assistant", "timezone": "Asia/Shanghai"}
 
 
 def test_cli_uses_host_config_defaults_for_tui(monkeypatch, tmp_path):
@@ -90,13 +102,16 @@ def test_tui_gateway_config_uses_launch_cwd_as_workspace_fallback(monkeypatch, t
     launch = tmp_path / "launch"
     launch.mkdir()
     monkeypatch.chdir(launch)
-    args = cli.build_parser().parse_args(["--home", str(tmp_path / "home"), "--provider", "fake"])
+    args = cli.build_parser().parse_args(
+        ["--home", str(tmp_path / "home"), "--provider", "fake", "--timezone", "Asia/Shanghai"]
+    )
     cli._apply_host_config_defaults(args)
 
     config = tui_launcher._gateway_config(args)
 
     assert config["workspace"] is None
     assert config["workspace_fallback"] == str(launch.resolve())
+    assert config["timezone"] == "Asia/Shanghai"
 
 
 def test_gateway_subcommand_runs_gateway(monkeypatch, tmp_path):
@@ -112,9 +127,10 @@ def test_gateway_subcommand_runs_gateway(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "create_app", fake_create_app)
     monkeypatch.setattr(cli, "run_gateway", fake_gateway)
 
-    cli.main(["gateway", "--home", str(tmp_path / "home"), "--provider", "fake"])
+    cli.main(["gateway", "--home", str(tmp_path / "home"), "--provider", "fake", "--timezone", "Asia/Shanghai"])
 
     assert called["create_app"]["provider_name"] == "fake"
+    assert called["create_app"]["timezone"] == "Asia/Shanghai"
     assert called["gateway_app"] is not None
 
 
@@ -170,6 +186,22 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
     assert raw["providers"]["default"] == "deepseek"
     assert raw["providers"]["profiles"]["deepseek"]["base_url"] == "https://api.deepseek.com"
     assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_setup_timezone_set_and_clear_writes_host_config(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(["--home", str(home), "setup", "timezone", "set", "Asia/Shanghai", "--json"])
+    output = capsys.readouterr().out
+    assert '"runtime_timezone": "Asia/Shanghai"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["runtime"]["timezone"] == "Asia/Shanghai"
+
+    cli.main(["--home", str(home), "setup", "timezone", "clear", "--json"])
+    output = capsys.readouterr().out
+    assert '"runtime_timezone_source"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["runtime"]["timezone"] is None
 
 
 def test_setup_wizard_add_provider_sets_core_model_with_preset_default(tmp_path):

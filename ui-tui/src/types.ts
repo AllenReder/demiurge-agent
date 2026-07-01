@@ -46,6 +46,8 @@ export type StatusState = {
   session_id: string
   provider: string
   model: string
+  runtime_timezone: string
+  runtime_timezone_source: string
   status: "idle" | "running" | string
   tool_display: "quiet" | "summary" | "full"
   user_message_align: UserMessageAlign
