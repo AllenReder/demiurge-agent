@@ -94,7 +94,7 @@ Workspace resolution uses this order:
 
 ## Current Alpha Boundaries
 
-- Latest release notes: [0.4.1](releases/0.4.1.md).
+- Latest release notes: [0.5.0](releases/0.5.0.md).
 - Python dependencies are host-owned and locked by the source checkout.
 - Agent Slot code runs in the host-shared Python environment.
 - Candidate Agent Core evolution cannot add dependencies automatically.

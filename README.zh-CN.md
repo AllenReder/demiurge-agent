@@ -18,7 +18,7 @@
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/">文档</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/quick-start">快速开始</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/tutorials/customize-agent-core">修改 Core</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.4.1">最新发布</a>
+  <a href="https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.5.0">最新发布</a>
 </p>
 
 Demiurge 是一个 Alpha 阶段的智能体框架，使用独特的 **Agent Slots** 拓展能力边界与逻辑设计而不影响 Harness。并可以在 Host 的受控环境中自我迭代。具有文件化设计的 Agent Core 可以在 Host 的控制下实现多 Agent 协作、状态管理、工具组合、技能组合、MCP 组合和自我进化。
@@ -107,7 +107,7 @@ runtime cores，不修改 source templates。
 - [配置 Provider](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/configure-provider)
 - [选择 Workspace](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/choose-workspace)
 - [故障排查](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/troubleshoot)
-- [最新发布：0.4.1](https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.4.1)
+- [最新发布：0.5.0](https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.5.0)
 
 ## 开发者路径
 

@@ -93,7 +93,7 @@ Workspace resolution 使用以下顺序：
 
 ## 当前 Alpha 边界
 
-- 最新 release notes：[0.4.1](releases/0.4.1.md)。
+- 最新 release notes：[0.5.0](releases/0.5.0.md)。
 - Python dependencies 由 host 拥有，并由 source checkout 锁定。
 - Agent Slot code 运行在 host-shared Python environment 中。
 - Candidate Agent Core evolution 不能自动添加 dependencies。
