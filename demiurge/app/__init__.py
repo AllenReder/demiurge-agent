@@ -16,7 +16,7 @@ from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
-from demiurge.jobs import JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskWorker
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
@@ -25,7 +25,7 @@ from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
-from demiurge.storage import SessionStore, VersionStore
+from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import default_home, ensure_dir
 from demiurge.security.workspace import WorkspaceScope
@@ -225,7 +225,7 @@ class DemiurgeApp:
     runtime_store: RuntimeStore
     control_plane: RuntimeControlPlane
     session_runtime: SessionRuntime
-    job_runtime: JobRuntime
+    task_worker: RuntimeTaskWorker
     tool_runtime: ToolRuntime
     approval_runtime: ApprovalRuntime
     workspace: WorkspaceScope
@@ -303,11 +303,10 @@ class DemiurgeApp:
             "debug_show_system_prompt_source": self.debug_show_system_prompt_source,
             "approval_mode": self.approval_runtime.mode,
             "approval_cached_allows": self.approval_runtime.cached_allow_count,
-            "background_jobs": self.job_runtime.active_count,
+            "background_tasks": self.task_worker.active_count,
             "session_id": self.runner.session_id,
-            "session_store": str(self.home / "sessions" / self.runner.session_id),
-            "session_messages": self.runner.session_store.message_count(self.runner.session_id),
-            "has_compaction_summary": self.runner.session_store.latest_compaction_summary(self.runner.session_id)
+            "session_messages": self.session_runtime.message_count(self.runner.session_id),
+            "has_compaction_summary": self.session_runtime.latest_compaction_summary(self.runner.session_id)
             is not None,
             "core_id": pointer.core_id,
             "active_version": pointer.active_version,
@@ -328,7 +327,8 @@ class HostEvolverRunner:
         fallback: AgentFallbackConfig,
         runtime_timezone: RuntimeTimezone,
         api_key_override: str | None,
-        job_runtime: JobRuntime | None = None,
+        session_runtime: SessionRuntime,
+        task_worker: RuntimeTaskWorker,
     ):
         self.home = home
         self.project_root = project_root
@@ -338,7 +338,8 @@ class HostEvolverRunner:
         self.fallback = fallback
         self.runtime_timezone = runtime_timezone
         self.api_key_override = api_key_override
-        self.job_runtime = job_runtime or JobRuntime()
+        self.session_runtime = session_runtime
+        self.task_worker = task_worker
 
     async def run(
         self,
@@ -378,7 +379,8 @@ class HostEvolverRunner:
             approval_runtime=ApprovalRuntime(),
             global_approval=ApprovalInfo(default="auto"),
             runtime_timezone=self.runtime_timezone,
-            job_runtime=self.job_runtime,
+            task_worker=self.task_worker,
+            session_runtime=self.session_runtime,
         )
         runner = SessionTurnStepRunner(
             home=self.home,
@@ -392,7 +394,8 @@ class HostEvolverRunner:
             initial_core_path=evolver_core_path,
             model_resolver=lambda core_model: resolve_model_name(core_model, self.fallback.model)[0],
             runtime_timezone=self.runtime_timezone,
-            job_runtime=self.job_runtime,
+            task_worker=self.task_worker,
+            session_runtime=self.session_runtime,
         )
         try:
             result = await runner.run_turn(
@@ -509,7 +512,10 @@ def create_app(
     approval_runtime = ApprovalRuntime(BridgeApprovalProvider())
     version_store = VersionStore(home)
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
-    if resume_required and session_id and not SessionStore(home).exists(session_id):
+    runtime_store = RuntimeStore.default(home)
+    control_plane = RuntimeControlPlane(runtime_store)
+    session_runtime = SessionRuntime(control_plane=control_plane)
+    if resume_required and session_id and not session_runtime.exists(session_id):
         raise FileNotFoundError(f"session not found: {session_id}")
 
     core_loader = CoreLoader()
@@ -538,10 +544,7 @@ def create_app(
     )
     gate_runner = GateRunner(project_root=project_root)
     mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
-    runtime_store = RuntimeStore.default(home)
-    control_plane = RuntimeControlPlane(runtime_store)
-    session_runtime = SessionRuntime(session_store=SessionStore(home), control_plane=control_plane)
-    job_runtime = JobRuntime(control_plane=control_plane)
+    task_worker = RuntimeTaskWorker(control_plane=control_plane)
     tool_runtime = ToolRuntime(
         version_store,
         workspace=workspace_scope,
@@ -549,7 +552,8 @@ def create_app(
         global_approval=fallback.approval,
         mcp_runtime=mcp_runtime,
         runtime_timezone=runtime_timezone,
-        job_runtime=job_runtime,
+        task_worker=task_worker,
+        session_runtime=session_runtime,
     )
     evolution_runtime = EvolutionRuntime(
         version_store=version_store,
@@ -563,7 +567,8 @@ def create_app(
             fallback=fallback,
             runtime_timezone=runtime_timezone,
             api_key_override=api_key,
-            job_runtime=job_runtime,
+            session_runtime=session_runtime,
+            task_worker=task_worker,
         ),
     )
     tool_runtime.evolution_runtime = evolution_runtime
@@ -581,7 +586,7 @@ def create_app(
         workspace=str(workspace_scope.root),
         show_system_prompt=host_config.debug.show_system_prompt,
         runtime_timezone=runtime_timezone,
-        job_runtime=job_runtime,
+        task_worker=task_worker,
         session_runtime=session_runtime,
     )
     return DemiurgeApp(
@@ -594,7 +599,7 @@ def create_app(
         runtime_store=runtime_store,
         control_plane=control_plane,
         session_runtime=session_runtime,
-        job_runtime=job_runtime,
+        task_worker=task_worker,
         tool_runtime=tool_runtime,
         approval_runtime=approval_runtime,
         workspace=workspace_scope,

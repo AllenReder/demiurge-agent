@@ -7,7 +7,7 @@ description: Contributor notes for host-owned schedule claims and runs.
 
 Schedules are declared by Agent Cores and executed by the host.
 
-## Runtime Files
+## Runtime State
 
 Core-authored schedules live under:
 
@@ -15,22 +15,22 @@ Core-authored schedules live under:
 agent/schedules/*.yaml
 ```
 
-Host scheduler state lives under:
+Host scheduler state is projected into:
 
 ```text
-~/.demiurge/scheduler/<core_id>/
+~/.demiurge/runtime/runtime.sqlite3
 ```
 
-The current scheduler still uses this JSON state as the claim adapter, but each
-claimed run also submits a `schedule.fire` task to `RuntimeControlPlane` and
-updates the SQLite `scheduler_instances` projection.
+The `scheduler_instances` projection records due times, task ids, claim status,
+and idempotency keys. Older `~/.demiurge/scheduler/` JSON files are not read,
+migrated, or dual-written by the runtime.
 
 ## Claim Flow
 
 The scheduler computes due times from cron expressions and runtime timezone.
-When a schedule is due, the host records a claim, advances the next run time,
-and creates a runtime task using an idempotency key derived from core id,
-schedule id, and due time.
+When a schedule is due, the host records a transactional SQLite claim, advances
+the next run time, and creates a runtime task using an idempotency key derived
+from core id, schedule id, and due time.
 
 ## Run Flow
 

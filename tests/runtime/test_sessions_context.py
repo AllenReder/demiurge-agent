@@ -70,7 +70,7 @@ async def test_session_messages_persist_and_resume_across_app_restart(tmp_path):
     second.runner.provider = second_provider
     await second.runner.run_turn("second message")
 
-    persisted = second.runner.session_store.read_messages(session_id)
+    persisted = second.session_runtime.read_messages(session_id)
     assert [message.role for message in persisted if message.kind == "message"] == [
         "user",
         "assistant",
@@ -82,19 +82,17 @@ async def test_session_messages_persist_and_resume_across_app_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_json_files_preserve_utf8_text(tmp_path):
+async def test_runtime_session_store_preserves_utf8_text(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     app.runner.provider = EchoInspectingProvider()
 
     result = await app.runner.run_turn("中文消息")
 
-    messages_raw = app.runner.session_store.messages_path(result.session_id).read_text(encoding="utf-8")
-    session_raw = app.runner.session_store.session_path(result.session_id).read_text(encoding="utf-8")
     events_raw = app.runner.event_log.path.read_text(encoding="utf-8")
-    assert "中文消息" in messages_raw
-    assert "中文消息" in session_raw
+    messages = app.session_runtime.read_messages(result.session_id)
+    assert any(message.content == "中文消息" for message in messages)
+    assert not (app.home / "sessions").exists()
     assert "中文消息" in events_raw
-    assert "\\u4e2d\\u6587\\u6d88\\u606f" not in messages_raw
 
 
 @pytest.mark.asyncio
@@ -133,7 +131,7 @@ async def test_bootstrap_context_file_is_written_and_injected_after_skill_index(
     await app.runner.run_turn("hello")
 
     session_id = app.runner.session_id
-    assert app.runner.session_store.bootstrap_context_path(session_id).read_text(encoding="utf-8") == "  BOOT  "
+    assert app.session_runtime.read_bootstrap_context(session_id) == "  BOOT  "
     layer_event = next(event for event in app.runner.event_log.tail(20) if event["type"] == "context.assembled")
     assert [layer["name"] for layer in layer_event["layers"]] == [
         "core_soul",
@@ -145,7 +143,7 @@ async def test_bootstrap_context_file_is_written_and_injected_after_skill_index(
     system_messages = [message for message in request_messages if message.role == "system"]
     assert len(system_messages) == 1
     assert system_messages[0].content.index("## Skills") < system_messages[0].content.index("  BOOT  ")
-    assert all(message.role != "system" for message in app.runner.session_store.read_messages(session_id))
+    assert all(message.role != "system" for message in app.session_runtime.read_messages(session_id))
 
 
 @pytest.mark.asyncio
@@ -164,7 +162,7 @@ async def test_bootstrap_context_receives_resolved_workspace(tmp_path):
 
     await app.runner.run_turn("hello")
 
-    assert app.runner.session_store.read_bootstrap_context(app.runner.session_id) == str(workspace.resolve())
+    assert app.session_runtime.read_bootstrap_context(app.runner.session_id) == str(workspace.resolve())
 
 
 @pytest.mark.asyncio
@@ -194,7 +192,7 @@ async def test_bootstrap_context_snapshot_is_reused_across_turns_and_resume(tmp_
     second.runner.provider = second_provider
     await second.runner.run_turn("third")
 
-    assert first.runner.session_store.read_bootstrap_context(session_id) == "BOOT1"
+    assert first.session_runtime.read_bootstrap_context(session_id) == "BOOT1"
     assert any("BOOT1" in message.content for message in second_provider.requests[0].messages)
     assert all("BOOT2" not in message.content for message in second_provider.requests[0].messages)
     events = second.runner.event_log.read_all()
@@ -216,8 +214,8 @@ async def test_bootstrap_soft_failure_creates_empty_snapshot_and_continues(tmp_p
     await app.runner.run_turn("hello")
 
     session_id = app.runner.session_id
-    assert app.runner.session_store.bootstrap_context_exists(session_id)
-    assert app.runner.session_store.read_bootstrap_context(session_id) == ""
+    assert app.session_runtime.bootstrap_context_exists(session_id)
+    assert app.session_runtime.read_bootstrap_context(session_id) == ""
     layer_event = next(event for event in app.runner.event_log.tail(20) if event["type"] == "context.assembled")
     assert "bootstrap_context" not in [layer["name"] for layer in layer_event["layers"]]
     event_types = [event["type"] for event in app.runner.event_log.read_all()]
@@ -242,8 +240,8 @@ async def test_bootstrap_hard_failure_blocks_first_model_request_without_snapsho
         await app.runner.run_turn("hello")
 
     session_id = app.runner.session_id
-    assert not app.runner.session_store.bootstrap_context_exists(session_id)
-    assert app.runner.session_store.read_messages(session_id) == []
+    assert not app.session_runtime.bootstrap_context_exists(session_id)
+    assert app.session_runtime.read_messages(session_id) == []
     assert provider.requests == []
     event_types = [event["type"] for event in app.runner.event_log.read_all()]
     assert "bootstrap.module.failed" in event_types
@@ -268,8 +266,8 @@ async def test_conversation_key_routes_to_durable_session(tmp_path):
 
     assert first.session_id != second.session_id
     assert third.session_id == first.session_id
-    assert app.runner.session_store.get(first.session_id).conversation_key == "telegram:1"
-    assert app.runner.session_store.get(second.session_id).conversation_key == "telegram:2"
+    assert app.session_runtime.get_session(first.session_id).conversation_key == "telegram:1"
+    assert app.session_runtime.get_session(second.session_id).conversation_key == "telegram:2"
 
 
 @pytest.mark.asyncio
@@ -308,13 +306,13 @@ async def test_compaction_failure_does_not_change_session_history(tmp_path):
     app.runner.provider = FailingCompactProvider()
     for index in range(4):
         await app.runner.run_turn(f"user {index}")
-    before = app.runner.session_store.message_count(app.runner.session_id)
+    before = app.session_runtime.message_count(app.runner.session_id)
 
     result = await app.runner.compact_session(protect_last_n=2)
 
     assert result.error == "summary failed"
-    assert app.runner.session_store.message_count(app.runner.session_id) == before
-    assert app.runner.session_store.latest_compaction_summary(app.runner.session_id) is None
+    assert app.session_runtime.message_count(app.runner.session_id) == before
+    assert app.session_runtime.latest_compaction_summary(app.runner.session_id) is None
 
 
 @pytest.mark.asyncio
@@ -344,7 +342,7 @@ async def test_compaction_uses_complete_turn_boundaries_for_tool_transcript(tmp_
 
     first_turn_messages = [
         message
-        for message in app.runner.session_store.read_messages(app.runner.session_id)
+        for message in app.session_runtime.read_messages(app.runner.session_id)
         if message.turn_id == first.turn_id
     ]
     assert [message.role for message in first_turn_messages] == ["user", "assistant", "tool", "assistant"]
@@ -352,7 +350,7 @@ async def test_compaction_uses_complete_turn_boundaries_for_tool_transcript(tmp_
     result = await app.runner.compact_session(protect_last_n=2)
 
     assert result.error is None
-    marker_id = app.runner.session_store.get(app.runner.session_id).compacted_until_message_id
+    marker_id = app.session_runtime.get_session(app.runner.session_id).compacted_until_message_id
     marker = next(message for message in first_turn_messages if message.id == marker_id)
     assert marker.role == "assistant"
     assert marker.content == "assistant: use tool"

@@ -3,50 +3,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from io import BufferedRandom
-from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from croniter import croniter
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
-
 from demiurge.core import LoadedCore, ScheduleDefinition
-from demiurge.runtime.control import ActionSource, ActionSpec
+from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
-from demiurge.runtime.store import RuntimeEvent
+from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
-from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
+from demiurge.util import utc_id
 
 
 UTC = timezone.utc
-
-
-def _lock_handle(handle: BufferedRandom) -> None:
-    if os.name == "nt":
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        return
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-
-
-def _unlock_handle(handle: BufferedRandom) -> None:
-    if os.name == "nt":
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(slots=True)
@@ -115,121 +87,76 @@ def schedule_signature(schedule: ScheduleDefinition) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-class SchedulerStore:
-    def __init__(self, home: Path, core_id: str, *, runtime_timezone: RuntimeTimezone | None = None):
-        self.home = home
+class SchedulerRuntime:
+    def __init__(
+        self,
+        control_plane: RuntimeControlPlane,
+        core_id: str,
+        *,
+        runtime_timezone: RuntimeTimezone | None = None,
+    ):
+        self.control_plane = control_plane
         self.core_id = core_id
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self.root = home / "scheduler" / core_id
-        self.state_path = self.root / "state.json"
-        self.runs_path = self.root / "runs.jsonl"
-        self.lock_path = self.root / "lock"
-
-    @contextlib.contextmanager
-    def locked(self) -> Iterator[None]:
-        ensure_dir(self.root)
-        with self.lock_path.open("a+b") as handle:
-            _lock_handle(handle)
-            try:
-                yield
-            finally:
-                _unlock_handle(handle)
-
-    def read_state(self) -> dict[str, Any]:
-        state = read_json(self.state_path, None)
-        if not isinstance(state, dict):
-            return {"schema_version": 1, "schedules": {}}
-        state.setdefault("schema_version", 1)
-        schedules = state.setdefault("schedules", {})
-        if not isinstance(schedules, dict):
-            state["schedules"] = {}
-        return state
-
-    def write_state(self, state: dict[str, Any]) -> None:
-        write_json(self.state_path, state)
 
     def set_next_run(self, schedule: ScheduleDefinition, next_run_at: datetime) -> None:
-        with self.locked():
-            state = self.read_state()
-            state.setdefault("schedules", {})[schedule.schedule_id] = {
-                "schedule_id": schedule.schedule_id,
-                "signature": schedule_signature(schedule),
-                "enabled": schedule.enabled,
-                "runtime_timezone": self.runtime_timezone.name,
-                "next_run_at": format_instant(next_run_at),
-            }
-            self.write_state(state)
+        self._record_instance(
+            schedule,
+            due_at=next_run_at.astimezone(UTC),
+            task_id=None,
+            claim_status="scheduled",
+            event_type="scheduler.scheduled",
+        )
 
     def claim_due(self, schedule: ScheduleDefinition, *, now: datetime | None = None) -> ScheduleRunClaim | None:
         if not schedule.enabled:
             return None
         now = (now or datetime.now(UTC)).astimezone(UTC)
-        with self.locked():
-            state = self.read_state()
-            schedules = state.setdefault("schedules", {})
-            entry = schedules.get(schedule.schedule_id)
-            signature = schedule_signature(schedule)
-            if (
-                not isinstance(entry, dict)
-                or entry.get("signature") != signature
-                or entry.get("runtime_timezone") != self.runtime_timezone.name
-            ):
-                schedules[schedule.schedule_id] = {
-                    "schedule_id": schedule.schedule_id,
-                    "signature": signature,
-                    "enabled": schedule.enabled,
-                    "runtime_timezone": self.runtime_timezone.name,
-                    "next_run_at": format_instant(next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone)),
-                }
-                self.write_state(state)
-                return None
-
-            next_run_raw = entry.get("next_run_at")
-            if not isinstance(next_run_raw, str) or not next_run_raw:
-                entry["runtime_timezone"] = self.runtime_timezone.name
-                entry["next_run_at"] = format_instant(next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone))
-                self.write_state(state)
-                return None
-            due_at = parse_instant(next_run_raw)
-            if due_at > now:
-                return None
-
-            run_id = utc_id("schedule_run_")
-            scheduled_at = now
-            next_run_at = next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone)
-            entry.update(
-                {
-                    "enabled": schedule.enabled,
-                    "runtime_timezone": self.runtime_timezone.name,
-                    "last_claimed_run_id": run_id,
-                    "last_due_at": format_instant(due_at),
-                    "last_scheduled_at": format_instant(scheduled_at),
-                    "next_run_at": format_instant(next_run_at),
-                }
-            )
-            self.write_state(state)
-            self._append_run_log(
-                {
-                    "event": "claimed",
-                    "status": "claimed",
-                    "core_id": self.core_id,
-                    "schedule_id": schedule.schedule_id,
-                    "run_id": run_id,
-                    "due_at": format_instant(due_at),
-                    "due_at_local": self.runtime_timezone.format_local(due_at),
-                    "scheduled_at": format_instant(scheduled_at),
-                    "scheduled_at_local": self.runtime_timezone.format_local(scheduled_at),
-                    "next_run_at": format_instant(next_run_at),
-                    "next_run_at_local": self.runtime_timezone.format_local(next_run_at),
-                    "runtime_timezone": self.runtime_timezone.name,
-                }
-            )
-            return ScheduleRunClaim(
-                run_id=run_id,
-                schedule_id=schedule.schedule_id,
+        signature = self._signature(schedule)
+        rows = [row for row in self._rows(schedule.schedule_id) if row.get("idempotency_key") == signature]
+        scheduled = sorted(
+            [row for row in rows if row.get("claim_status") == "scheduled"],
+            key=lambda row: row["due_at"],
+        )
+        if not scheduled:
+            self.set_next_run(schedule, next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone))
+            return None
+        due_rows = [row for row in scheduled if parse_instant(str(row["due_at"])) <= now]
+        if not due_rows:
+            return None
+        row = due_rows[0]
+        due_at = parse_instant(str(row["due_at"]))
+        run_id = utc_id("schedule_run_")
+        scheduled_at = now
+        aggregate_id = self._instance_aggregate_id(schedule, due_at)
+        last_seq = self._last_instance_seq(aggregate_id)
+        if last_seq is None:
+            return None
+        try:
+            self._record_instance(
+                schedule,
                 due_at=due_at,
-                scheduled_at=scheduled_at,
+                task_id=run_id,
+                claim_status="claimed",
+                event_type="scheduler.claimed",
+                idempotency_key=f"scheduler:{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}:claim:{run_id}",
+                expected={
+                    "aggregate_type": "scheduler_instance",
+                    "aggregate_id": aggregate_id,
+                    "last_seq": last_seq,
+                },
             )
+        except RuntimeError:
+            return None
+        next_run_at = next_fire_after(schedule, now, runtime_timezone=self.runtime_timezone)
+        if not any(parse_instant(str(item["due_at"])) == next_run_at for item in scheduled):
+            self.set_next_run(schedule, next_run_at)
+        return ScheduleRunClaim(
+            run_id=run_id,
+            schedule_id=schedule.schedule_id,
+            due_at=due_at,
+            scheduled_at=scheduled_at,
+        )
 
     def record_completed(
         self,
@@ -241,48 +168,106 @@ class SchedulerStore:
         deliveries: int = 0,
         error: str | None = None,
     ) -> None:
-        completed_at = datetime.now(UTC)
-        with self.locked():
-            state = self.read_state()
-            entry = state.setdefault("schedules", {}).setdefault(claim.schedule_id, {})
-            entry.update(
-                {
-                    "last_run_id": claim.run_id,
-                    "last_status": status,
-                    "last_completed_at": format_instant(completed_at),
-                    "last_session_id": session_id,
-                    "last_turn_id": turn_id,
-                }
-            )
-            self.write_state(state)
-            self._append_run_log(
-                {
-                    "event": status,
-                    "status": status,
-                    "core_id": self.core_id,
-                    "schedule_id": claim.schedule_id,
-                    "run_id": claim.run_id,
-                    "due_at": format_instant(claim.due_at),
-                    "due_at_local": self.runtime_timezone.format_local(claim.due_at),
-                    "scheduled_at": format_instant(claim.scheduled_at),
-                    "scheduled_at_local": self.runtime_timezone.format_local(claim.scheduled_at),
-                    "completed_at": format_instant(completed_at),
-                    "completed_at_local": self.runtime_timezone.format_local(completed_at),
-                    "runtime_timezone": self.runtime_timezone.name,
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "deliveries": deliveries,
-                    **({"error": error} if error else {}),
-                }
-            )
+        self.control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type="scheduler.completed" if status == "completed" else "scheduler.error",
+                    aggregate_type="scheduler_instance",
+                    aggregate_id=claim.run_id,
+                    payload={
+                        "core_id": self.core_id,
+                        "schedule_id": claim.schedule_id,
+                        "due_at": format_instant(claim.due_at),
+                        "task_id": claim.run_id,
+                        "claim_status": status,
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "deliveries": deliveries,
+                        "error": error,
+                    },
+                )
+            ]
+        )
 
     def read_run_logs(self) -> list[dict[str, Any]]:
-        if not self.runs_path.exists():
-            return []
-        return [json.loads(line) for line in self.runs_path.read_text(encoding="utf-8").splitlines()]
+        events = self.control_plane.store.query(
+            RuntimeQuery(table="runtime_events", where={"aggregate_type": "scheduler_instance"}, order_by="seq", limit=10_000)
+        ).rows
+        return [
+            {
+                "event": event["type"].split(".", 1)[1],
+                "status": (event.get("payload") or {}).get("claim_status") or event["type"].split(".", 1)[1],
+                "core_id": (event.get("payload") or {}).get("core_id"),
+                "schedule_id": (event.get("payload") or {}).get("schedule_id"),
+                "run_id": (event.get("payload") or {}).get("task_id"),
+                "due_at": (event.get("payload") or {}).get("due_at"),
+                "due_at_local": self.runtime_timezone.format_local(parse_instant(str((event.get("payload") or {}).get("due_at"))))
+                if (event.get("payload") or {}).get("due_at")
+                else None,
+                "runtime_timezone": self.runtime_timezone.name,
+            }
+            for event in events
+            if (event.get("payload") or {}).get("core_id") == self.core_id
+        ]
 
-    def _append_run_log(self, entry: dict[str, Any]) -> None:
-        append_jsonl(self.runs_path, entry)
+    def _rows(self, schedule_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.control_plane.store.query(
+                RuntimeQuery(table="scheduler_instances", where={"core_id": self.core_id, "schedule_id": schedule_id}, limit=10_000)
+            ).rows
+        ]
+
+    def _signature(self, schedule: ScheduleDefinition) -> str:
+        return f"{self.runtime_timezone.name}:{schedule_signature(schedule)}"
+
+    def _record_instance(
+        self,
+        schedule: ScheduleDefinition,
+        *,
+        due_at: datetime,
+        task_id: str | None,
+        claim_status: str,
+        event_type: str,
+        idempotency_key: str | None = None,
+        expected: dict[str, Any] | None = None,
+    ) -> None:
+        self.control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type=event_type,
+                    aggregate_type="scheduler_instance",
+                    aggregate_id=self._instance_aggregate_id(schedule, due_at),
+                    payload={
+                        "core_id": self.core_id,
+                        "schedule_id": schedule.schedule_id,
+                        "due_at": format_instant(due_at),
+                        "task_id": task_id,
+                        "claim_status": claim_status,
+                        "idempotency_key": self._signature(schedule),
+                    },
+                )
+            ],
+            idempotency_key=idempotency_key
+            or f"scheduler:{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}:{claim_status}",
+            expected=expected,
+        )
+
+    def _instance_aggregate_id(self, schedule: ScheduleDefinition, due_at: datetime) -> str:
+        return f"{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}"
+
+    def _last_instance_seq(self, aggregate_id: str) -> int | None:
+        rows = self.control_plane.store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"aggregate_type": "scheduler_instance", "aggregate_id": aggregate_id},
+                order_by="seq",
+                limit=10_000,
+            )
+        ).rows
+        if not rows:
+            return None
+        return int(rows[-1]["seq"])
 
 
 class SchedulerService:
@@ -296,7 +281,7 @@ class SchedulerService:
         self.app = app
         self.delivery_bridge = delivery_bridge
         self.poll_interval_seconds = poll_interval_seconds
-        self.store = SchedulerStore(app.home, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+        self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
         self._task: asyncio.Task[None] | None = None
         self._bridges: dict[str, Any] = {}
 
@@ -435,7 +420,8 @@ class SchedulerService:
             workspace=self.app.runner.workspace,
             show_system_prompt=self.app.runner.show_system_prompt,
             runtime_timezone=self.app.runtime_timezone,
-            job_runtime=self.app.job_runtime,
+            task_worker=self.app.task_worker,
+            session_runtime=self.app.session_runtime,
         )
 
     def _record_claim_task(
@@ -473,19 +459,6 @@ class SchedulerService:
                     aggregate_type="task",
                     aggregate_id=task_id,
                     payload={"status": "running"},
-                ),
-                RuntimeEvent(
-                    type="scheduler.claimed",
-                    aggregate_type="scheduler_instance",
-                    aggregate_id=task_id,
-                    payload={
-                        "core_id": core.core_id,
-                        "schedule_id": schedule.schedule_id,
-                        "due_at": format_instant(claim.due_at),
-                        "task_id": task_id,
-                        "claim_status": "claimed",
-                        "idempotency_key": idempotency_key,
-                    },
                 ),
             ]
         )
@@ -644,7 +617,7 @@ __all__ = [
     "ScheduleRunClaim",
     "ScheduleRunResult",
     "SchedulerService",
-    "SchedulerStore",
+    "SchedulerRuntime",
     "format_instant",
     "next_fire_after",
     "parse_instant",

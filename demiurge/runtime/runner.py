@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from demiurge.jobs import JobConflictError, JobContext, JobOutcome, JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskContext, RuntimeTaskOutcome, RuntimeTaskWorker
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
@@ -33,6 +33,7 @@ from demiurge.runtime.interactions import (
     InteractionOutbound,
     get_current_bridge,
 )
+from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slots import SlotInvocation, SlotRuntime
 from demiurge.runtime.store import RuntimeEvent
@@ -62,7 +63,7 @@ from demiurge.sdk import (
     ToolResult,
     TurnContext,
 )
-from demiurge.storage import ArtifactStore, EventLog, SessionMessage, SessionStore, StateStore, VersionStore
+from demiurge.storage import ArtifactStore, EventLog, SessionMessage, StateStore, VersionStore
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import utc_id
@@ -74,6 +75,7 @@ SUMMARY_PREFIX = (
     "message that appears after this summary; the latest user message wins if there is any conflict."
 )
 SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY - respond to the message below, not the summary above ---"
+DELEGATION_TOOL_NAMES = {"delegate_task", "task_status", "task_control", "yield_until"}
 
 
 @dataclass(slots=True)
@@ -184,7 +186,7 @@ class ModuleToolClient:
 
     async def call(self, name: str, arguments: Mapping[str, Any] | None = None):
         self.capability.require(f"tool.call:{name}", slot_path=self.slot_path)
-        return await self.tool_runtime.execute(
+        return await self.parent.execute_tool(
             ToolCall(name=name, arguments=dict(arguments or {})),
             core=self.core,
             turn=self.turn,
@@ -448,8 +450,8 @@ class ModuleOutputClient:
 
 
 class ModuleHistoryClient:
-    def __init__(self, *, session_store: SessionStore, session_id: str):
-        self.session_store = session_store
+    def __init__(self, *, sessions: SessionRuntime, session_id: str):
+        self.sessions = sessions
         self.session_id = session_id
 
     def recent_messages(self, limit: int, roles: list[str] | tuple[str, ...] | set[str] | None = None) -> list[HistoryMessageSummary]:
@@ -458,7 +460,7 @@ class ModuleHistoryClient:
             return []
         messages = [
             message
-            for message in self.session_store.read_messages(self.session_id)
+            for message in self.sessions.read_messages(self.session_id)
             if message.kind == "message" and message.role in allowed
         ]
         result: list[HistoryMessageSummary] = []
@@ -540,7 +542,7 @@ class ModuleIOClient:
         self.home = home
         self.session_id = session_id
         self.workspace = Path(workspace or ".").resolve()
-        self.session_root = (home / "sessions" / session_id).resolve()
+        self.session_root = (home / "runtime" / "artifacts" / session_id).resolve()
         self.default_history_policy = default_history_policy
         self.default_write_history = default_write_history
         self.allow_write_history = allow_write_history
@@ -559,6 +561,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         """Commit a host-mediated delivery request."""
@@ -579,6 +583,8 @@ class ModuleIOClient:
             delivery="immediate",
             visible=visible,
             target="current",
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             metadata=request_metadata,
         )
         item = self.commit(request)
@@ -622,6 +628,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self.send(
@@ -629,6 +637,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text if history_text is not None else text,
+            failure_history_text=failure_history_text,
             metadata=delivery_metadata,
         )
 
@@ -677,6 +687,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self._send_artifact_block(
@@ -689,6 +701,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             delivery_metadata=delivery_metadata,
         )
 
@@ -703,6 +717,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self._send_artifact_block(
@@ -715,6 +731,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             delivery_metadata=delivery_metadata,
         )
 
@@ -729,6 +747,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self._send_artifact_block(
@@ -741,6 +761,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             delivery_metadata=delivery_metadata,
         )
 
@@ -755,6 +777,8 @@ class ModuleIOClient:
         write_history: bool | None = None,
         history_policy: str | None = None,
         visible: bool = True,
+        history_text: str | None = None,
+        failure_history_text: str | None = None,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self._send_artifact_block(
@@ -767,6 +791,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             delivery_metadata=delivery_metadata,
         )
 
@@ -782,6 +808,8 @@ class ModuleIOClient:
         write_history: bool | None,
         history_policy: str | None,
         visible: bool,
+        history_text: str | None,
+        failure_history_text: str | None,
         delivery_metadata: Mapping[str, Any] | None,
     ) -> DeliveryHandle:
         artifact_input = self._coerce_artifact(
@@ -797,6 +825,8 @@ class ModuleIOClient:
             write_history=write_history,
             history_policy=history_policy,
             visible=visible,
+            history_text=history_text,
+            failure_history_text=failure_history_text,
             metadata=delivery_metadata,
         )
 
@@ -1121,7 +1151,7 @@ class ModuleResultClient:
         self.home = home
         self.session_id = session_id
         self.workspace = Path(workspace or ".").resolve()
-        self.session_root = (home / "sessions" / session_id).resolve()
+        self.session_root = (home / "runtime" / "artifacts" / session_id).resolve()
         self.writable = writable
         self._state = state if state is not None else {"is_set": False, "value": None}
 
@@ -1209,7 +1239,7 @@ class SessionTurnStepRunner:
         initial_core_path: Path | None = None,
         show_system_prompt: bool = False,
         runtime_timezone: RuntimeTimezone | None = None,
-        job_runtime: JobRuntime | None = None,
+        task_worker: RuntimeTaskWorker | None = None,
         session_runtime: SessionRuntime | None = None,
         slot_runtime: SlotRuntime | None = None,
         turn_engine: TurnEngine | None = None,
@@ -1228,24 +1258,23 @@ class SessionTurnStepRunner:
         self.initial_core_path = initial_core_path
         self.show_system_prompt = show_system_prompt
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self.job_runtime = job_runtime or getattr(tool_runtime, "job_runtime", None) or JobRuntime()
-        self.session_runtime = session_runtime or SessionRuntime(session_store=SessionStore(home))
-        self.session_store = self.session_runtime.session_store
+        self.task_worker = task_worker or getattr(tool_runtime, "task_worker", None)
+        if self.task_worker is None:
+            raise ValueError("SessionTurnStepRunner requires a RuntimeControlPlane-backed RuntimeTaskWorker")
+        if session_runtime is None:
+            raise ValueError("SessionTurnStepRunner requires a RuntimeControlPlane-backed SessionRuntime")
+        self.session_runtime = session_runtime
+        self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
         self.turn_engine = turn_engine or TurnEngine(self)
-        self.tool_runtime.delegation_adapter = self._handle_delegation_tool
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
+        self.delivery_runtime = DeliveryRuntime(store=self.session_runtime.store, event_log=self.event_log)
         self.runtime_io = RuntimeIO(self)
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
         self._session_started_ids: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
-        self._interaction_queues: dict[
-            str,
-            asyncio.Queue[tuple[InteractionItem, TurnContext, dict[str, Any], InteractionBridge, str]],
-        ] = {}
-        self._interaction_queue_tasks: dict[str, asyncio.Task[Any]] = {}
         self._ensure_current_session()
 
     async def run_turn(
@@ -1320,7 +1349,7 @@ class SessionTurnStepRunner:
             )
         items: list[InteractionItem] = list(input_items)
         await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
-        available_tools = self.tool_runtime.definitions_for(core)
+        available_tools = self.tool_runtime.definitions_for(core, turn=turn)
         engine_result = await self.turn_engine.run(
             TurnEngineRequest(
                 core=core,
@@ -1409,7 +1438,7 @@ class SessionTurnStepRunner:
     ) -> None:
         if not core.bootstrap_enabled:
             return
-        if self.session_store.bootstrap_context_exists(self.session_id):
+        if self.sessions.bootstrap_context_exists(self.session_id):
             return
 
         self.event_log.emit(
@@ -1476,7 +1505,7 @@ class SessionTurnStepRunner:
                     if slot.failure_policy == "hard":
                         raise
             content = "\n\n".join(fragments)
-            self.session_store.write_bootstrap_context(self.session_id, content)
+            self.sessions.write_bootstrap_context(self.session_id, content)
             self.event_log.emit(
                 "bootstrap.completed",
                 core_id=core.core_id,
@@ -1509,12 +1538,12 @@ class SessionTurnStepRunner:
             context=context,
             session_history=[
                 message
-                for message in self.session_store.history_for_context(self.session_id)
+                for message in self.sessions.history_for_context(self.session_id)
                 if message.turn_id != turn_id
             ],
             current_turn_messages=turn_messages,
-            bootstrap_context=self.session_store.read_bootstrap_context(self.session_id),
-            compaction_summary=self.session_store.latest_compaction_summary(self.session_id),
+            bootstrap_context=self.sessions.read_bootstrap_context(self.session_id),
+            compaction_summary=self.sessions.latest_compaction_summary(self.session_id),
         )
         self.event_log.emit(
             "context.assembled",
@@ -1684,7 +1713,7 @@ class SessionTurnStepRunner:
         try:
             messages = [
                 message
-                for message in self.session_store.history_for_context(self.session_id)
+                for message in self.sessions.history_for_context(self.session_id)
                 if message.kind == "message" and message.turn_id
             ]
             turn_ids = list(dict.fromkeys(message.turn_id for message in messages if message.turn_id))
@@ -1812,13 +1841,13 @@ class SessionTurnStepRunner:
         self.history = self._session_history_messages()
 
     def _switch_session(self, session_id: str, *, emit_resumed: bool) -> None:
-        if not self.session_store.exists(session_id):
+        if not self.sessions.exists(session_id):
             raise FileNotFoundError(f"session not found: {session_id}")
         self.session_id = session_id
         self.event_log = EventLog(self.home, self.session_id)
         self.history = self._session_history_messages()
         if emit_resumed:
-            record = self.session_store.get(session_id)
+            record = self.sessions.get_session(session_id)
             self.event_log.emit(
                 "session.resumed",
                 core_id=record.core_id,
@@ -1848,7 +1877,7 @@ class SessionTurnStepRunner:
         if not channel:
             return
         if not conversation_key:
-            if self.session_store.can_bind_current_session(
+            if self.sessions.can_bind_session(
                 self.session_id,
                 channel=str(channel),
                 conversation_key=None,
@@ -1866,7 +1895,7 @@ class SessionTurnStepRunner:
                     },
                 )
             return
-        existing = self.session_store.resolve_interaction_session(
+        existing = self.sessions.resolve_interaction_session(
             core_id=core.core_id,
             channel=str(channel),
             conversation_key=str(conversation_key),
@@ -1875,7 +1904,7 @@ class SessionTurnStepRunner:
             if existing != self.session_id:
                 self._switch_session(existing, emit_resumed=True)
             return
-        if self.session_store.can_bind_current_session(
+        if self.sessions.can_bind_session(
             self.session_id,
             channel=str(channel),
             conversation_key=str(conversation_key),
@@ -1935,7 +1964,7 @@ class SessionTurnStepRunner:
 
     def _session_history_messages(self) -> list[LLMMessage]:
         messages: list[LLMMessage] = []
-        for message in self.session_store.history_for_context(self.session_id):
+        for message in self.sessions.history_for_context(self.session_id):
             llm_message = self.context_assembler._session_message_to_llm(message)
             if llm_message is not None:
                 messages.append(llm_message)
@@ -2071,6 +2100,7 @@ class SessionTurnStepRunner:
         parent_turn: TurnContext,
         parent_slot_path: str,
         context: list[str],
+        tool_policy: Mapping[str, Any] | None = None,
         session_id: str | None = None,
     ) -> AgentRunResult:
         child_session_id = session_id or utc_id("session_child_")
@@ -2088,7 +2118,7 @@ class SessionTurnStepRunner:
             workspace=self.workspace,
             show_system_prompt=self.show_system_prompt,
             runtime_timezone=self.runtime_timezone,
-            job_runtime=self.job_runtime,
+            task_worker=self.task_worker,
             session_runtime=self.session_runtime,
             slot_runtime=self.slot_runtime,
         )
@@ -2098,6 +2128,8 @@ class SessionTurnStepRunner:
             "parent_turn_id": parent_turn.turn_id,
             "parent_slot": parent_slot_path,
         }
+        if tool_policy:
+            child_metadata["tool_policy"] = dict(tool_policy)
         result = await child_runner.run_turn(
             raw_input,
             interaction=InteractionInbound(
@@ -2143,10 +2175,11 @@ class SessionTurnStepRunner:
         parent_turn: TurnContext,
         parent_slot_path: str,
         context: list[str],
+        tool_policy: Mapping[str, Any] | None = None,
     ) -> AgentSpawnHandle:
         session_id = utc_id("session_child_")
 
-        async def run_job(ctx: JobContext) -> JobOutcome:
+        async def run_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.event_log.emit(
                 "agent_spawn.started",
                 turn_id=parent_turn.turn_id,
@@ -2162,6 +2195,7 @@ class SessionTurnStepRunner:
                     parent_turn=parent_turn,
                     parent_slot_path=parent_slot_path,
                     context=context,
+                    tool_policy=tool_policy,
                     session_id=session_id,
                 )
                 summary = result.content or f"child agent {core_id} completed"
@@ -2187,7 +2221,7 @@ class SessionTurnStepRunner:
                     child_session_id=session_id,
                     child_turn_id=result.turn_id,
                 )
-                return JobOutcome(
+                return RuntimeTaskOutcome(
                     summary=summary,
                     result_ref=f"session:{session_id}:{result.turn_id}",
                     metadata={
@@ -2210,7 +2244,7 @@ class SessionTurnStepRunner:
                 raise
 
         try:
-            record = self.job_runtime.start_task(
+            record = self.task_worker.start_task(
                 backend="agent",
                 owner_session_id=parent_turn.session_id,
                 owner_turn_id=parent_turn.turn_id,
@@ -2218,9 +2252,14 @@ class SessionTurnStepRunner:
                 task_factory=run_job,
                 write_scope=f"session:{parent_turn.session_id}",
                 notify_on_complete=True,
-                metadata={"child_core_id": core_id, "child_session_id": session_id, "parent_slot": parent_slot_path},
+                metadata={
+                    "child_core_id": core_id,
+                    "child_session_id": session_id,
+                    "parent_slot": parent_slot_path,
+                    **({"tool_policy": dict(tool_policy)} if tool_policy else {}),
+                },
             )
-        except JobConflictError as exc:
+        except RuntimeTaskConflictError as exc:
             self.event_log.emit(
                 "agent_spawn.rejected",
                 turn_id=parent_turn.turn_id,
@@ -2246,7 +2285,28 @@ class SessionTurnStepRunner:
                     return True
         return False
 
-    async def _handle_delegation_tool(
+    async def execute_tool(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        emit_event: Callable[..., dict[str, Any]] | None = None,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
+    ) -> ToolResult:
+        if call.name in DELEGATION_TOOL_NAMES:
+            return await self.handle_delegation_tool(call, core=core, turn=turn, capability=capability)
+        return await self.tool_runtime.execute(
+            call,
+            core=core,
+            turn=turn,
+            capability=capability,
+            emit_event=emit_event,
+            output_factory=output_factory,
+        )
+
+    async def handle_delegation_tool(
         self,
         call: ToolCall,
         *,
@@ -2268,9 +2328,10 @@ class SessionTurnStepRunner:
         goal = str(call.arguments.get("goal") or "").strip()
         if not goal:
             return ToolResult(content="goal is required", is_error=True)
-        tool_policy = call.arguments.get("tool_policy")
-        if tool_policy:
-            return ToolResult(content="delegate_task tool_policy is not implemented yet", is_error=True)
+        raw_tool_policy = call.arguments.get("tool_policy")
+        if raw_tool_policy is not None and not isinstance(raw_tool_policy, Mapping):
+            return ToolResult(content="delegate_task tool_policy must be an object", is_error=True)
+        tool_policy = dict(raw_tool_policy or {})
         child_core_id = str(call.arguments.get("core_id") or core.core_id).strip()
         context_mode = str(call.arguments.get("context_mode") or "isolated").strip()
         if context_mode not in {"isolated", "fork", "handoff"}:
@@ -2283,12 +2344,12 @@ class SessionTurnStepRunner:
             return ToolResult(content=f"delegation depth limit exceeded: max_depth={max_depth}", is_error=True)
         total_children = [
             job
-            for job in self.job_runtime.list_jobs(owner_session_id=turn.session_id, backend="agent")
+            for job in self.task_worker.list_tasks(owner_session_id=turn.session_id, backend="agent")
             if job.owner_turn_id == turn.turn_id
         ]
         if len(total_children) >= 4:
             return ToolResult(content="delegation limit exceeded: max_children=4", is_error=True)
-        running_children = self.job_runtime.list_jobs(
+        running_children = self.task_worker.list_tasks(
             owner_session_id=turn.session_id,
             backend="agent",
             include_completed=False,
@@ -2303,6 +2364,7 @@ class SessionTurnStepRunner:
             parent_turn=turn,
             parent_slot_path="builtin:delegate_task",
             context=context,
+            tool_policy=tool_policy,
         )
         payload = {
             "task_id": handle.job_id,
@@ -2312,13 +2374,14 @@ class SessionTurnStepRunner:
             "status": handle.status,
             "context_mode": context_mode,
             "notify_policy": notify_policy,
+            "tool_policy": tool_policy,
         }
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     def _delegation_context(self, context_mode: str) -> list[str]:
         if context_mode == "isolated":
             return []
-        messages = self.session_store.history_for_context(self.session_id)[-12:]
+        messages = self.sessions.history_for_context(self.session_id)[-12:]
         if not messages:
             return []
         transcript = "\n".join(f"{message.role}: {message.content}" for message in messages if message.content.strip())
@@ -2342,8 +2405,8 @@ class SessionTurnStepRunner:
         command = str(call.arguments.get("command") or "cancel").strip()
         if command == "cancel":
             try:
-                record = await self.job_runtime.cancel(task_id)
-                payload = record.to_payload(include_log=True, log=self.job_runtime.log(task_id))
+                record = await self.task_worker.cancel(task_id)
+                payload = record.to_payload(include_log=True, log=self.task_worker.log(task_id))
             except KeyError:
                 payload = self._control_plane_command(task_id, "cancel")
                 if payload is None:
@@ -2360,7 +2423,7 @@ class SessionTurnStepRunner:
             return ToolResult(content="task_id is required", is_error=True)
         timeout = int(call.arguments.get("timeout_seconds") or 30)
         try:
-            record = await self.job_runtime.wait(task_id, timeout_seconds=timeout)
+            record = await self.task_worker.wait(task_id, timeout_seconds=timeout)
         except KeyError:
             payload = self._task_view(task_id, include_log=False)
             if payload is None:
@@ -2370,24 +2433,24 @@ class SessionTurnStepRunner:
             payload = self._task_view(task_id, include_log=False) or {"task_id": task_id, "status": "unknown"}
             payload["timed_out"] = True
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=True)
-        payload = record.to_payload(include_log=True, log=self.job_runtime.log(task_id))
+        payload = record.to_payload(include_log=True, log=self.task_worker.log(task_id))
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=record.running)
 
     def _task_view(self, task_id: str, *, include_log: bool) -> dict[str, Any] | None:
         try:
-            record = self.job_runtime.get(task_id)
+            record = self.task_worker.get(task_id)
         except KeyError:
-            control_plane = getattr(self.job_runtime, "control_plane", None)
+            control_plane = getattr(self.task_worker, "control_plane", None)
             if control_plane is None:
                 return None
             try:
                 return control_plane.read(task_id, view="operator" if include_log else "model")
             except KeyError:
                 return None
-        return record.to_payload(include_log=include_log, log=self.job_runtime.log(task_id) if include_log else None)
+        return record.to_payload(include_log=include_log, log=self.task_worker.log(task_id) if include_log else None)
 
     def _control_plane_command(self, task_id: str, command: str) -> dict[str, Any] | None:
-        control_plane = getattr(self.job_runtime, "control_plane", None)
+        control_plane = getattr(self.task_worker, "control_plane", None)
         if control_plane is None:
             return None
         try:
@@ -2543,7 +2606,7 @@ class SessionTurnStepRunner:
             slot_path=slot.relative_path,
             capability=capability,
             input=ModuleInputClient(raw_input=raw_input, builder=builder, writable=builder_writable, sender=io_client),
-            history=ModuleHistoryClient(session_store=self.session_store, session_id=self.session_id),
+            history=ModuleHistoryClient(sessions=self.sessions, session_id=self.session_id),
             agents=ModuleAgentsClient(
                 parent=self,
                 capability=capability,
@@ -2718,7 +2781,7 @@ class SessionTurnStepRunner:
             slot_path=slot.relative_path,
             capability=capability,
             output=ModuleOutputClient(content=current_output, metadata=envelope.metadata, sender=io_client),
-            history=ModuleHistoryClient(session_store=self.session_store, session_id=self.session_id),
+            history=ModuleHistoryClient(sessions=self.sessions, session_id=self.session_id),
             agents=ModuleAgentsClient(
                 parent=self,
                 capability=capability,
@@ -2842,53 +2905,19 @@ class SessionTurnStepRunner:
         interaction_bridge: InteractionBridge,
         channel: str,
     ) -> None:
-        key = self._delivery_route_key(metadata)
-        queue = self._interaction_queues.setdefault(key, asyncio.Queue())
-        queue.put_nowait((item, turn, metadata, interaction_bridge, channel))
-        task = self._interaction_queue_tasks.get(key)
-        if task is None or task.done():
-            task = asyncio.create_task(self._drain_interaction_queue(key))
-            self._interaction_queue_tasks[key] = task
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-
-    async def _drain_interaction_queue(self, key: str) -> None:
-        queue = self._interaction_queues[key]
-        try:
-            while not queue.empty():
-                item, turn, metadata, interaction_bridge, channel = await queue.get()
-                outbound = InteractionOutbound(
-                    channel=channel,
-                    items=[item],
-                    session_id=self.session_id,
-                    turn_id=turn.turn_id,
-                    metadata=metadata,
-                )
-                try:
-                    await interaction_bridge.deliver(outbound)
-                    item.set_dispatch_status("delivered")
-                except Exception as exc:
-                    item.metadata["dispatch_error"] = str(exc)
-                    if item.delivery is not None:
-                        item.delivery.metadata = {
-                            **dict(item.delivery.metadata),
-                            "delivery_error": str(exc),
-                        }
-                    item.set_dispatch_status("failed")
-                    self.event_log.emit(
-                        "delivery.failed",
-                        turn_id=turn.turn_id,
-                        reason="bridge_deliver_failed",
-                        error=str(exc),
-                        **self._delivery_event_metadata(metadata),
-                    )
-                finally:
-                    queue.task_done()
-        finally:
-            if queue.empty():
-                self._interaction_queues.pop(key, None)
-                if self._interaction_queue_tasks.get(key) is asyncio.current_task():
-                    self._interaction_queue_tasks.pop(key, None)
+        task = asyncio.create_task(
+            self.delivery_runtime.dispatch_item(
+                item,
+                session_id=self.session_id,
+                turn_id=turn.turn_id,
+                channel=channel,
+                metadata=metadata,
+                interaction_bridge=interaction_bridge,
+                event_metadata=self._delivery_event_metadata(metadata),
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _flush_pending_background_items(
         self,
@@ -2905,21 +2934,23 @@ class SessionTurnStepRunner:
             bridge = interaction_bridge or get_current_bridge()
             channel = metadata.get("channel") or interaction_metadata.get("channel")
             if bridge is None or not channel:
-                item.set_dispatch_status("failed")
-                self.event_log.emit(
-                    "delivery.failed",
+                self.delivery_runtime.mark_failed(
+                    item,
                     turn_id=turn.turn_id,
+                    error=None,
                     reason="no_active_interaction_bridge",
-                    **self._delivery_event_metadata(metadata),
+                    event_metadata=self._delivery_event_metadata(metadata),
                 )
                 continue
             item.set_dispatch_status("scheduled")
-            self._enqueue_interaction_item(
+            await self.delivery_runtime.dispatch_item(
                 item,
-                turn=turn,
+                session_id=self.session_id,
+                turn_id=turn.turn_id,
+                channel=str(channel),
                 metadata=metadata,
                 interaction_bridge=bridge,
-                channel=str(channel),
+                event_metadata=self._delivery_event_metadata(metadata),
             )
 
     async def _handle_effects(
@@ -2988,7 +3019,7 @@ class SessionTurnStepRunner:
                     )
                 elif effect.type == "tool_call" and effect.tool_name:
                     capability.require(f"tool.call:{effect.tool_name}", slot_path=slot.relative_path)
-                    result = await self.tool_runtime.execute(
+                    result = await self.execute_tool(
                         ToolCall(name=effect.tool_name, arguments=dict(effect.arguments or {})),
                         core=core,
                         turn=turn,
@@ -3072,10 +3103,8 @@ class SessionTurnStepRunner:
             history_artifact = asdict(artifact)
             delivery_artifact = self._delivery_artifact_dict(artifact)
             delivery_artifacts.append(delivery_artifact)
-            summary = artifact.summary or artifact.media_type or artifact.kind
             if block.text:
                 fallback_lines.append(str(block.text))
-            fallback_lines.append(f"[artifact:{artifact.artifact_id} {artifact.kind} {summary}]")
             history_blocks.append(
                 {
                     "type": block.type,
@@ -3092,8 +3121,35 @@ class SessionTurnStepRunner:
                     "metadata": dict(block.metadata),
                 }
             )
+            self._append_runtime_event(
+                RuntimeEvent(
+                    type="artifact.stored",
+                    aggregate_type="artifact",
+                    aggregate_id=artifact.artifact_id,
+                    payload={
+                        "task_id": turn.turn_id,
+                        "kind": artifact.kind,
+                        "uri": artifact.path or artifact.url or "",
+                        "metadata": {
+                            "session_id": self.session_id,
+                            "turn_id": turn.turn_id,
+                            "media_type": artifact.media_type,
+                            "summary": artifact.summary,
+                            **dict(artifact.metadata),
+                        },
+                    },
+                )
+            )
 
         fallback_text = "\n\n".join(line for line in fallback_lines if line).strip()
+        writes_history = history_policy != "transient"
+        has_non_text_history = any(block.get("type") != "text" for block in history_blocks)
+        history_text = request.history_text
+        if history_text is None and not has_non_text_history:
+            history_text = fallback_text
+        if writes_history and has_non_text_history and not (history_text or "").strip():
+            raise ValueError("non-text send_* with write_history=True requires history_text")
+        failure_history_text = request.failure_history_text if request.failure_history_text is not None else history_text
         metadata = {
             "slot": slot.relative_path,
             "phase": slot.kind,
@@ -3104,15 +3160,39 @@ class SessionTurnStepRunner:
             "delivery": request.delivery,
             "delivery_status": "pending",
             "artifacts": [asdict(artifact) for artifact in artifacts],
+            "history_text": history_text,
+            "failure_history_text": failure_history_text,
             **dict(request.metadata),
         }
-        content = fallback_text
+        content = history_text or ""
         message_id = None
-        if history_policy != "transient":
-            message = self.session_runtime.append_message(
+        delivery_payload = {
+            "kind": request.kind,
+            "visible": request.visible,
+            "history_policy": history_policy,
+            "message_id": None,
+            "history_text": history_text,
+            "failure_history_text": failure_history_text,
+            "fallback_text": fallback_text,
+            "blocks": delivery_blocks,
+            "artifacts": delivery_artifacts,
+        }
+        delivery_target = {
+            "conversation_key": interaction_metadata.get("conversation_key"),
+            "source": interaction_metadata.get("source"),
+            "reply_to": interaction_metadata.get("reply_to"),
+        }
+        if writes_history:
+            message = self.session_runtime.append_delivery_message(
                 self.session_id,
                 role="assistant",
                 content=content,
+                delivery_id=request.delivery_id,
+                task_id=turn.turn_id,
+                channel=interaction_metadata.get("channel"),
+                target=delivery_target,
+                delivery_payload=delivery_payload,
+                delivery_idempotency_key=request.delivery_id,
                 turn_id=turn.turn_id,
                 visible=request.visible,
                 model_visible=history_policy == "persist",
@@ -3120,6 +3200,8 @@ class SessionTurnStepRunner:
                 metadata=metadata,
             )
             message_id = message.id
+            metadata["message_id"] = message_id
+            delivery_payload["message_id"] = message_id
             self.event_log.emit(
                 "message.persisted",
                 turn_id=turn.turn_id,
@@ -3127,6 +3209,22 @@ class SessionTurnStepRunner:
                 role=message.role,
                 kind=message.kind,
                 **interaction_metadata,
+            )
+        else:
+            self._append_runtime_event(
+                RuntimeEvent(
+                    type="delivery.queued",
+                    aggregate_type="delivery",
+                    aggregate_id=request.delivery_id,
+                    payload={
+                        "task_id": turn.turn_id,
+                        "channel": interaction_metadata.get("channel"),
+                        "target": delivery_target,
+                        "status": "queued",
+                        "idempotency_key": request.delivery_id,
+                        "payload": delivery_payload,
+                    },
+                )
             )
         self.event_log.emit(
             "delivery.completed",
@@ -3139,33 +3237,6 @@ class SessionTurnStepRunner:
             history_policy=history_policy,
             artifacts=[artifact.artifact_id for artifact in artifacts],
             **interaction_metadata,
-        )
-        self._append_runtime_event(
-            RuntimeEvent(
-                type="delivery.queued",
-                aggregate_type="delivery",
-                aggregate_id=request.delivery_id,
-                payload={
-                    "task_id": turn.turn_id,
-                    "channel": interaction_metadata.get("channel"),
-                    "target": {
-                        "conversation_key": interaction_metadata.get("conversation_key"),
-                        "source": interaction_metadata.get("source"),
-                        "reply_to": interaction_metadata.get("reply_to"),
-                    },
-                    "status": "queued",
-                    "idempotency_key": request.delivery_id,
-                    "payload": {
-                        "kind": request.kind,
-                        "visible": request.visible,
-                        "history_policy": history_policy,
-                        "message_id": message_id,
-                        "fallback_text": fallback_text,
-                        "blocks": delivery_blocks,
-                        "artifacts": delivery_artifacts,
-                    },
-                },
-            )
         )
         if unsupported_blocks:
             self.event_log.emit(
@@ -3210,7 +3281,7 @@ class SessionTurnStepRunner:
             if raw_path.is_absolute():
                 data["resolved_path"] = str(raw_path)
             else:
-                data["resolved_path"] = str((self.home / "sessions" / self.session_id / path).resolve())
+                data["resolved_path"] = str((self.home / "runtime" / "artifacts" / self.session_id / path).resolve())
         return data
 
     def _apply_deliver_effect(
@@ -3269,11 +3340,11 @@ class SessionTurnStepRunner:
     async def drain_background_tasks(self) -> None:
         while self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
-        await self.job_runtime.drain()
+        await self.task_worker.drain()
 
     @property
     def background_task_count(self) -> int:
-        return sum(1 for task in self._background_tasks if not task.done()) + self.job_runtime.active_count
+        return sum(1 for task in self._background_tasks if not task.done()) + self.task_worker.active_count
 
     def _submit_turn_task(self, *, core: LoadedCore, turn_id: str, metadata: Mapping[str, Any]) -> str | None:
         control_plane = getattr(self.session_runtime, "control_plane", None)
@@ -3356,12 +3427,6 @@ class SessionTurnStepRunner:
             if delivery_metadata.get(key) is not None:
                 metadata[key] = delivery_metadata[key]
         return metadata
-
-    def _delivery_route_key(self, metadata: dict[str, Any]) -> str:
-        return "|".join(
-            str(metadata.get(key) or "")
-            for key in ("channel", "conversation_key", "source", "reply_to", "session_id")
-        )
 
     def _delivery_event_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in metadata.items() if key != "turn_id"}

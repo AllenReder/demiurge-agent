@@ -8,38 +8,38 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
-from demiurge.runtime.store import RuntimeEvent
+from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.util import utc_id
 
 
-JobStatus = Literal["queued", "running", "blocked_needs_user", "succeeded", "failed", "cancelled", "lost"]
-TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "lost"}
+RuntimeTaskStatus = Literal["queued", "running", "blocked_needs_user", "succeeded", "failed", "cancelled", "lost"]
+TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled", "lost"}
 
-JobCancelCallback = Callable[[], Any | Awaitable[Any]]
-JobCompletionCallback = Callable[["JobCompletionEvent"], Any | Awaitable[Any]]
-JobTaskFactory = Callable[["JobContext"], Awaitable[Any]]
+RuntimeTaskCancelCallback = Callable[[], Any | Awaitable[Any]]
+RuntimeTaskCompletionCallback = Callable[["RuntimeTaskCompletionEvent"], Any | Awaitable[Any]]
+RuntimeTaskFactory = Callable[["RuntimeTaskContext"], Awaitable[Any]]
 
 
-class JobConflictError(RuntimeError):
+class RuntimeTaskConflictError(RuntimeError):
     pass
 
 
 @dataclass(slots=True)
-class JobOutcome:
+class RuntimeTaskOutcome:
     summary: str = ""
     result_ref: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
-class JobRecord:
+class RuntimeTaskRecord:
     job_id: str
     backend: str
     owner_session_id: str
     owner_turn_id: str
     source_tool: str
     write_scope: str | None
-    status: JobStatus
+    status: RuntimeTaskStatus
     started_at: str | None = None
     completed_at: str | None = None
     summary: str = ""
@@ -77,14 +77,14 @@ class JobRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class JobCompletionEvent:
+class RuntimeTaskCompletionEvent:
     event_id: str
     job_id: str
     backend: str
     owner_session_id: str
     owner_turn_id: str
     source_tool: str
-    status: JobStatus
+    status: RuntimeTaskStatus
     summary: str
     log_tail: tuple[str, ...] = ()
     result_ref: str | None = None
@@ -127,9 +127,40 @@ class JobCompletionEvent:
             "result_ref": self.result_ref,
         }
 
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "backend": self.backend,
+            "owner_session_id": self.owner_session_id,
+            "owner_turn_id": self.owner_turn_id,
+            "source_tool": self.source_tool,
+            "status": self.status,
+            "summary": self.summary,
+            "log_tail": list(self.log_tail),
+            "result_ref": self.result_ref,
+            "metadata": dict(self.metadata),
+        }
 
-class JobContext:
-    def __init__(self, runtime: "JobRuntime", job_id: str):
+    @classmethod
+    def from_runtime_event(cls, event: Mapping[str, Any]) -> "RuntimeTaskCompletionEvent":
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        return cls(
+            event_id=str(event.get("aggregate_id") or event.get("event_id") or ""),
+            job_id=str(payload.get("job_id") or ""),
+            backend=str(payload.get("backend") or ""),
+            owner_session_id=str(payload.get("owner_session_id") or ""),
+            owner_turn_id=str(payload.get("owner_turn_id") or ""),
+            source_tool=str(payload.get("source_tool") or ""),
+            status=str(payload.get("status") or "failed"),  # type: ignore[arg-type]
+            summary=str(payload.get("summary") or ""),
+            log_tail=tuple(str(line) for line in payload.get("log_tail") or ()),
+            result_ref=payload.get("result_ref"),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+        )
+
+
+class RuntimeTaskContext:
+    def __init__(self, runtime: "RuntimeTaskWorker", job_id: str):
         self.runtime = runtime
         self.job_id = job_id
 
@@ -145,15 +176,20 @@ class JobContext:
     def update_metadata(self, values: Mapping[str, Any]) -> None:
         self.runtime.update_metadata(self.job_id, values)
 
-    def set_cancel_callback(self, callback: JobCancelCallback) -> None:
+    def set_cancel_callback(self, callback: RuntimeTaskCancelCallback) -> None:
         self.runtime.set_cancel_callback(self.job_id, callback)
 
     def mark_blocked(self, summary: str, *, metadata: Mapping[str, Any] | None = None) -> None:
         self.runtime.mark_blocked(self.job_id, summary, metadata=metadata)
 
 
-class JobRuntime:
-    """Host-owned in-memory background job registry and completion bus."""
+class RuntimeTaskWorker:
+    """In-process worker for RuntimeControlPlane tasks.
+
+    SQLite projections are the read source of truth. This object only owns
+    active asyncio handles, cancellation callbacks, and live completion
+    subscribers; pending completion events are reconstructed from SQLite.
+    """
 
     def __init__(
         self,
@@ -161,18 +197,16 @@ class JobRuntime:
         max_log_lines: int = 4000,
         log_tail_lines: int = 40,
         log_tail_chars: int = 8000,
-        control_plane: RuntimeControlPlane | None = None,
+        control_plane: RuntimeControlPlane,
     ):
         self.max_log_lines = max_log_lines
         self.log_tail_lines = log_tail_lines
         self.log_tail_chars = log_tail_chars
         self.control_plane = control_plane
-        self._jobs: dict[str, JobRecord] = {}
-        self._logs: dict[str, list[str]] = {}
-        self._cancel_callbacks: dict[str, JobCancelCallback] = {}
-        self._completion_callbacks: dict[str, JobCompletionCallback] = {}
-        self._pending_events: dict[str, list[JobCompletionEvent]] = {}
-        self._emitted_jobs: set[str] = set()
+        self._active_records: dict[str, RuntimeTaskRecord] = {}
+        self._active_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._cancel_callbacks: dict[str, RuntimeTaskCancelCallback] = {}
+        self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
 
     def start_task(
@@ -182,15 +216,15 @@ class JobRuntime:
         owner_session_id: str,
         owner_turn_id: str,
         source_tool: str,
-        task_factory: JobTaskFactory,
+        task_factory: RuntimeTaskFactory,
         write_scope: str | None = None,
         notify_on_complete: bool = True,
         metadata: Mapping[str, Any] | None = None,
         job_id: str | None = None,
-    ) -> JobRecord:
+    ) -> RuntimeTaskRecord:
         normalized_scope = self._normalize_scope(write_scope)
         self._ensure_scope_available(normalized_scope)
-        record = JobRecord(
+        record = RuntimeTaskRecord(
             job_id=job_id or utc_id("job_"),
             backend=str(backend),
             owner_session_id=owner_session_id,
@@ -202,19 +236,19 @@ class JobRuntime:
             notify_on_complete=notify_on_complete,
         )
         self._submit_runtime_task(record)
-        self._jobs[record.job_id] = record
-        self._logs[record.job_id] = []
         record.task = asyncio.create_task(self._run_record(record, task_factory), context=contextvars.Context())
+        self._active_records[record.job_id] = record
+        self._active_tasks[record.job_id] = record.task
         return record
 
-    async def _run_record(self, record: JobRecord, task_factory: JobTaskFactory) -> None:
-        context = JobContext(self, record.job_id)
+    async def _run_record(self, record: RuntimeTaskRecord, task_factory: RuntimeTaskFactory) -> None:
+        context = RuntimeTaskContext(self, record.job_id)
         try:
             record.status = "running"
             record.started_at = _now()
             self._append_runtime_status_event(record, "task.started")
             outcome = await task_factory(context)
-            if isinstance(outcome, JobOutcome):
+            if isinstance(outcome, RuntimeTaskOutcome):
                 if outcome.summary:
                     record.summary = outcome.summary
                 if outcome.result_ref is not None:
@@ -233,11 +267,11 @@ class JobRuntime:
                     record.metadata.update(dict(metadata))
             elif outcome is not None and not record.summary:
                 record.summary = str(outcome)
-            if record.status not in TERMINAL_JOB_STATUSES and record.status != "blocked_needs_user":
+            if record.status not in TERMINAL_TASK_STATUSES and record.status != "blocked_needs_user":
                 record.status = "succeeded"
                 record.completed_at = _now()
                 self._append_runtime_status_event(record, "task.succeeded")
-            elif record.status in TERMINAL_JOB_STATUSES and record.completed_at is None:
+            elif record.status in TERMINAL_TASK_STATUSES and record.completed_at is None:
                 record.completed_at = _now()
                 self._append_runtime_status_event(record, f"task.{record.status}")
         except asyncio.CancelledError:
@@ -254,49 +288,63 @@ class JobRuntime:
             self.append_log(record.job_id, f"error: {exc}")
             self._append_runtime_status_event(record, "task.failed")
         finally:
-            if record.status in TERMINAL_JOB_STATUSES or record.status == "blocked_needs_user":
+            if record.status in TERMINAL_TASK_STATUSES or record.status == "blocked_needs_user":
                 self._emit_completion_once(record)
             self._cancel_callbacks.pop(record.job_id, None)
 
-    def subscribe(self, callback: JobCompletionCallback) -> Callable[[], None]:
+    def subscribe(self, callback: RuntimeTaskCompletionCallback) -> Callable[[], None]:
         subscription_id = utc_id("job_sub_")
         self._completion_callbacks[subscription_id] = callback
+        for event in self.pending_events():
+            self._notify_completion_callback(callback, event)
 
         def unsubscribe() -> None:
             self._completion_callbacks.pop(subscription_id, None)
 
         return unsubscribe
 
-    def pending_events_for_session(self, session_id: str) -> list[JobCompletionEvent]:
-        return list(self._pending_events.get(session_id, []))
+    def pending_events(self) -> list[RuntimeTaskCompletionEvent]:
+        return self._pending_completion_events()
+
+    def pending_events_for_session(self, session_id: str) -> list[RuntimeTaskCompletionEvent]:
+        return [event for event in self._pending_completion_events() if event.owner_session_id == session_id]
 
     def clear_pending_event(self, event_id: str) -> bool:
-        for session_id, events in list(self._pending_events.items()):
-            remaining = [event for event in events if event.event_id != event_id]
-            if len(remaining) != len(events):
-                if remaining:
-                    self._pending_events[session_id] = remaining
-                else:
-                    self._pending_events.pop(session_id, None)
-                return True
-        return False
+        if not any(event.event_id == event_id for event in self._pending_completion_events()):
+            return False
+        self.control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type="task.completion_cleared",
+                    aggregate_type="task_completion",
+                    aggregate_id=event_id,
+                    payload={"event_id": event_id, "status": "cleared"},
+                )
+            ],
+            idempotency_key=f"task_completion:{event_id}:cleared",
+        )
+        return True
 
-    def get(self, job_id: str) -> JobRecord:
+    def get(self, job_id: str) -> RuntimeTaskRecord:
         try:
-            return self._jobs[job_id]
+            return self._record_from_projection(job_id)
         except KeyError as exc:
             raise KeyError(f"job not found: {job_id}") from exc
 
-    def list_jobs(
+    def list_tasks(
         self,
         *,
         owner_session_id: str | None = None,
         backend: str | None = None,
         include_completed: bool = True,
-    ) -> list[JobRecord]:
-        jobs = list(self._jobs.values())
+    ) -> list[RuntimeTaskRecord]:
+        where: dict[str, Any] = {}
         if owner_session_id:
-            jobs = [job for job in jobs if job.owner_session_id == owner_session_id]
+            where["owner_session_id"] = owner_session_id
+        rows = self.control_plane.store.query(
+            RuntimeQuery(table="tasks", where=where, order_by="created_at", limit=1000)
+        ).rows
+        jobs = [self._record_from_projection(str(row["task_id"]), task_row=row) for row in rows]
         if backend:
             jobs = [job for job in jobs if job.backend == backend]
         if not include_completed:
@@ -305,16 +353,19 @@ class JobRuntime:
 
     def log(self, job_id: str, *, tail: int | None = None) -> list[str]:
         self.get(job_id)
-        log = list(self._logs.get(job_id, []))
+        rows = self.control_plane.store.query(
+            RuntimeQuery(table="task_logs", where={"task_id": job_id}, order_by="seq", limit=10000)
+        ).rows
+        log = [str(row.get("text") or "") for row in rows]
         if tail is None:
             return log
         return log[-max(0, int(tail)) :]
 
-    async def wait(self, job_id: str, *, timeout_seconds: int | float | None = None) -> JobRecord:
+    async def wait(self, job_id: str, *, timeout_seconds: int | float | None = None) -> RuntimeTaskRecord:
         record = self.get(job_id)
-        task = record.task
+        task = self._active_tasks.get(job_id)
         if task is None or task.done():
-            return record
+            return self.get(job_id)
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
         except asyncio.TimeoutError:
@@ -323,12 +374,17 @@ class JobRuntime:
             raise
         except Exception:
             pass
-        return record
+        return self.get(job_id)
 
-    async def cancel(self, job_id: str) -> JobRecord:
+    async def cancel(self, job_id: str) -> RuntimeTaskRecord:
         record = self.get(job_id)
-        if record.status in TERMINAL_JOB_STATUSES:
+        if record.status in TERMINAL_TASK_STATUSES:
             return record
+        active_record = self._active_records.get(job_id)
+        if active_record is None:
+            self.control_plane.control(job_id, "cancel")
+            return self.get(job_id)
+        record = active_record
         record.status = "cancelled"
         record.summary = record.summary or "job cancelled"
         record.completed_at = _now()
@@ -338,7 +394,7 @@ class JobRuntime:
             value = callback()
             if inspect.isawaitable(value):
                 await value
-        task = record.task
+        task = self._active_tasks.get(job_id)
         if task is not None and not task.done():
             task.cancel()
             with_context = asyncio.gather(task, return_exceptions=True)
@@ -347,28 +403,22 @@ class JobRuntime:
             except asyncio.TimeoutError:
                 pass
         self._emit_completion_once(record)
-        return record
+        return self.get(job_id)
 
     async def drain(self) -> None:
         while True:
-            tasks = [job.task for job in self._jobs.values() if job.task is not None and not job.task.done()]
+            tasks = [task for task in self._active_tasks.values() if not task.done()]
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def active_count(self) -> int:
-        return sum(1 for job in self._jobs.values() if job.running)
+        return len(self.list_tasks(include_completed=False))
 
     def append_log(self, job_id: str, text: str) -> None:
-        record = self.get(job_id)
+        record = self._active_records.get(job_id) or self.get(job_id)
         lines = str(text).splitlines() or [str(text)]
-        log = self._logs.setdefault(job_id, [])
-        for line in lines:
-            log.append(line)
-        if len(log) > self.max_log_lines:
-            del log[: len(log) - self.max_log_lines]
-        record.log_tail = self._bounded_tail(log)
         self._append_runtime_events(
             record,
             [
@@ -382,31 +432,30 @@ class JobRuntime:
                 for line in lines
             ],
         )
+        record.log_tail = self._bounded_tail(self.log(job_id))
 
     def set_summary(self, job_id: str, summary: str) -> None:
-        self.get(job_id).summary = str(summary)
+        self._active_record(job_id).summary = str(summary)
 
     def set_result_ref(self, job_id: str, result_ref: str | None) -> None:
-        self.get(job_id).result_ref = result_ref
+        self._active_record(job_id).result_ref = result_ref
 
     def update_metadata(self, job_id: str, values: Mapping[str, Any]) -> None:
-        self.get(job_id).metadata.update(dict(values))
+        self._active_record(job_id).metadata.update(dict(values))
 
-    def set_cancel_callback(self, job_id: str, callback: JobCancelCallback) -> None:
+    def set_cancel_callback(self, job_id: str, callback: RuntimeTaskCancelCallback) -> None:
         self.get(job_id)
         self._cancel_callbacks[job_id] = callback
 
     def mark_blocked(self, job_id: str, summary: str, *, metadata: Mapping[str, Any] | None = None) -> None:
-        record = self.get(job_id)
+        record = self._active_record(job_id)
         record.status = "blocked_needs_user"
         record.summary = str(summary)
         if metadata:
             record.metadata.update(dict(metadata))
         self._append_runtime_status_event(record, "task.blocked")
 
-    def _submit_runtime_task(self, record: JobRecord) -> None:
-        if self.control_plane is None:
-            return
+    def _submit_runtime_task(self, record: RuntimeTaskRecord) -> None:
         payload = {
             "task_id": record.job_id,
             "owner_session_id": record.owner_session_id,
@@ -422,10 +471,10 @@ class JobRuntime:
             ActionSpec(
                 kind=_action_kind_for_backend(record.backend),
                 payload=payload,
-                idempotency_key=f"job:{record.job_id}:submitted",
+                idempotency_key=f"task:{record.job_id}:submitted",
             ),
             source=ActionSource(
-                actor="host.job_runtime",
+                actor="host.task_worker",
                 session_id=record.owner_session_id,
                 turn_id=record.owner_turn_id,
                 core_id=payload["core_id"],
@@ -433,7 +482,7 @@ class JobRuntime:
             ),
         )
 
-    def _append_runtime_status_event(self, record: JobRecord, event_type: str) -> None:
+    def _append_runtime_status_event(self, record: RuntimeTaskRecord, event_type: str) -> None:
         if (record.job_id, event_type) in self._runtime_status_events:
             return
         self._runtime_status_events.add((record.job_id, event_type))
@@ -462,14 +511,14 @@ class JobRuntime:
             ],
         )
 
-    def _append_runtime_events(self, record: JobRecord, events: list[RuntimeEvent]) -> None:
-        if self.control_plane is None or not events:
+    def _append_runtime_events(self, record: RuntimeTaskRecord, events: list[RuntimeEvent]) -> None:
+        if not events:
             return
         self.control_plane.store.append(events)
 
-    def _runtime_actor(self, record: JobRecord) -> dict[str, Any]:
+    def _runtime_actor(self, record: RuntimeTaskRecord) -> dict[str, Any]:
         return {
-            "actor": "host.job_runtime",
+            "actor": "host.task_worker",
             "session_id": record.owner_session_id,
             "turn_id": record.owner_turn_id,
             "core_id": record.metadata.get("core_id") or record.metadata.get("child_core_id"),
@@ -479,15 +528,14 @@ class JobRuntime:
     def _ensure_scope_available(self, write_scope: str | None) -> None:
         if not write_scope:
             return
-        for job in self._jobs.values():
+        for job in self.list_tasks(include_completed=False):
             if job.write_scope == write_scope and job.running:
-                raise JobConflictError(f"background job write_scope is already active: {write_scope}")
+                raise RuntimeTaskConflictError(f"background job write_scope is already active: {write_scope}")
 
-    def _emit_completion_once(self, record: JobRecord) -> None:
-        if not record.notify_on_complete or record.job_id in self._emitted_jobs:
+    def _emit_completion_once(self, record: RuntimeTaskRecord) -> None:
+        if not record.notify_on_complete or self._completion_ready_event_for_task(record.job_id) is not None:
             return
-        self._emitted_jobs.add(record.job_id)
-        event = JobCompletionEvent(
+        event = RuntimeTaskCompletionEvent(
             event_id=utc_id("job_event_"),
             job_id=record.job_id,
             backend=record.backend,
@@ -500,14 +548,141 @@ class JobRuntime:
             result_ref=record.result_ref,
             metadata=dict(record.metadata),
         )
-        self._pending_events.setdefault(event.owner_session_id, []).append(event)
+        result = self.control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type="task.completion_ready",
+                    aggregate_type="task_completion",
+                    aggregate_id=event.event_id,
+                    actor=self._runtime_actor(record),
+                    payload=event.to_payload(),
+                )
+            ],
+            idempotency_key=f"task:{record.job_id}:completion_ready",
+        )
+        event = RuntimeTaskCompletionEvent.from_runtime_event(result.events[-1])
         for callback in list(self._completion_callbacks.values()):
-            try:
-                value = callback(event)
-                if inspect.isawaitable(value):
-                    asyncio.create_task(value)
-            except RuntimeError:
+            self._notify_completion_callback(callback, event)
+
+    def _notify_completion_callback(
+        self,
+        callback: RuntimeTaskCompletionCallback,
+        event: RuntimeTaskCompletionEvent,
+    ) -> None:
+        try:
+            value = callback(event)
+            if inspect.isawaitable(value):
+                asyncio.create_task(value)
+        except RuntimeError:
+            return
+
+    def _pending_completion_events(self) -> list[RuntimeTaskCompletionEvent]:
+        rows = self.control_plane.store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"aggregate_type": "task_completion"},
+                order_by="seq",
+                limit=10_000,
+            )
+        ).rows
+        cleared = {
+            str(row.get("aggregate_id"))
+            for row in rows
+            if row.get("type") == "task.completion_cleared"
+        }
+        events = [
+            RuntimeTaskCompletionEvent.from_runtime_event(row)
+            for row in rows
+            if row.get("type") == "task.completion_ready" and str(row.get("aggregate_id")) not in cleared
+        ]
+        return events
+
+    def _completion_ready_event_for_task(self, job_id: str) -> RuntimeTaskCompletionEvent | None:
+        for event in self._pending_completion_events():
+            if event.job_id == job_id:
+                return event
+        rows = self.control_plane.store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"aggregate_type": "task_completion"},
+                order_by="seq",
+                limit=10_000,
+            )
+        ).rows
+        for row in rows:
+            if row.get("type") != "task.completion_ready":
                 continue
+            event = RuntimeTaskCompletionEvent.from_runtime_event(row)
+            if event.job_id == job_id:
+                return event
+        return None
+
+    def _active_record(self, job_id: str) -> RuntimeTaskRecord:
+        record = self._active_records.get(job_id)
+        if record is None:
+            raise KeyError(f"task is not active in this worker: {job_id}")
+        return record
+
+    def _record_from_projection(self, job_id: str, *, task_row: Mapping[str, Any] | None = None) -> RuntimeTaskRecord:
+        if task_row is None:
+            rows = self.control_plane.store.query(RuntimeQuery(table="tasks", where={"task_id": job_id}, limit=1)).rows
+            if not rows:
+                raise KeyError(job_id)
+            task_row = rows[0]
+        events = self.control_plane.store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"aggregate_type": "task", "aggregate_id": job_id},
+                order_by="seq",
+                limit=1000,
+            )
+        ).rows
+        submitted = next((event for event in events if event.get("type") == "task.submitted"), {})
+        submitted_payload = submitted.get("payload") if isinstance(submitted.get("payload"), Mapping) else {}
+        action = submitted_payload.get("action") if isinstance(submitted_payload.get("action"), Mapping) else {}
+        source = task_row.get("source") if isinstance(task_row.get("source"), Mapping) else {}
+        source_metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
+        metadata: dict[str, Any] = {}
+        if isinstance(action.get("metadata"), Mapping):
+            metadata.update(dict(action["metadata"]))
+        summary = ""
+        source_tool = str(action.get("source_tool") or source_metadata.get("source_tool") or "")
+        backend = str(action.get("backend") or source_metadata.get("backend") or _backend_for_kind(str(task_row.get("kind") or "")))
+        write_scope = action.get("write_scope")
+        for event in events:
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            if isinstance(payload.get("metadata"), Mapping):
+                metadata.update(dict(payload["metadata"]))
+            if payload.get("summary") is not None:
+                summary = str(payload.get("summary") or "")
+            if payload.get("source_tool") is not None:
+                source_tool = str(payload.get("source_tool") or "")
+            if payload.get("backend") is not None:
+                backend = str(payload.get("backend") or "")
+        task = self._active_tasks.get(job_id)
+        return RuntimeTaskRecord(
+            job_id=job_id,
+            backend=backend,
+            owner_session_id=str(task_row.get("owner_session_id") or ""),
+            owner_turn_id=str(task_row.get("owner_turn_id") or ""),
+            source_tool=source_tool,
+            write_scope=str(write_scope) if write_scope else None,
+            status=str(task_row.get("status") or "queued"),  # type: ignore[arg-type]
+            started_at=task_row.get("started_at"),
+            completed_at=task_row.get("completed_at"),
+            summary=summary,
+            log_tail=self._bounded_tail(self._log_from_store(job_id)),
+            result_ref=task_row.get("result_ref"),
+            metadata=metadata,
+            notify_on_complete=str(task_row.get("notify_policy") or "") != "silent",
+            task=task,
+        )
+
+    def _log_from_store(self, job_id: str) -> list[str]:
+        rows = self.control_plane.store.query(
+            RuntimeQuery(table="task_logs", where={"task_id": job_id}, order_by="seq", limit=10000)
+        ).rows
+        return [str(row.get("text") or "") for row in rows]
 
     def _bounded_tail(self, log: list[str]) -> list[str]:
         tail = list(log[-self.log_tail_lines :])
@@ -532,3 +707,13 @@ def _action_kind_for_backend(backend: str):
     if backend == "agent":
         return "agent.spawn"
     return "tool.call"
+
+
+def _backend_for_kind(kind: str) -> str:
+    if kind == "terminal.exec":
+        return "terminal"
+    if kind == "evolver.run":
+        return "evolve"
+    if kind == "agent.spawn":
+        return "agent"
+    return "tool"

@@ -116,7 +116,7 @@ class TurnEngine:
                             },
                         )
                     )
-                    result: ToolResult = await self.host.tool_runtime.execute(
+                    result: ToolResult = await self.host.execute_tool(
                         call,
                         core=request.core,
                         turn=request.turn,

@@ -58,5 +58,7 @@ Telegram is deny-by-default through `allowed_users` and `allowed_chats`.
 The current alpha runtime does not promise a hardened multi-tenant sandbox.
 Agent Slot code runs in the host-shared Python environment by default.
 Per-core environments and subprocess workers are future isolation options, not
-the default runtime mode. Background jobs are in-memory only and are not
-recovered after host process restart.
+the default runtime mode. Runtime task records, logs, scheduler instances, and
+delivery outbox status are stored in the SQLite runtime database; in-process
+workers are still responsible for live execution and do not replay already
+started dangerous side effects after host process restart.

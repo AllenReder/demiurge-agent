@@ -22,7 +22,7 @@ from typing import Any, Callable
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
-from demiurge.jobs import JobCompletionEvent, JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
@@ -159,8 +159,8 @@ class TelegramInteractionBridge:
             default=None,
         )
         self._conversations: dict[str, TelegramConversationState] = {}
-        self._job_runtime: JobRuntime | None = None
-        self._job_unsubscribe: Callable[[], None] | None = None
+        self._task_worker: RuntimeTaskWorker | None = None
+        self._task_unsubscribe: Callable[[], None] | None = None
 
     @classmethod
     def from_config(
@@ -457,6 +457,8 @@ class TelegramInteractionBridge:
                 await self._send_text(inbound.source, f"Unknown command: /{command.name}", reply_to=inbound.reply_to)
                 return
 
+        if not _is_background_completion(inbound):
+            inbound = self._merge_stored_task_completions(state, inbound)
         if state.active_task and not state.active_task.done():
             await self._handle_busy_inbound(state, inbound)
             return
@@ -744,7 +746,7 @@ class TelegramInteractionBridge:
                 conversation_key=conversation_key,
             )
             self._conversations[conversation_key] = state
-            self._subscribe_job_runtime(state.runtime)
+            self._subscribe_task_worker(state.runtime)
         return state
 
     async def _handle_busy_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
@@ -849,11 +851,10 @@ class TelegramInteractionBridge:
             f"- allowed chats: `{len(self.allowed_chats)}`",
             f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
         ]
-        session_store = getattr(runner, "session_store", None)
         session_id = getattr(runner, "session_id", None)
-        if session_store is not None and session_id:
+        if session_id:
             with contextlib.suppress(Exception):
-                lines.append(f"- messages: `{session_store.message_count(session_id)}`")
+                lines.append(f"- messages: `{state.runtime.session_runtime.message_count(session_id)}`")
         provider_name = getattr(runner, "provider_name", None)
         if provider_name:
             lines.append(f"- provider: `{provider_name}`")
@@ -915,12 +916,12 @@ class TelegramInteractionBridge:
 
     async def _command_sessions(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         limit = int(args.strip()) if args.strip().isdigit() else 10
-        records = state.runtime.runner.session_store.list_sessions(core_id=state.runtime.runner.core_id, limit=limit)
+        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=limit)
         await self._send_text(inbound.source, self._sessions_text(records, state.runtime.runner.session_id), reply_to=inbound.reply_to)
 
     async def _command_subagents(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         text = await subagents_command_text(
-            state.runtime.runner.job_runtime,
+            state.runtime.runner.task_worker,
             session_id=state.runtime.runner.session_id,
             args=args,
         )
@@ -928,7 +929,7 @@ class TelegramInteractionBridge:
 
     async def _command_resume(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         raw = args.strip()
-        records = state.runtime.runner.session_store.list_sessions(core_id=state.runtime.runner.core_id, limit=20)
+        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=20)
         if not raw:
             await self._send_text(
                 inbound.source,
@@ -1041,28 +1042,54 @@ class TelegramInteractionBridge:
         state.metadata = dict(inbound.metadata)
         state.conversation_key = inbound.conversation_key or state.conversation_key
 
-    def _subscribe_job_runtime(self, runtime: InteractionRuntime) -> None:
-        job_runtime = getattr(getattr(runtime, "runner", None), "job_runtime", None)
-        if job_runtime is None or job_runtime is self._job_runtime:
-            return
-        if self._job_unsubscribe is not None:
-            self._job_unsubscribe()
-        self._job_runtime = job_runtime
-        self._job_unsubscribe = job_runtime.subscribe(self._on_job_completion)
+    def _merge_stored_task_completions(
+        self,
+        state: TelegramConversationState,
+        inbound: InteractionInbound,
+    ) -> InteractionInbound:
+        task_worker = getattr(getattr(state.runtime, "runner", None), "task_worker", None)
+        session_id = getattr(getattr(state.runtime, "runner", None), "session_id", None)
+        if task_worker is None or not session_id:
+            return inbound
+        completions: list[InteractionInbound] = []
+        for event in task_worker.pending_events_for_session(str(session_id)):
+            completions.append(
+                _task_completion_inbound(
+                    event,
+                    channel="telegram",
+                    source=state.source or inbound.source,
+                    reply_to=state.reply_to,
+                    conversation_key=state.conversation_key,
+                    metadata=state.metadata,
+                )
+            )
+            task_worker.clear_pending_event(event.event_id)
+        if not completions:
+            return inbound
+        return _merge_completion_inbounds(inbound, completions)
 
-    def _on_job_completion(self, event: JobCompletionEvent) -> None:
+    def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
+        task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
+        if task_worker is None or task_worker is self._task_worker:
+            return
+        if self._task_unsubscribe is not None:
+            self._task_unsubscribe()
+        self._task_worker = task_worker
+        self._task_unsubscribe = task_worker.subscribe(self._on_task_completion)
+
+    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
         state = self._state_for_session(event.owner_session_id)
         if state is None:
             return
         try:
-            asyncio.get_running_loop().create_task(self._enqueue_job_completion(state, event))
+            asyncio.get_running_loop().create_task(self._enqueue_task_completion(state, event))
         except RuntimeError:
             return
 
-    async def _enqueue_job_completion(self, state: TelegramConversationState, event: JobCompletionEvent) -> None:
+    async def _enqueue_task_completion(self, state: TelegramConversationState, event: RuntimeTaskCompletionEvent) -> None:
         if not state.source:
             return
-        inbound = _job_completion_inbound(
+        inbound = _task_completion_inbound(
             event,
             channel="telegram",
             source=state.source,
@@ -1070,8 +1097,8 @@ class TelegramInteractionBridge:
             conversation_key=state.conversation_key,
             metadata=state.metadata,
         )
-        if self._job_runtime is not None:
-            self._job_runtime.clear_pending_event(event.event_id)
+        if self._task_worker is not None:
+            self._task_worker.clear_pending_event(event.event_id)
         if state.active_task and not state.active_task.done():
             await state.queue.put(inbound)
             return
@@ -1480,6 +1507,9 @@ def _runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
             provider_name=app.runner.provider_name,
             workspace=app.runner.workspace,
             show_system_prompt=app.runner.show_system_prompt,
+            runtime_timezone=app.runtime_timezone,
+            task_worker=app.task_worker,
+            session_runtime=app.session_runtime,
         )
         return InteractionRuntime(runner)
 
@@ -1494,8 +1524,8 @@ def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
     return config.bot_token
 
 
-def _job_completion_inbound(
-    event: JobCompletionEvent,
+def _task_completion_inbound(
+    event: RuntimeTaskCompletionEvent,
     *,
     channel: str,
     source: str,

@@ -23,16 +23,19 @@ The source checkout and runtime home have different roles.
     agent.yaml
     assistant/
     evolver/
-  sessions/
-  scheduler/
+  runtime/
+    runtime.sqlite3
+    artifacts/
+    session-events/
   workspace/
   logs/
 ```
 
 `config.yaml` is host-owned runtime configuration. `.env` can hold local
-provider secrets. `agents/` contains live runtime Agent Cores. `sessions/`
-contains persisted session records. `scheduler/` contains scheduler state and
-run records. `workspace/` is the non-local fallback workspace.
+provider secrets. `agents/` contains live runtime Agent Cores. `runtime/`
+contains the SQLite control-plane database, delivery outbox projection,
+scheduler runtime projections, session event logs, and host-owned artifacts.
+`workspace/` is the non-local fallback workspace.
 
 ## Source Templates vs Runtime Cores
 

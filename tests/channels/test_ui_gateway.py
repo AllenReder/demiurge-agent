@@ -79,14 +79,14 @@ async def _complete_background_job(app, *, summary: str = "background complete")
         ctx.append_log("background tail")
         return summary
 
-    record = app.job_runtime.start_task(
+    record = app.task_worker.start_task(
         backend="test",
         owner_session_id=app.runner.session_id,
         owner_turn_id="turn_origin",
         source_tool="test",
         task_factory=task,
     )
-    await app.job_runtime.wait(record.job_id, timeout_seconds=1)
+    await app.task_worker.wait(record.job_id, timeout_seconds=1)
     return record
 
 

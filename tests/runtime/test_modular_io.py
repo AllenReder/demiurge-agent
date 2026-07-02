@@ -187,7 +187,7 @@ async def test_input_serial_appends_user_fragments_and_transient_system(tmp_path
     assert "SYS" in system_messages[0].content
     current_user = [message for message in request_messages if message.role == "user"][-1]
     assert current_user.content == "FIRST\n\nhello\n\nTAIL"
-    history = app.runner.session_store.read_messages(app.runner.session_id)
+    history = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.role for message in history] == ["user", "assistant"]
     assert history[0].content == "FIRST\n\nhello"
     assert all(message.role != "system" for message in history)
@@ -253,7 +253,7 @@ async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_
     assert "TURN SYSTEM" in debug_delivery.text
     assert "hello" not in debug_delivery.text
     assert "main" not in debug_delivery.text
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert all("BOOT SYSTEM" not in message.content for message in messages)
     assert all("TURN SYSTEM" not in message.content for message in messages)
     assert all(message.role != "system" for message in messages)
@@ -299,7 +299,7 @@ async def test_input_module_can_send_delivery(tmp_path):
     result = await app.runner.run_turn("hello")
 
     assert _delivery_texts(result) == ["input note", "main"]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     input_message = next(message for message in messages if message.content == "input note")
     assert input_message.role == "assistant"
     assert input_message.model_visible is False
@@ -358,7 +358,7 @@ async def test_output_pipeline_without_send_does_not_deliver_or_persist_assistan
     result = await app.runner.run_turn("hello")
 
     assert result.deliveries == []
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content) for message in messages] == [("user", "hello")]
 
 
@@ -381,7 +381,7 @@ async def test_output_explicit_delivery_and_history_policy(tmp_path):
     assert _delivery_texts(result) == ["main", "extra"]
     assistant_history = [
         (message.content, message.model_visible)
-        for message in app.runner.session_store.read_messages(app.runner.session_id)
+        for message in app.session_runtime.read_messages(app.runner.session_id)
         if message.role == "assistant"
     ]
     assert assistant_history == [("main", True), ("extra", False)]
@@ -417,7 +417,7 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == [
         "persist immediate",
     ]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content, message.visible, message.model_visible) for message in messages] == [
         ("user", "hello", True, True),
         ("assistant", "persist immediate", True, True),
@@ -529,7 +529,7 @@ async def test_tool_step_transcript_persists_and_output_history_sees_current_tur
     result = await app.runner.run_turn("inspect tools")
 
     assert _delivery_texts(result) == ["checking tools", "done"]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content, message.visible, message.model_visible) for message in messages] == [
         ("user", "inspect tools", True, True),
         ("assistant", "checking tools", True, True),
@@ -607,7 +607,7 @@ async def test_authored_tool_can_send_transient_audio_without_history(tmp_path):
     assert audio_delivery.history_policy == "transient"
     assert audio_delivery.metadata["slot"] == "agent/tools/voice_sender"
     assert audio_delivery.metadata["phase"] == "tool"
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content, message.model_visible) for message in messages] == [
         ("user", "make voice", True),
         ("assistant", "", True),
@@ -652,7 +652,7 @@ async def test_tool_output_defaults_to_persist_when_write_history_is_omitted(tmp
 
     delivery = next(delivery for delivery in result.deliveries if delivery.text == "default policy")
     assert delivery.history_policy == "persist"
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assistant_delivery = next(
         message for message in messages if message.role == "assistant" and message.content == "default policy"
     )
@@ -778,7 +778,7 @@ async def test_runtime_max_model_steps_limits_tool_loop(tmp_path):
     assert _delivery_texts(result) == [
         "The provider did not produce a final assistant message within the configured step budget of 2."
     ]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.role for message in messages] == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
     assert [message.metadata.get("step_id") for message in messages if message.role == "assistant" and message.metadata.get("tool_calls")] == [
         f"{result.turn_id}_step_1",
@@ -803,7 +803,7 @@ async def test_io_delivery_does_not_require_deliver_capability(tmp_path):
     result = await app.runner.run_turn("hello")
 
     assert _delivery_texts(result) == ["main", "denied"]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.content for message in messages if message.role == "assistant"] == ["main", "denied"]
     assert not any(event["type"] == "capability.denied" for event in app.runner.event_log.tail(30))
 
@@ -870,7 +870,7 @@ async def test_progress_flushes_immediately_without_persisting_history(tmp_path)
     assert outbound.deliveries == []
     delivered = [(delivery.kind, delivery.text) for outbound in bridge.outbounds for delivery in outbound.deliveries]
     assert delivered == [("message", "main"), ("progress", "working"), ("message", "done")]
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content) for message in messages] == [
         ("user", "hello"),
         ("assistant", "main"),
@@ -893,7 +893,7 @@ async def test_immediate_delivery_failure_is_nonfatal_and_keeps_history(tmp_path
     await app.runner.drain_background_tasks()
 
     assert outbound.deliveries == []
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content, message.model_visible) for message in messages] == [
         ("user", "hello", True),
         ("assistant", "main", True),
@@ -936,7 +936,7 @@ async def test_output_send_commits_history_and_schedules_delivery_immediately(tm
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == ["main", "slot-end"]
     assert app.runner.display_turns[-1]["assistant"] == ["main", "slot-end"]
-    assert app.runner.session_store.read_messages(app.runner.session_id)[-1].content == "slot-end"
+    assert app.session_runtime.read_messages(app.runner.session_id)[-1].content == "slot-end"
     assert any(
         event["type"] == "turn.completed" and event.get("agent_result") == {"saw_slot_end": True}
         for event in app.runner.event_log.tail(30)
@@ -1057,7 +1057,7 @@ async def test_history_recent_messages_returns_message_order_with_tool_summary(t
     assert "assistant:None:" in summary
     assert "tool:tools_list:" in summary
     assert "assistant:None:tool done" in summary
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.role for message in messages[:4]] == ["user", "assistant", "tool", "assistant"]
     assert messages[1].metadata["tool_calls"][0]["name"] == "tools_list"
     assert messages[2].model_visible is True
@@ -1185,13 +1185,13 @@ async def test_agents_run_returns_child_result_without_auto_mirroring_delivery(t
     assert _delivery_texts(result)[0] == "parent"
     assert _delivery_texts(result)[1].startswith("run-result:child:1:session_child_")
     child_session_id = _delivery_texts(result)[1].rsplit(":", 1)[1]
-    parent_messages = app.runner.session_store.read_messages(app.runner.session_id)
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [(message.role, message.content) for message in parent_messages] == [
         ("user", "hello"),
         ("assistant", "parent"),
         ("assistant", _delivery_texts(result)[1]),
     ]
-    child_messages = app.runner.session_store.read_messages(child_session_id)
+    child_messages = app.session_runtime.read_messages(child_session_id)
     assert [(message.role, message.content) for message in child_messages] == [
         ("user", "child raw"),
         ("assistant", "child"),
@@ -1275,11 +1275,11 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     assert not any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
     provider.release_child.set()
     await app.runner.drain_background_tasks()
-    agent_jobs = app.job_runtime.list_jobs(backend="agent")
+    agent_jobs = app.task_worker.list_tasks(backend="agent")
     assert len(agent_jobs) == 1
     assert agent_jobs[0].status == "succeeded"
-    assert app.job_runtime.pending_events_for_session(app.runner.session_id)[0].job_id == agent_jobs[0].job_id
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].job_id == agent_jobs[0].job_id
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.content for message in messages if message.role == "assistant"] == [
         "parent",
         "spawn:running:evolver",
@@ -1318,10 +1318,10 @@ async def test_agents_spawn_marks_job_blocked_when_child_needs_user(tmp_path):
     await app.runner.run_turn("hello")
     await app.runner.drain_background_tasks()
 
-    agent_jobs = app.job_runtime.list_jobs(backend="agent")
+    agent_jobs = app.task_worker.list_tasks(backend="agent")
     assert len(agent_jobs) == 1
     assert agent_jobs[0].status == "blocked_needs_user"
-    assert app.job_runtime.pending_events_for_session(app.runner.session_id)[0].status == "blocked_needs_user"
+    assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].status == "blocked_needs_user"
     assert any(event["type"] == "agent_spawn.blocked" for event in app.runner.event_log.tail(50))
 
 
@@ -1361,6 +1361,7 @@ async def test_child_result_artifact_can_be_sent_by_parent(tmp_path):
         "        summary=audio.get('summary'),\n"
         "        artifact_metadata=audio.get('metadata'),\n"
         "        history_policy='model_hidden',\n"
+        "        history_text='voice result ready',\n"
         "    )\n",
     )
     _write_slot(
@@ -1378,10 +1379,10 @@ async def test_child_result_artifact_can_be_sent_by_parent(tmp_path):
     assert _delivery_texts(result)[1].startswith("voice ready")
     assert result.deliveries[1].blocks[-1]["type"] == "audio"
     assert result.deliveries[1].blocks[-1]["artifact"]["resolved_path"] == str(workspace / "voice.ogg")
-    parent_messages = app.runner.session_store.read_messages(app.runner.session_id)
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.content for message in parent_messages if message.role == "assistant"] == [
         "parent",
-        _delivery_texts(result)[1],
+        "voice result ready",
     ]
 
 
@@ -1456,6 +1457,7 @@ async def test_deliver_attachment_uses_artifact_reference_in_history(tmp_path):
         "        media_type='audio/ogg',\n"
         "        summary='voice note',\n"
         "        artifact_metadata={'source': 'unit'},\n"
+        "        history_text='voice ready: voice note',\n"
         "    )\n",
     )
     _write_slot(agents, "assistant/agent/output/audio/slot.yaml", _slot_text())
@@ -1469,19 +1471,17 @@ async def test_deliver_attachment_uses_artifact_reference_in_history(tmp_path):
     assert _delivery_texts(result)[1].startswith("voice ready")
     assistant_history = [
         message.content
-        for message in app.runner.session_store.read_messages(app.runner.session_id)
+        for message in app.session_runtime.read_messages(app.runner.session_id)
         if message.role == "assistant"
     ]
-    assert "voice ready" in assistant_history[-1]
-    assert "voice note" in assistant_history[-1]
+    assert assistant_history[-1] == "voice ready: voice note"
     assert "RAW-AUDIO-CONTENT" not in assistant_history[-1]
     assert result.deliveries[-1].blocks[-1]["type"] == "audio"
     assert result.deliveries[-1].blocks[-1]["artifact"]["media_type"] == "audio/ogg"
     assert result.deliveries[-1].blocks[-1]["artifact"]["summary"] == "voice note"
     assert result.deliveries[-1].blocks[-1]["artifact"]["metadata"] == {"source": "unit"}
     assert result.deliveries[-1].blocks[-1]["artifact"]["resolved_path"] == str(workspace / "voice.ogg")
-    index_path = app.home / "sessions" / app.runner.session_id / "artifacts" / "index.jsonl"
-    assert "RAW-AUDIO-CONTENT" not in index_path.read_text(encoding="utf-8")
+    assert not (app.home / "sessions").exists()
 
 
 @pytest.mark.asyncio

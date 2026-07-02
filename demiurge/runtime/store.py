@@ -10,7 +10,7 @@ from demiurge.util import ensure_dir, utc_id
 from demiurge.storage import utc_now
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +174,12 @@ class RuntimeStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current_version not in {0, SCHEMA_VERSION}:
+                raise RuntimeError(
+                    f"unsupported runtime database schema version {current_version}; "
+                    f"expected {SCHEMA_VERSION}. Demiurge does not migrate old runtime state."
+                )
             connection.executescript(_SCHEMA_SQL)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
@@ -322,6 +328,25 @@ class RuntimeStore:
                     None,
                 ),
             )
+        elif event_type in {"delivery.sent", "delivery.failed", "delivery.retry_scheduled"}:
+            status = payload.get("status") or event_type.split(".", 1)[1]
+            connection.execute(
+                """
+                UPDATE outbox
+                SET status = ?,
+                    attempts = COALESCE(?, attempts),
+                    last_error = ?,
+                    sent_at = COALESCE(?, sent_at)
+                WHERE delivery_id = ?
+                """,
+                (
+                    status,
+                    payload.get("attempts"),
+                    payload.get("last_error"),
+                    payload.get("sent_at") or (event["created_at"] if event_type == "delivery.sent" else None),
+                    event["aggregate_id"],
+                ),
+            )
         elif event_type == "session.created":
             connection.execute(
                 """
@@ -404,9 +429,9 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO messages (
-                    message_id, session_id, turn_id, role, visibility, content_json, created_at
+                    message_id, session_id, turn_id, role, visibility, content_json, created_at, runtime_seq
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
@@ -415,6 +440,39 @@ class RuntimeStore:
                     payload.get("role"),
                     payload.get("visibility") or ("visible" if payload.get("visible", True) else "hidden"),
                     json.dumps(content, ensure_ascii=False, sort_keys=True),
+                    payload.get("created_at") or event["created_at"],
+                    event["seq"],
+                ),
+            )
+        elif event_type == "message.updated":
+            content = payload.get("content")
+            if not isinstance(content, dict):
+                content = {"text": payload.get("text") or "", "metadata": payload.get("metadata") or {}}
+            connection.execute(
+                """
+                UPDATE messages
+                SET content_json = ?
+                WHERE message_id = ?
+                """,
+                (
+                    json.dumps(content, ensure_ascii=False, sort_keys=True),
+                    event["aggregate_id"],
+                ),
+            )
+        elif event_type == "artifact.stored":
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO artifacts (
+                    artifact_id, task_id, kind, uri, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["aggregate_id"],
+                    payload.get("task_id"),
+                    payload.get("kind") or "file",
+                    payload.get("uri") or "",
+                    json.dumps(payload.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
                     payload.get("created_at") or event["created_at"],
                 ),
             )
@@ -454,7 +512,7 @@ class RuntimeStore:
                     event["aggregate_id"],
                 ),
             )
-        elif event_type == "scheduler.claimed":
+        elif event_type in {"scheduler.scheduled", "scheduler.claimed"}:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO scheduler_instances (
@@ -512,7 +570,7 @@ _QUERY_TABLES = {
     "artifacts",
     "scheduler_instances",
 }
-_QUERY_ORDER_FIELDS = {"seq", "created_at", "started_at", "completed_at", "due_at"}
+_QUERY_ORDER_FIELDS = {"seq", "runtime_seq", "created_at", "updated_at", "started_at", "completed_at", "due_at"}
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runtime_events (
@@ -627,8 +685,10 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     visibility TEXT NOT NULL,
     content_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    runtime_seq INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, runtime_seq);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
     call_id TEXT PRIMARY KEY,

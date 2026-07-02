@@ -68,6 +68,8 @@ class DeliveryRequest:
     delivery: str = "immediate"
     visible: bool = True
     target: str = "current"
+    history_text: str | None = None
+    failure_history_text: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

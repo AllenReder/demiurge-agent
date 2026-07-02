@@ -10,7 +10,7 @@ from demiurge.channels.telegram import TelegramInteractionBridge
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionRuntime
 from demiurge.runtime.store import RuntimeQuery
-from demiurge.scheduler import SchedulerService, SchedulerStore, next_fire_after, parse_instant, start_scheduler_for_app
+from demiurge.scheduler import SchedulerRuntime, SchedulerService, next_fire_after, parse_instant, start_scheduler_for_app
 from demiurge.storage import EventLog
 
 
@@ -129,7 +129,7 @@ def test_scheduler_claim_coalesces_missed_runs_and_is_single_flight(tmp_path):
     _write_schedule(agents, 'schedule: "* * * * *"\nprompt: "Tick"\n')
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="UTC")
     schedule = _schedule(app)
-    store = SchedulerStore(app.home, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+    store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
     due = datetime(2026, 6, 28, 10, 0, tzinfo=UTC)
     now = datetime(2026, 6, 28, 10, 5, 30, tzinfo=UTC)
     store.set_next_run(schedule, due)
@@ -140,14 +140,21 @@ def test_scheduler_claim_coalesces_missed_runs_and_is_single_flight(tmp_path):
     assert claim is not None
     assert claim.due_at == due
     assert second_claim is None
-    next_run = parse_instant(store.read_state()["schedules"][schedule.schedule_id]["next_run_at"])
+    rows = app.runtime_store.query(
+        RuntimeQuery(
+            table="scheduler_instances",
+            where={"core_id": app.runner.core_id, "schedule_id": schedule.schedule_id},
+            order_by="due_at",
+            limit=10,
+        )
+    ).rows
+    next_run = parse_instant([row for row in rows if row["claim_status"] == "scheduled"][-1]["due_at"])
     assert next_run == datetime(2026, 6, 28, 10, 6, tzinfo=UTC)
     logs = store.read_run_logs()
-    assert logs[0]["event"] == "claimed"
-    assert logs[0]["run_id"] == claim.run_id
-    assert logs[0]["due_at"] == "2026-06-28T10:00:00Z"
-    assert logs[0]["due_at_local"] == "2026-06-28T10:00:00+00:00"
-    assert logs[0]["runtime_timezone"] == "UTC"
+    claimed = next(log for log in logs if log["event"] == "claimed")
+    assert claimed["run_id"] == claim.run_id
+    assert claimed["due_at"] == "2026-06-28T10:00:00Z"
+    assert claimed["runtime_timezone"] == "UTC"
 
 
 @pytest.mark.asyncio
@@ -201,7 +208,7 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
     assert result.deliveries == 0
     user_messages = [message.content for message in provider.requests[0].messages if message.role == "user"]
     assert user_messages[-1] == "scheduled prompt"
-    messages = app.runner.session_store.read_messages(result.session_id)
+    messages = app.session_runtime.read_messages(result.session_id)
     assert [(message.role, message.content) for message in messages] == [
         ("user", "scheduled prompt"),
         ("assistant", "model result"),

@@ -165,7 +165,7 @@ async def test_memory_basic_runtime_injects_bootstrap_context_and_tool_writes_ar
     session_id = app.runner.session_id
     first_request_text = "\n".join(message.content for message in provider.requests[0].messages)
     second_step_text = "\n".join(message.content for message in provider.requests[1].messages)
-    bootstrap_context = app.runner.session_store.read_bootstrap_context(session_id)
+    bootstrap_context = app.session_runtime.read_bootstrap_context(session_id)
 
     assert "You have persistent memory across sessions" in first_request_text
     assert "Initial project convention" in first_request_text
@@ -177,7 +177,7 @@ async def test_memory_basic_runtime_injects_bootstrap_context_and_tool_writes_ar
     assert "New durable memory" in (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
     assert first.tool_results[0].call.name == "memory"
     assert first.tool_results[0].result.is_error is False
-    history = app.runner.session_store.read_messages(session_id)
+    history = app.session_runtime.read_messages(session_id)
     assert all(message.role != "system" for message in history)
     assert all("You have persistent memory across sessions" not in message.content for message in history)
     assert all("Initial project convention" not in message.content for message in history)
@@ -241,8 +241,8 @@ async def test_memory_basic_runtime_lists_live_memory_without_refreshing_bootstr
     list_request_text = "\n".join(message.content for message in provider.requests[2].messages)
     assert "Initial project convention" in list_request_text
     assert "Live disk entry" not in list_request_text
-    bootstrap_context = app.runner.session_store.read_bootstrap_context(app.runner.session_id)
+    bootstrap_context = app.session_runtime.read_bootstrap_context(app.runner.session_id)
     assert "Initial project convention" in bootstrap_context
     assert "Live disk entry" not in bootstrap_context
-    history = app.runner.session_store.read_messages(app.runner.session_id)
+    history = app.session_runtime.read_messages(app.runner.session_id)
     assert all(message.role != "system" for message in history)

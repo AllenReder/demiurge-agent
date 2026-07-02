@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable
 
 from demiurge.app import DemiurgeApp, load_host_config
 from demiurge.diagnostics.doctor import DoctorRuntime
-from demiurge.jobs import JobCompletionEvent
+from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
 from demiurge.runtime.delegation import subagents_command_text
@@ -92,7 +92,7 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
-        self._job_unsubscribe = self.app.job_runtime.subscribe(self._on_job_completion)
+        self._task_unsubscribe = self.app.task_worker.subscribe(self._on_task_completion)
 
     @property
     def running(self) -> bool:
@@ -247,9 +247,9 @@ class TuiInteractionBridge:
         for prompt in self._pending_prompts.values():
             if prompt.future is not None and not prompt.future.done():
                 prompt.future.set_result("")
-        if self._job_unsubscribe is not None:
-            self._job_unsubscribe()
-            self._job_unsubscribe = None
+        if self._task_unsubscribe is not None:
+            self._task_unsubscribe()
+            self._task_unsubscribe = None
         await self.emit("channel.shutdown", {})
 
     def _start_scheduler(self) -> None:
@@ -332,36 +332,54 @@ class TuiInteractionBridge:
         return selected
 
     def _merge_pending_completions_into(self, inbound: InteractionInbound) -> InteractionInbound:
+        stored_completions = self._stored_completion_inbounds()
         if self._queued_inputs.empty():
-            return inbound
+            if not stored_completions:
+                return inbound
+            return _merge_completion_inbounds(inbound, stored_completions)
         pending: list[InteractionInbound] = []
         while not self._queued_inputs.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 pending.append(self._queued_inputs.get_nowait())
-        completions = [item for item in pending if _is_background_completion(item)]
+        completions = stored_completions + [item for item in pending if _is_background_completion(item)]
         for item in [item for item in pending if not _is_background_completion(item)]:
             self._queued_inputs.put_nowait(item)
         if not completions:
             return inbound
         return _merge_completion_inbounds(inbound, completions)
 
-    def _on_job_completion(self, event: JobCompletionEvent) -> None:
+    def _stored_completion_inbounds(self) -> list[InteractionInbound]:
+        completions: list[InteractionInbound] = []
+        for event in self.app.task_worker.pending_events_for_session(self.app.runner.session_id):
+            completions.append(
+                _task_completion_inbound(
+                    event,
+                    channel="tui",
+                    source="local",
+                    reply_to=None,
+                    conversation_key=self._conversation_key(),
+                )
+            )
+            self.app.task_worker.clear_pending_event(event.event_id)
+        return completions
+
+    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
         if event.owner_session_id != self.app.runner.session_id or self.should_exit:
             return
         try:
-            asyncio.get_running_loop().create_task(self._enqueue_job_completion(event))
+            asyncio.get_running_loop().create_task(self._enqueue_task_completion(event))
         except RuntimeError:
             return
 
-    async def _enqueue_job_completion(self, event: JobCompletionEvent) -> None:
-        inbound = _job_completion_inbound(
+    async def _enqueue_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
+        inbound = _task_completion_inbound(
             event,
             channel="tui",
             source="local",
             reply_to=None,
             conversation_key=self._conversation_key(),
         )
-        self.app.job_runtime.clear_pending_event(event.event_id)
+        self.app.task_worker.clear_pending_event(event.event_id)
         await self._emit_notice(f"background job {event.job_id} {event.status}: {shorten_text(event.summary, 100)}")
         if self.running or not self._queued_inputs.empty():
             await self._queued_inputs.put(inbound)
@@ -438,7 +456,7 @@ class TuiInteractionBridge:
             "busy_mode": self.busy_mode,
             "queued_inputs": self._queued_inputs.qsize(),
             "background_tasks": self.app.runner.background_task_count,
-            "message_count": self.app.runner.session_store.message_count(self.app.runner.session_id),
+            "message_count": self.app.session_runtime.message_count(self.app.runner.session_id),
             "pending_prompts": len(self._pending_prompts),
             "pending_approvals": len(self._pending_approvals),
             "last_error": self._last_error,
@@ -613,13 +631,13 @@ class TuiInteractionBridge:
 
     async def _sessions(self, args: str) -> bool:
         limit = int(args.strip()) if args.strip().isdigit() else 20
-        records = self.app.runner.session_store.list_sessions(core_id=self.app.runner.core_id, limit=limit)
+        records = self.app.session_runtime.list_sessions(core_id=self.app.runner.core_id, limit=limit)
         await self._emit_command_output("sessions", _format_sessions(records, active_session_id=self.app.runner.session_id))
         return True
 
     async def _subagents(self, args: str) -> bool:
         text = await subagents_command_text(
-            self.app.job_runtime,
+            self.app.task_worker,
             session_id=self.app.runner.session_id,
             args=args,
         )
@@ -628,7 +646,7 @@ class TuiInteractionBridge:
 
     async def _resume(self, args: str) -> bool:
         raw = args.strip()
-        records = self.app.runner.session_store.list_sessions(core_id=self.app.runner.core_id, limit=20)
+        records = self.app.session_runtime.list_sessions(core_id=self.app.runner.core_id, limit=20)
         if not raw:
             self._prompt_counter += 1
             prompt_id = f"prompt_{self._prompt_counter}"
@@ -696,7 +714,7 @@ class TuiInteractionBridge:
             if self.app.runner.display_turns:
                 turn_id = str(self.app.runner.display_turns[-1]["turn_id"])
             else:
-                latest = self.app.runner.session_store.latest_turn_id(self.app.runner.session_id)
+                latest = self.app.session_runtime.latest_turn_id(self.app.runner.session_id)
                 if latest:
                     turn_id = latest
                 else:
@@ -704,7 +722,7 @@ class TuiInteractionBridge:
                     return True
         events = self.app.runner.event_log.for_turn(turn_id)
         if not events:
-            latest = self.app.runner.session_store.latest_turn_id(self.app.runner.session_id)
+            latest = self.app.session_runtime.latest_turn_id(self.app.runner.session_id)
             if latest and latest != turn_id:
                 events = self.app.runner.event_log.for_turn(latest)
                 turn_id = latest
@@ -860,8 +878,8 @@ def _delivery_dict(delivery: Any) -> dict[str, Any]:
     }
 
 
-def _job_completion_inbound(
-    event: JobCompletionEvent,
+def _task_completion_inbound(
+    event: RuntimeTaskCompletionEvent,
     *,
     channel: str,
     source: str,

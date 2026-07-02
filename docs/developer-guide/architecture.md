@@ -21,8 +21,10 @@ SessionTurnStepRunner
         +--> ContextAssembler
         +--> Provider
         +--> ToolRuntime
-        +--> JobRuntime
-        +--> Delivery/session stores
+        +--> RuntimeControlPlane / RuntimeStore
+        +--> RuntimeTaskWorker
+        +--> DeliveryRuntime
+        +--> SessionRuntime
         +--> SchedulerService
 ```
 
@@ -36,9 +38,11 @@ SessionTurnStepRunner
 | Runner | Own session, turn, step, bootstrap, input, model/tool loop, output, and delivery flow. |
 | Context assembler | Build provider messages from soul, skills, bootstrap, input, history, and current turn. |
 | Tool runtime | Build the visible registry and execute built-in, authored, and MCP tools. |
-| Job runtime | Track in-memory background jobs, logs, write scopes, and completion events. |
-| Delivery runtime | Convert authored delivery requests into session records, events, artifacts, and channel output. |
-| Scheduler | Claim due schedules and run fresh sessions. |
+| Runtime control plane | Submit actions, project tasks/events, and expose task/session/scheduler/outbox state from SQLite. |
+| Runtime task worker | Hold active process handles and live completion subscribers; pending completions are recovered from SQLite events. |
+| Delivery runtime | Dispatch authored delivery intents and update outbox status. |
+| Session runtime | Read and write session, turn, message, bootstrap, and compaction projections. |
+| Scheduler | Claim due schedules through SQLite scheduler projections and run fresh sessions. |
 | Package manager | Preview, install, uninstall, and record package repository components. |
 
 ## Entry Points
@@ -46,8 +50,11 @@ SessionTurnStepRunner
 - `demiurge/cli.py`
 - `demiurge/app/__init__.py`
 - `demiurge/runtime/runner.py`
+- `demiurge/runtime/control.py`
+- `demiurge/runtime/store.py`
+- `demiurge/runtime/tasks.py`
+- `demiurge/runtime/outbox.py`
 - `demiurge/tools/runtime.py`
-- `demiurge/jobs.py`
 - `demiurge/channels/gateway.py`
 - `demiurge/packages.py`
 - `demiurge/scheduler/__init__.py`

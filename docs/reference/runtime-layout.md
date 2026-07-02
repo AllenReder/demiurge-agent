@@ -38,8 +38,8 @@ Common children:
 | `.env` | Local secret environment file. |
 | `agents/` | Runtime Agent Cores. |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
-| `sessions/` | Session records. |
-| `scheduler/` | Scheduler state and run records. |
+| `runtime/artifacts/` | Host-owned artifacts referenced by SQLite artifact rows. |
+| `runtime/session-events/` | Per-session diagnostic event logs. |
 | `workspace/` | Non-local fallback workspace. |
 | `logs/` | Runtime logs such as MCP stderr logs. |
 

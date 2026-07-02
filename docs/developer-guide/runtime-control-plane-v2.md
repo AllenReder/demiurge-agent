@@ -88,11 +88,21 @@ session history.
 
 ## Current Implementation Slice
 
-The first implemented slice keeps the existing JSON `SessionStore` as the local
-session-file adapter while projecting `agent.turn` tasks, session, turn,
-message, tool-call, task, job-log, scheduler-instance, and outbox events into
-SQLite. `JobRuntime` still owns in-process execution for active jobs, but task
-status and logs are mirrored into `RuntimeControlPlane`.
+The runtime store is now the hot-path source of truth for sessions, turns,
+messages, task status, task logs, scheduler instances, artifacts, and delivery
+outbox rows. Old JSON session and scheduler files may still exist on disk from
+older installs, but runtime code does not read, migrate, or dual-write them.
+
+`RuntimeTaskWorker` is the in-process backend for active subprocess, terminal,
+evolver, and child-agent work. It keeps only non-durable process handles,
+cancel callbacks, and live completion subscribers in memory. Public task reads,
+lists, logs, waits, cancellation results, and pending completion notifications
+are rebuilt from `RuntimeControlPlane` / SQLite projections and runtime events.
+
+`DeliveryRuntime` dispatches queued delivery intents through channel bridges and
+updates the SQLite outbox projection with `sent` or `failed` status. Delivery
+failure can update a previously persisted history row with explicit failure
+history text, but retries must not rewrite the original history body.
 
 `SessionTurnStepRunner` now delegates:
 
@@ -112,8 +122,8 @@ The model-facing delegation tools are:
 - `run_terminal(command, background=true, workspace=None, risk=None)`.
 
 `delegate_task` currently supports `isolated` and `fork` context modes, enforces
-the default depth and child-count limits, and returns an explicit error for
-non-empty `tool_policy` until child tool filtering is implemented. `handoff`
-returns a policy error until channel handoff ownership is implemented. Child
-output is evidence for the parent by default; child tasks do not deliver
-directly to the user unless a later channel handoff policy grants that path.
+the default depth and child-count limits, and applies child `tool_policy`
+filters during visible-tool construction and dispatch. `handoff` returns a
+policy error until channel handoff ownership is implemented. Child output is
+evidence for the parent by default; child tasks do not deliver directly to the
+user unless a later channel handoff policy grants that path.

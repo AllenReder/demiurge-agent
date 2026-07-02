@@ -50,8 +50,8 @@ runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
 | `search_files` | Search file contents or names. |
 | `terminal` | Run a command inside the workspace. |
 | `run_terminal` | Run a command as a runtime task; defaults to background execution. |
-| `job` | Manage background jobs. |
-| `process` | Compatibility view for terminal background jobs. Prefer `job`. |
+| `job` | Compatibility control tool for background runtime tasks. |
+| `process` | Compatibility view for terminal runtime tasks. Prefer `job`. |
 | `web_extract` | Fetch and extract text from a known URL. |
 | `skills_list` | List skill metadata. |
 | `skill_view` | Load a skill or linked skill file. |
@@ -72,19 +72,21 @@ runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
 `base_input`, `base_output`, and local delivery. Runtime timezone belongs to the
 host runtime, not to individual schedule YAML files.
 
-## Background Jobs
+## Background Runtime Tasks
 
 `terminal(background=true)`, `run_terminal(...)`, `delegate_task(...)`,
 `ctx.agents.spawn(...)`, and `evolve_core(background=true)` submit host-owned
 tasks. Background tool calls return a `job_id`; terminal calls also return
 `process_id` as a compatibility alias.
 
-`background=true` defaults to `notify_on_complete=true`. When a job completes,
-the host queues a synthetic model turn in the originating session. If a user
-turn is already running, the completion waits. If user input and completion are
-both pending, user input runs first and pending completion summaries are merged
-into that user turn. `/stop` cancels only the foreground turn; use
-`job(action="cancel", job_id="...")` to stop a background job.
+`background=true` defaults to `notify_on_complete=true`. When a task completes,
+the host records a pending completion event in SQLite and wakes any live channel
+subscriber. If a user turn is already running, the completion waits. If user
+input and completion are both pending, user input runs first and pending
+completion summaries are merged into that user turn. `/stop` cancels only the
+foreground turn; use
+`job(action="cancel", job_id="...")` or `task_control(command="cancel")` to
+stop a background task.
 
 Delegation tools are the preferred model-facing controls for child agents.
 `delegate_task` defaults to isolated context and `return_to_parent` notification;
@@ -98,19 +100,19 @@ The `job` tool supports:
 
 | Action | Purpose |
 | --- | --- |
-| `list` | List jobs, optionally filtered by `backend` or `owner_session_id`. |
-| `poll` | Return status, metadata, summary, and log tail for one job. |
-| `log` | Return the in-memory job log. Use `tail` to limit lines. |
+| `list` | List tasks, optionally filtered by `backend` or `owner_session_id`. |
+| `poll` | Return status, metadata, summary, and log tail for one task. |
+| `log` | Return the projected task log. Use `tail` to limit lines. |
 | `wait` | Wait up to `timeout_seconds` for completion. |
-| `cancel` | Cancel a queued or running job. |
+| `cancel` | Cancel a queued or running task. |
 
-Job statuses are `queued`, `running`, `blocked_needs_user`, `succeeded`,
+Task statuses are `queued`, `running`, `blocked_needs_user`, `succeeded`,
 `failed`, `cancelled`, and `lost`. Completion payloads include metadata,
-summary, result reference, and a bounded log tail; full in-memory logs are
+summary, result reference, and a bounded log tail; full projected logs are
 available through `job(action="log")`.
 
 Runtime control-plane projections are the durable source of truth for new task
-state. Jobs still declare a `write_scope`; another active background job with
+state. Background tasks still declare a `write_scope`; another active task with
 the same scope is rejected to avoid foreground/background or
 background/background overwrite races.
 

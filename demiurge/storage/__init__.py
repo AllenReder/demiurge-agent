@@ -18,7 +18,7 @@ class EventLog:
     def __init__(self, home: Path, session_id: str):
         self.home = home
         self.session_id = session_id
-        self.path = home / "sessions" / session_id / "events.jsonl"
+        self.path = home / "runtime" / "session-events" / f"{session_id}.jsonl"
 
     def emit(self, event_type: str, **data: Any) -> dict[str, Any]:
         event = {
@@ -108,325 +108,6 @@ class SessionMessage:
         )
 
 
-class SessionStore:
-    def __init__(self, home: Path):
-        self.home = home
-        self.root = home / "sessions"
-
-    def session_dir(self, session_id: str) -> Path:
-        return self.root / session_id
-
-    def session_path(self, session_id: str) -> Path:
-        return self.session_dir(session_id) / "session.json"
-
-    def messages_path(self, session_id: str) -> Path:
-        return self.session_dir(session_id) / "messages.jsonl"
-
-    def bootstrap_context_path(self, session_id: str) -> Path:
-        return self.session_dir(session_id) / "bootstrap_context.md"
-
-    def exists(self, session_id: str) -> bool:
-        return self.session_path(session_id).exists()
-
-    def ensure_session(
-        self,
-        session_id: str,
-        *,
-        core_id: str,
-        core_version: str,
-        channel: str | None = None,
-        conversation_key: str | None = None,
-        workspace: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> tuple[SessionRecord, bool]:
-        if self.exists(session_id):
-            record = self.get(session_id)
-            self.update_session(
-                session_id,
-                core_id=core_id,
-                core_version=core_version,
-                channel=channel,
-                conversation_key=conversation_key,
-                workspace=workspace,
-                provider=provider,
-                model=model,
-                metadata=metadata,
-                touch=False,
-            )
-            return self.get(session_id), False
-        return (
-            self.create_session(
-                session_id=session_id,
-                core_id=core_id,
-                core_version=core_version,
-                channel=channel,
-                conversation_key=conversation_key,
-                workspace=workspace,
-                provider=provider,
-                model=model,
-                metadata=metadata,
-            ),
-            True,
-        )
-
-    def create_session(
-        self,
-        *,
-        session_id: str | None = None,
-        core_id: str,
-        core_version: str,
-        channel: str | None = None,
-        conversation_key: str | None = None,
-        workspace: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> SessionRecord:
-        now = utc_now()
-        record = SessionRecord(
-            session_id=session_id or utc_id("session_"),
-            core_id=core_id,
-            core_version=core_version,
-            created_at=now,
-            updated_at=now,
-            channel=channel,
-            conversation_key=conversation_key,
-            workspace=workspace,
-            provider=provider,
-            model=model,
-            metadata=metadata or {},
-        )
-        write_json(self.session_path(record.session_id), asdict(record))
-        return record
-
-    def get(self, session_id: str) -> SessionRecord:
-        data = read_json(self.session_path(session_id), None)
-        if not data:
-            raise FileNotFoundError(f"session not found: {session_id}")
-        return SessionRecord(**data)
-
-    def update_session(
-        self,
-        session_id: str,
-        *,
-        core_id: str | None = None,
-        core_version: str | None = None,
-        channel: str | None = None,
-        conversation_key: str | None = None,
-        workspace: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        title: str | None = None,
-        preview: str | None = None,
-        message_count: int | None = None,
-        compaction_summary_id: str | None = None,
-        compacted_until_message_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        touch: bool = True,
-    ) -> SessionRecord:
-        record = self.get(session_id)
-        data = asdict(record)
-        updates = {
-            "core_id": core_id,
-            "core_version": core_version,
-            "channel": channel,
-            "conversation_key": conversation_key,
-            "workspace": workspace,
-            "provider": provider,
-            "model": model,
-            "title": title,
-            "preview": preview,
-            "message_count": message_count,
-            "compaction_summary_id": compaction_summary_id,
-            "compacted_until_message_id": compacted_until_message_id,
-        }
-        for key, value in updates.items():
-            if value is not None:
-                data[key] = value
-        if metadata:
-            merged = dict(data.get("metadata") or {})
-            merged.update(metadata)
-            data["metadata"] = merged
-        if touch:
-            data["updated_at"] = utc_now()
-        write_json(self.session_path(session_id), data)
-        return SessionRecord(**data)
-
-    def list_sessions(self, *, core_id: str | None = None, limit: int = 20) -> list[SessionRecord]:
-        if not self.root.exists():
-            return []
-        records: list[SessionRecord] = []
-        for path in self.root.iterdir():
-            if not path.is_dir():
-                continue
-            try:
-                record = self.get(path.name)
-            except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if core_id and record.core_id != core_id:
-                continue
-            records.append(record)
-        records.sort(key=lambda item: item.updated_at, reverse=True)
-        return records[:limit]
-
-    def resolve_interaction_session(self, *, core_id: str, channel: str | None, conversation_key: str | None) -> str | None:
-        if not channel or not conversation_key:
-            return None
-        for record in self.list_sessions(core_id=core_id, limit=10_000):
-            if record.channel == channel and record.conversation_key == conversation_key:
-                return record.session_id
-        return None
-
-    def can_bind_current_session(self, session_id: str, *, channel: str | None, conversation_key: str | None) -> bool:
-        if not self.exists(session_id):
-            return True
-        record = self.get(session_id)
-        if record.message_count == 0:
-            return True
-        return record.channel == channel and record.conversation_key == conversation_key
-
-    def append_message(
-        self,
-        session_id: str,
-        *,
-        role: str,
-        content: str,
-        turn_id: str | None = None,
-        kind: str = "message",
-        visible: bool = True,
-        model_visible: bool = True,
-        interaction_metadata: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> SessionMessage:
-        interaction_metadata = interaction_metadata or {}
-        message = SessionMessage(
-            id=utc_id("msg_"),
-            session_id=session_id,
-            turn_id=turn_id,
-            role=role,
-            content=content,
-            created_at=utc_now(),
-            kind=kind,
-            visible=visible,
-            model_visible=model_visible,
-            channel=interaction_metadata.get("channel"),
-            source=interaction_metadata.get("source"),
-            reply_to=interaction_metadata.get("reply_to"),
-            conversation_key=interaction_metadata.get("conversation_key"),
-            metadata=metadata or {},
-        )
-        append_jsonl(self.messages_path(session_id), asdict(message))
-        self._update_after_message(session_id, message)
-        return message
-
-    def read_messages(self, session_id: str) -> list[SessionMessage]:
-        path = self.messages_path(session_id)
-        if not path.exists():
-            return []
-        return [SessionMessage.from_dict(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines()]
-
-    def bootstrap_context_exists(self, session_id: str) -> bool:
-        return self.bootstrap_context_path(session_id).exists()
-
-    def read_bootstrap_context(self, session_id: str) -> str:
-        path = self.bootstrap_context_path(session_id)
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8")
-
-    def write_bootstrap_context(self, session_id: str, content: str) -> None:
-        path = self.bootstrap_context_path(session_id)
-        ensure_dir(path.parent)
-        path.write_text(content, encoding="utf-8")
-
-    def message_count(self, session_id: str) -> int:
-        return len(self.read_messages(session_id))
-
-    def latest_turn_id(self, session_id: str) -> str | None:
-        for message in reversed(self.read_messages(session_id)):
-            if message.turn_id:
-                return message.turn_id
-        return None
-
-    def latest_compaction_summary(self, session_id: str) -> SessionMessage | None:
-        messages = self.read_messages(session_id)
-        for message in reversed(messages):
-            if message.kind == "compaction_summary" and message.model_visible:
-                return message
-        return None
-
-    def history_for_context(self, session_id: str) -> list[SessionMessage]:
-        messages = self.read_messages(session_id)
-        cutoff_index = self._compacted_until_index(session_id, messages)
-        result: list[SessionMessage] = []
-        for index, message in enumerate(messages):
-            if index <= cutoff_index:
-                continue
-            if message.kind != "message" or not message.model_visible:
-                continue
-            if message.role not in {"user", "assistant", "system", "tool"}:
-                continue
-            result.append(message)
-        return result
-
-    def write_compaction_summary(
-        self,
-        session_id: str,
-        *,
-        content: str,
-        turn_id: str,
-        compacted_until_message_id: str,
-        compacted_count: int,
-        focus: str | None = None,
-    ) -> SessionMessage:
-        message = self.append_message(
-            session_id,
-            role="system",
-            content=content,
-            turn_id=turn_id,
-            kind="compaction_summary",
-            visible=False,
-            model_visible=True,
-            metadata={"compacted_count": compacted_count, "focus": focus},
-        )
-        self.update_session(
-            session_id,
-            compaction_summary_id=message.id,
-            compacted_until_message_id=compacted_until_message_id,
-        )
-        return message
-
-    def _compacted_until_index(self, session_id: str, messages: list[SessionMessage]) -> int:
-        if not self.exists(session_id):
-            return -1
-        marker = self.get(session_id).compacted_until_message_id
-        if not marker:
-            return -1
-        for index, message in enumerate(messages):
-            if message.id == marker:
-                return index
-        return -1
-
-    def _update_after_message(self, session_id: str, message: SessionMessage) -> None:
-        record = self.get(session_id)
-        messages = self.read_messages(session_id)
-        preview = record.preview
-        title = record.title
-        if message.kind == "message" and message.visible and message.content.strip():
-            preview = message.content.strip().replace("\n", " ")[:120]
-            if title is None and message.role == "user":
-                title = preview[:80]
-        self.update_session(
-            session_id,
-            title=title,
-            preview=preview,
-            message_count=len(messages),
-            touch=True,
-        )
-
-
 @dataclass(slots=True)
 class ArtifactRecord:
     artifact_id: str
@@ -444,8 +125,7 @@ class ArtifactStore:
     def __init__(self, home: Path, session_id: str):
         self.home = home
         self.session_id = session_id
-        self.root = home / "sessions" / session_id / "artifacts"
-        self.index_path = self.root / "index.jsonl"
+        self.root = home / "runtime" / "artifacts" / session_id
 
     def store(self, attachment: ArtifactRef | dict[str, Any]) -> ArtifactRef:
         if isinstance(attachment, ArtifactRef):
@@ -463,7 +143,7 @@ class ArtifactStore:
             filename = self._safe_filename(str(attachment.get("filename") or "payload.txt"))
             artifact_path = artifact_dir / filename
             artifact_path.write_text(str(content), encoding="utf-8")
-            path = artifact_path.relative_to(self.home / "sessions" / self.session_id).as_posix()
+            path = artifact_path.relative_to(self.home / "runtime" / "artifacts" / self.session_id).as_posix()
         ensure_dir(self.root)
         record = ArtifactRecord(
             artifact_id=artifact_id,
@@ -476,7 +156,6 @@ class ArtifactStore:
             summary=str(summary) if summary else None,
             metadata=metadata,
         )
-        append_jsonl(self.index_path, asdict(record))
         return ArtifactRef(
             artifact_id=artifact_id,
             kind=kind,

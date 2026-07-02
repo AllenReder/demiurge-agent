@@ -589,7 +589,7 @@ async def test_terminal_background_job_can_be_managed_with_job_tool_and_notifies
     assert waited.data["running"] is False
     assert "job-ready" in log.content
     assert job_id in listed.content
-    events = app.job_runtime.pending_events_for_session("session_test")
+    events = app.task_worker.pending_events_for_session("session_test")
     assert [event.job_id for event in events] == [job_id]
     task = app.control_plane.read(job_id, view="debug")
     assert task["kind"] == "terminal.exec"
@@ -746,10 +746,10 @@ async def test_session_search_reads_existing_messages_without_history_write(tmp_
     app = create_app(home=tmp_path / "home", provider_name="fake")
     await app.runner.run_turn("alpha search target")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    before = app.runner.session_store.message_count(app.runner.session_id)
+    before = app.session_runtime.message_count(app.runner.session_id)
 
     result = await _execute(app, core, "session_search", {"query": "alpha", "limit": 5})
-    after = app.runner.session_store.message_count(app.runner.session_id)
+    after = app.session_runtime.message_count(app.runner.session_id)
 
     assert result.is_error is False
     assert "alpha search target" in result.content

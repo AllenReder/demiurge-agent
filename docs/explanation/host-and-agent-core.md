@@ -9,7 +9,7 @@ Demiurge separates the runtime harness from the authored agent surface.
 
 The **host** is stable infrastructure. It owns sessions, turns, provider calls,
 tool execution, approvals, state, delivery, schedules, package installation,
-background jobs, promotion, and rollback.
+background runtime tasks, promotion, and rollback.
 
 An **Agent Core** is the authored filesystem surface. It owns identity,
 instructions, Agent Slots, skills, tools, schedules, MCP declarations, tests,
@@ -43,7 +43,7 @@ The host owns:
 - provider request construction
 - provider calls
 - tool registry and dispatch
-- in-memory background job runtime
+- runtime task control and active task workers
 - approval and capability checks
 - workspace enforcement
 - external channel bridges

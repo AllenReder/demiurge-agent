@@ -5,7 +5,6 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionQuery, SessionRuntime
 from demiurge.runtime.store import RuntimeQuery, RuntimeStore
-from demiurge.storage import SessionStore
 
 
 class StaticProvider:
@@ -26,10 +25,7 @@ class ToolThenAnswerProvider:
 
 def test_session_runtime_projects_session_turn_and_messages(tmp_path):
     store = RuntimeStore(tmp_path / "runtime.sqlite3")
-    runtime = SessionRuntime(
-        session_store=SessionStore(tmp_path / "home"),
-        control_plane=RuntimeControlPlane(store),
-    )
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
 
     record, created = runtime.ensure_session(
         "session_1",
@@ -51,6 +47,40 @@ def test_session_runtime_projects_session_turn_and_messages(tmp_path):
     assert snapshot.turns[0]["turn_id"] == "turn_1"
     assert snapshot.turns[0]["status"] == "completed"
     assert snapshot.turns[0]["result_ref"] == "result:1"
+
+
+def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime.sqlite3")
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
+    record, _ = runtime.ensure_session(
+        "session_1",
+        core_id="assistant",
+        core_version="0001",
+        channel="tui",
+        conversation_key="local",
+    )
+
+    message = runtime.append_delivery_message(
+        record.session_id,
+        role="assistant",
+        content="hello",
+        turn_id="turn_1",
+        delivery_id="delivery_1",
+        task_id="turn_1",
+        channel="tui",
+        target={"conversation_key": "local"},
+        delivery_payload={"fallback_text": "hello"},
+        delivery_idempotency_key="delivery_1",
+    )
+
+    events = store.query(
+        RuntimeQuery(table="runtime_events", where={"idempotency_key": "delivery:delivery_1:message_outbox"}, order_by="seq")
+    ).rows
+    outbox = store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
+
+    assert [event["type"] for event in events] == ["message.persisted", "delivery.queued"]
+    assert events[0]["aggregate_id"] == message.id
+    assert outbox["payload"]["message_id"] == message.id
 
 
 @pytest.mark.asyncio

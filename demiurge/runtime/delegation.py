@@ -2,29 +2,29 @@ from __future__ import annotations
 
 from typing import Any
 
-from demiurge.jobs import JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskWorker
 
 
-async def subagents_command_text(job_runtime: JobRuntime, *, session_id: str, args: str) -> str:
+async def subagents_command_text(task_worker: RuntimeTaskWorker, *, session_id: str, args: str) -> str:
     parts = args.split()
     if parts and parts[0] == "cancel":
         if len(parts) != 2:
             return "Usage: /subagents cancel <task_id>"
         try:
-            record = await job_runtime.cancel(parts[1])
+            record = await task_worker.cancel(parts[1])
         except KeyError:
             return f"Subagent task not found: {parts[1]}"
-        return _format_task(record.to_payload(include_log=True, log=job_runtime.log(record.job_id)), title="Cancelled Subagent")
+        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.job_id)), title="Cancelled Subagent")
     if parts:
         task_id = parts[0]
         try:
-            record = job_runtime.get(task_id)
+            record = task_worker.get(task_id)
         except KeyError:
             return f"Subagent task not found: {task_id}"
         if record.backend != "agent":
             return f"Task is not a subagent: {task_id}"
-        return _format_task(record.to_payload(include_log=True, log=job_runtime.log(record.job_id)), title="Subagent")
-    records = job_runtime.list_jobs(owner_session_id=session_id, backend="agent")
+        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.job_id)), title="Subagent")
+    records = task_worker.list_tasks(owner_session_id=session_id, backend="agent")
     if not records:
         return "No subagents for this session."
     rows = [

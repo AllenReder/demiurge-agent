@@ -2,15 +2,15 @@ import asyncio
 
 import pytest
 
-from demiurge.jobs import JobConflictError, JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskWorker
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.store import RuntimeStore
 
 
 @pytest.mark.asyncio
-async def test_job_runtime_lifecycle_default_notify_and_log_tail(tmp_path):
+async def test_task_worker_lifecycle_default_notify_and_log_tail(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
-    runtime = JobRuntime(log_tail_lines=2, log_tail_chars=80, control_plane=control)
+    runtime = RuntimeTaskWorker(log_tail_lines=2, log_tail_chars=80, control_plane=control)
     events = []
     runtime.subscribe(events.append)
 
@@ -37,6 +37,11 @@ async def test_job_runtime_lifecycle_default_notify_and_log_tail(tmp_path):
     assert events[0].job_id == record.job_id
     assert events[0].owner_session_id == "session_1"
     assert runtime.pending_events_for_session("session_1")[0].job_id == record.job_id
+    recovered = RuntimeTaskWorker(log_tail_lines=2, log_tail_chars=80, control_plane=control)
+    recovered_event = recovered.pending_events_for_session("session_1")[0]
+    assert recovered_event.job_id == record.job_id
+    assert recovered.clear_pending_event(recovered_event.event_id) is True
+    assert recovered.pending_events_for_session("session_1") == []
     task = control.read(record.job_id, view="debug")
     assert task["kind"] == "tool.call"
     assert task["status"] == "succeeded"
@@ -52,8 +57,9 @@ async def test_job_runtime_lifecycle_default_notify_and_log_tail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_job_runtime_cancel_and_write_scope_conflict():
-    runtime = JobRuntime()
+async def test_task_worker_cancel_and_write_scope_conflict(tmp_path):
+    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
+    runtime = RuntimeTaskWorker(control_plane=control)
     release = asyncio.Event()
 
     async def task(ctx):
@@ -68,7 +74,7 @@ async def test_job_runtime_cancel_and_write_scope_conflict():
         write_scope="scope:a",
     )
 
-    with pytest.raises(JobConflictError):
+    with pytest.raises(RuntimeTaskConflictError):
         runtime.start_task(
             backend="test",
             owner_session_id="session_1",
@@ -85,9 +91,9 @@ async def test_job_runtime_cancel_and_write_scope_conflict():
 
 
 @pytest.mark.asyncio
-async def test_job_runtime_mark_blocked_notifies_without_completion(tmp_path):
+async def test_task_worker_mark_blocked_notifies_without_completion(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
-    runtime = JobRuntime(control_plane=control)
+    runtime = RuntimeTaskWorker(control_plane=control)
     events = []
     runtime.subscribe(events.append)
 

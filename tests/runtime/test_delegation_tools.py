@@ -33,7 +33,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.tool_runtime.execute(
+    delegated = await app.runner.execute_tool(
         ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
         core=core,
         turn=turn,
@@ -43,14 +43,14 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
 
     assert delegated.is_error is False
     task_id = delegated.data["task_id"]
-    status = await app.tool_runtime.execute(
+    status = await app.runner.execute_tool(
         ToolCall(name="task_status", arguments={"task_id": task_id}),
         core=core,
         turn=turn,
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    waited = await app.tool_runtime.execute(
+    waited = await app.runner.execute_tool(
         ToolCall(name="yield_until", arguments={"task_id": task_id, "timeout_seconds": 2}),
         core=core,
         turn=turn,
@@ -61,8 +61,8 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     assert status.data["job_id"] == task_id
     assert waited.data["status"] == "succeeded"
     assert app.control_plane.read(task_id)["kind"] == "agent.spawn"
-    listing = await subagents_command_text(app.job_runtime, session_id=app.runner.session_id, args="")
-    detail = await subagents_command_text(app.job_runtime, session_id=app.runner.session_id, args=task_id)
+    listing = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args="")
+    detail = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args=task_id)
     assert task_id in listing
     assert "Subagent" in detail
 
@@ -85,26 +85,26 @@ async def test_run_terminal_defaults_to_background_task(tmp_path):
     assert result.is_error is False
     assert result.data["executionStarted"] is True
     assert result.data["job_id"].startswith("job_")
-    await app.job_runtime.wait(result.data["job_id"], timeout_seconds=2)
+    await app.task_worker.wait(result.data["job_id"], timeout_seconds=2)
     assert app.control_plane.read(result.data["job_id"])["kind"] == "terminal.exec"
 
 
 @pytest.mark.asyncio
-async def test_delegate_task_rejects_depth_excess_and_nonempty_tool_policy(tmp_path):
+async def test_delegate_task_rejects_depth_excess_and_accepts_tool_policy(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     turn = _turn(app, core)
     turn.metadata["delegation_depth"] = 2
     capability = CapabilityFacade(core)
 
-    too_deep = await app.tool_runtime.execute(
+    too_deep = await app.runner.execute_tool(
         ToolCall(name="delegate_task", arguments={"goal": "nested", "core_id": "evolver"}),
         core=core,
         turn=turn,
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    tool_policy = await app.tool_runtime.execute(
+    tool_policy = await app.runner.execute_tool(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "nested", "core_id": "evolver", "tool_policy": {"deny": ["terminal"]}},
@@ -117,8 +117,28 @@ async def test_delegate_task_rejects_depth_excess_and_nonempty_tool_policy(tmp_p
 
     assert too_deep.is_error is True
     assert "max_depth=2" in too_deep.content
-    assert tool_policy.is_error is True
-    assert "tool_policy is not implemented" in tool_policy.content
+    assert tool_policy.is_error is False
+    assert tool_policy.data["tool_policy"] == {"deny": ["terminal"]}
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_denies_child_tool_execution(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    turn.metadata["tool_policy"] = {"deny": ["tools_list"]}
+    capability = CapabilityFacade(core)
+
+    result = await app.tool_runtime.execute(
+        ToolCall(name="tools_list", arguments={}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert "not allowed" in result.content
 
 
 def test_subagents_slash_command_is_available_on_tui_and_telegram():

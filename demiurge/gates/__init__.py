@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from demiurge.core import CoreLoadError, CoreLoader
+from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.store import RuntimeStore
+from demiurge.runtime.tasks import RuntimeTaskWorker
 from demiurge.providers import FakeProvider
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
@@ -135,7 +139,10 @@ class GateRunner:
             with tempfile.TemporaryDirectory(prefix="demiurge-smoke-") as tmp:
                 home = Path(tmp)
                 version_store = VersionStore(home)
-                tool_runtime = ToolRuntime(version_store)
+                control_plane = RuntimeControlPlane(RuntimeStore.default(home))
+                session_runtime = SessionRuntime(control_plane=control_plane)
+                task_worker = RuntimeTaskWorker(control_plane=control_plane)
+                tool_runtime = ToolRuntime(version_store, session_runtime=session_runtime, task_worker=task_worker)
                 runner = SessionTurnStepRunner(
                     home=home,
                     version_store=version_store,
@@ -144,6 +151,8 @@ class GateRunner:
                     tool_runtime=tool_runtime,
                     core_id=core.core_id,
                     initial_core_path=candidate_path,
+                    session_runtime=session_runtime,
+                    task_worker=task_worker,
                 )
                 result = await runner.run_turn("smoke tools_list", core_path=candidate_path)
             if not result.deliveries:

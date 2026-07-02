@@ -1824,7 +1824,7 @@ async def test_conversation_style_injects_transient_system_hint_and_skill(tmp_pa
     assert "Prefer precise technical language" in request_text
     assert "The user is in a terminal UI" in request_text
     assert "# Conversation Style" in request_text
-    history = app.runner.session_store.read_messages(app.runner.session_id)
+    history = app.session_runtime.read_messages(app.runner.session_id)
     assert all("Conversation style package hint" not in message.content for message in history)
     assert all("# Conversation Style" not in message.content for message in history)
 
@@ -1845,7 +1845,7 @@ async def test_context_reseed_writes_future_bootstrap_context(tmp_path):
     note = note_path.read_text(encoding="utf-8")
     assert "capture continuity" in note
     assert "first answer" in note
-    assert "Context reseed note" not in app.runner.session_store.read_bootstrap_context(first_session_id)
+    assert "Context reseed note" not in app.session_runtime.read_bootstrap_context(first_session_id)
 
     app.runner.start_new_session()
     await app.runner.run_turn("fresh session")
@@ -1854,7 +1854,7 @@ async def test_context_reseed_writes_future_bootstrap_context(tmp_path):
     assert '<context_reseed_note inert="true">' in fresh_request_text
     assert "> - current user: capture continuity" in fresh_request_text
     assert "> - current assistant: first answer" in fresh_request_text
-    history = app.runner.session_store.read_messages(app.runner.session_id)
+    history = app.session_runtime.read_messages(app.runner.session_id)
     assert all("Context reseed note" not in message.content for message in history)
 
 
@@ -2369,7 +2369,7 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
     assert audio_delivery.metadata["slot"] == "agent/tools/text_to_speech"
     assert result.tool_results[0].call.name == "text_to_speech"
     assert result.tool_results[0].result.content == "sent audio"
-    messages = app.runner.session_store.read_messages(app.runner.session_id)
+    messages = app.session_runtime.read_messages(app.runner.session_id)
     tool_message = next(message for message in messages if message.role == "tool")
     assert tool_message.content == "Sent speech audio to the user."
     assert tool_message.model_visible is True

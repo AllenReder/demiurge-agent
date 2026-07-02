@@ -315,7 +315,7 @@ async def test_memory_honcho_hybrid_injects_context_exposes_tools_and_syncs_turn
     synced = json.loads((core_path / "memory" / "honcho" / "synced_turns.json").read_text(encoding="utf-8"))
     assert len(synced) == 1
     assert not (core_path / "memory" / "honcho" / "outbox.jsonl").exists()
-    history = app.runner.session_store.read_messages(app.runner.session_id)
+    history = app.session_runtime.read_messages(app.runner.session_id)
     assert all("<memory-context>" not in message.content for message in history)
 
 

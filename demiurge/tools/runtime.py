@@ -17,7 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from demiurge.jobs import JobConflictError, JobContext, JobOutcome, JobRuntime
+from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskContext, RuntimeTaskOutcome, RuntimeTaskWorker
 from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
@@ -27,7 +27,8 @@ from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
 from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
-from demiurge.storage import SessionStore, VersionStore
+from demiurge.runtime.session import SessionRuntime
+from demiurge.storage import VersionStore
 from demiurge.tools.registry import (
     APPROVAL_ORDER,
     BUILTIN_TOOL_DEFINITIONS,
@@ -137,7 +138,8 @@ class ToolRuntime:
         global_approval: ApprovalInfo | None = None,
         mcp_runtime: McpRuntime | None = None,
         runtime_timezone: RuntimeTimezone | None = None,
-        job_runtime: JobRuntime | None = None,
+        task_worker: RuntimeTaskWorker | None = None,
+        session_runtime: SessionRuntime | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
@@ -146,8 +148,10 @@ class ToolRuntime:
         self.global_approval = global_approval or ApprovalInfo()
         self.mcp_runtime = mcp_runtime
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self.job_runtime = job_runtime or JobRuntime()
-        self.delegation_adapter: Callable[..., Any] | None = None
+        if task_worker is None:
+            raise ValueError("ToolRuntime requires a RuntimeControlPlane-backed RuntimeTaskWorker")
+        self.task_worker = task_worker
+        self.session_runtime = session_runtime
 
     async def prepare_for_turn(
         self,
@@ -164,7 +168,7 @@ class ToolRuntime:
         if self.mcp_runtime is not None:
             await self.mcp_runtime.close()
 
-    def registry_for(self, core: LoadedCore) -> list[ToolRegistryEntry]:
+    def registry_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolRegistryEntry]:
         entries: list[ToolRegistryEntry] = []
         for name in core.builtin_tool_names:
             definition = BUILTIN_TOOL_DEFINITIONS.get(name)
@@ -226,7 +230,7 @@ class ToolRuntime:
                     self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
                 if entry.enabled:
                     entries.append(entry)
-        return entries
+        return [entry for entry in entries if self._tool_policy_allows(entry, self._tool_policy(turn))]
 
     def _apply_metadata(
         self,
@@ -253,8 +257,8 @@ class ToolRuntime:
         if metadata.enabled is not None:
             entry.enabled = metadata.enabled
 
-    def definitions_for(self, core: LoadedCore) -> list[ToolDefinition]:
-        return [entry.to_definition() for entry in self.registry_for(core)]
+    def definitions_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolDefinition]:
+        return [entry.to_definition() for entry in self.registry_for(core, turn=turn)]
 
     async def execute(
         self,
@@ -267,7 +271,7 @@ class ToolRuntime:
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         try:
-            visible_tools = {entry.name for entry in self.registry_for(core)}
+            visible_tools = {entry.name for entry in self.registry_for(core, turn=turn)}
             if call.name in BUILTIN_TOOL_DEFINITIONS:
                 if call.name not in visible_tools:
                     return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
@@ -280,6 +284,8 @@ class ToolRuntime:
                 )
             slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
             if slot:
+                if call.name not in visible_tools:
+                    return ToolResult(content=f"authored tool is not allowed: {call.name}", is_error=True)
                 return await self._execute_authored(
                     slot,
                     call,
@@ -304,6 +310,48 @@ class ToolRuntime:
                 return ToolResult(content=f"tool not found: {call.name}", is_error=True)
         except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+
+    def _tool_policy(self, turn: TurnContext | None) -> Mapping[str, Any]:
+        if turn is None or not isinstance(turn.metadata, Mapping):
+            return {}
+        policy = turn.metadata.get("tool_policy")
+        return policy if isinstance(policy, Mapping) else {}
+
+    def _tool_policy_allows(self, entry: ToolRegistryEntry, policy: Mapping[str, Any]) -> bool:
+        if not policy:
+            return True
+        deny = self._policy_patterns(policy.get("deny"))
+        if any(self._policy_pattern_matches(entry, pattern) for pattern in deny):
+            return False
+        allow = self._policy_patterns(policy.get("allow"))
+        if allow and not any(self._policy_pattern_matches(entry, pattern) for pattern in allow):
+            return False
+        risk_ceiling = policy.get("risk_ceiling") or policy.get("max_risk") or policy.get("risk")
+        if risk_ceiling:
+            ceiling = self._normalize_risk(str(risk_ceiling))
+            if RISK_ORDER[entry.risk] > RISK_ORDER[ceiling]:
+                return False
+        return True
+
+    def _policy_patterns(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list | tuple | set):
+            return [str(item) for item in value if str(item).strip()]
+        return []
+
+    def _policy_pattern_matches(self, entry: ToolRegistryEntry, pattern: str) -> bool:
+        normalized = pattern.strip()
+        if not normalized:
+            return False
+        if fnmatch.fnmatch(entry.name, normalized):
+            return True
+        capability = entry.capability or ""
+        if capability and (capability == normalized or capability.startswith(normalized.rstrip("*"))):
+            return True
+        return False
 
     async def _execute_builtin(
         self,
@@ -369,7 +417,7 @@ class ToolRuntime:
         if call.name == "process":
             return await self._process(call, capability=capability)
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
-            return await self._delegation_tool(call, core=core, turn=turn, capability=capability)
+            return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
         if call.name == "skills_list":
             return self._skills_list(call, core=core)
         if call.name == "skill_view":
@@ -735,7 +783,7 @@ class ToolRuntime:
         owner_turn_id: str,
         notify_on_complete: bool,
     ) -> ToolResult:
-        async def run_terminal_job(ctx: JobContext) -> JobOutcome:
+        async def run_terminal_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             process = await asyncio.create_subprocess_shell(
                 execution_command,
                 cwd=cwd.path,
@@ -769,12 +817,12 @@ class ToolRuntime:
             ctx.update_metadata({"returncode": returncode})
             summary = f"terminal command exited {returncode}"
             ctx.set_summary(summary)
-            if returncode != 0 and self.job_runtime.get(ctx.job_id).status != "cancelled":
+            if returncode != 0 and self.task_worker.get(ctx.job_id).status != "cancelled":
                 raise RuntimeError(summary)
-            return JobOutcome(summary=summary, metadata={"returncode": returncode})
+            return RuntimeTaskOutcome(summary=summary, metadata={"returncode": returncode})
 
         try:
-            record = self.job_runtime.start_task(
+            record = self.task_worker.start_task(
                 backend="terminal",
                 owner_session_id=owner_session_id,
                 owner_turn_id=owner_turn_id,
@@ -784,7 +832,7 @@ class ToolRuntime:
                 notify_on_complete=notify_on_complete,
                 metadata={"command": command, "cwd": cwd.relative, "process_id": ""},
             )
-        except JobConflictError as exc:
+        except RuntimeTaskConflictError as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
         payload = {
             "executionStarted": True,
@@ -801,7 +849,7 @@ class ToolRuntime:
     async def _capture_process_output(
         self,
         process: asyncio.subprocess.Process,
-        ctx: JobContext,
+        ctx: RuntimeTaskContext,
     ) -> None:
         async def read_stream(stream: asyncio.StreamReader | None, label: str) -> None:
             if stream is None:
@@ -825,7 +873,7 @@ class ToolRuntime:
     ) -> ToolResult:
         assert self.evolution_runtime is not None
 
-        async def run_evolve_job(ctx: JobContext) -> JobOutcome:
+        async def run_evolve_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             result = await self.evolution_runtime.evolve(
                 target_core_id=core.core_id,
                 goal=goal,
@@ -838,11 +886,11 @@ class ToolRuntime:
             if result.evolver.get("needs_user"):
                 summary = f"evolve job needs user input for {core.core_id}"
                 ctx.mark_blocked(summary, metadata=payload)
-                return JobOutcome(summary=summary, result_ref=result.report_path, metadata=payload)
-            return JobOutcome(summary=result.summary, result_ref=result.report_path, metadata=payload)
+                return RuntimeTaskOutcome(summary=summary, result_ref=result.report_path, metadata=payload)
+            return RuntimeTaskOutcome(summary=result.summary, result_ref=result.report_path, metadata=payload)
 
         try:
-            record = self.job_runtime.start_task(
+            record = self.task_worker.start_task(
                 backend="evolve",
                 owner_session_id=turn.session_id,
                 owner_turn_id=turn.turn_id,
@@ -852,7 +900,7 @@ class ToolRuntime:
                 notify_on_complete=notify_on_complete,
                 metadata={"target_core_id": core.core_id, "goal": goal},
             )
-        except JobConflictError as exc:
+        except RuntimeTaskConflictError as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
         payload = {
             "executionStarted": True,
@@ -872,28 +920,6 @@ class ToolRuntime:
         capability.require("terminal.exec")
         return await self._job_action(call, compatibility_process=True)
 
-    async def _delegation_tool(
-        self,
-        call: ToolCall,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-    ) -> ToolResult:
-        if call.name == "delegate_task":
-            target_core = str(call.arguments.get("core_id") or core.core_id).strip()
-            capability.require(f"agents.spawn:{target_core}")
-        else:
-            capability.require("job.control")
-        if self.delegation_adapter is None:
-            return ToolResult(content="delegation runtime is not configured", is_error=True)
-        value = self.delegation_adapter(call, core=core, turn=turn, capability=capability)
-        if inspect.isawaitable(value):
-            value = await value
-        if isinstance(value, ToolResult):
-            return value
-        return ToolResult(content=json.dumps(value, ensure_ascii=False), data=value)
-
     async def _job_action(self, call: ToolCall, *, compatibility_process: bool) -> ToolResult:
         action = str(call.arguments.get("action") or "list").strip().lower()
         if compatibility_process and action == "kill":
@@ -902,7 +928,7 @@ class ToolRuntime:
             backend = "terminal" if compatibility_process else call.arguments.get("backend")
             jobs = [
                 self._job_payload(record, include_log=False, compatibility_process=compatibility_process)
-                for record in self.job_runtime.list_jobs(
+                for record in self.task_worker.list_tasks(
                     owner_session_id=call.arguments.get("owner_session_id"),
                     backend=str(backend) if backend else None,
                 )
@@ -916,7 +942,7 @@ class ToolRuntime:
         if not job_id:
             return ToolResult(content=("process_id" if compatibility_process else "job_id") + " is required", is_error=True)
         try:
-            record = self.job_runtime.get(job_id)
+            record = self.task_worker.get(job_id)
         except KeyError:
             label = "process" if compatibility_process else "job"
             return ToolResult(content=f"{label} not found: {job_id}", is_error=True)
@@ -927,14 +953,14 @@ class ToolRuntime:
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
         if action == "log":
             tail = call.arguments.get("tail")
-            log = self.job_runtime.log(job_id, tail=int(tail) if tail is not None else None)
+            log = self.task_worker.log(job_id, tail=int(tail) if tail is not None else None)
             content = "\n".join(log) or "(no output)"
             payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=content, data=payload, model_output=content)
         if action == "wait":
             timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
             try:
-                record = await self.job_runtime.wait(job_id, timeout_seconds=timeout)
+                record = await self.task_worker.wait(job_id, timeout_seconds=timeout)
             except asyncio.TimeoutError:
                 payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
                 payload["timed_out"] = True
@@ -942,14 +968,14 @@ class ToolRuntime:
             payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=payload["running"])
         if action == "cancel":
-            record = await self.job_runtime.cancel(job_id)
+            record = await self.task_worker.cancel(job_id)
             payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
             return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
         label = "process" if compatibility_process else "job"
         return ToolResult(content=f"unsupported {label} action: {action}", is_error=True)
 
     def _job_payload(self, record: Any, *, include_log: bool, compatibility_process: bool) -> dict[str, Any]:
-        log = self.job_runtime.log(record.job_id) if include_log else None
+        log = self.task_worker.log(record.job_id) if include_log else None
         payload = record.to_payload(include_log=include_log, log=log)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         if compatibility_process:
@@ -1163,7 +1189,7 @@ class ToolRuntime:
 
     def _todo(self, call: ToolCall, *, turn: TurnContext) -> ToolResult:
         action = str(call.arguments.get("action") or "list").strip().lower()
-        path = self.version_store.home / "sessions" / turn.session_id / "todo.json"
+        path = self.version_store.home / "runtime" / "session-state" / turn.session_id / "todo.json"
         todos = read_json(path, [])
         if not isinstance(todos, list):
             todos = []
@@ -1261,7 +1287,9 @@ class ToolRuntime:
         )
 
     def _session_search(self, call: ToolCall) -> ToolResult:
-        store = SessionStore(self.version_store.home)
+        store = self.session_runtime
+        if store is None:
+            return ToolResult(content="session runtime is not configured", is_error=True)
         query = str(call.arguments.get("query") or "").strip()
         session_id = str(call.arguments.get("session_id") or "").strip()
         limit = self._positive_int(call.arguments.get("limit"), default=10, maximum=50)

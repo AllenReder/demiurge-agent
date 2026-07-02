@@ -15,7 +15,7 @@ run automatically, must prompt, or is denied.
 | `fs.read` | Read workspace files. |
 | `fs.write` | Write workspace files. |
 | `terminal.exec` | Run terminal commands in workspace scope. |
-| `job.control` | List, poll, wait, read logs for, or cancel background jobs. |
+| `job.control` | List, poll, wait, read logs for, or cancel background runtime tasks. |
 | `agents.spawn:<core_id>` | Spawn a child agent task for a specific core. |
 | `network.fetch` | Fetch network content. |
 | `schedule.manage` | Manage core schedule files. |
