@@ -382,7 +382,7 @@ def _print_refresh_result(result: dict[str, object]) -> None:
 
 
 def _handle_package_command(args: argparse.Namespace) -> None:
-    home = args.home or default_home()
+    home = (args.home or default_home()).expanduser().resolve()
     host_config = _host_config_or_default(home)
     version_store = VersionStore(home)
     if args.package_command == "repo":

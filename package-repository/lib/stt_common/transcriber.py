@@ -987,7 +987,7 @@ def _tencent_headers(
     timestamp: int,
 ) -> dict[str, str]:
     algorithm = "TC3-HMAC-SHA256"
-    date = _datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+    date = _datetime.datetime.fromtimestamp(timestamp, _datetime.timezone.utc).strftime("%Y-%m-%d")
     content_type = "application/json; charset=utf-8"
     canonical_headers = f"content-type:{content_type}\nhost:{host}\nx-tc-action:{action.lower()}\n"
     signed_headers = "content-type;host;x-tc-action"

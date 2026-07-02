@@ -1383,6 +1383,43 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
 
 
+def test_cli_package_install_preview_accepts_relative_home(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    relative_home = Path("relative-home")
+
+    main(
+        [
+            "--home",
+            str(relative_home),
+            "package",
+            "install",
+            "memory_basic",
+            "--core",
+            "assistant",
+            "--preview",
+            "--json",
+        ]
+    )
+
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["preview"] is True
+    assert preview["package_id"] == "memory_basic"
+    assert preview["components"]
+    assert not (tmp_path / relative_home / "agents" / "assistant" / "agent" / "lib" / "memory_basic").exists()
+
+
+def test_cli_package_uninstall_output_marks_removed_components(tmp_path, capsys):
+    home = tmp_path / "home"
+    main(["--home", str(home), "package", "install", "memory_basic", "--core", "assistant"])
+    capsys.readouterr()
+
+    main(["--home", str(home), "package", "uninstall", "memory_basic", "--core", "assistant"])
+
+    output = capsys.readouterr().out
+    assert "- remove lib agent/lib/memory_basic" in output
+    assert "- write lib agent/lib/memory_basic" not in output
+
+
 def test_cli_package_repo_add_list_remove_path_repository(tmp_path, capsys):
     home = tmp_path / "home"
     repository_root = tmp_path / "repository"

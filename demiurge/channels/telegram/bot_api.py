@@ -253,7 +253,7 @@ class TelegramBotApi:
         if reply_to_message_id is not None:
             params["reply_to_message_id"] = reply_to_message_id
         path = Path(value)
-        if not urllib.parse.urlparse(value).scheme and path.exists():
+        if path.exists() and path.is_file():
             return self._request_multipart(method, params, field_name=field_name, path=path)
         params[field_name] = value
         return self._request(method, params)

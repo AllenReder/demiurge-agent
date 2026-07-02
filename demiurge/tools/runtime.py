@@ -6,8 +6,10 @@ import fnmatch
 import inspect
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict
@@ -43,6 +45,70 @@ from demiurge.security.workspace import (
 
 
 EventEmitter = Callable[..., dict[str, Any]]
+
+
+def _terminal_execution_command(command: str) -> str:
+    if os.name != "nt":
+        return command
+    return _windows_posix_compat_command(command) or command
+
+
+def _windows_posix_compat_command(command: str) -> str | None:
+    if any(token in command for token in ("\n", "\r", "|", "&&", ";", ">", "<")):
+        return None
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    name = parts[0]
+    args = parts[1:]
+    if name == "printf" and args:
+        return _python_shell_command("import sys; sys.stdout.write(' '.join(sys.argv[1:]))", args)
+    if name == "sleep" and len(args) == 1:
+        try:
+            seconds = float(args[0])
+        except ValueError:
+            return None
+        if seconds < 0:
+            return None
+        return _python_shell_command("import sys, time; time.sleep(float(sys.argv[1]))", [str(seconds)])
+    if name == "pwd" and not args:
+        return _python_shell_command("from pathlib import Path; print(Path.cwd())", [])
+    if name == "rm":
+        return _windows_rm_command(args)
+    if name == "true" and not args:
+        return _python_shell_command("import sys; sys.exit(0)", [])
+    if name == "false" and not args:
+        return _python_shell_command("import sys; sys.exit(1)", [])
+    return None
+
+
+def _windows_rm_command(args: list[str]) -> str | None:
+    force = False
+    targets: list[str] = []
+    for arg in args:
+        if arg == "-f":
+            force = True
+            continue
+        if arg.startswith("-"):
+            return None
+        targets.append(arg)
+    if not targets:
+        return None
+    code = (
+        "import os, sys; "
+        "force = sys.argv[1] == '1'; "
+        "missing = []; "
+        "[os.remove(path) if os.path.exists(path) else missing.append(path) for path in sys.argv[2:]]; "
+        "sys.exit(0 if force or not missing else 1)"
+    )
+    return _python_shell_command(code, ["1" if force else "0", *targets])
+
+
+def _python_shell_command(code: str, args: list[str]) -> str:
+    return subprocess.list2cmdline([sys.executable, "-c", code, *args])
 
 
 class ToolRuntime:
@@ -583,9 +649,11 @@ class ToolRuntime:
         env = os.environ.copy()
         env.update({str(key): str(value) for key, value in env_overlay.items()})
         env = self.runtime_timezone.apply_subprocess_env(env)
+        execution_command = _terminal_execution_command(command)
         if bool(call.arguments.get("background", False)):
             return self._start_background_process(
                 command=command,
+                execution_command=execution_command,
                 cwd=cwd,
                 env=env,
                 owner_session_id=turn.session_id,
@@ -595,7 +663,7 @@ class ToolRuntime:
         try:
             completed = await asyncio.to_thread(
                 subprocess.run,
-                command,
+                execution_command,
                 cwd=cwd.path,
                 env=env,
                 shell=True,
@@ -630,6 +698,7 @@ class ToolRuntime:
         self,
         *,
         command: str,
+        execution_command: str,
         cwd: Any,
         env: Mapping[str, str],
         owner_session_id: str,
@@ -638,7 +707,7 @@ class ToolRuntime:
     ) -> ToolResult:
         async def run_terminal_job(ctx: JobContext) -> JobOutcome:
             process = await asyncio.create_subprocess_shell(
-                command,
+                execution_command,
                 cwd=cwd.path,
                 env=dict(env),
                 stdout=asyncio.subprocess.PIPE,
