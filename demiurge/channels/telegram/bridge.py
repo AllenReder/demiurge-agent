@@ -695,7 +695,7 @@ class TelegramInteractionBridge:
         reply_to_message_id: int | None,
     ) -> None:
         path = Path(source)
-        if not urllib.parse.urlparse(source).scheme and path.exists():
+        if path.exists() and path.is_file():
             with tempfile.TemporaryDirectory(prefix="demiurge-telegram-voice-") as tmpdir:
                 voice_path = Path(tmpdir) / f"{path.stem or 'voice'}.ogg"
                 await asyncio.to_thread(_convert_audio_to_ogg_opus, path, voice_path)

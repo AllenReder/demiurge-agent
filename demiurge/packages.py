@@ -943,6 +943,7 @@ class PackageManager:
         if record is None:
             raise PackageOperationError(f"package is not installed for {core_id}: {package_id}")
         remaining = [item for item in installed if item is not record]
+        components = [self._uninstall_component_preview(component, remaining=remaining) for component in record.components]
         warnings: list[str] = []
         for component in reversed(record.components):
             warnings.extend(self._remove_component(core_path, component, remaining=remaining, ignore_missing=True))
@@ -957,7 +958,7 @@ class PackageManager:
             repository_type=record.repository_type,
             repository_ref=record.repository_ref,
             repository_commit=record.repository_commit,
-            components=record.components,
+            components=components,
             warnings=warnings,
             registry_path=self._registry_path(core_path),
             options=dict(record.options),
