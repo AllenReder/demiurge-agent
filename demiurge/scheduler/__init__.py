@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import BufferedRandom
 from pathlib import Path
 from typing import Any, Iterator
 
 from croniter import croniter
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
@@ -19,6 +25,26 @@ from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_jso
 
 
 UTC = timezone.utc
+
+
+def _lock_handle(handle: BufferedRandom) -> None:
+    if os.name == "nt":
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_handle(handle: BufferedRandom) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(slots=True)
@@ -100,12 +126,12 @@ class SchedulerStore:
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
         ensure_dir(self.root)
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        with self.lock_path.open("a+b") as handle:
+            _lock_handle(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _unlock_handle(handle)
 
     def read_state(self) -> dict[str, Any]:
         state = read_json(self.state_path, None)
