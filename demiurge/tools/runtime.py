@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import difflib
 import fnmatch
 import inspect
@@ -65,7 +66,7 @@ def _windows_posix_compat_command(command: str) -> str | None:
     name = parts[0]
     args = parts[1:]
     if name == "printf" and args:
-        return _python_shell_command("import sys; sys.stdout.write(' '.join(sys.argv[1:]))", args)
+        return _windows_printf_command(args)
     if name == "sleep" and len(args) == 1:
         try:
             seconds = float(args[0])
@@ -105,6 +106,20 @@ def _windows_rm_command(args: list[str]) -> str | None:
         "sys.exit(0 if force or not missing else 1)"
     )
     return _python_shell_command(code, ["1" if force else "0", *targets])
+
+
+def _windows_printf_command(args: list[str]) -> str:
+    code = (
+        "import sys; "
+        "from demiurge.tools.runtime import _format_windows_printf; "
+        "sys.stdout.write(_format_windows_printf(sys.argv[1], sys.argv[2:]))"
+    )
+    return _python_shell_command(code, args)
+
+
+def _format_windows_printf(format_text: str, values: list[str]) -> str:
+    decoded_format = codecs.decode(format_text, "unicode_escape")
+    return decoded_format % tuple(values) if values else decoded_format
 
 
 def _python_shell_command(code: str, args: list[str]) -> str:

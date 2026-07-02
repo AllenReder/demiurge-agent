@@ -10,6 +10,7 @@ from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
+from demiurge.tools import runtime as tool_runtime
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
 
 
@@ -429,6 +430,51 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert denied.is_error is True
     assert denied.data["executionStarted"] is False
     assert (workspace / "denied.txt").exists()
+
+
+def test_windows_terminal_printf_compat_formats_common_smoke_command():
+    assert tool_runtime._format_windows_printf("%s\\n", ["hello"]) == "hello\n"
+
+    translated = tool_runtime._windows_posix_compat_command("printf '%s\\n' hello")
+
+    assert translated is not None
+    assert "_format_windows_printf" in translated
+    assert "printf" not in translated.split(" -c ", 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_windows_terminal_executes_compat_command_but_approves_original(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "target.txt").write_text("delete me", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    approval_provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = approval_provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+        captured["command"] = command
+        return Completed()
+
+    monkeypatch.setattr(
+        "demiurge.tools.runtime._terminal_execution_command",
+        lambda command: tool_runtime._windows_posix_compat_command(command) or command,
+    )
+    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+
+    result = await _execute(app, core, "terminal", {"command": "rm target.txt", "cwd": "."})
+
+    assert result.is_error is False
+    assert "os.remove" in captured["command"]
+    assert "rm target.txt" not in captured["command"]
+    assert approval_provider.requests[0].command == "rm target.txt"
+    assert approval_provider.requests[0].arguments_preview["command"] == "rm target.txt"
 
 
 @pytest.mark.asyncio
