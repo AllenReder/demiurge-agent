@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: stt_tencent
 name: Tencent Cloud STT
 summary: Transcribe voice and audio attachments with Tencent Cloud ASR before the
@@ -40,26 +40,16 @@ options:
   description: Add compact provider/source metadata next to the transcript in the
     user prompt.
   default: true
-config_defaults: {}
 capabilities:
 - network.fetch
-slots:
+components:
 - id: stt_input
+  kind: input
   source: stt_tencent
   target: agent/input/speech_to_text
   pipeline:
     group: serial
-    before: base_input
-  phase: input
-  metadata:
-    entrypoint: module:process
-    history_policy: persist
-    failure_policy: soft
-    description: Transcribe voice/audio attachments with Tencent Cloud STT and add
-      the transcript to the user prompt.
-    capabilities:
-    - network.fetch
-files:
+    append: true
 - id: stt_common_lib
   kind: lib
   source: stt_common
@@ -69,30 +59,9 @@ files:
   source: stt_tencent
   target: agent/lib/stt_tencent
   config:
-    provider: stt_tencent
-    host: asr.tencentcloudapi.com
-    action: SentenceRecognition
-    version: '2019-06-14'
     region: ${options.region}
     model: ${options.engine_model_type}
     engine_model_type: ${options.engine_model_type}
     secret_id: ${options.secret_id}
-    secret_id_env: DEMIURGE_TENCENT_SECRET_ID
     secret_key: ${options.secret_key}
-    secret_key_env: DEMIURGE_TENCENT_SECRET_KEY
-    project_id: 0
-    sub_service_type: 2
-    word_info: 0
-    convert_num_mode: 1
     include_metadata: ${options.include_metadata}
-    transcript_label: Voice message transcript
-    max_audio_mb: 3
-    max_audio_seconds: 60
-    allowed_mime_types:
-    - audio/amr
-    - audio/m4a
-    - audio/mp3
-    - audio/mpeg
-    - audio/pcm
-    - audio/wav
-    - audio/x-wav

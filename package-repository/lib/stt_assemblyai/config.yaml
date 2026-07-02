@@ -1,0 +1,35 @@
+provider: stt_assemblyai
+base_url: https://api.assemblyai.com/v2
+upload_endpoint: /upload
+transcript_endpoint: /transcript
+model: universal
+api_key: null
+api_key_env: DEMIURGE_ASSEMBLYAI_API_KEY
+fallback_envs:
+- ASSEMBLYAI_API_KEY
+language: null
+detect_language: true
+speaker_labels: false
+punctuate: true
+format_text: true
+include_metadata: true
+transcript_label: Voice message transcript
+max_audio_mb: 100
+max_audio_seconds: 7200
+max_polls: 30
+poll_interval_seconds: 3
+allowed_mime_types:
+- audio/aac
+- audio/flac
+- audio/m4a
+- audio/mp3
+- audio/mpeg
+- audio/mp4
+- audio/ogg
+- audio/opus
+- audio/wav
+- audio/webm
+- audio/x-m4a
+- audio/x-wav
+- video/mp4
+- video/webm

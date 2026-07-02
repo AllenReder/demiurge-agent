@@ -1,0 +1,66 @@
+input_schema:
+  type: object
+  properties:
+    target:
+      type: string
+      enum:
+      - memory
+      - user
+      - all
+      description: memory stores environment/project/tool notes; user stores profile
+        and preferences; all is only valid with action=list and returns both stores.
+    action:
+      type: string
+      enum:
+      - add
+      - replace
+      - remove
+      - list
+      description: Single-operation action. Use list to read current live memory entries;
+        omit when using operations.
+    content:
+      type: string
+      description: Entry content for add or replace.
+    old_text:
+      type: string
+      description: Required for replace or remove; a short unique substring from the
+        existing entry.
+    operations:
+      type: array
+      description: Batch operations for the same target. Each operation is add, replace,
+        or remove.
+      items:
+        type: object
+        properties:
+          action:
+            type: string
+            enum:
+            - add
+            - replace
+            - remove
+          content:
+            type: string
+          old_text:
+            type: string
+        required:
+        - action
+        additionalProperties: false
+  required:
+  - target
+  additionalProperties: false
+risk: medium
+capabilities: []
+approval_policy: auto
+description: Save durable facts to local persistent memory that survives across sessions.
+  Use this when the user states a stable preference, correction, profile detail, project
+  convention, environment fact, or tool/workflow lesson that should reduce future
+  repetition. Do not save task progress, temporary todos, raw data dumps, commit or
+  PR status, easily rediscovered facts, or reusable procedures that belong in a skill.
+  Use action=list with target=all when the user asks to view, list, inspect, or confirm
+  what is currently stored in memory; list is read-only, does not save or delete anything,
+  and does not refresh the current session's bootstrap memory context. Make multiple
+  changes in one operations batch when possible; batch writes are all-or-nothing against
+  the final character budget.
+entrypoint: module:execute
+display_policy: summary
+model_output_policy: content

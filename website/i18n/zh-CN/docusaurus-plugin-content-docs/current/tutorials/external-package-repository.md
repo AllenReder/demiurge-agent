@@ -47,7 +47,7 @@ capabilities: []
 
 ```python
 def process(ctx):
-    ctx.input.add("system", "Package hint: answer with direct, concrete steps.")
+    ctx.input.add_context("Package hint: answer with direct, concrete steps.", role="system")
 ```
 
 ## 3. 添加 Package Recipe
@@ -55,7 +55,7 @@ def process(ctx):
 创建 `packages/reply_style.yaml`：
 
 ```yaml
-schema_version: 2
+schema_version: 1
 id: reply_style
 name: Reply Style
 summary: Add a package-provided reply style hint.
@@ -67,11 +67,13 @@ components:
     source: reply_style
     target: agent/input/reply_style
     pipeline:
-      before: base_input
+      group: serial
+      append: true
 ```
 
 `source` path 是 `input/` 下的 repository-relative 路径。`target` path 是
-runtime-core-relative 路径。
+runtime-core-relative 路径。安装 package 会复制 component 目录并更新目标
+core 的 `agent/pipelines.yaml`。
 
 ## 4. Trust 并添加 Repository
 

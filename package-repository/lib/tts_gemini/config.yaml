@@ -1,0 +1,16 @@
+provider: tts_gemini
+base_url: https://generativelanguage.googleapis.com/v1beta
+model: gemini-2.5-flash-preview-tts
+voice: Kore
+output_format: wav
+sample_rate: 24000
+channels: 1
+sample_width: 2
+output_dir: .demiurge-tts
+filename_template: '{turn_id}-gemini.{format}'
+media_type: audio/wav
+api_key: null
+api_key_env: DEMIURGE_GEMINI_API_KEY
+fallback_envs:
+- GEMINI_API_KEY
+- GOOGLE_API_KEY

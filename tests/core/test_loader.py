@@ -7,35 +7,35 @@ from demiurge.app import source_agents_root
 from demiurge.core import CoreLoadError, CoreLoader, load_slot_callable
 
 
-def _slots_yaml_path(core_root):
-    return core_root / "agent" / "slots.yaml"
+def _pipelines_yaml_path(core_root):
+    return core_root / "agent" / "pipelines.yaml"
 
 
-def _read_slots_yaml(core_root):
-    return yaml.safe_load(_slots_yaml_path(core_root).read_text(encoding="utf-8"))
+def _read_pipelines_yaml(core_root):
+    return yaml.safe_load(_pipelines_yaml_path(core_root).read_text(encoding="utf-8"))
 
 
-def _write_slots_yaml(core_root, data):
-    _slots_yaml_path(core_root).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+def _write_pipelines_yaml(core_root, data):
+    _pipelines_yaml_path(core_root).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 def _declare_slot(core_root, phase, slot_id, **values):
-    data = _read_slots_yaml(core_root)
-    declaration = {"failure": "soft", "capabilities": []}
+    slot_dir = core_root / "agent" / phase / slot_id
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    declaration = {"failure_policy": "soft", "capabilities": []}
     declaration.update(values)
-    data["slots"].setdefault(phase, {})[slot_id] = declaration
-    _write_slots_yaml(core_root, data)
+    (slot_dir / "slot.yaml").write_text(yaml.safe_dump(declaration, sort_keys=False), encoding="utf-8")
 
 
 def _set_pipeline(core_root, phase, *, serial=None, parallel=None, extra=None):
-    data = _read_slots_yaml(core_root)
+    data = _read_pipelines_yaml(core_root)
     pipeline = {"serial": list(serial or [])}
     if phase != "bootstrap":
         pipeline["parallel"] = list(parallel or [])
     if extra:
         pipeline.update(extra)
-    data["pipelines"][phase] = pipeline
-    _write_slots_yaml(core_root, data)
+    data[phase] = pipeline
+    _write_pipelines_yaml(core_root, data)
 
 
 def test_loader_discovers_source_agent_slots():
@@ -419,13 +419,13 @@ def test_loader_rejects_duplicate_skill_ids(tmp_path):
         raise AssertionError("expected CoreLoadError")
 
 
-def test_loader_requires_slots_yaml(tmp_path):
+def test_loader_requires_pipelines_yaml(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    _slots_yaml_path(target).unlink()
+    _pipelines_yaml_path(target).unlink()
 
-    with pytest.raises(CoreLoadError, match="missing slots.yaml"):
+    with pytest.raises(CoreLoadError, match="missing pipelines.yaml"):
         CoreLoader().load(target)
 
 
@@ -448,7 +448,7 @@ def test_loader_rejects_bootstrap_parallel_key(tmp_path):
     shutil.copytree(source, target)
     _set_pipeline(target, "bootstrap", serial=[], extra={"parallel": []})
 
-    with pytest.raises(CoreLoadError, match="invalid slots.yaml pipelines.bootstrap key"):
+    with pytest.raises(CoreLoadError, match="invalid pipelines.yaml bootstrap key"):
         CoreLoader().load(target)
 
 
@@ -476,9 +476,7 @@ def test_loader_rejects_invalid_bootstrap_failure_policy(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    slot_dir = target / "agent" / "bootstrap" / "bad_policy"
-    slot_dir.mkdir(parents=True)
-    _declare_slot(target, "bootstrap", "bad_policy", failure="explode")
+    _declare_slot(target, "bootstrap", "bad_policy", failure_policy="explode")
     _set_pipeline(target, "bootstrap", serial=["bad_policy"])
 
     with pytest.raises(CoreLoadError, match="invalid bootstrap module failure_policy"):
@@ -511,7 +509,7 @@ def test_loader_rejects_unknown_pipeline_keys(tmp_path):
     shutil.copytree(source, target)
     _set_pipeline(target, "input", serial=["base_input"], extra={"unexpected": ["profile"]})
 
-    with pytest.raises(CoreLoadError, match="invalid slots.yaml pipelines.input key"):
+    with pytest.raises(CoreLoadError, match="invalid pipelines.yaml input key"):
         CoreLoader().load(target)
 
 
@@ -522,7 +520,7 @@ def test_slot_modules_use_isolated_relative_imports(tmp_path):
     for slot_id, value in {"relative_a": "A", "relative_b": "B"}.items():
         slot = target / "agent" / "output" / slot_id
         slot.mkdir(parents=True)
-        _declare_slot(target, "output", slot_id, description="relative import test", failure="hard")
+        _declare_slot(target, "output", slot_id, description="relative import test", failure_policy="hard")
         (slot / "module.py").write_text(
             "from .helper import VALUE\n\n"
             "def process(ctx):\n"

@@ -43,37 +43,40 @@ def process(ctx):
     ctx.input.add_context("Package hint: answer with direct, concrete steps.", role="system")
 ```
 
+Create `input/reply_style/slot.yaml`:
+
+```yaml
+entrypoint: module:process
+failure_policy: soft
+capabilities: []
+description: "Adds a package-provided reply style hint."
+```
+
 ## 3. Add a Package Recipe
 
 Create `packages/reply_style.yaml`:
 
 ```yaml
-schema_version: 3
+schema_version: 1
 id: reply_style
 name: Reply Style
 summary: Add a package-provided reply style hint.
 tags:
   - style
-slots:
+components:
   - id: reply_style_input
-    phase: input
+    kind: input
     source: reply_style
     target: agent/input/reply_style
-    metadata:
-      failure: soft
-      capabilities: []
-      description: "Adds a package-provided reply style hint."
     pipeline:
-      before: base_input
-tools: []
-files: []
-config_defaults: {}
+      group: serial
+      append: true
 capabilities: []
 ```
 
 The `source` path is repository-relative under `input/`. The `target` path is
-runtime-core-relative. Installing the package merges the slot declaration and
-pipeline entry into the target core's `agent/slots.yaml`.
+runtime-core-relative. Installing the package copies the component directory and
+updates the target core's `agent/pipelines.yaml`.
 
 ## 4. Trust and Add the Repository
 

@@ -1,0 +1,5 @@
+capabilities:
+- agents.run:tts_summarizer
+description: Generate and deliver a MiniMax TTS audio artifact from assistant output.
+entrypoint: module:process
+failure_policy: soft

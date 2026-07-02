@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: tts_xai
 name: xAI TTS
 summary: Generate speech audio with xAI speech synthesis, either directly or through
@@ -31,99 +31,40 @@ options:
   description: Optional direct xAI API key; leave empty to read DEMIURGE_XAI_API_KEY.
   required: false
   default: null
-config_defaults: {}
 capabilities:
 - network.fetch
 - agents.run:tts_summarizer
-slots:
+components:
 - id: tts_output
+  kind: output
   source: tts_xai
   target: agent/output/tts_xai
   pipeline:
     group: parallel
-  config:
-    summarizer_core: null
-    summary: xAI TTS audio
-    max_text_length: 10000
-    strip_markdown: true
+    append: true
   when:
     mode: direct
-  phase: output
-  metadata:
-    entrypoint: module:process
-    failure_policy: soft
-    description: Generate and deliver speech audio from assistant output using the
-      configured TTS provider.
-    capabilities:
-    - network.fetch
 - id: tts_output_summary
+  kind: output
   source: tts_xai_summary
   target: agent/output/tts_xai
   pipeline:
     group: parallel
-  config:
-    summarizer_core: tts_summarizer
-    summary: xAI summarized TTS audio
-    max_text_length: 10000
-    strip_markdown: true
+    append: true
   when:
     mode: summary
-  phase: output
-  metadata:
-    entrypoint: module:process
-    failure_policy: soft
-    description: Summarize assistant output, then generate and deliver speech audio
-      using xAI TTS.
-    capabilities:
-    - agents.run:tts_summarizer
-    - network.fetch
-tools:
 - id: tts_tool
+  kind: tool
   source: text_to_speech_xai
   target: agent/tools/text_to_speech
-  config:
-    filename_template: '{turn_id}-xai-tool.{format}'
   when:
     enable_tool: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        text:
-          type: string
-          description: Text to synthesize and send as speech audio.
-      required:
-      - text
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: prompt
-    display_policy: summary
-    risk: medium
-    description: Generate and send a speech audio message from text using xAI TTS.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
-files:
 - id: tts_lib
   kind: lib
   source: tts_xai
   target: agent/lib/tts_xai
   config:
-    provider: tts_xai
-    base_url: https://api.x.ai/v1
-    endpoint: /tts
-    voice_id: eve
-    language: en
-    output_format:
-      codec: mp3
-    output_dir: .demiurge-tts
-    filename_template: '{turn_id}-xai.{format}'
-    media_type: audio/mpeg
     api_key: ${options.api_key}
-    api_key_env: DEMIURGE_XAI_API_KEY
-    fallback_envs:
-    - XAI_API_KEY
 - id: tts_summarizer
   kind: core
   source: tts_summarizer

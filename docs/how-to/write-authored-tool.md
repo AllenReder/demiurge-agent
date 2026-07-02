@@ -32,7 +32,7 @@ capabilities: []
 The tool id is the directory name. The model sees the description and input
 schema when the host exposes the tool.
 
-Authored tools are not Agent Slots and are not declared in `agent/slots.yaml`.
+Authored tools are not Agent Slots and are not listed in `agent/pipelines.yaml`.
 A tool is a model-callable action; a slot is a governed interaction boundary in
 the agent loop.
 

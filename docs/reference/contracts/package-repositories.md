@@ -57,7 +57,8 @@ Rules:
 - Entry ids are unique within a recipe.
 - Entry sources stay inside the repository.
 - Entry sources cannot be symlinks.
-- Pipeline edits are allowed only for entries in `slots`.
+- Pipeline edits are allowed only for `bootstrap`, `input`, and `output`
+  components.
 - Bootstrap pipeline edits are serial-only.
 - `mcp` and `schedule` file entries install one YAML file each.
 - `mcp` defaults to the target core's `slots.mcp` root.
@@ -76,9 +77,9 @@ servers. The host still owns MCP transport, schedule claims, approvals, and
 execution.
 
 ```yaml
-schema_version: 3
+schema_version: 1
 id: docs_and_daily
-files:
+components:
   - id: docs
     kind: mcp
     source: docs.yaml
@@ -90,10 +91,6 @@ files:
     config:
       schedule: "0 9 * * *"
       prompt: "Write a daily summary."
-slots: []
-tools: []
-config_defaults: {}
-capabilities: []
 ```
 
 The source files may be incomplete bases as long as the rendered final manifest

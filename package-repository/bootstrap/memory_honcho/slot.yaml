@@ -1,0 +1,5 @@
+capabilities:
+- fs.read
+description: Injects static Honcho memory guidance and cached session memory context.
+entrypoint: module:process
+failure_policy: soft

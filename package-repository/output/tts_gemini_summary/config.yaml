@@ -1,0 +1,4 @@
+summarizer_core: tts_summarizer
+summary: Gemini summarized TTS audio
+max_text_length: 32000
+strip_markdown: true

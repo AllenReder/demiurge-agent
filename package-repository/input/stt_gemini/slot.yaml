@@ -1,0 +1,7 @@
+capabilities:
+- network.fetch
+description: Transcribe voice/audio attachments with Gemini STT and add the transcript
+  to the user prompt.
+entrypoint: module:process
+failure_policy: soft
+history_policy: persist

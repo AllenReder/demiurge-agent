@@ -1,0 +1,31 @@
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: A natural-language question for Honcho memory.
+    reasoning_level:
+      type: string
+      enum:
+      - minimal
+      - low
+      - medium
+      - high
+      - max
+      description: Optional reasoning depth override.
+    peer:
+      type: string
+      description: Peer to query. Use user, ai, or an explicit Honcho peer id.
+  required:
+  - query
+  additionalProperties: false
+risk: medium
+capabilities:
+- network.fetch
+approval_policy: auto
+description: Ask Honcho a natural-language question and get a synthesized answer from
+  its dialectic reasoning layer.
+entrypoint: module:execute
+display_policy: summary
+capability: network.fetch
+model_output_policy: content

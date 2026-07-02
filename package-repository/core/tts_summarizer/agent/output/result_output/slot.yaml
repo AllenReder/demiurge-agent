@@ -1,0 +1,4 @@
+entrypoint: module:process
+failure_policy: hard
+description: Return the summarized spoken text to the parent core.
+capabilities: []

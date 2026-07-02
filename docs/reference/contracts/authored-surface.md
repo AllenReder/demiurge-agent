@@ -19,7 +19,7 @@ A concrete runtime core has this shape:
   packages.yaml
   agent/
     SOUL.md
-    slots.yaml
+    pipelines.yaml
     bootstrap/
     input/
     output/
@@ -40,7 +40,7 @@ Agent Core authors may edit:
 
 - `agent.yaml`
 - `agent/SOUL.md`
-- `agent/slots.yaml`
+- `agent/pipelines.yaml`
 - `agent/bootstrap/`
 - `agent/input/`
 - `agent/output/`
@@ -75,9 +75,10 @@ review item.
 
 ## Slot Rule
 
-`agent/slots.yaml` is the only authored metadata and pipeline graph for
-bootstrap, input, and output slots. Slot code stays in `agent/bootstrap/`,
-`agent/input/`, and `agent/output/`.
+Bootstrap, input, and output slots are directory components. Slot code and
+metadata stay together under `agent/<bootstrap|input|output>/<slot_id>/`; each
+slot declares metadata in `slot.yaml`. Phase ordering lives in
+`agent/pipelines.yaml`.
 
 `base_input` and `base_output` are editable seed slots. The host does not treat
 them as required built-ins. If no input slot contributes prompt content, the

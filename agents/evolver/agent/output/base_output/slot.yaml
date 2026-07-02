@@ -1,0 +1,4 @@
+entrypoint: module:process
+failure_policy: hard
+description: Delivers the model output through the host output surface.
+capabilities: []

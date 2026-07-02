@@ -1,0 +1,4 @@
+entrypoint: module:process
+failure_policy: hard
+description: Build a TTS summarization prompt.
+capabilities: []

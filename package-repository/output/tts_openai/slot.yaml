@@ -1,0 +1,6 @@
+capabilities:
+- network.fetch
+description: Generate and deliver speech audio from assistant output using the configured
+  TTS provider.
+entrypoint: module:process
+failure_policy: soft

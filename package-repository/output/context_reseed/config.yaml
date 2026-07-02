@@ -1,0 +1,3 @@
+mode: explicit
+max_chars: '1800'
+notice: false

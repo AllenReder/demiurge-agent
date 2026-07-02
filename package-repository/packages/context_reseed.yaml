@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: context_reseed
 name: Context Reseed
 summary: Keep a bounded continuity note and inject it as reference context at new
@@ -30,51 +30,33 @@ options:
   prompt: Show update notice
   description: Emit a transient notice when the output module refreshes the note.
   default: false
-config_defaults: {}
 capabilities:
 - fs.read
 - fs.write
-slots:
+components:
 - id: context_reseed_bootstrap
+  kind: bootstrap
   source: context_reseed
   target: agent/bootstrap/context_reseed_bootstrap
   pipeline:
-    after: session_context
-  phase: bootstrap
-  metadata:
-    entrypoint: module:process
-    failure_policy: soft
-    description: Injects the latest bounded continuity reseed note at session start.
-    capabilities:
-    - fs.read
+    group: serial
+    append: true
 - id: context_reseed_output
+  kind: output
   source: context_reseed
   target: agent/output/context_reseed_output
   pipeline:
     group: serial
-    after: base_output
+    append: true
   config:
     mode: ${options.mode}
     max_chars: ${options.max_chars}
     notice: ${options.notice}
-  phase: output
-  metadata:
-    entrypoint: module:process
-    history_policy: transient
-    failure_policy: soft
-    description: Writes a bounded continuity note after assistant output for future
-      sessions.
-    capabilities:
-    - fs.write
-files:
 - id: context_reseed_lib
   kind: lib
   source: context_reseed
   target: agent/lib/context_reseed
   config:
-    storage:
-      relative_to: core_root
-      path: context/reseed.md
     mode: ${options.mode}
     max_chars: ${options.max_chars}
     notice: ${options.notice}

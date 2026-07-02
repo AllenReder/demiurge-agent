@@ -6,12 +6,6 @@ from typing import Any, Mapping
 import yaml
 
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "style": "balanced",
-    "channel_hint": True,
-    "activate_skill": True,
-}
-
 STYLE_HINTS = {
     "concise": "Prefer concise, scannable answers. Lead with the result, then include only the context needed to act safely.",
     "balanced": "Prefer a balanced answer: direct result first, then relevant reasoning, caveats, and next steps.",
@@ -48,8 +42,7 @@ def process(ctx):
 
 def load_config(slot_file: str | Path) -> dict[str, Any]:
     core_root = resolve_core_root(slot_file)
-    config = dict(DEFAULT_CONFIG)
-    config.update(_load_yaml_mapping(Path(slot_file).with_name("config.yaml")))
+    config = _load_required_yaml_mapping(Path(slot_file).with_name("config.yaml"))
     config["core_root"] = str(core_root)
     return config
 
@@ -63,11 +56,13 @@ def resolve_core_root(slot_file: str | Path) -> Path:
     raise ValueError(f"could not resolve core root from slot path: {slot_file}")
 
 
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+def _load_required_yaml_mapping(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {}
+        raise ValueError(f"required conversation_style config not found: {path}")
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return dict(loaded) if isinstance(loaded, Mapping) else {}
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"conversation_style config must be a mapping: {path}")
+    return dict(loaded)
 
 
 def _config_bool(value: Any, *, default: bool) -> bool:

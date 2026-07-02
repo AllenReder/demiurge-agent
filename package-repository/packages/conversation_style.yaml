@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: conversation_style
 name: Conversation Style
 summary: Add configurable per-turn communication style hints and a progressive style
@@ -34,29 +34,20 @@ options:
   prompt: Activate style skill
   description: Load the packaged style skill automatically for each turn.
   default: true
-config_defaults: {}
 capabilities:
 - skill.activate:conversation_style
-slots:
+components:
 - id: conversation_style_input
+  kind: input
   source: conversation_style
   target: agent/input/conversation_style
   pipeline:
     group: serial
-    before: base_input
+    append: true
   config:
     style: ${options.style}
     channel_hint: ${options.channel_hint}
     activate_skill: ${options.activate_skill}
-  phase: input
-  metadata:
-    entrypoint: module:process
-    history_policy: transient
-    failure_policy: soft
-    description: Injects user-selected conversational style hints into each turn.
-    capabilities:
-    - skill.activate:conversation_style
-files:
 - id: conversation_style_skill
   kind: skill
   source: conversation_style

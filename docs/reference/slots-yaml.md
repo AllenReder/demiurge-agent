@@ -1,57 +1,64 @@
 ---
-title: slots.yaml Reference
-description: Reference for Agent Slot metadata and phase pipelines.
+title: Slot Manifests and Pipelines Reference
+description: Reference for Agent Slot metadata files and phase pipelines.
 ---
 
-# `slots.yaml` Reference
+# Slot Manifests and Pipelines Reference
 
-`agent/slots.yaml` is the single authored slot interface for bootstrap, input,
-and output slots. Slot code still lives in typed folders:
+Bootstrap, input, and output slots are directory components. Each slot owns its
+own `slot.yaml`; the phase ordering lives in `agent/pipelines.yaml`.
 
 ```text
-agent/bootstrap/<slot_id>/module.py
-agent/input/<slot_id>/module.py
-agent/output/<slot_id>/module.py
+agent/bootstrap/<slot_id>/
+  module.py
+  slot.yaml
+agent/input/<slot_id>/
+  module.py
+  slot.yaml
+agent/output/<slot_id>/
+  module.py
+  slot.yaml
 ```
 
-## Shape
+## `agent/pipelines.yaml`
 
 ```yaml
-version: 2
-slots:
-  bootstrap: {}
-  input:
-    base_input:
-      failure: hard
-      capabilities: []
-  output:
-    base_output:
-      failure: soft
-      capabilities: []
-pipelines:
-  bootstrap:
-    serial: []
-  input:
-    serial: [base_input]
-    parallel: []
-  output:
-    serial: [base_output]
-    parallel: []
+schema_version: 1
+bootstrap:
+  serial: []
+input:
+  serial: [base_input]
+  parallel: []
+output:
+  serial: [base_output]
+  parallel: []
 ```
 
 `base_input` and `base_output` are ordinary editable seed slots. The host does
 not require those ids and does not silently replace them.
 
-## Slot Metadata
+## `slot.yaml`
+
+```yaml
+entrypoint: module:process
+description: Adds current-turn context.
+failure_policy: soft
+capabilities: []
+```
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `run` | `agent/<phase>/<slot_id>/module.py:process` | Optional handler override. |
+| `entrypoint` | `module:process` | Slot handler. Use `module:function` relative to the slot directory, or a core-root-relative Python file path. |
 | `description` | `""` | Human-facing description. |
 | `capabilities` | `[]` | Host capabilities requested by the slot. |
 | `timeout_seconds` | `null` | Optional timeout for the slot. |
-| `failure` | `soft` | Failure behavior. Use `hard` only for required slots. |
+| `failure_policy` | `soft` | Failure behavior. Use `hard` only for required slots. |
 | `input_schema` | `{}` | Optional authored input schema metadata. |
+| `default_placement` | `pre_current_user` | Default input placement for context fragments. |
+| `history_policy` | `persist` | Default persistence policy for slot output. |
+
+Unknown fields are rejected. Legacy aliases such as `run` and `failure` are not
+accepted.
 
 ## Phase Semantics
 
@@ -68,4 +75,4 @@ not require those ids and does not silently replace them.
 
 The loader rejects unknown phases, unknown pipeline keys, duplicate slot ids
 across phases, duplicate pipeline entries, and pipeline entries that reference
-undeclared slots.
+missing slot directories.

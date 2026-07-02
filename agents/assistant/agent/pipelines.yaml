@@ -1,0 +1,12 @@
+schema_version: 1
+bootstrap:
+  serial:
+  - session_context
+input:
+  serial:
+  - base_input
+  parallel: []
+output:
+  serial:
+  - base_output
+  parallel: []

@@ -1,0 +1,13 @@
+provider: tts_openai
+base_url: https://api.openai.com/v1
+endpoint: /audio/speech
+model: gpt-4o-mini-tts
+voice: alloy
+response_format: mp3
+output_dir: .demiurge-tts
+filename_template: '{turn_id}-openai.{format}'
+media_type: audio/mpeg
+api_key: null
+api_key_env: DEMIURGE_OPENAI_API_KEY
+fallback_envs:
+- OPENAI_API_KEY

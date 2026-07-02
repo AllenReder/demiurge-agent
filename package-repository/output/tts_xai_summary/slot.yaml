@@ -1,0 +1,7 @@
+capabilities:
+- agents.run:tts_summarizer
+- network.fetch
+description: Summarize assistant output, then generate and deliver speech audio using
+  xAI TTS.
+entrypoint: module:process
+failure_policy: soft

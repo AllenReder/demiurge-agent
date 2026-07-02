@@ -22,17 +22,17 @@ agent/bootstrap/memory_basic/
 agent/tools/memory/
 ```
 
-It also edits `agent/slots.yaml`:
+It also updates `agent/pipelines.yaml`:
 
 ```yaml
-pipelines:
-  bootstrap:
-    serial:
-      - memory_basic
+bootstrap:
+  serial:
+    - session_context
+    - memory_basic
 ```
 
-If the core already has the default `session_context` bootstrap slot, the
-installer inserts `memory_basic` after it.
+Built-in packages append their slots to the target pipeline. In the default
+assistant core, that places `memory_basic` after `session_context`.
 
 The durable memory files live outside package-owned component directories:
 

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: memory_honcho
 name: Honcho Memory
 summary: Add Honcho-backed persistent memory with automatic recall, turn sync, and
@@ -90,211 +90,62 @@ options:
   prompt: Context cadence
   description: Minimum turn gap between remote context refreshes.
   default: '1'
-config_defaults: {}
 capabilities:
 - fs.read
 - fs.write
 - network.fetch
-slots:
+components:
 - id: memory_honcho_bootstrap
+  kind: bootstrap
   source: memory_honcho
   target: agent/bootstrap/memory_honcho
   pipeline:
-    after: session_context
-  config: {}
-  phase: bootstrap
-  metadata:
-    entrypoint: module:process
-    failure_policy: soft
-    description: Injects static Honcho memory guidance and cached session memory context.
-    capabilities:
-    - fs.read
+    group: serial
+    append: true
 - id: memory_honcho_recall
+  kind: input
   source: memory_honcho_recall
   target: agent/input/memory_honcho_recall
   pipeline:
     group: serial
-    before: base_input
-  config: {}
-  phase: input
-  metadata:
-    entrypoint: module:process
-    history_policy: transient
-    failure_policy: soft
-    description: Injects relevant Honcho memory context before the model request.
-    capabilities:
-    - fs.read
-    - fs.write
-    - network.fetch
+    append: true
 - id: memory_honcho_sync
+  kind: output
   source: memory_honcho_sync
   target: agent/output/memory_honcho_sync
   pipeline:
     group: parallel
-  config: {}
-  phase: output
-  metadata:
-    entrypoint: module:process
-    history_policy: transient
-    failure_policy: soft
-    description: Mirrors completed turns into Honcho memory and refreshes next-turn
-      context cache.
-    capabilities:
-    - fs.read
-    - fs.write
-    - network.fetch
-tools:
+    append: true
 - id: honcho_profile_tool
+  kind: tool
   source: honcho_profile
   target: agent/tools/honcho_profile
   when:
     enable_tools: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        peer:
-          type: string
-          description: Peer to query. Use user, ai, or an explicit Honcho peer id.
-        card:
-          type: array
-          description: New peer card as a list of fact strings. Omit to read.
-          items:
-            type: string
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: auto
-    display_policy: summary
-    failure_policy: soft
-    risk: medium
-    description: Retrieve or update a Honcho peer card. Omit card to read the current
-      card; pass card to replace it.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
 - id: honcho_search_tool
+  kind: tool
   source: honcho_search
   target: agent/tools/honcho_search
   when:
     enable_tools: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        query:
-          type: string
-          description: What to search for in Honcho memory.
-        peer:
-          type: string
-          description: Peer to query. Use user, ai, or an explicit Honcho peer id.
-      required:
-      - query
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: auto
-    display_policy: summary
-    failure_policy: soft
-    risk: medium
-    description: Search Honcho memory for raw context about a peer. Returns excerpts
-      and peer-card facts without LLM synthesis.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
 - id: honcho_context_tool
+  kind: tool
   source: honcho_context
   target: agent/tools/honcho_context
   when:
     enable_tools: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        peer:
-          type: string
-          description: Peer to query. Use user, ai, or an explicit Honcho peer id.
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: auto
-    display_policy: summary
-    failure_policy: soft
-    risk: medium
-    description: Retrieve the current Honcho session context, including summary, representation,
-      and peer card.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
 - id: honcho_reasoning_tool
+  kind: tool
   source: honcho_reasoning
   target: agent/tools/honcho_reasoning
   when:
     enable_tools: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        query:
-          type: string
-          description: A natural-language question for Honcho memory.
-        reasoning_level:
-          type: string
-          enum:
-          - minimal
-          - low
-          - medium
-          - high
-          - max
-          description: Optional reasoning depth override.
-        peer:
-          type: string
-          description: Peer to query. Use user, ai, or an explicit Honcho peer id.
-      required:
-      - query
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: auto
-    display_policy: summary
-    failure_policy: soft
-    risk: medium
-    description: Ask Honcho a natural-language question and get a synthesized answer
-      from its dialectic reasoning layer.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
 - id: honcho_conclude_tool
+  kind: tool
   source: honcho_conclude
   target: agent/tools/honcho_conclude
   when:
     enable_tools: true
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        conclusion:
-          type: string
-          description: Factual statement to persist as a Honcho conclusion.
-        delete_id:
-          type: string
-          description: Conclusion id to delete for PII removal or correction.
-        peer:
-          type: string
-          description: Peer to update. Use user, ai, or an explicit Honcho peer id.
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: prompt
-    display_policy: summary
-    failure_policy: soft
-    risk: medium
-    description: Write or delete a persistent Honcho conclusion about a peer. Pass
-      exactly one of conclusion or delete_id.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
-files:
 - id: memory_honcho_lib
   kind: lib
   source: memory_honcho
@@ -303,9 +154,7 @@ files:
     recall_mode: ${options.recall_mode}
     enable_tools: ${options.enable_tools}
     api_key: ${options.api_key}
-    api_key_env: HONCHO_API_KEY
     base_url: ${options.base_url}
-    base_url_env: HONCHO_BASE_URL
     workspace: ${options.workspace}
     peer_name: ${options.peer_name}
     ai_peer: ${options.ai_peer}
@@ -313,9 +162,6 @@ files:
     context_tokens: ${options.context_tokens}
     timeout_seconds: ${options.timeout_seconds}
     context_cadence: ${options.context_cadence}
-    storage:
-      relative_to: core_root
-      path: memory/honcho
 - id: memory_honcho_skill
   kind: skill
   source: memory_honcho

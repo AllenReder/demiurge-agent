@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: web_search_tavily
 name: Tavily Web Search
 summary: Search the web with Tavily Search through a package-owned web_search tool.
@@ -13,103 +13,16 @@ options:
   description: Optional direct Tavily API key; leave empty to read DEMIURGE_TAVILY_API_KEY.
   required: false
   default: null
-config_defaults: {}
 capabilities:
 - network.fetch
-tools:
+components:
 - id: web_search_tool
+  kind: tool
   source: web_search_tavily
   target: agent/tools/web_search
-  metadata:
-    entrypoint: module:execute
-    input_schema:
-      type: object
-      properties:
-        query:
-          type: string
-          description: Search query string.
-        search_depth:
-          type: string
-          enum:
-          - basic
-          - advanced
-          description: Optional Tavily search depth.
-        topic:
-          type: string
-          enum:
-          - general
-          - news
-          - finance
-          description: Optional Tavily topic.
-        time_range:
-          type: string
-          enum:
-          - day
-          - week
-          - month
-          - year
-          - d
-          - w
-          - m
-          - y
-          description: Optional time range filter.
-        start_date:
-          type: string
-          description: Optional start date for results, using YYYY-MM-DD.
-        end_date:
-          type: string
-          description: Optional end date for results, using YYYY-MM-DD.
-        max_results:
-          type: integer
-          description: Number of results to return.
-          minimum: 1
-          maximum: 20
-          default: 5
-        include_answer:
-          type: string
-          enum:
-          - 'false'
-          - 'true'
-          - basic
-          - advanced
-          description: Whether Tavily should include a generated answer. Use false,
-            true, basic, or advanced.
-        include_domains:
-          type: array
-          items:
-            type: string
-          description: Optional domains to include.
-        exclude_domains:
-          type: array
-          items:
-            type: string
-          description: Optional domains to exclude.
-        country:
-          type: string
-          description: Optional country hint for search.
-      required:
-      - query
-      additionalProperties: false
-    model_output_policy: content
-    approval_policy: prompt
-    display_policy: summary
-    risk: medium
-    description: Search the web using Tavily Search. Returns structured web results
-      and optional generated answers.
-    capabilities:
-    - network.fetch
-    capability: network.fetch
-files:
 - id: web_search_lib
   kind: lib
   source: web_search_tavily
   target: agent/lib/web_search_tavily
   config:
-    provider: web_search_tavily
-    base_url: https://api.tavily.com/search
-    timeout_seconds: 30
-    default_max_results: 5
     api_key: ${options.api_key}
-    api_key_env: DEMIURGE_TAVILY_API_KEY
-    fallback_envs:
-    - TAVILY_API_KEY

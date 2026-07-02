@@ -1,0 +1,27 @@
+provider: stt_tencent
+host: asr.tencentcloudapi.com
+action: SentenceRecognition
+version: '2019-06-14'
+region: ap-shanghai
+model: 16k_zh
+engine_model_type: 16k_zh
+secret_id: null
+secret_id_env: DEMIURGE_TENCENT_SECRET_ID
+secret_key: null
+secret_key_env: DEMIURGE_TENCENT_SECRET_KEY
+project_id: 0
+sub_service_type: 2
+word_info: 0
+convert_num_mode: 1
+include_metadata: true
+transcript_label: Voice message transcript
+max_audio_mb: 3
+max_audio_seconds: 60
+allowed_mime_types:
+- audio/amr
+- audio/m4a
+- audio/mp3
+- audio/mpeg
+- audio/pcm
+- audio/wav
+- audio/x-wav

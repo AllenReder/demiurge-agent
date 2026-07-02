@@ -1,0 +1,30 @@
+provider: stt_baidu
+base_url: https://vop.baidu.com/server_api
+token_url: https://aip.baidubce.com/oauth/2.0/token
+model: Baidu short speech recognition
+api_key: null
+api_key_env: DEMIURGE_BAIDU_API_KEY
+fallback_envs:
+- BAIDU_API_KEY
+secret_key: null
+secret_key_env: DEMIURGE_BAIDU_SECRET_KEY
+access_token: null
+access_token_env: DEMIURGE_BAIDU_ACCESS_TOKEN
+language: null
+dev_pid: '1537'
+sample_rate: 16000
+channel: 1
+cuid: demiurge
+include_metadata: true
+transcript_label: Voice message transcript
+max_audio_mb: 5
+max_audio_seconds: 60
+allowed_mime_types:
+- audio/amr
+- audio/flac
+- audio/m4a
+- audio/mp3
+- audio/mpeg
+- audio/pcm
+- audio/wav
+- audio/x-wav

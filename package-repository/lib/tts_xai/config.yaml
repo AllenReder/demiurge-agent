@@ -1,0 +1,14 @@
+provider: tts_xai
+base_url: https://api.x.ai/v1
+endpoint: /tts
+voice_id: eve
+language: en
+output_format:
+  codec: mp3
+output_dir: .demiurge-tts
+filename_template: '{turn_id}-xai.{format}'
+media_type: audio/mpeg
+api_key: null
+api_key_env: DEMIURGE_XAI_API_KEY
+fallback_envs:
+- XAI_API_KEY

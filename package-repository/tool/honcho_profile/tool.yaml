@@ -1,0 +1,22 @@
+input_schema:
+  type: object
+  properties:
+    peer:
+      type: string
+      description: Peer to query. Use user, ai, or an explicit Honcho peer id.
+    card:
+      type: array
+      description: New peer card as a list of fact strings. Omit to read.
+      items:
+        type: string
+  additionalProperties: false
+risk: medium
+capabilities:
+- network.fetch
+approval_policy: auto
+description: Retrieve or update a Honcho peer card. Omit card to read the current
+  card; pass card to replace it.
+entrypoint: module:execute
+display_policy: summary
+capability: network.fetch
+model_output_policy: content

@@ -1,0 +1,16 @@
+recall_mode: hybrid
+enable_tools: true
+api_key: null
+api_key_env: HONCHO_API_KEY
+base_url: null
+base_url_env: HONCHO_BASE_URL
+workspace: demiurge
+peer_name: null
+ai_peer: demiurge-assistant
+session_strategy: per-directory
+context_tokens: '1200'
+timeout_seconds: '3'
+context_cadence: '1'
+storage:
+  relative_to: core_root
+  path: memory/honcho

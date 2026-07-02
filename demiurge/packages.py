@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -33,7 +34,6 @@ COMPONENT_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib", "core
 CORE_LOCAL_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib"}
 CORE_TARGET_KINDS = CORE_LOCAL_KINDS | MANIFEST_FILE_KINDS
 PIPELINE_KINDS = {"bootstrap", "input", "output"}
-FILE_COMPONENT_KINDS = {"skill", "lib", "core", *MANIFEST_FILE_KINDS}
 INSTALL_KIND_ORDER = {
     "lib": 0,
     "bootstrap": 1,
@@ -132,7 +132,6 @@ class PackageComponent:
     config: dict[str, Any] | None = None
     when: dict[str, Any] = field(default_factory=dict)
     config_when: list[ConditionalConfig] = field(default_factory=list)
-    authored_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +142,6 @@ class PackageInfo:
     tags: list[str]
     components: list[PackageComponent]
     options: list[PackageOption] = field(default_factory=list)
-    config_defaults: dict[str, Any] = field(default_factory=dict)
     capabilities: list[str] = field(default_factory=list)
     manual_dependencies: list[str] = field(default_factory=list)
     repository_alias: str = ""
@@ -245,6 +243,8 @@ class PackageRepository:
         if not repository_path.exists():
             raise PackageRepositoryError(f"repository.yaml not found: {repository_path}")
         raw_repository = _read_yaml_mapping(repository_path)
+        if raw_repository.get("schema_version") != 1:
+            raise PackageRepositoryError(f"repository {repository_path} schema_version must be 1")
         repository_id = _required_str(raw_repository, "id", path=repository_path)
         repository = RepositoryInfo(
             repository_id=repository_id,
@@ -255,7 +255,9 @@ class PackageRepository:
         packages = cls._load_packages(root, repository=repository, source=source)
         for package in packages.values():
             for component in package.components:
-                cls._validate_component_tree(root, component, cls._component_source_path(root, component))
+                source_path = cls._component_source_path(root, component)
+                cls._validate_component_tree(root, component, source_path)
+                cls._validate_component_config_source(component, source_path)
         return cls(root=root, repository=repository, packages=packages, source=source)
 
     @staticmethod
@@ -266,10 +268,11 @@ class PackageRepository:
             return result
         for path in sorted(packages_root.glob("*.yaml"), key=lambda item: item.name):
             raw = _read_yaml_mapping(path)
-            if raw.get("schema_version") != 3:
-                raise PackageRepositoryError(f"package {path} schema_version must be 3")
-            if "components" in raw:
-                raise PackageRepositoryError(f"package {path} must use schema v3 slots/tools/files, not components")
+            if raw.get("schema_version") != 1:
+                raise PackageRepositoryError(f"package {path} schema_version must be 1")
+            old_keys = sorted(set(raw) & {"slots", "tools", "files", "config_defaults", "metadata"})
+            if old_keys:
+                raise PackageRepositoryError(f"package {path} uses removed v1 field(s): {', '.join(old_keys)}")
             package_id = _required_str(raw, "id", path=path)
             if package_id in result:
                 raise PackageRepositoryError(f"duplicate package id: {package_id}")
@@ -279,16 +282,13 @@ class PackageRepository:
             manual_dependencies = raw.get("manual_dependencies") or []
             if not isinstance(manual_dependencies, list) or any(not isinstance(item, str) for item in manual_dependencies):
                 raise PackageRepositoryError(f"package manual_dependencies must be a list of strings: {path}")
-            config_defaults = raw.get("config_defaults") or {}
-            if not isinstance(config_defaults, Mapping):
-                raise PackageRepositoryError(f"package config_defaults must be a mapping: {path}")
             raw_capabilities = raw.get("capabilities") or []
             if not isinstance(raw_capabilities, list) or any(not isinstance(item, str) for item in raw_capabilities):
                 raise PackageRepositoryError(f"package capabilities must be a list of strings: {path}")
-            raw_components = PackageRepository._v3_components(raw, package_id=package_id, path=path)
+            raw_components = PackageRepository._v1_components(raw, package_id=package_id, path=path)
             components = [
                 PackageRepository._parse_component(
-                    PackageRepository._with_config_defaults(item, config_defaults),
+                    item,
                     package_id=package_id,
                     path=path,
                 )
@@ -304,7 +304,6 @@ class PackageRepository:
                 tags=list(tags),
                 components=components,
                 options=options,
-                config_defaults=dict(config_defaults),
                 capabilities=list(raw_capabilities),
                 manual_dependencies=list(manual_dependencies),
                 repository_alias=source.alias,
@@ -316,33 +315,16 @@ class PackageRepository:
         return result
 
     @staticmethod
-    def _v3_components(raw: Mapping[str, Any], *, package_id: str, path: Path) -> list[dict[str, Any]]:
-        slots = raw.get("slots") or []
-        tools = raw.get("tools") or []
-        files = raw.get("files") or []
-        if not isinstance(slots, list) or any(not isinstance(item, Mapping) for item in slots):
-            raise PackageRepositoryError(f"package slots must be a list of objects: {path}")
-        if not isinstance(tools, list) or any(not isinstance(item, Mapping) for item in tools):
-            raise PackageRepositoryError(f"package tools must be a list of objects: {path}")
-        if not isinstance(files, list) or any(not isinstance(item, Mapping) for item in files):
-            raise PackageRepositoryError(f"package files must be a list of objects: {path}")
+    def _v1_components(raw: Mapping[str, Any], *, package_id: str, path: Path) -> list[dict[str, Any]]:
+        raw_components = raw.get("components")
+        if not isinstance(raw_components, list) or any(not isinstance(item, Mapping) for item in raw_components):
+            raise PackageRepositoryError(f"package components must be a list of objects: {path}")
         components: list[tuple[int, dict[str, Any]]] = []
-        index = 0
-        for item in slots:
-            phase = str(item.get("phase") or "").strip()
-            if phase not in PIPELINE_KINDS:
-                raise PackageRepositoryError(f"package {package_id} slot has invalid phase: {phase}")
-            components.append((index, {**dict(item), "kind": phase}))
-            index += 1
-        for item in tools:
-            components.append((index, {**dict(item), "kind": "tool"}))
-            index += 1
-        for item in files:
+        for index, item in enumerate(raw_components):
             kind = str(item.get("kind") or "").strip()
-            if kind not in FILE_COMPONENT_KINDS:
-                raise PackageRepositoryError(f"package {package_id} file has invalid kind: {kind}")
+            if kind not in COMPONENT_KINDS:
+                raise PackageRepositoryError(f"package {package_id} component has invalid kind: {kind}")
             components.append((index, dict(item)))
-            index += 1
         return [
             item
             for _, item in sorted(
@@ -352,55 +334,56 @@ class PackageRepository:
         ]
 
     @staticmethod
-    def _with_config_defaults(raw: Mapping[str, Any], config_defaults: Mapping[str, Any]) -> dict[str, Any]:
-        item = dict(raw)
-        if not config_defaults:
-            return item
-        kind = str(item.get("kind") or "")
-        component_id = str(item.get("id") or item.get("source") or "")
-        merged: dict[str, Any] = {}
-        for key in ("all", kind, component_id):
-            value = config_defaults.get(key)
-            if isinstance(value, Mapping):
-                merged = _merge_mapping(merged, value)
-        config = item.get("config")
-        if isinstance(config, Mapping):
-            merged = _merge_mapping(merged, config)
-        if merged:
-            item["config"] = merged
-        return item
-
-    @staticmethod
     def _parse_component(raw: Mapping[str, Any], *, package_id: str, path: Path) -> PackageComponent:
-        component_id = str(raw.get("id") or raw.get("source") or "").strip()
+        component_id = str(raw.get("id") or "").strip()
         kind = str(raw.get("kind") or "").strip()
         source = str(raw.get("source") or "").strip()
         if kind not in COMPONENT_KINDS:
             raise PackageRepositoryError(f"invalid component kind in package {package_id}: {kind}")
         if not component_id or not source:
             raise PackageRepositoryError(f"package {package_id} has a component without id/source")
-        pipeline = raw.get("pipeline") or {}
-        if not isinstance(pipeline, Mapping):
-            raise PackageRepositoryError(f"component {component_id} pipeline must be a mapping: {path}")
+        if "metadata" in raw or "phase" in raw:
+            raise PackageRepositoryError(f"component {component_id} uses removed v1 metadata/phase fields: {path}")
+        pipeline = raw.get("pipeline")
+        if kind in PIPELINE_KINDS:
+            if not isinstance(pipeline, Mapping):
+                raise PackageRepositoryError(f"component {component_id} pipeline is required and must be a mapping: {path}")
+            PackageRepository._validate_pipeline_placement(kind, pipeline, component_id=component_id, path=path)
+        elif pipeline is not None:
+            raise PackageRepositoryError(f"component {component_id} pipeline is only valid for bootstrap/input/output: {path}")
         config = raw.get("config")
         if config is not None and not isinstance(config, Mapping):
             raise PackageRepositoryError(f"component {component_id} config must be a mapping: {path}")
         config_when = PackageRepository._parse_config_when(raw.get("config_when"), package_id=package_id, path=path)
-        authored_metadata = raw.get("metadata") or {}
-        if authored_metadata is not None and not isinstance(authored_metadata, Mapping):
-            raise PackageRepositoryError(f"component {component_id} metadata must be a mapping: {path}")
+        if kind == "core" and (config is not None or config_when):
+            raise PackageRepositoryError(f"component {component_id} config is not valid for core components: {path}")
         return PackageComponent(
             component_id=component_id,
             kind=kind,
             source=source,
             target=str(raw["target"]) if raw.get("target") is not None else None,
             target_core_id=str(raw["target_core_id"]) if raw.get("target_core_id") is not None else None,
-            pipeline=dict(pipeline),
+            pipeline=dict(pipeline or {}),
             config=dict(config) if isinstance(config, Mapping) else None,
             when=PackageRepository._parse_condition(raw.get("when"), package_id=package_id, path=path),
             config_when=config_when,
-            authored_metadata=dict(authored_metadata or {}),
         )
+
+    @staticmethod
+    def _validate_pipeline_placement(kind: str, pipeline: Mapping[str, Any], *, component_id: str, path: Path) -> None:
+        group = pipeline.get("group")
+        groups = {"serial"} if kind == "bootstrap" else {"serial", "parallel"}
+        if group not in groups:
+            raise PackageRepositoryError(f"component {component_id} pipeline.group must be one of {sorted(groups)}: {path}")
+        placements = [key for key in ("before", "after") if pipeline.get(key)]
+        append = bool(pipeline.get("append", False))
+        if append:
+            placements.append("append")
+        if len(placements) != 1:
+            raise PackageRepositoryError(f"component {component_id} pipeline requires exactly one of before, after, or append: {path}")
+        unknown = sorted(set(pipeline) - {"group", "before", "after", "append"})
+        if unknown:
+            raise PackageRepositoryError(f"component {component_id} pipeline has invalid key(s): {', '.join(unknown)}")
 
     @staticmethod
     def _parse_config_when(raw: Any, *, package_id: str, path: Path) -> list[ConditionalConfig]:
@@ -560,14 +543,71 @@ class PackageRepository:
         if source_path.is_symlink():
             raise PackageRepositoryError(f"component source cannot be a symlink: {source_path}")
         if source_path.is_file():
-            require_relative_path(source_path, root)
-            return
+            raise PackageRepositoryError(f"{component.kind} component source must be a directory: {source_path}")
         if not source_path.is_dir():
             raise PackageRepositoryError(f"component source must be a directory or file: {source_path}")
+        if component.kind in PIPELINE_KINDS:
+            manifest_path = source_path / "slot.yaml"
+            if not manifest_path.exists():
+                raise PackageRepositoryError(f"{component.kind} component source requires slot.yaml: {source_path}")
+            PackageRepository._validate_component_manifest(manifest_path, kind=component.kind, root=root)
+        if component.kind == "tool":
+            manifest_path = source_path / "tool.yaml"
+            if not manifest_path.exists():
+                raise PackageRepositoryError(f"tool component source requires tool.yaml: {source_path}")
+            PackageRepository._validate_component_manifest(manifest_path, kind=component.kind, root=root)
         for path in source_path.rglob("*"):
             if path.is_symlink():
                 raise PackageRepositoryError(f"component source cannot contain symlinks: {path}")
             require_relative_path(path, root)
+
+    @staticmethod
+    def _validate_component_manifest(path: Path, *, kind: str, root: Path) -> None:
+        raw = _read_yaml_mapping(path)
+        if kind == "tool":
+            allowed = {
+                "entrypoint",
+                "description",
+                "input_schema",
+                "risk",
+                "capability",
+                "approval_policy",
+                "display_policy",
+                "model_output_policy",
+                "capabilities",
+            }
+            manifest_name = "tool.yaml"
+        else:
+            allowed = {
+                "entrypoint",
+                "description",
+                "input_schema",
+                "capabilities",
+                "timeout_seconds",
+                "failure_policy",
+                "default_placement",
+                "history_policy",
+            }
+            manifest_name = "slot.yaml"
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            rel = path.relative_to(root).as_posix()
+            raise PackageRepositoryError(f"invalid {manifest_name} {rel} key(s): {', '.join(unknown)}")
+
+    @staticmethod
+    def _validate_component_config_source(component: PackageComponent, source_path: Path) -> None:
+        if component.kind in MANIFEST_FILE_KINDS:
+            return
+        if component.config is None and not component.config_when:
+            return
+        if component.kind == "core":
+            return
+        if not source_path.is_dir():
+            raise PackageRepositoryError(f"component config requires a directory source: {component.source}")
+        config_path = source_path / "config.yaml"
+        if not config_path.exists():
+            raise PackageRepositoryError(f"component {component.component_id} config requires source config.yaml: {config_path}")
+        _read_yaml_mapping(config_path)
 
 
 class PackageRepositoryCollection:
@@ -1108,12 +1148,13 @@ class PackageManager:
         repository = self._repository_for_package(package)
         source_path = repository.component_source_path(component)
         source_key = f"{component.kind}/{component.source}"
-        config = self._render_component_config(component, resolved_options)
+        config_patch = self._render_component_config(component, resolved_options)
         if component.kind in MANIFEST_FILE_KINDS:
-            return self._plan_manifest_file_component(core_path, package, component, source_path, source_key, config)
+            return self._plan_manifest_file_component(core_path, package, component, source_path, source_key, config_patch)
         if component.kind in CORE_LOCAL_KINDS:
             target_rel = component.target or f"{DEFAULT_TARGET_ROOTS[component.kind]}/{Path(component.source).name}"
             target_path = self._relative_target(core_path, target_rel)
+            effective_config = self._effective_component_config(source_path, config_patch)
             operation = {
                 "kind": component.kind,
                 "component_id": component.component_id,
@@ -1123,19 +1164,13 @@ class PackageManager:
                 "source_path": str(source_path),
                 "target": target_path.relative_to(core_path).as_posix(),
                 "target_path": str(target_path),
-                "config": config,
+                "config": effective_config,
+                "config_hash": self._config_hash(effective_config),
                 "reused": False,
             }
             if component.kind in PIPELINE_KINDS:
                 operation["slot_id"] = target_path.name
-                operation["pipeline"] = dict(component.pipeline or {"group": "serial"})
-                operation["slot_manifest"] = self._slot_manifest_from_source(
-                    source_path,
-                    config,
-                    component.authored_metadata,
-                )
-            if component.kind == "tool":
-                operation["tool_manifest"] = self._tool_manifest(component.authored_metadata)
+                operation["pipeline"] = dict(component.pipeline)
             return operation
         target_core_id = component.target_core_id or component.component_id
         self._validate_core_id(target_core_id)
@@ -1150,6 +1185,7 @@ class PackageManager:
             "target_core_id": target_core_id,
             "target": str(target_path),
             "target_path": str(target_path),
+            "config_hash": None,
             "reused": False,
         }
 
@@ -1186,6 +1222,7 @@ class PackageManager:
             "manifest": manifest,
             "manifest_id": target_path.stem,
             "manifest_root": target_root_rel,
+            "config_hash": self._config_hash(manifest),
             "reused": False,
         }
 
@@ -1247,6 +1284,27 @@ class PackageManager:
             raise PackageOperationError(f"invalid {kind} manifest: {exc}") from exc
         return manifest.model_dump(mode="python", exclude_none=True)
 
+    def _effective_component_config(self, source_path: Path, config_patch: dict[str, Any] | None) -> dict[str, Any] | None:
+        config_path = source_path / "config.yaml"
+        has_config = config_path.exists()
+        if config_patch is not None and not has_config:
+            raise PackageOperationError(f"component config requires source config.yaml: {config_path}")
+        if not has_config:
+            return None
+        try:
+            base = _read_yaml_mapping(config_path)
+        except PackageRepositoryError as exc:
+            raise PackageOperationError(str(exc)) from exc
+        if config_patch is None:
+            return base
+        return self._merge_config(base, config_patch)
+
+    def _config_hash(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        payload = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _validate_install_plan(
         self,
         core_path: Path,
@@ -1266,6 +1324,8 @@ class PackageManager:
             if target_path.exists():
                 if existing is None:
                     raise PackageOperationError(f"target already exists: {self._display_target(core_path, operation)}")
+                if operation.get("config_hash") != existing.get("config_hash"):
+                    raise PackageOperationError(f"shared component config conflict: {self._display_target(core_path, operation)}")
                 operation["reused"] = True
                 operation["reused_by"] = existing.get("package_id")
                 continue
@@ -1309,20 +1369,6 @@ class PackageManager:
             return self._component_record(operation)
         if operation["kind"] in CORE_LOCAL_KINDS:
             self._copy_component_source(source_path, target_path)
-            if operation["kind"] in PIPELINE_KINDS:
-                legacy_manifest = target_path / "slot.yaml"
-                if legacy_manifest.exists():
-                    legacy_manifest.unlink()
-            if operation["kind"] == "tool":
-                legacy_manifest = target_path / "slot.yaml"
-                if legacy_manifest.exists():
-                    legacy_manifest.unlink()
-                tool_manifest = operation.get("tool_manifest")
-                if isinstance(tool_manifest, dict):
-                    (target_path / "tool.yaml").write_text(
-                        yaml.safe_dump(tool_manifest, sort_keys=False, allow_unicode=True),
-                        encoding="utf-8",
-                    )
             config = operation.get("config")
             if isinstance(config, dict):
                 if not target_path.is_dir():
@@ -1332,7 +1378,6 @@ class PackageManager:
                     encoding="utf-8",
                 )
             if operation["kind"] in PIPELINE_KINDS:
-                self._upsert_slot_declaration(core_path, operation)
                 self._insert_pipeline_slot(core_path, operation)
             return self._component_record(operation)
         shutil.copytree(source_path, target_path, ignore=_COPYTREE_IGNORE)
@@ -1396,58 +1441,6 @@ class PackageManager:
         ensure_dir(target_path.parent)
         shutil.copy2(source_path, target_path)
 
-    def _slot_manifest_from_source(
-        self,
-        source_path: Path,
-        config: dict[str, Any] | None,
-        authored_metadata: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        manifest_path = source_path / "slot.yaml" if source_path.is_dir() else None
-        raw: dict[str, Any] = {}
-        if manifest_path is not None and manifest_path.exists():
-            raw = _read_yaml_mapping(manifest_path)
-        if authored_metadata:
-            raw = {**raw, **dict(authored_metadata)}
-        result: dict[str, Any] = {}
-        if raw.get("description") is not None:
-            result["description"] = str(raw.get("description") or "")
-        failure = raw.get("failure") or raw.get("failure_policy")
-        if failure is not None:
-            result["failure"] = str(failure)
-        capabilities = raw.get("capabilities")
-        if isinstance(capabilities, list):
-            result["capabilities"] = [str(item) for item in capabilities]
-        else:
-            result["capabilities"] = []
-        if raw.get("timeout_seconds") is not None:
-            result["timeout_seconds"] = raw.get("timeout_seconds")
-        entrypoint = raw.get("entrypoint")
-        if entrypoint and str(entrypoint) != "module:process":
-            result["run"] = str(entrypoint)
-        return result
-
-    def _tool_manifest(self, authored_metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        raw = dict(authored_metadata or {})
-        result: dict[str, Any] = {}
-        for key in (
-            "entrypoint",
-            "description",
-            "input_schema",
-            "failure",
-            "failure_policy",
-            "capability",
-            "risk",
-            "approval_policy",
-            "display_policy",
-            "model_output_policy",
-            "capabilities",
-        ):
-            if raw.get(key) is not None:
-                result[key] = copy.deepcopy(raw[key])
-        result.setdefault("entrypoint", "module:execute")
-        result.setdefault("capabilities", [])
-        return result
-
     def _component_record(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         keep = {
             "kind",
@@ -1461,6 +1454,7 @@ class PackageManager:
             "pipeline",
             "manifest_id",
             "manifest_root",
+            "config_hash",
             "reused",
             "reused_by",
         }
@@ -1567,54 +1561,34 @@ class PackageManager:
         pipeline = self._read_pipeline(core_path, kind)
         if slot_id in set(pipeline.get("serial") or []) | set(pipeline.get("parallel") or []):
             raise PackageOperationError(f"{kind} pipeline already contains slot: {slot_id}")
+        group = str(config.get("group") or "")
+        values = list(pipeline.get(group) or [])
+        if config.get("before") and str(config["before"]) not in values:
+            raise PackageOperationError(f"{kind} pipeline before target not found: {config['before']}")
+        if config.get("after") and str(config["after"]) not in values:
+            raise PackageOperationError(f"{kind} pipeline after target not found: {config['after']}")
 
-    def _slots_yaml_path(self, core_path: Path) -> Path:
-        return core_path / "agent" / "slots.yaml"
+    def _pipelines_yaml_path(self, core_path: Path) -> Path:
+        return core_path / "agent" / "pipelines.yaml"
 
-    def _read_slots_yaml(self, core_path: Path) -> dict[str, Any]:
-        path = self._slots_yaml_path(core_path)
+    def _read_pipelines_yaml(self, core_path: Path) -> dict[str, Any]:
+        path = self._pipelines_yaml_path(core_path)
         if not path.exists():
-            return {
-                "version": 2,
-                "slots": {"bootstrap": {}, "input": {}, "output": {}},
-                "pipelines": {
-                    "bootstrap": {"serial": []},
-                    "input": {"serial": [], "parallel": []},
-                    "output": {"serial": [], "parallel": []},
-                },
-            }
+            raise PackageOperationError(f"missing agent/pipelines.yaml: {path}")
         raw = _read_yaml_mapping(path)
-        if raw.get("version") != 2:
-            raise PackageOperationError("agent/slots.yaml version must be 2")
-        slots = raw.setdefault("slots", {})
-        pipelines = raw.setdefault("pipelines", {})
-        if not isinstance(slots, dict) or not isinstance(pipelines, dict):
-            raise PackageOperationError("agent/slots.yaml slots and pipelines must be mappings")
+        if raw.get("schema_version") != 1:
+            raise PackageOperationError("agent/pipelines.yaml schema_version must be 1")
+        unknown = sorted(set(raw) - {"schema_version", "bootstrap", "input", "output"})
+        if unknown:
+            raise PackageOperationError(f"invalid agent/pipelines.yaml phase(s): {', '.join(unknown)}")
         for phase in ("bootstrap", "input", "output"):
-            slots.setdefault(phase, {})
-            pipelines.setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
+            raw.setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
         return raw
 
-    def _write_slots_yaml(self, core_path: Path, data: Mapping[str, Any]) -> None:
-        path = self._slots_yaml_path(core_path)
+    def _write_pipelines_yaml(self, core_path: Path, data: Mapping[str, Any]) -> None:
+        path = self._pipelines_yaml_path(core_path)
         ensure_dir(path.parent)
         path.write_text(yaml.safe_dump(dict(data), sort_keys=False, allow_unicode=True), encoding="utf-8")
-
-    def _upsert_slot_declaration(self, core_path: Path, operation: Mapping[str, Any]) -> None:
-        kind = str(operation["kind"])
-        if kind not in PIPELINE_KINDS:
-            return
-        slot_id = str(operation["slot_id"])
-        data = self._read_slots_yaml(core_path)
-        slots = data["slots"]
-        for phase, declarations in slots.items():
-            if phase != kind and isinstance(declarations, Mapping) and slot_id in declarations:
-                raise PackageOperationError(f"slot id already exists in {phase}: {slot_id}")
-        declarations = slots.setdefault(kind, {})
-        if not isinstance(declarations, dict):
-            raise PackageOperationError(f"agent/slots.yaml slots.{kind} must be a mapping")
-        declarations[slot_id] = dict(operation.get("slot_manifest") or {"failure": "soft", "capabilities": []})
-        self._write_slots_yaml(core_path, data)
 
     def _insert_pipeline_slot(self, core_path: Path, operation: Mapping[str, Any]) -> None:
         kind = str(operation["kind"])
@@ -1626,12 +1600,14 @@ class PackageManager:
         values = list(pipeline.get(group) or [])
         after = config.get("after")
         before = config.get("before")
-        if after and after in values:
+        if bool(config.get("append", False)):
+            values.append(slot_id)
+        elif after and after in values:
             values.insert(values.index(after) + 1, slot_id)
         elif before and before in values:
             values.insert(values.index(before), slot_id)
         else:
-            values.append(slot_id)
+            raise PackageOperationError(f"{kind} pipeline placement target not found for slot: {slot_id}")
         pipeline[group] = values
         self._write_pipeline(core_path, kind, pipeline)
 
@@ -1646,43 +1622,42 @@ class PackageManager:
                 changed = True
         if changed:
             self._write_pipeline(core_path, kind, pipeline)
-        data = self._read_slots_yaml(core_path)
-        declarations = data.get("slots", {}).get(kind)
-        if isinstance(declarations, dict) and slot_id in declarations:
-            declarations.pop(slot_id)
-            self._write_slots_yaml(core_path, data)
 
     def _read_pipeline(self, core_path: Path, kind: str) -> dict[str, list[str]]:
-        data = self._read_slots_yaml(core_path)
-        raw = data.get("pipelines", {}).get(kind) or {}
+        data = self._read_pipelines_yaml(core_path)
+        raw = data.get(kind) or {}
         groups = self._pipeline_groups(kind)
         unknown_keys = sorted(set(raw) - set(groups))
         if unknown_keys:
-            raise PackageOperationError(f"invalid {kind} pipeline key(s): {', '.join(unknown_keys)}")
+            raise PackageOperationError(f"invalid agent/pipelines.yaml {kind} key(s): {', '.join(unknown_keys)}")
         result: dict[str, list[str]] = {}
         for group in groups:
             values = raw.get(group) or []
             if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
-                raise PackageOperationError(f"invalid {kind} pipeline {group}: expected list of slot ids")
+                raise PackageOperationError(f"invalid agent/pipelines.yaml {kind}.{group}: expected list of slot ids")
             result[group] = list(values)
         return result
 
     def _write_pipeline(self, core_path: Path, kind: str, pipeline: Mapping[str, list[str]]) -> None:
-        slots_yaml = self._read_slots_yaml(core_path)
-        pipelines = slots_yaml.setdefault("pipelines", {})
+        pipelines = self._read_pipelines_yaml(core_path)
         phase_pipeline = {"serial": pipeline.get("serial") or []}
         if "parallel" in self._pipeline_groups(kind):
             phase_pipeline["parallel"] = pipeline.get("parallel") or []
         pipelines[kind] = phase_pipeline
-        self._write_slots_yaml(core_path, slots_yaml)
+        self._write_pipelines_yaml(core_path, pipelines)
 
     def _pipeline_groups(self, kind: str) -> tuple[str, ...]:
         return ("serial",) if kind == "bootstrap" else ("serial", "parallel")
 
     def _validate_pipeline_config(self, kind: str, config: Mapping[str, Any]) -> None:
-        group = str(config.get("group") or "serial")
+        group = str(config.get("group") or "")
         if group not in self._pipeline_groups(kind):
             raise PackageOperationError(f"invalid {kind} pipeline group: {group}")
+        placements = [key for key in ("before", "after") if config.get(key)]
+        if bool(config.get("append", False)):
+            placements.append("append")
+        if len(placements) != 1:
+            raise PackageOperationError(f"{kind} pipeline requires exactly one of before, after, or append")
 
     def _normalize_option_value(
         self,
@@ -1740,6 +1715,8 @@ class PackageManager:
         if not path.exists():
             return []
         raw = _read_yaml_mapping(path)
+        if raw.get("schema_version") != 1:
+            raise PackageOperationError(f"packages.yaml schema_version must be 1: {path}")
         values = raw.get("installed") or []
         if not isinstance(values, list) or any(not isinstance(item, Mapping) for item in values):
             raise PackageOperationError(f"invalid packages.yaml installed list: {path}")
@@ -1770,7 +1747,7 @@ class PackageManager:
             return
         ensure_dir(path.parent)
         data = {
-            "schema_version": 3,
+            "schema_version": 1,
             "installed": [
                 {
                     "package_id": item.package_id,

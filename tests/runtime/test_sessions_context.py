@@ -30,15 +30,17 @@ def _write_bootstrap_module(agents, code, *, slot_id="session_context", failure_
     bootstrap_dir = agents / "assistant" / "agent" / "bootstrap"
     slot_dir = bootstrap_dir / slot_id
     slot_dir.mkdir(parents=True, exist_ok=True)
-    slots_path = agents / "assistant" / "agent" / "slots.yaml"
-    slots = yaml.safe_load(slots_path.read_text(encoding="utf-8"))
-    slots["slots"].setdefault("bootstrap", {})[slot_id] = {
-        "failure": failure_policy,
-        "capabilities": [],
-    }
+    (slot_dir / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        f"failure_policy: {failure_policy}\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
     if pipeline:
-        slots["pipelines"]["bootstrap"] = {"serial": [slot_id]}
-    slots_path.write_text(yaml.safe_dump(slots, sort_keys=False), encoding="utf-8")
+        pipelines_path = agents / "assistant" / "agent" / "pipelines.yaml"
+        pipelines = yaml.safe_load(pipelines_path.read_text(encoding="utf-8"))
+        pipelines["bootstrap"] = {"serial": [slot_id]}
+        pipelines_path.write_text(yaml.safe_dump(pipelines, sort_keys=False), encoding="utf-8")
     (slot_dir / "module.py").write_text(code, encoding="utf-8")
 
 
@@ -99,6 +101,10 @@ async def test_runtime_session_store_preserves_utf8_text(tmp_path):
 async def test_context_assembler_emits_default_assistant_layers(tmp_path):
     agents = _copy_agents(tmp_path)
     shutil.rmtree(agents / "assistant" / "agent" / "bootstrap", ignore_errors=True)
+    pipelines_path = agents / "assistant" / "agent" / "pipelines.yaml"
+    pipelines = yaml.safe_load(pipelines_path.read_text(encoding="utf-8"))
+    pipelines["bootstrap"] = {"serial": []}
+    pipelines_path.write_text(yaml.safe_dump(pipelines, sort_keys=False), encoding="utf-8")
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     provider = EchoInspectingProvider()
     app.runner.provider = provider

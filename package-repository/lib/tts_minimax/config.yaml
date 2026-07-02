@@ -1,0 +1,12 @@
+provider: tts_minimax
+base_url: https://api.minimaxi.com/v1/t2a_v2
+model: speech-2.8-hd
+voice_setting:
+  voice_id: male-qn-qingse
+audio_setting: {}
+output_dir: .demiurge-tts
+media_type: audio/mpeg
+api_key: null
+api_key_env: DEMIURGE_MINIMAX_API_KEY
+group_id: null
+group_id_env: DEMIURGE_MINIMAX_GROUP_ID

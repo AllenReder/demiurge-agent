@@ -33,44 +33,49 @@ def process(ctx):
     ctx.output.send_text(ctx.output.response_text)
 ```
 
-## Declare the Slot in `agent/slots.yaml`
+## Declare the Slot Manifest
 
-Add metadata and pipeline placement in the core's single slot graph:
+Create `slot.yaml` next to `module.py`:
 
 ```yaml
-version: 2
-slots:
-  input:
-    style_hint:
-      failure: soft
-      capabilities: []
-      description: "Adds a current-turn style hint."
-pipelines:
-  input:
-    serial:
-      - style_hint
-      - base_input
-    parallel: []
+entrypoint: module:process
+failure_policy: soft
+capabilities: []
+description: "Adds a current-turn style hint."
 ```
 
-Use `failure: hard` only when the turn should fail if the slot fails. Handler
-entrypoints default to `agent/<phase>/<slot_id>/module.py:process`; use `run:`
-only when the function lives elsewhere.
+Use `failure_policy: hard` only when the turn should fail if the slot fails.
+Handler entrypoints default to `module:process`; use `entrypoint` only when the
+function lives elsewhere.
 
-Output pipeline entries use the same file:
+## Add the Slot to `agent/pipelines.yaml`
+
+Input slots run in the order declared by the input pipeline:
 
 ```yaml
-slots:
-  output:
-    artifact_writer:
-      failure: soft
-      capabilities: [fs.write]
-pipelines:
-  output:
-    serial:
-      - base_output
-    parallel:
-      - artifact_writer
+schema_version: 1
+bootstrap:
+  serial: []
+input:
+  serial:
+    - style_hint
+    - base_input
+  parallel: []
+output:
+  serial:
+    - base_output
+  parallel: []
+```
+
+For output slots, add the output slot id under `output.serial` or
+`output.parallel`:
+
+```yaml
+output:
+  serial:
+    - base_output
+  parallel:
+    - artifact_writer
 ```
 
 ## Verify

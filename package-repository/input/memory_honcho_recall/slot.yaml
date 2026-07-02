@@ -1,0 +1,8 @@
+capabilities:
+- fs.read
+- fs.write
+- network.fetch
+description: Injects relevant Honcho memory context before the model request.
+entrypoint: module:process
+failure_policy: soft
+history_policy: transient

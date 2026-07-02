@@ -34,12 +34,8 @@ def _manager(app) -> PackageManager:
     return PackageManager(version_store=app.version_store, repository=repositories)
 
 
-def _slots_yaml(core_path) -> dict:
-    return yaml.safe_load((core_path / "agent" / "slots.yaml").read_text(encoding="utf-8"))
-
-
 def _pipeline(core_path, phase: str) -> dict:
-    return _slots_yaml(core_path)["pipelines"][phase]
+    return yaml.safe_load((core_path / "agent" / "pipelines.yaml").read_text(encoding="utf-8"))[phase]
 
 
 class _RecordingProvider:
@@ -191,9 +187,9 @@ def test_builtin_repository_lists_memory_honcho_package():
         "honcho_conclude_tool",
         "memory_honcho_skill",
     ]
-    assert package.components[1].pipeline == {"after": "session_context"}
-    assert package.components[2].pipeline == {"group": "serial", "before": "base_input"}
-    assert package.components[3].pipeline == {"group": "parallel"}
+    assert package.components[1].pipeline == {"group": "serial", "append": True}
+    assert package.components[2].pipeline == {"group": "serial", "append": True}
+    assert package.components[3].pipeline == {"group": "parallel", "append": True}
     assert all(component.when == {"enable_tools": True} for component in package.components[4:9])
 
 
@@ -215,9 +211,9 @@ def test_install_and_uninstall_memory_honcho_preserves_data(tmp_path):
     assert (core_path / "agent" / "input" / "memory_honcho_recall" / "module.py").exists()
     assert (core_path / "agent" / "output" / "memory_honcho_sync" / "module.py").exists()
     assert (core_path / "agent" / "skills" / "memory_honcho" / "SKILL.md").exists()
-    assert (core_path / "agent" / "bootstrap" / "memory_honcho" / "config.yaml").exists()
-    assert (core_path / "agent" / "input" / "memory_honcho_recall" / "config.yaml").exists()
-    assert (core_path / "agent" / "output" / "memory_honcho_sync" / "config.yaml").exists()
+    assert not (core_path / "agent" / "bootstrap" / "memory_honcho" / "config.yaml").exists()
+    assert not (core_path / "agent" / "input" / "memory_honcho_recall" / "config.yaml").exists()
+    assert not (core_path / "agent" / "output" / "memory_honcho_sync" / "config.yaml").exists()
     for tool in HONCHO_TOOLS:
         assert (core_path / "agent" / "tools" / tool / "module.py").exists()
 
@@ -230,15 +226,13 @@ def test_install_and_uninstall_memory_honcho_preserves_data(tmp_path):
     assert registry["installed"][0]["options"]["api_key"] == "<redacted>"
 
     assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context", "memory_honcho"]
-    assert _pipeline(core_path, "input") == {"serial": ["memory_honcho_recall", "base_input"], "parallel": []}
+    assert _pipeline(core_path, "input") == {"serial": ["base_input", "memory_honcho_recall"], "parallel": []}
     assert _pipeline(core_path, "output") == {"serial": ["base_output"], "parallel": ["memory_honcho_sync"]}
 
     conclude_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_conclude" / "tool.yaml").read_text())
     search_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_search" / "tool.yaml").read_text())
     assert conclude_slot["approval_policy"] == "prompt"
-    assert conclude_slot["failure_policy"] == "soft"
     assert search_slot["approval_policy"] == "auto"
-    assert search_slot["failure_policy"] == "soft"
     assert search_slot["risk"] == "medium"
     assert search_slot["display_policy"] == "summary"
     assert search_slot["model_output_policy"] == "content"

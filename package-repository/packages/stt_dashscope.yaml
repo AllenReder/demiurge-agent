@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 1
 id: stt_dashscope
 name: DashScope STT
 summary: Transcribe voice and audio attachments with Alibaba Cloud Model Studio before
@@ -35,26 +35,16 @@ options:
   description: Ask DashScope to normalize recognized numbers, dates, and similar spoken
     text.
   default: true
-config_defaults: {}
 capabilities:
 - network.fetch
-slots:
+components:
 - id: stt_input
+  kind: input
   source: stt_dashscope
   target: agent/input/speech_to_text
   pipeline:
     group: serial
-    before: base_input
-  phase: input
-  metadata:
-    entrypoint: module:process
-    history_policy: persist
-    failure_policy: soft
-    description: Transcribe voice/audio attachments with DashScope STT and add the
-      transcript to the user prompt.
-    capabilities:
-    - network.fetch
-files:
+    append: true
 - id: stt_common_lib
   kind: lib
   source: stt_common
@@ -64,34 +54,7 @@ files:
   source: stt_dashscope
   target: agent/lib/stt_dashscope
   config:
-    provider: stt_dashscope
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    endpoint: /chat/completions
-    model: qwen3-asr-flash
     api_key: ${options.api_key}
-    api_key_env: DEMIURGE_DASHSCOPE_API_KEY
-    fallback_envs:
-    - DASHSCOPE_API_KEY
     language: ${options.language}
     enable_itn: ${options.enable_itn}
     include_metadata: ${options.include_metadata}
-    transcript_label: Voice message transcript
-    transcription_instruction: Transcribe the attached audio into text. Return only
-      the transcript.
-    max_audio_mb: 7
-    max_audio_seconds: 1800
-    allowed_mime_types:
-    - audio/aac
-    - audio/flac
-    - audio/m4a
-    - audio/mp3
-    - audio/mpeg
-    - audio/mp4
-    - audio/ogg
-    - audio/opus
-    - audio/wav
-    - audio/webm
-    - audio/x-m4a
-    - audio/x-wav
-    - video/mp4
-    - video/webm

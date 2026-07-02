@@ -38,7 +38,7 @@ def execute(ctx, args):
 ```
 
 Authored tools are model-callable actions executed through the host tool
-runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
+runtime. They are not Agent Slots and are not listed in `agent/pipelines.yaml`.
 
 ## Built-In Tools
 

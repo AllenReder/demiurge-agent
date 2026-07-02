@@ -78,27 +78,6 @@ def _write_slot(root, rel_path, text):
     parts = path.relative_to(root).parts
     if len(parts) == 5 and parts[1] == "agent" and parts[2] == "tools" and parts[4] == "slot.yaml":
         path = path.with_name("tool.yaml")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return
-    if len(parts) == 5 and parts[1] == "agent" and parts[2] in {"bootstrap", "input", "output"} and parts[4] == "slot.yaml":
-        core_id, _, phase, slot_id, _ = parts
-        raw = yaml.safe_load(text) or {}
-        declaration = {}
-        entrypoint = raw.get("entrypoint")
-        if entrypoint and entrypoint != "module:process":
-            declaration["run"] = str(entrypoint)
-        if raw.get("description") is not None:
-            declaration["description"] = str(raw.get("description") or "")
-        declaration["failure"] = str(raw.get("failure") or raw.get("failure_policy") or "soft")
-        declaration["capabilities"] = [str(item) for item in (raw.get("capabilities") or [])]
-        for key in ("input_schema", "timeout_seconds", "default_placement", "history_policy"):
-            if raw.get(key) is not None:
-                declaration[key] = raw[key]
-        slots = _load_slots_yaml(root, core_id)
-        slots["slots"].setdefault(phase, {})[slot_id] = declaration
-        _write_slots_yaml(root, core_id, slots)
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
@@ -106,28 +85,25 @@ def _write_slot(root, rel_path, text):
 def _write_pipeline(root, phase, *, serial=None, parallel=None, core_id="assistant"):
     serial = serial or []
     parallel = parallel or []
-    slots = _load_slots_yaml(root, core_id)
-    slots["pipelines"][phase] = {"serial": list(serial)}
+    pipelines = _load_pipelines_yaml(root, core_id)
+    pipelines[phase] = {"serial": list(serial)}
     if phase != "bootstrap":
-        slots["pipelines"][phase]["parallel"] = list(parallel)
-    _write_slots_yaml(root, core_id, slots)
+        pipelines[phase]["parallel"] = list(parallel)
+    _write_pipelines_yaml(root, core_id, pipelines)
 
 
-def _load_slots_yaml(root, core_id="assistant"):
-    path = root / core_id / "agent" / "slots.yaml"
+def _load_pipelines_yaml(root, core_id="assistant"):
+    path = root / core_id / "agent" / "pipelines.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else None
     data = raw if isinstance(raw, dict) else {}
-    data.setdefault("version", 2)
-    data.setdefault("slots", {})
-    data.setdefault("pipelines", {})
+    data.setdefault("schema_version", 1)
     for phase in ("bootstrap", "input", "output"):
-        data["slots"].setdefault(phase, {})
-        data["pipelines"].setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
+        data.setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
     return data
 
 
-def _write_slots_yaml(root, core_id, data):
-    path = root / core_id / "agent" / "slots.yaml"
+def _write_pipelines_yaml(root, core_id, data):
+    path = root / core_id / "agent" / "pipelines.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 

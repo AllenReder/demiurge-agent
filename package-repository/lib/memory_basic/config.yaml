@@ -1,0 +1,6 @@
+storage:
+  relative_to: core_root
+  path: memory
+limits:
+  memory_chars: 2200
+  user_chars: 1375

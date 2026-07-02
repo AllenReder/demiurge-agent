@@ -1,0 +1,58 @@
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query string. Backend-supported operators such as site:,
+        filetype:, -term, and quoted phrases may work.
+    count:
+      type: integer
+      description: Number of results to return.
+      minimum: 1
+      maximum: 20
+      default: 5
+    country:
+      type: string
+      description: Optional 2-letter country code for regional results, such as US
+        or DE.
+    search_lang:
+      type: string
+      description: Optional Brave search language code, such as en, en-gb, zh-hans,
+        or zh-hant.
+    ui_lang:
+      type: string
+      description: Optional UI locale, such as en-US or de-DE.
+    safesearch:
+      type: string
+      enum:
+      - 'off'
+      - moderate
+      - strict
+      description: Optional safe search level.
+    freshness:
+      type: string
+      enum:
+      - pd
+      - pw
+      - pm
+      - py
+      description: Optional time filter, using Brave values pd, pw, pm, or py.
+    date_after:
+      type: string
+      description: Optional YYYY-MM-DD start date. Must be paired with date_before.
+    date_before:
+      type: string
+      description: Optional YYYY-MM-DD end date. Must be paired with date_after.
+  required:
+  - query
+  additionalProperties: false
+risk: medium
+capabilities:
+- network.fetch
+approval_policy: prompt
+description: Search the web using Brave Search. Returns structured web results with
+  titles, URLs, and snippets.
+entrypoint: module:execute
+display_policy: summary
+capability: network.fetch
+model_output_policy: content

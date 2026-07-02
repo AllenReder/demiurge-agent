@@ -7,16 +7,6 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "storage": {
-        "relative_to": "core_root",
-        "path": "context/reseed.md",
-    },
-    "mode": "explicit",
-    "max_chars": 1800,
-    "notice": False,
-}
-
 _THREAT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"ignore\s+(?:\w+\s+){0,8}(previous|all|above|prior)\s+(?:\w+\s+){0,8}instructions", re.I), "prompt_injection"),
     (re.compile(r"disregard\s+(?:\w+\s+){0,8}(your|all|any)\s+(?:\w+\s+){0,8}(instructions|rules|guidelines)", re.I), "disregard_rules"),
@@ -84,7 +74,7 @@ class ContextReseedStore:
 
 def load_reseed_config(slot_file: str | Path) -> dict[str, Any]:
     core_root = resolve_core_root(slot_file)
-    config = _deep_merge(DEFAULT_CONFIG, _load_yaml_mapping(core_root / "agent" / "lib" / "context_reseed" / "config.yaml"))
+    config = _load_required_yaml_mapping(core_root / "agent" / "lib" / "context_reseed" / "config.yaml")
     config = _deep_merge(config, _load_yaml_mapping(Path(slot_file).with_name("config.yaml")))
     config["core_root"] = str(core_root)
     return config
@@ -187,6 +177,15 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
         return {}
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return dict(loaded) if isinstance(loaded, Mapping) else {}
+
+
+def _load_required_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError(f"required context_reseed config not found: {path}")
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"context_reseed config must be a mapping: {path}")
+    return dict(loaded)
 
 
 def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:

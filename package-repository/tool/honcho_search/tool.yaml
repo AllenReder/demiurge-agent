@@ -1,0 +1,22 @@
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: What to search for in Honcho memory.
+    peer:
+      type: string
+      description: Peer to query. Use user, ai, or an explicit Honcho peer id.
+  required:
+  - query
+  additionalProperties: false
+risk: medium
+capabilities:
+- network.fetch
+approval_policy: auto
+description: Search Honcho memory for raw context about a peer. Returns excerpts and
+  peer-card facts without LLM synthesis.
+entrypoint: module:execute
+display_policy: summary
+capability: network.fetch
+model_output_policy: content

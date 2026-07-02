@@ -1,0 +1,23 @@
+input_schema:
+  type: object
+  properties:
+    conclusion:
+      type: string
+      description: Factual statement to persist as a Honcho conclusion.
+    delete_id:
+      type: string
+      description: Conclusion id to delete for PII removal or correction.
+    peer:
+      type: string
+      description: Peer to update. Use user, ai, or an explicit Honcho peer id.
+  additionalProperties: false
+risk: medium
+capabilities:
+- network.fetch
+approval_policy: prompt
+description: Write or delete a persistent Honcho conclusion about a peer. Pass exactly
+  one of conclusion or delete_id.
+entrypoint: module:execute
+display_policy: summary
+capability: network.fetch
+model_output_policy: content

@@ -1,0 +1,9 @@
+provider: web_search_brave
+base_url: https://api.search.brave.com/res/v1/web/search
+timeout_seconds: 30
+default_count: 5
+api_key: null
+api_key_env: DEMIURGE_BRAVE_SEARCH_API_KEY
+fallback_envs:
+- BRAVE_SEARCH_API_KEY
+- BRAVE_API_KEY

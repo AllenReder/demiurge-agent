@@ -1,0 +1,6 @@
+capabilities:
+- fs.write
+description: Writes a bounded continuity note after assistant output for future sessions.
+entrypoint: module:process
+failure_policy: soft
+history_policy: transient

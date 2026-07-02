@@ -82,7 +82,7 @@ assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
-    ├── slots.yaml
+    ├── pipelines.yaml
     ├── bootstrap/
     ├── input/
     ├── output/

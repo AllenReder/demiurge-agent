@@ -23,16 +23,6 @@ except ImportError:  # pragma: no cover - Unix fallback
 
 
 ENTRY_DELIMITER = "\n§\n"
-DEFAULT_CONFIG: dict[str, Any] = {
-    "storage": {
-        "relative_to": "core_root",
-        "path": "memory",
-    },
-    "limits": {
-        "memory_chars": 2200,
-        "user_chars": 1375,
-    },
-}
 TARGET_FILENAMES = {
     "memory": "MEMORY.md",
     "user": "USER.md",
@@ -71,7 +61,7 @@ def resolve_core_root(slot_file: str | Path) -> Path:
 
 def load_memory_config(slot_file: str | Path) -> dict[str, Any]:
     core_root = resolve_core_root(slot_file)
-    config = _deep_merge(DEFAULT_CONFIG, _load_yaml_mapping(core_root / "agent" / "lib" / "memory_basic" / "config.yaml"))
+    config = _load_required_yaml_mapping(core_root / "agent" / "lib" / "memory_basic" / "config.yaml")
     config = _deep_merge(config, _load_yaml_mapping(Path(slot_file).with_name("config.yaml")))
     config["core_root"] = str(core_root)
     return config
@@ -529,6 +519,15 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
         return {}
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return dict(loaded) if isinstance(loaded, Mapping) else {}
+
+
+def _load_required_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError(f"required memory config not found: {path}")
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"memory config must be a mapping: {path}")
+    return dict(loaded)
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:

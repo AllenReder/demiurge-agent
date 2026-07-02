@@ -37,40 +37,32 @@ background-task state is not migrated. In-progress subprocess work found after
 restart must be marked `lost` or `interrupted`; the host must not replay dangerous
 effects after a crash.
 
-## Agent Slot v2
+## Agent Slot Layout
 
-`agent/slots.yaml` is the single declaration and pipeline graph for bootstrap,
-input, and output slots:
+Each bootstrap, input, and output slot owns a `slot.yaml` manifest in its slot
+directory. `agent/pipelines.yaml` is the single phase ordering graph:
 
 ```yaml
-version: 2
-slots:
-  bootstrap: {}
-  input:
-    base_input:
-      failure: hard
-      capabilities: []
-  output:
-    base_output:
-      failure: soft
-      capabilities: []
-pipelines:
-  bootstrap:
-    serial: []
-  input:
-    serial: [base_input]
-    parallel: []
-  output:
-    serial: [base_output]
-    parallel: []
+schema_version: 1
+bootstrap:
+  serial: []
+input:
+  serial: [base_input]
+  parallel: []
+output:
+  serial: [base_output]
+  parallel: []
 ```
 
-Slot code stays in typed folders:
+Slot code and metadata stay in typed folders:
 
 ```text
 agent/bootstrap/<slot_id>/module.py
+agent/bootstrap/<slot_id>/slot.yaml
 agent/input/<slot_id>/module.py
+agent/input/<slot_id>/slot.yaml
 agent/output/<slot_id>/module.py
+agent/output/<slot_id>/slot.yaml
 ```
 
 `base_input` and `base_output` are ordinary editable seed slots. The host does

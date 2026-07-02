@@ -26,8 +26,6 @@ from demiurge.ui_gateway import TuiInteractionBridge
 
 
 def _manager(app, repository_root: Path | None = None) -> PackageManager:
-    if repository_root is not None:
-        _upgrade_test_repository_to_v3(repository_root)
     configs = (
         {"builtin": {"type": "builtin"}}
         if repository_root is None
@@ -37,88 +35,12 @@ def _manager(app, repository_root: Path | None = None) -> PackageManager:
     return PackageManager(version_store=app.version_store, repository=repositories)
 
 
-def _slots_yaml(core_path: Path) -> dict:
-    return yaml.safe_load((core_path / "agent" / "slots.yaml").read_text(encoding="utf-8"))
-
-
 def _pipeline(core_path: Path, phase: str) -> dict:
-    return _slots_yaml(core_path)["pipelines"][phase]
+    return yaml.safe_load((core_path / "agent" / "pipelines.yaml").read_text(encoding="utf-8"))[phase]
 
 
 def _slot_declaration(core_path: Path, phase: str, slot_id: str) -> dict:
-    return _slots_yaml(core_path)["slots"][phase][slot_id]
-
-
-def _upgrade_test_repository_to_v3(root: Path) -> None:
-    packages = root / "packages"
-    if not packages.exists():
-        return
-    metadata_keys = {
-        "entrypoint",
-        "description",
-        "input_schema",
-        "failure",
-        "failure_policy",
-        "timeout_seconds",
-        "default_placement",
-        "history_policy",
-        "capability",
-        "risk",
-        "approval_policy",
-        "display_policy",
-        "model_output_policy",
-        "capabilities",
-    }
-    for path in sorted(packages.glob("*.yaml")):
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if raw.get("schema_version") == 3 and "components" not in raw:
-            continue
-        components = raw.pop("components", [])
-        slots: list[dict] = []
-        tools: list[dict] = []
-        files: list[dict] = []
-        for component in components:
-            kind = component["kind"]
-            item = {key: value for key, value in component.items() if key != "kind"}
-            metadata_path = root / kind / component["source"] / "slot.yaml"
-            if metadata_path.exists():
-                metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-                item["metadata"] = {key: metadata[key] for key in metadata_keys if key in metadata}
-            if kind in {"bootstrap", "input", "output"}:
-                item["phase"] = kind
-                slots.append(item)
-            elif kind == "tool":
-                tools.append(item)
-            else:
-                item["kind"] = kind
-                files.append(item)
-        raw["schema_version"] = 3
-        if slots:
-            raw["slots"] = slots
-        if tools:
-            raw["tools"] = tools
-        if files:
-            raw["files"] = files
-        raw.setdefault("config_defaults", {})
-        raw.setdefault("capabilities", [])
-        ordered = {}
-        for key in [
-            "schema_version",
-            "id",
-            "name",
-            "summary",
-            "tags",
-            "manual_dependencies",
-            "options",
-            "config_defaults",
-            "capabilities",
-            "slots",
-            "tools",
-            "files",
-        ]:
-            if key in raw:
-                ordered[key] = raw[key]
-        path.write_text(yaml.safe_dump(ordered, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return yaml.safe_load((core_path / "agent" / phase / slot_id / "slot.yaml").read_text(encoding="utf-8"))
 
 
 class _FakeHTTPResponse:
@@ -511,7 +433,7 @@ def test_builtin_repository_lists_provider_stt_packages(package_id, provider):
     assert package.components[1].source == f"stt_{provider}"
     assert package.components[2].source == f"stt_{provider}"
     assert package.components[2].target == "agent/input/speech_to_text"
-    assert package.components[2].pipeline == {"group": "serial", "before": "base_input"}
+    assert package.components[2].pipeline == {"group": "serial", "append": True}
     assert len(package.components) == 3
     assert {component.kind for component in package.components} == {"lib", "input"}
 
@@ -676,16 +598,19 @@ def test_web_search_provider_packages_are_mutually_exclusive_by_tool_target(tmp_
 def test_repository_rejects_component_source_escape(tmp_path):
     root = tmp_path / "repository"
     (root / "packages").mkdir(parents=True)
-    (root / "repository.yaml").write_text("id: test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: test\n", encoding="utf-8")
     (root / "packages" / "bad.yaml").write_text(
+        "schema_version: 1\n"
         "id: bad\n"
         "components:\n"
         "  - id: bad\n"
         "    kind: output\n"
-        "    source: ../bad\n",
+        "    source: ../bad\n"
+        "    pipeline:\n"
+        "      group: serial\n"
+        "      append: true\n",
         encoding="utf-8",
     )
-    _upgrade_test_repository_to_v3(root)
 
     with pytest.raises(PackageRepositoryError, match="component source must stay inside"):
         PackageRepository.load(root)
@@ -698,18 +623,41 @@ def test_repository_rejects_top_level_component_source_symlink(tmp_path):
     real.mkdir(parents=True)
     (real / "module.py").write_text("# real\n", encoding="utf-8")
     (root / "output" / "voice_link").symlink_to(real, target_is_directory=True)
-    (root / "repository.yaml").write_text("id: test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: test\n", encoding="utf-8")
     (root / "packages" / "bad.yaml").write_text(
+        "schema_version: 1\n"
         "id: bad\n"
         "components:\n"
         "  - id: bad\n"
         "    kind: output\n"
-        "    source: voice_link\n",
+        "    source: voice_link\n"
+        "    pipeline:\n"
+        "      group: serial\n"
+        "      append: true\n",
         encoding="utf-8",
     )
-    _upgrade_test_repository_to_v3(root)
 
     with pytest.raises(PackageRepositoryError, match="component source cannot be a symlink"):
+        PackageRepository.load(root)
+
+
+def test_repository_rejects_directory_component_file_source(tmp_path):
+    root = tmp_path / "repository"
+    (root / "packages").mkdir(parents=True)
+    (root / "lib").mkdir()
+    (root / "lib" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: test\n", encoding="utf-8")
+    (root / "packages" / "bad.yaml").write_text(
+        "schema_version: 1\n"
+        "id: bad\n"
+        "components:\n"
+        "  - id: helper\n"
+        "    kind: lib\n"
+        "    source: helper.py\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PackageRepositoryError, match="lib component source must be a directory"):
         PackageRepository.load(root)
 
 
@@ -755,7 +703,7 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert _pipeline(core_path, "output")["serial"] == ["base_output"]
     assert _pipeline(core_path, "output")["parallel"] == ["tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
-    assert registry["schema_version"] == 3
+    assert registry["schema_version"] == 1
     assert registry["installed"][0]["package_id"] == "tts_minimax"
     assert registry["installed"][0]["repository_alias"] == "builtin"
     assert registry["installed"][0]["repository_id"] == "builtin"
@@ -878,7 +826,7 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
         assert lib_config["api_key"] is None
     input_slot = _slot_declaration(core_path, "input", "speech_to_text")
     assert input_slot["capabilities"] == ["network.fetch"]
-    assert _pipeline(core_path, "input")["serial"] == ["speech_to_text", "base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["base_input", "speech_to_text"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["installed"][0]["package_id"] == package_id
     assert registry["installed"][0]["repository_alias"] == "builtin"
@@ -975,7 +923,7 @@ def test_install_conversation_style_updates_input_pipeline_and_skill(tmp_path):
     assert (core_path / "agent" / "skills" / "conversation_style" / "SKILL.md").exists()
     config = yaml.safe_load((core_path / "agent" / "input" / "conversation_style" / "config.yaml").read_text())
     assert config == {"style": "technical", "channel_hint": False, "activate_skill": True}
-    assert _pipeline(core_path, "input")["serial"] == ["conversation_style", "base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["base_input", "conversation_style"]
 
     removed = manager.uninstall(core_id="assistant", package_id="conversation_style")
 
@@ -1139,12 +1087,11 @@ def test_bootstrap_pipeline_after_ordering(tmp_path):
 
 def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
     repository_root = tmp_path / "repository"
-    _write_bootstrap_repository(repository_root)
+    _write_invalid_bootstrap_repository(repository_root)
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    manager = _manager(app, repository_root)
 
-    with pytest.raises(PackageOperationError, match="invalid bootstrap pipeline group: parallel"):
-        manager.preview_install(core_id="assistant", package_id="bootstrap_parallel")
+    with pytest.raises(PackageRepositoryError, match="pipeline.group"):
+        _manager(app, repository_root)
 
     core_path = app.version_store.active_core_path("assistant")
     assert not (core_path / "agent" / "bootstrap" / "parallel_session").exists()
@@ -1244,8 +1191,9 @@ def test_manifest_file_package_rejects_invalid_final_manifest(tmp_path):
     (repository_root / "packages").mkdir(parents=True)
     (repository_root / "mcp").mkdir()
     (repository_root / "mcp" / "bad.yaml").write_text("transport: stdio\n", encoding="utf-8")
-    (repository_root / "repository.yaml").write_text("id: bad_manifest\nname: Bad\n", encoding="utf-8")
+    (repository_root / "repository.yaml").write_text("schema_version: 1\nid: bad_manifest\nname: Bad\n", encoding="utf-8")
     (repository_root / "packages" / "bad.yaml").write_text(
+        "schema_version: 1\n"
         "id: bad\n"
         "components:\n"
         "  - id: bad\n"
@@ -1277,8 +1225,9 @@ def test_manifest_file_package_rejects_non_yaml_or_directory_source(tmp_path, so
         source_path.mkdir()
     else:
         source_path.write_text("transport: stdio\ncommand: node\n", encoding="utf-8")
-    (repository_root / "repository.yaml").write_text("id: bad_source\nname: Bad Source\n", encoding="utf-8")
+    (repository_root / "repository.yaml").write_text("schema_version: 1\nid: bad_source\nname: Bad Source\n", encoding="utf-8")
     (repository_root / "packages" / "bad.yaml").write_text(
+        "schema_version: 1\n"
         "id: bad\n"
         "components:\n"
         "  - id: bad\n"
@@ -1296,6 +1245,7 @@ def test_manifest_file_package_rejects_target_outside_slot_root(tmp_path):
     repository_root = tmp_path / "repository"
     _write_manifest_file_repository(repository_root)
     (repository_root / "packages" / "docs_mcp.yaml").write_text(
+        "schema_version: 1\n"
         "id: docs_mcp\n"
         "components:\n"
         "  - id: docs\n"
@@ -2627,9 +2577,10 @@ def _write_test_repository(root: Path) -> None:
             encoding="utf-8",
         )
         (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
-    (root / "repository.yaml").write_text("id: test_repository\nname: Test\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: test_repository\nname: Test\n", encoding="utf-8")
     for package_id, source in (("first", "first"), ("second", "second")):
         (root / "packages" / f"{package_id}.yaml").write_text(
+            "schema_version: 1\n"
             f"id: {package_id}\n"
             "tags:\n"
             "  - tts\n"
@@ -2643,7 +2594,6 @@ def _write_test_repository(root: Path) -> None:
             "      after: base_output\n",
             encoding="utf-8",
         )
-    _upgrade_test_repository_to_v3(root)
 
 
 def _write_shared_lib_repository(root: Path) -> None:
@@ -2651,9 +2601,10 @@ def _write_shared_lib_repository(root: Path) -> None:
     lib.mkdir(parents=True)
     (lib / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "packages").mkdir(parents=True)
-    (root / "repository.yaml").write_text("id: shared_repository\nname: Shared\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: shared_repository\nname: Shared\n", encoding="utf-8")
     for package_id in ("first", "second"):
         (root / "packages" / f"{package_id}.yaml").write_text(
+            "schema_version: 1\n"
             f"id: {package_id}\n"
             "components:\n"
             "  - id: shared\n"
@@ -2662,7 +2613,6 @@ def _write_shared_lib_repository(root: Path) -> None:
             "    target: agent/lib/shared\n",
             encoding="utf-8",
         )
-    _upgrade_test_repository_to_v3(root)
 
 
 def _write_bootstrap_repository(root: Path) -> None:
@@ -2679,8 +2629,10 @@ def _write_bootstrap_repository(root: Path) -> None:
             encoding="utf-8",
         )
         (slot / "module.py").write_text("def process(ctx):\n    ctx.bootstrap.add('test bootstrap')\n", encoding="utf-8")
-    (root / "repository.yaml").write_text("id: bootstrap_repository\nname: Bootstrap\n", encoding="utf-8")
+    (root / "bootstrap" / "before_session" / "config.yaml").write_text("label: default\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: bootstrap_repository\nname: Bootstrap\n", encoding="utf-8")
     (root / "packages" / "bootstrap_before.yaml").write_text(
+        "schema_version: 1\n"
         "id: bootstrap_before\n"
         "tags:\n"
         "  - bootstrap\n"
@@ -2689,12 +2641,14 @@ def _write_bootstrap_repository(root: Path) -> None:
         "    kind: bootstrap\n"
         "    source: before_session\n"
         "    pipeline:\n"
+        "      group: serial\n"
         "      before: session_context\n"
         "    config:\n"
         "      label: before\n",
         encoding="utf-8",
     )
     (root / "packages" / "bootstrap_after.yaml").write_text(
+        "schema_version: 1\n"
         "id: bootstrap_after\n"
         "tags:\n"
         "  - bootstrap\n"
@@ -2707,7 +2661,22 @@ def _write_bootstrap_repository(root: Path) -> None:
         "      after: session_context\n",
         encoding="utf-8",
     )
+def _write_invalid_bootstrap_repository(root: Path) -> None:
+    (root / "packages").mkdir(parents=True)
+    slot = root / "bootstrap" / "parallel_session"
+    slot.mkdir(parents=True)
+    (slot / "slot.yaml").write_text(
+        "entrypoint: module:process\n"
+        "description: test bootstrap\n"
+        "failure_policy: soft\n"
+        "capabilities:\n"
+        "  []\n",
+        encoding="utf-8",
+    )
+    (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: invalid_bootstrap_repository\nname: Invalid Bootstrap\n", encoding="utf-8")
     (root / "packages" / "bootstrap_parallel.yaml").write_text(
+        "schema_version: 1\n"
         "id: bootstrap_parallel\n"
         "tags:\n"
         "  - bootstrap\n"
@@ -2719,12 +2688,11 @@ def _write_bootstrap_repository(root: Path) -> None:
         "      group: parallel\n",
         encoding="utf-8",
     )
-    _upgrade_test_repository_to_v3(root)
 
 
 def _write_manifest_file_repository(root: Path) -> None:
     (root / "packages").mkdir(parents=True)
-    (root / "repository.yaml").write_text("id: manifest_repository\nname: Manifest\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: manifest_repository\nname: Manifest\n", encoding="utf-8")
     (root / "mcp").mkdir()
     (root / "mcp" / "docs.yaml").write_text(
         "transport: streamable_http\n",
@@ -2733,6 +2701,7 @@ def _write_manifest_file_repository(root: Path) -> None:
     (root / "schedule").mkdir()
     (root / "schedule" / "daily.yaml").write_text("{}\n", encoding="utf-8")
     (root / "packages" / "docs_mcp.yaml").write_text(
+        "schema_version: 1\n"
         "id: docs_mcp\n"
         "options:\n"
         "  - id: url\n"
@@ -2748,6 +2717,7 @@ def _write_manifest_file_repository(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "packages" / "daily_schedule.yaml").write_text(
+        "schema_version: 1\n"
         "id: daily_schedule\n"
         "options:\n"
         "  - id: cron\n"
@@ -2767,7 +2737,6 @@ def _write_manifest_file_repository(root: Path) -> None:
         "      prompt: ${options.prompt}\n",
         encoding="utf-8",
     )
-    _upgrade_test_repository_to_v3(root)
 
 
 class _FakePrompt:
@@ -2833,9 +2802,11 @@ def _write_option_repository(root: Path, *, required_default: bool) -> None:
         encoding="utf-8",
     )
     (slot / "module.py").write_text("def process(ctx):\n    pass\n", encoding="utf-8")
-    (root / "repository.yaml").write_text("id: options_repository\nname: Options\n", encoding="utf-8")
+    (slot / "config.yaml").write_text("voice: alto\n", encoding="utf-8")
+    (root / "repository.yaml").write_text("schema_version: 1\nid: options_repository\nname: Options\n", encoding="utf-8")
     default_line = "    default: alto\n" if required_default else ""
     (root / "packages" / "voice.yaml").write_text(
+        "schema_version: 1\n"
         "id: voice\n"
         "tags:\n"
         "  - voice\n"
@@ -2860,6 +2831,5 @@ def _write_option_repository(root: Path, *, required_default: bool) -> None:
         "      after: base_output\n"
         "    config:\n"
         "      voice: ${options.voice}\n",
-        encoding="utf-8",
+            encoding="utf-8",
     )
-    _upgrade_test_repository_to_v3(root)

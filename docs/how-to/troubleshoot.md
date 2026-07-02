@@ -49,7 +49,8 @@ uv run demiurge init --check
 Then check the affected files:
 
 - `agent.yaml`
-- `agent/slots.yaml`
+- `agent/pipelines.yaml`
+- the slot `slot.yaml`
 - the slot `module.py`
 - authored tool `tool.yaml` when a tool fails to load
 
