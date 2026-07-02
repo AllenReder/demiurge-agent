@@ -56,17 +56,23 @@ fake provider 不需要 API key，适合先验证 runtime。短启动路径见
 
 ## Agent Slots 如何工作
 
-Agent Slots 让 package 接入 input/output 行为，同时让 provider access、
+Agent Slots 通过安装 package 接入 bootstrap、input 和 output 行为，并由
+自定义代码控制 subagents 的调用与逻辑行为，同时让 provider access、
 approvals、delivery、promotion 和 rollback 继续由 Host 治理。
 
 <p>
-  <strong>Speech-to-text input</strong><br>
-  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+  <strong>Basic Memory System</strong><br>
+  <video src="https://github.com/user-attachments/assets/d5c98dae-74e5-452a-9f72-93a8c35b962b" controls muted playsinline width="100%"></video>
 </p>
 
 <p>
   <strong>Text-to-speech output</strong><br>
   <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
 </p>
 
 ## Core 结构

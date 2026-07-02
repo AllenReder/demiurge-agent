@@ -24,7 +24,8 @@ Slots are separate from the things they compose:
   libraries, and child cores together.
 
 Current Demiurge slots are bootstrap, input, and output slots. They let an Agent
-Core add session context, shape current-turn input, and handle final output.
+Core add session context, shape current-turn input, handle final output, and
+compose tools, skills, MCP, state, or other agents through governed interfaces.
 Future slot kinds should represent new governed interaction boundaries, not
 ordinary feature categories.
 

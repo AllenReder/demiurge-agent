@@ -57,17 +57,23 @@ for the short tutorial, then configure a provider or install packages from there
 
 ## How Agent Slots Work
 
-Agent Slots let packages attach input and output behavior while the host keeps
+Agent Slots let packages attach bootstrap, input, and output behavior, and let
+custom code control subagent calls and authored logic, while the host keeps
 provider access, approvals, delivery, promotion, and rollback under control.
 
 <p>
-  <strong>Speech-to-text input</strong><br>
-  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
+  <strong>Basic Memory System</strong><br>
+  <video src="https://github.com/user-attachments/assets/d5c98dae-74e5-452a-9f72-93a8c35b962b" controls muted playsinline width="100%"></video>
 </p>
 
 <p>
   <strong>Text-to-speech output</strong><br>
   <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
+</p>
+
+<p>
+  <strong>Speech-to-text input</strong><br>
+  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
 </p>
 
 ## Core Shape

@@ -364,6 +364,10 @@
   overflow: hidden;
 }
 
+.demoPanel--featured {
+  grid-column: 1 / -1;
+}
+
 .demoPanel video {
   aspect-ratio: 16 / 9;
   background: var(--demiurge-code-bg);

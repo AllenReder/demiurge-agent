@@ -23,7 +23,7 @@ type Copy = {
   pillars: Array<{title: string; body: string}>;
   demoTitle: string;
   demoBody: string;
-  demos: Array<{title: string; body: string; src: string; label: string}>;
+  demos: Array<{title: string; body: string; src: string; label: string; featured?: boolean}>;
   flowTitle: string;
   flowBody: string;
   flowItems: string[];
@@ -75,14 +75,15 @@ const copy: Record<string, Copy> = {
     ],
     demoTitle: 'How Agent Slots Work',
     demoBody:
-      'Input and output behavior can be installed as package-owned Agent Slots while the host keeps provider access, approvals, and delivery under control.',
+      'Packages attach bootstrap, input, and output behavior through Agent Slots. Custom code can control subagent calls and authored logic while the host keeps provider access, approvals, delivery, promotion, and rollback under control.',
     demos: [
       {
-        title: 'Speech-to-text input',
+        title: 'Basic Memory System',
         body:
-          'An STT package adds an input slot that turns voice into governed turn context without changing the host loop.',
-        src: '/media/slot-packages/stt-package-demo.mp4',
-        label: 'STT package Agent Slot demo',
+          'A memory package adds bootstrap context from local files before the turn runs, without moving memory ownership into the host harness.',
+        src: '/media/slot-packages/memory-basic-package-demo.mp4',
+        label: 'Memory package Agent Slot demo',
+        featured: true,
       },
       {
         title: 'Text-to-speech output',
@@ -90,6 +91,13 @@ const copy: Record<string, Copy> = {
           'A TTS package adds an output slot that renders spoken replies while delivery remains host-owned.',
         src: '/media/slot-packages/tts-package-demo.mp4',
         label: 'TTS package Agent Slot demo',
+      },
+      {
+        title: 'Speech-to-text input',
+        body:
+          'An STT package adds an input slot that turns voice into governed turn context without changing the host loop.',
+        src: '/media/slot-packages/stt-package-demo.mp4',
+        label: 'STT package Agent Slot demo',
       },
     ],
     flowTitle: 'How Slots fit the loop',
@@ -143,19 +151,26 @@ const copy: Record<string, Copy> = {
     ],
     demoTitle: 'Agent Slots 如何工作',
     demoBody:
-      'Input 和 output 行为可以作为 package-owned Agent Slots 安装；provider access、approvals 和 delivery 仍由 Host 治理。',
+      'Agent Slots 通过安装 package 接入 bootstrap、input 和 output 行为，并由自定义代码控制 subagents 的调用与逻辑行为，同时让 provider access、approvals、delivery、promotion 和 rollback 继续由 Host 治理。',
     demos: [
       {
-        title: 'Speech-to-text input',
-        body: 'STT package 添加 input slot，把语音转成受治理的 turn context，不需要改 host loop。',
-        src: '/media/slot-packages/stt-package-demo.mp4',
-        label: 'STT package Agent Slot 演示',
+        title: 'Basic Memory System',
+        body: 'Memory package 会在 turn 运行前从本地文件加入 bootstrap context，同时不把 memory ownership 移进 host harness。',
+        src: '/media/slot-packages/memory-basic-package-demo.mp4',
+        label: 'Memory package Agent Slot 演示',
+        featured: true,
       },
       {
         title: 'Text-to-speech output',
         body: 'TTS package 添加 output slot，把回复渲染成语音，同时 delivery 仍保持 host-owned。',
         src: '/media/slot-packages/tts-package-demo.mp4',
         label: 'TTS package Agent Slot 演示',
+      },
+      {
+        title: 'Speech-to-text input',
+        body: 'STT package 添加 input slot，把语音转成受治理的 turn context，不需要改 host loop。',
+        src: '/media/slot-packages/stt-package-demo.mp4',
+        label: 'STT package Agent Slot 演示',
       },
     ],
     flowTitle: 'Slots 如何进入 loop',
@@ -281,11 +296,11 @@ function BoundaryFlow() {
 function PackageDemoCard({
   demo,
 }: {
-  demo: {title: string; body: string; src: string; label: string};
+  demo: {title: string; body: string; src: string; label: string; featured?: boolean};
 }) {
   const videoUrl = useBaseUrl(demo.src);
   return (
-    <article className="demoPanel">
+    <article className={demo.featured ? 'demoPanel demoPanel--featured' : 'demoPanel'}>
       <video
         aria-label={demo.label}
         autoPlay

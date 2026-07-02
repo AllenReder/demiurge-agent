@@ -23,8 +23,9 @@ Slot 和它组合的对象是不同概念：
   和 child cores。
 
 当前 Demiurge slots 是 bootstrap、input 和 output slots。它们让 Agent Core 添加
-session context、塑造 current-turn input，并处理 final output。未来新的 slot kind
-应该代表新的受治理交互边界，而不是普通 feature category。
+session context、塑造 current-turn input、处理 final output，并通过受治理接口组合
+tools、skills、MCP、state 或其他 agents。未来新的 slot kind 应该代表新的受治理
+交互边界，而不是普通 feature category。
 
 这让 slots 成为自然的 evolution surface。Candidate Agent Core 可以用文件形式替换、
 重排或组合 slot behavior，而 host 仍把高风险效果留在稳定 contracts 后面。
