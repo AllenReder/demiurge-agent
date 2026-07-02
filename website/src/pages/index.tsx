@@ -10,7 +10,7 @@ type Copy = {
   subtitle: string;
   primary: string;
   secondary: string;
-  github: string;
+  tertiary: string;
   alpha: string;
   previewLabel: string;
   composeTitle: string;
@@ -34,12 +34,12 @@ type Copy = {
 const copy: Record<string, Copy> = {
   en: {
     badge: 'Alpha developer preview',
-    title: 'Build file-backed, self-evolving Agent Cores.',
+    title: 'Build self-evolving agents with Agent Slots.',
     subtitle:
-      'Demiurge runs local Agent Cores from ordinary files while the host owns provider calls, tools, approvals, delivery, promotion, and rollback.',
-    primary: 'Read the Manual',
+      'Demiurge uses Agent Slots to extend capability boundaries and logic design without changing the Host harness. File-backed Agent Cores can compose agents, state, tools, skills, and MCP while evolving under Host control.',
+    primary: 'Understand Agent Slots',
     secondary: 'Quick Start',
-    github: 'Agent Slots',
+    tertiary: 'Read the Manual',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
     previewLabel: 'agent slot loop',
@@ -50,12 +50,12 @@ const copy: Record<string, Copy> = {
     loopItems: ['Inbound', 'Bootstrap / input slots', 'Provider + tool loop', 'Output slots'],
     pillarsTitle: 'A runtime shaped around evolvable agent boundaries.',
     pillarsBody:
-      'Demiurge keeps feature behavior in Agent Core files and packages while the host owns the risky runtime machinery.',
+      'Demiurge keeps custom capability and logic design in Agent Core files and packages while the Host owns the risky runtime machinery.',
     pillars: [
       {
         title: 'Agent Slots',
         body:
-          'Slots define where Core-defined behavior enters the loop and what governed effects it may request.',
+          'Slots define where Core-authored behavior enters the loop and which governed effects it may request.',
       },
       {
         title: 'Package-composed capabilities',
@@ -70,7 +70,7 @@ const copy: Record<string, Copy> = {
       {
         title: 'Versionable Core files',
         body:
-          'Agent Cores stay readable, diffable, testable, and promotable as ordinary files.',
+          'Agent Cores stay readable, diffable, testable, promotable, and evolvable as ordinary files.',
       },
     ],
     demoTitle: 'How Agent Slots Work',
@@ -116,12 +116,12 @@ const copy: Record<string, Copy> = {
   },
   'zh-CN': {
     badge: 'Alpha 开发者预览',
-    title: '打造文件化、可自进化的 Agent Core',
+    title: '用 Agent Slots 构建可自进化 Agent',
     subtitle:
-      'Demiurge 从普通文件运行本地 Agent Core，同时由 Host 负责 provider calls、tools、approvals、delivery、promotion 和 rollback。',
-    primary: '阅读手册',
+      'Demiurge 使用 Agent Slots 拓展能力边界与逻辑设计，而不修改 Host harness。文件化的 Agent Core 可以组合 agents、state、tools、skills 和 MCP，并在 Host 控制下自我进化。',
+    primary: '理解 Agent Slots',
     secondary: '快速开始',
-    github: 'Agent Slots',
+    tertiary: '阅读手册',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
     previewLabel: 'agent slot loop',
     composeTitle: 'Slots 可以组合',
@@ -130,11 +130,11 @@ const copy: Record<string, Copy> = {
     governanceItems: ['approvals', 'delivery', 'rollback'],
     loopItems: ['Inbound', 'Bootstrap / input slots', 'Provider + tool loop', 'Output slots'],
     pillarsTitle: '围绕可演化 Agent 边界设计的 runtime。',
-    pillarsBody: 'Demiurge 把具体能力留在 Agent Core 文件和 packages 中，把高风险 runtime 机制留给 Host 治理。',
+    pillarsBody: 'Demiurge 把自定义能力和逻辑设计留在 Agent Core 文件和 packages 中，把高风险 runtime 机制留给 Host 治理。',
     pillars: [
       {
         title: 'Agent Slots',
-        body: 'Slot 定义 Core 定义的行为逻辑在哪里介入 loop，以及它可以请求哪些受治理的效果。',
+        body: 'Slot 定义 Core authored behavior 在哪里介入 loop，以及它可以请求哪些受治理的效果。',
       },
       {
         title: 'Package 组合能力',
@@ -146,7 +146,7 @@ const copy: Record<string, Copy> = {
       },
       {
         title: '可版本化 Core 文件',
-        body: 'Agent Core 作为普通文件保持可读、可 diff、可测试、可 promote。',
+        body: 'Agent Core 作为普通文件保持可读、可 diff、可测试、可 promote、可演化。',
       },
     ],
     demoTitle: 'Agent Slots 如何工作',
@@ -202,14 +202,14 @@ function HomepageHeader() {
           </Heading>
           <p className="hero__subtitle">{text.subtitle}</p>
           <div className="hero__actions">
-            <Link className="button button--lg heroButton heroButton--primary" to="/docs/">
+            <Link className="button button--lg heroButton heroButton--primary" to="/docs/explanation/agent-slots">
               {text.primary}
             </Link>
             <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/quick-start">
               {text.secondary}
             </Link>
-            <Link className="button button--lg heroButton heroButton--ghost" to="/docs/explanation/agent-slots">
-              {text.github}
+            <Link className="button button--lg heroButton heroButton--ghost" to="/docs/">
+              {text.tertiary}
             </Link>
           </div>
           <p className="hero__note">{text.alpha}</p>

@@ -2,16 +2,24 @@
 slug: /
 sidebar_position: 0
 title: Demiurge Manual
-description: User manual for installing Demiurge, starting the TUI, configuring providers, choosing workspaces, and authoring Agent Cores.
+description: User manual for installing Demiurge, configuring providers, choosing workspaces, and authoring self-evolving Agent Cores with Agent Slots.
 ---
 
 # Demiurge Manual
 
-Demiurge is an alpha agent framework for running file-backed Agent Cores under a
-host-owned runtime harness. The host owns sessions, turns, provider calls, tools,
-approvals, state, delivery, promotion, and rollback. Agent Cores own authored
-files such as `agent.yaml`, `SOUL.md`, Agent Slots, skills, tools, schedules,
-MCP declarations, tests, and local libraries.
+Demiurge is an Alpha-stage agent framework built around **Agent Slots**:
+governed extension boundaries that let an Agent Core expand capability and
+logic design without changing the Host harness. A file-backed Agent Core can
+compose agents, state, tools, skills, and MCP declarations, then evolve through
+Host-controlled candidate changes.
+
+The Host owns sessions, turns, provider calls, tools, approvals, state,
+delivery, promotion, and rollback. Agent Cores own authored files such as
+`agent.yaml`, `SOUL.md`, Agent Slots, skills, tools, schedules, MCP
+declarations, tests, and local libraries.
+
+Start with [Agent Slots](explanation/agent-slots.md) if you want to understand
+how custom behavior enters the agent loop under Host governance.
 
 The manual uses the Diataxis documentation model:
 

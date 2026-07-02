@@ -2,16 +2,23 @@
 slug: /
 sidebar_position: 0
 title: Demiurge 手册
-description: 用于安装 Demiurge、启动 TUI、配置 provider、选择 workspace，以及编写 Agent Core 的用户手册。
+description: 用于安装 Demiurge、配置 provider、选择 workspace，以及用 Agent Slots 编写可自进化 Agent Core 的用户手册。
 ---
 
 # Demiurge 手册
 
-Demiurge 是 alpha 阶段的 agent framework，用于在 host-owned runtime harness
-下运行文件化的 Agent Core。host 拥有 session、turn、provider call、tool、
-approval、state、delivery、promotion 和 rollback。Agent Core 拥有作者维护的文件，
-例如 `agent.yaml`、`SOUL.md`、Agent Slots、skills、tools、schedules、MCP
-declarations、tests 和本地 libraries。
+Demiurge 是 Alpha 阶段的智能体框架，围绕 **Agent Slots** 构建：Agent Slots
+是受治理的扩展边界，让 Agent Core 可以拓展能力边界与逻辑设计，而不需要修改
+Host harness。具有文件化设计的 Agent Core 可以组合 agents、state、tools、
+skills 和 MCP declarations，并通过 Host 控制的 candidate changes 实现自我演进。
+
+Host 拥有 session、turn、provider call、tool、approval、state、delivery、
+promotion 和 rollback。Agent Core 拥有作者维护的文件，例如 `agent.yaml`、
+`SOUL.md`、Agent Slots、skills、tools、schedules、MCP declarations、tests
+和本地 libraries。
+
+如果你想理解自定义行为如何在 Host 治理下进入 agent loop，请先读
+[Agent Slots](explanation/agent-slots.md)。
 
 本手册采用 Diataxis 文档模型：
 
