@@ -83,6 +83,7 @@ assistant/
 ├── agent.yaml
 └── agent/
     ├── SOUL.md
+    ├── slots.yaml
     ├── bootstrap/
     ├── input/
     ├── output/

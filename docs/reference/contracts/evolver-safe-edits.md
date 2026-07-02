@@ -68,7 +68,7 @@ Good goals are functional and scoped:
 
 ```text
 Add an input module that gives Telegram replies a concise style hint.
-Change only agent/input and agent/input/pipeline.yaml.
+Change only agent/input and agent/slots.yaml.
 ```
 
 Bad goals ask for host runtime changes, dependency changes, release changes, or

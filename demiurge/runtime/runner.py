@@ -289,6 +289,27 @@ class ModuleInputBuilder:
     def __init__(self) -> None:
         self.fragments: list[dict[str, str]] = []
 
+    def add_context(
+        self,
+        content: str,
+        *,
+        role: str,
+        write_history: bool,
+    ) -> None:
+        role = role.strip()
+        if role not in {"user", "system"}:
+            raise ValueError(f"invalid input context role: {role}")
+        text = str(content or "").strip()
+        if not text:
+            return
+        self.fragments.append(
+            {
+                "section": role,
+                "content": text,
+                "history_policy": "persist" if write_history else "transient",
+            }
+        )
+
     def add(
         self,
         section: str,
@@ -297,18 +318,12 @@ class ModuleInputBuilder:
         history_policy: str | None = None,
         default_history_policy: str = "persist",
     ) -> None:
-        section = section.strip()
-        if section not in INPUT_SECTIONS:
-            raise ValueError(f"invalid input section: {section}")
         policy = history_policy if history_policy is not None else ("transient" if section == "system" else default_history_policy)
-        if policy not in INPUT_HISTORY_POLICIES:
-            raise ValueError(f"invalid input history_policy: {policy}")
-        if section == "system" and policy != "transient":
-            raise ValueError("system input fragments cannot be persisted")
-        text = str(content or "").strip()
-        if not text:
-            return
-        self.fragments.append({"section": section, "content": text, "history_policy": policy})
+        self.add_context(
+            content,
+            role=section,
+            write_history=policy == "persist",
+        )
 
     def section_text(self, section: str, *, persisted_only: bool = False) -> str:
         parts = [
@@ -325,6 +340,22 @@ class ModuleInputClient:
         self._builder = builder
         self._writable = writable
         self._sender = sender
+
+    @property
+    def raw_text(self) -> str:
+        return self.raw_input.text
+
+    @property
+    def attachments(self) -> tuple[Any, ...]:
+        return tuple(self.raw_input.attachments)
+
+    def add_context(self, content: str, *, role: str = "system", write_history: bool | None = None) -> None:
+        if not self._writable:
+            raise RuntimeError("parallel input modules cannot modify the current prompt")
+        normalized_role = role.strip()
+        if write_history is None:
+            write_history = normalized_role == "user"
+        self._builder.add_context(content, role=normalized_role, write_history=write_history)
 
     def add(self, section: str, content: str, *, history_policy: str | None = None) -> None:
         if not self._writable:
@@ -374,6 +405,10 @@ class ModuleOutputClient:
         self.content = content
         self.metadata = dict(metadata or {})
         self._sender = sender
+
+    @property
+    def response_text(self) -> str:
+        return self.content
 
     @property
     def workspace(self) -> Path:
@@ -490,6 +525,8 @@ class ModuleIOClient:
         session_id: str,
         workspace: str | None,
         default_history_policy: str = "persist",
+        default_write_history: bool | None = None,
+        allow_write_history: bool = True,
         commit: Callable[[DeliveryRequest], InteractionItem | None],
         schedule: Callable[[InteractionItem], None],
         route: DeliveryRouteContext | None = None,
@@ -501,6 +538,8 @@ class ModuleIOClient:
         self.workspace = Path(workspace or ".").resolve()
         self.session_root = (home / "sessions" / session_id).resolve()
         self.default_history_policy = default_history_policy
+        self.default_write_history = default_write_history
+        self.allow_write_history = allow_write_history
         self.commit = commit
         self.schedule = schedule
         self.route = route
@@ -513,22 +552,17 @@ class ModuleIOClient:
         blocks: ContentBlock | Mapping[str, Any] | str | list[ContentBlock | Mapping[str, Any] | str],
         *,
         kind: str = "message",
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
-        """Commit a host-mediated delivery request.
+        """Commit a host-mediated delivery request."""
 
-        The runner commits history/artifacts immediately. ``delivery`` controls
-        only when the resulting channel item is sent.
-        """
-        resolved_policy = history_policy or self.default_history_policy
-        if delivery not in DELIVERY_MODES:
-            raise ValueError(f"invalid delivery mode: {delivery}")
+        resolved_policy = self._resolve_history_policy(write_history, history_policy, visible=visible)
         normalized = self._normalize_blocks(blocks)
         request_metadata = dict(metadata or {})
-        request_metadata["delivery"] = delivery
+        request_metadata["delivery"] = "immediate"
         if self.background:
             request_metadata["background"] = True
         if self.route is not None:
@@ -538,7 +572,7 @@ class ModuleIOClient:
             kind=kind,
             blocks=normalized,
             history_policy=resolved_policy,
-            delivery=delivery,
+            delivery="immediate",
             visible=visible,
             target="current",
             metadata=request_metadata,
@@ -546,11 +580,31 @@ class ModuleIOClient:
         item = self.commit(request)
         if item is not None:
             self.items.append(item)
-            if delivery == "immediate":
-                self.schedule(item)
-            else:
-                self.slot_end_items.append(item)
+            self.schedule(item)
         return DeliveryHandle(delivery_id=request.delivery_id)
+
+    def _resolve_history_policy(
+        self,
+        write_history: bool | None,
+        history_policy: str | None,
+        *,
+        visible: bool,
+    ) -> str:
+        if history_policy is not None:
+            resolved = history_policy
+            resolved_write = history_policy != "transient"
+        else:
+            resolved_write = self.default_write_history if write_history is None else write_history
+            if resolved_write is None:
+                resolved_write = self.default_history_policy != "transient"
+            resolved = "persist" if resolved_write else "transient"
+        if resolved not in {"persist", "model_hidden", "transient"}:
+            raise ValueError(f"invalid history policy: {resolved}")
+        if resolved_write and not self.allow_write_history:
+            raise RuntimeError("parallel output modules cannot write session history")
+        if not visible and not resolved_write:
+            raise ValueError("send with visible=False and write_history=False has no effect")
+        return resolved
 
     def flush_slot_end(self) -> None:
         for item in self.slot_end_items:
@@ -561,15 +615,15 @@ class ModuleIOClient:
         self,
         text: str,
         *,
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
         return self.send(
             ContentBlock(type="text", text=text),
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             metadata=delivery_metadata,
         )
@@ -586,8 +640,7 @@ class ModuleIOClient:
         return self.send(
             ContentBlock(type="text", text=text),
             kind="progress",
-            history_policy="transient",
-            delivery="immediate",
+            write_history=False,
             visible=visible,
             metadata=delivery_metadata,
         )
@@ -604,8 +657,7 @@ class ModuleIOClient:
         return self.send(
             ContentBlock(type="text", text=text),
             kind="notice",
-            history_policy="transient",
-            delivery="immediate",
+            write_history=False,
             visible=visible,
             metadata=delivery_metadata,
         )
@@ -618,8 +670,8 @@ class ModuleIOClient:
         media_type: str | None = None,
         summary: str | None = None,
         artifact_metadata: Mapping[str, Any] | None = None,
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
@@ -630,8 +682,8 @@ class ModuleIOClient:
             media_type=media_type,
             summary=summary,
             artifact_metadata=artifact_metadata,
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             delivery_metadata=delivery_metadata,
         )
@@ -644,8 +696,8 @@ class ModuleIOClient:
         media_type: str | None = None,
         summary: str | None = None,
         artifact_metadata: Mapping[str, Any] | None = None,
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
@@ -656,8 +708,8 @@ class ModuleIOClient:
             media_type=media_type,
             summary=summary,
             artifact_metadata=artifact_metadata,
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             delivery_metadata=delivery_metadata,
         )
@@ -670,8 +722,8 @@ class ModuleIOClient:
         media_type: str | None = None,
         summary: str | None = None,
         artifact_metadata: Mapping[str, Any] | None = None,
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
@@ -682,8 +734,8 @@ class ModuleIOClient:
             media_type=media_type,
             summary=summary,
             artifact_metadata=artifact_metadata,
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             delivery_metadata=delivery_metadata,
         )
@@ -696,8 +748,8 @@ class ModuleIOClient:
         media_type: str | None = None,
         summary: str | None = None,
         artifact_metadata: Mapping[str, Any] | None = None,
+        write_history: bool | None = None,
         history_policy: str | None = None,
-        delivery: str = "immediate",
         visible: bool = True,
         delivery_metadata: Mapping[str, Any] | None = None,
     ) -> DeliveryHandle:
@@ -708,8 +760,8 @@ class ModuleIOClient:
             media_type=media_type,
             summary=summary,
             artifact_metadata=artifact_metadata,
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             delivery_metadata=delivery_metadata,
         )
@@ -723,8 +775,8 @@ class ModuleIOClient:
         media_type: str | None,
         summary: str | None,
         artifact_metadata: Mapping[str, Any] | None,
+        write_history: bool | None,
         history_policy: str | None,
-        delivery: str,
         visible: bool,
         delivery_metadata: Mapping[str, Any] | None,
     ) -> DeliveryHandle:
@@ -738,8 +790,8 @@ class ModuleIOClient:
         blocks = [ContentBlock(type=block_type, text=caption, artifact=artifact_input)]
         return self.send(
             blocks,
+            write_history=write_history,
             history_policy=history_policy,
-            delivery=delivery,
             visible=visible,
             metadata=delivery_metadata,
         )
@@ -2023,11 +2075,20 @@ class SessionTurnStepRunner:
             interaction_metadata=interaction_metadata,
             interaction_bridge=interaction_bridge,
         )
+        default_write_history = slot.history_policy != "transient"
+        allow_write_history = True
+        if slot.kind == "input":
+            default_write_history = False
+        elif slot.kind == "output":
+            default_write_history = not background
+            allow_write_history = not background
         return ModuleIOClient(
             home=self.home,
             session_id=self.session_id,
             workspace=self.workspace,
             default_history_policy=slot.history_policy,
+            default_write_history=default_write_history,
+            allow_write_history=allow_write_history,
             commit=commit,
             schedule=schedule,
             route=route,

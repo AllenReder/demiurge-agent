@@ -11,11 +11,11 @@ Authored tools live in the Agent Core and are executed by the host tool runtime.
 
 ```text
 agent/tools/project_note/
-  slot.yaml
+  tool.yaml
   module.py
 ```
 
-## Define `slot.yaml`
+## Define `tool.yaml`
 
 ```yaml
 entrypoint: module:execute
@@ -32,9 +32,9 @@ capabilities: []
 The tool id is the directory name. The model sees the description and input
 schema when the host exposes the tool.
 
-Authored tools reuse the `slot.yaml` metadata format, but they are not Agent
-Slots. A tool is a model-callable action; a slot is a governed interaction
-boundary in the agent loop.
+Authored tools are not Agent Slots and are not declared in `agent/slots.yaml`.
+A tool is a model-callable action; a slot is a governed interaction boundary in
+the agent loop.
 
 ## Implement `module.py`
 
@@ -50,7 +50,7 @@ def execute(ctx, args):
 ## Enable Capabilities When Needed
 
 If a tool needs filesystem, terminal, network, state, or other dangerous
-effects, declare the capability in `slot.yaml` and configure approval policy in
+effects, declare the capability in `tool.yaml` and configure approval policy in
 the core manifest.
 
 ```yaml

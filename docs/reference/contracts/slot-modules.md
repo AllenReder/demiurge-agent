@@ -13,7 +13,6 @@ stay inside the Agent Core authored surface.
 
 ```text
 agent/input/<slot_id>/
-  slot.yaml
   module.py
 ```
 
@@ -23,12 +22,14 @@ The same shape applies to current Agent Slot kinds:
 - `agent/input/<slot_id>/`
 - `agent/output/<slot_id>/`
 
+Slot metadata and pipeline placement live in `agent/slots.yaml`.
+
 ## Entrypoints
 
 Bootstrap, input, and output slots normally use:
 
 ```yaml
-entrypoint: module:process
+run: agent/input/<slot_id>/module.py:process
 ```
 
 ```python
@@ -36,9 +37,12 @@ def process(ctx):
     ...
 ```
 
+The `run` field is optional when the handler is the default
+`agent/<phase>/<slot_id>/module.py:process`.
+
 ## Pipelines
 
-Input and output pipelines support:
+`agent/slots.yaml` declares phase pipelines. Input and output support:
 
 ```yaml
 serial: []
@@ -60,8 +64,8 @@ Rules:
 
 ## Capability Rule
 
-Slots should declare capabilities they need in `slot.yaml`, but the host decides
-whether the effect is allowed.
+Slots should declare capabilities they need in `agent/slots.yaml`, but the host
+decides whether the effect is allowed.
 
 Do not bypass host tools by directly touching paths, network, or process state
 when a host capability exists for the effect.
@@ -71,8 +75,8 @@ interfaces when the required capabilities allow it.
 
 ## Failure Rule
 
-Use `failure_policy: soft` unless the turn cannot proceed without the slot.
-Use `failure_policy: hard` for required base behavior such as raw input
+Use `failure: soft` unless the turn cannot proceed without the slot.
+Use `failure: hard` for required base behavior such as raw input
 passthrough.
 
 ## Verification

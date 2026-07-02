@@ -17,59 +17,60 @@ session-start context, shape current-turn input, or handle final output.
 | Input | `agent/input/<id>/` | Adds current-turn context before provider calls. |
 | Output | `agent/output/<id>/` | Delivers final assistant output, artifacts, or structured results. |
 
-## Add `slot.yaml`
+## Add the Slot Code
 
-```yaml
-entrypoint: module:process
-description: "Describe what this slot does."
-failure_policy: soft
-capabilities: []
-```
-
-Use `failure_policy: hard` only when the turn should fail if the slot fails.
-
-## Add `module.py`
-
-Input example:
+Create `module.py` in the slot directory. Input example:
 
 ```python
 def process(ctx):
-    ctx.input.add("system", "Prefer short, concrete answers this turn.")
+    ctx.input.add_context("Prefer short, concrete answers this turn.", role="system")
 ```
 
 Output example:
 
 ```python
 def process(ctx):
-    ctx.output.send_text(ctx.output.content, history_policy="persist")
+    ctx.output.send_text(ctx.output.response_text)
 ```
 
-## Place the Slot in a Pipeline
+## Declare the Slot in `agent/slots.yaml`
 
-Input pipeline:
+Add metadata and pipeline placement in the core's single slot graph:
 
 ```yaml
-serial:
-  - style_hint
-  - base_input
-parallel: []
+version: 2
+slots:
+  input:
+    style_hint:
+      failure: soft
+      capabilities: []
+      description: "Adds a current-turn style hint."
+pipelines:
+  input:
+    serial:
+      - style_hint
+      - base_input
+    parallel: []
 ```
 
-Output pipeline:
+Use `failure: hard` only when the turn should fail if the slot fails. Handler
+entrypoints default to `agent/<phase>/<slot_id>/module.py:process`; use `run:`
+only when the function lives elsewhere.
+
+Output pipeline entries use the same file:
 
 ```yaml
-serial:
-  - base_output
-parallel:
-  - artifact_writer
-```
-
-Bootstrap, input, and output pipeline files live under their slot roots:
-
-```text
-agent/bootstrap/pipeline.yaml
-agent/input/pipeline.yaml
-agent/output/pipeline.yaml
+slots:
+  output:
+    artifact_writer:
+      failure: soft
+      capabilities: [fs.write]
+pipelines:
+  output:
+    serial:
+      - base_output
+    parallel:
+      - artifact_writer
 ```
 
 ## Verify

@@ -24,10 +24,12 @@ Authored tools live under:
 agent/tools/<tool_id>/
 ```
 
-They use `slot.yaml` plus a Python entrypoint, usually:
+They use `tool.yaml` plus a Python entrypoint, usually:
 
 ```yaml
 entrypoint: module:execute
+description: "Return project information."
+capabilities: []
 ```
 
 ```python
@@ -35,8 +37,8 @@ def execute(ctx, args):
     ...
 ```
 
-The file name is shared with Agent Slot metadata, but authored tools are tools:
-model-callable actions executed through the host tool runtime.
+Authored tools are model-callable actions executed through the host tool
+runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
 
 ## Built-In Tools
 
@@ -68,9 +70,9 @@ host runtime, not to individual schedule YAML files.
 ## Background Jobs
 
 `terminal(background=true)`, `ctx.agents.spawn(...)`, and
-`evolve_core(background=true)` submit host-owned in-memory jobs. Background
-tool calls return a `job_id`; terminal calls also return `process_id` as a
-compatibility alias.
+`evolve_core(background=true)` submit host-owned tasks. Background tool calls
+return a `job_id`; terminal calls also return `process_id` as a compatibility
+alias.
 
 `background=true` defaults to `notify_on_complete=true`. When a job completes,
 the host queues a synthetic model turn in the originating session. If a user
@@ -94,10 +96,10 @@ Job statuses are `queued`, `running`, `blocked_needs_user`, `succeeded`,
 summary, result reference, and a bounded log tail; full in-memory logs are
 available through `job(action="log")`.
 
-The first implementation is in-memory only. Running jobs, logs, and pending
-completion events are lost when the host process exits. Jobs declare a
-`write_scope`; another active background job with the same scope is rejected to
-avoid foreground/background or background/background overwrite races.
+Runtime control-plane projections are the durable source of truth for new task
+state. Jobs still declare a `write_scope`; another active background job with
+the same scope is rejected to avoid foreground/background or
+background/background overwrite races.
 
 ## Package-Provided Web Search
 

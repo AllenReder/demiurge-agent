@@ -20,6 +20,8 @@ from demiurge.jobs import JobRuntime
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
+from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.store import RuntimeStore
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import SessionStore, VersionStore
@@ -219,6 +221,8 @@ class DemiurgeApp:
     core_loader: CoreLoader
     gate_runner: GateRunner
     evolution_runtime: EvolutionRuntime
+    runtime_store: RuntimeStore
+    control_plane: RuntimeControlPlane
     job_runtime: JobRuntime
     tool_runtime: ToolRuntime
     approval_runtime: ApprovalRuntime
@@ -284,6 +288,7 @@ class DemiurgeApp:
             "runtime_timezone_source": self.runtime_timezone.source,
             "runtime_timezone_explicit": self.runtime_timezone.explicit,
             "runtime_local_now": self.runtime_timezone.local_now().isoformat(),
+            "runtime_store": str(self.runtime_store.path),
             "channel_busy_mode": self.channel_busy_mode,
             "channel_busy_mode_source": self.channel_busy_mode_source,
             "user_message_align": self.user_message_align,
@@ -531,7 +536,9 @@ def create_app(
     )
     gate_runner = GateRunner(project_root=project_root)
     mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
-    job_runtime = JobRuntime()
+    runtime_store = RuntimeStore.default(home)
+    control_plane = RuntimeControlPlane(runtime_store)
+    job_runtime = JobRuntime(control_plane=control_plane)
     tool_runtime = ToolRuntime(
         version_store,
         workspace=workspace_scope,
@@ -580,6 +587,8 @@ def create_app(
         core_loader=core_loader,
         gate_runner=gate_runner,
         evolution_runtime=evolution_runtime,
+        runtime_store=runtime_store,
+        control_plane=control_plane,
         job_runtime=job_runtime,
         tool_runtime=tool_runtime,
         approval_runtime=approval_runtime,

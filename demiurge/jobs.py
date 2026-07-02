@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
+from demiurge.runtime.store import RuntimeEvent
 from demiurge.util import utc_id
 
 
@@ -159,16 +161,19 @@ class JobRuntime:
         max_log_lines: int = 4000,
         log_tail_lines: int = 40,
         log_tail_chars: int = 8000,
+        control_plane: RuntimeControlPlane | None = None,
     ):
         self.max_log_lines = max_log_lines
         self.log_tail_lines = log_tail_lines
         self.log_tail_chars = log_tail_chars
+        self.control_plane = control_plane
         self._jobs: dict[str, JobRecord] = {}
         self._logs: dict[str, list[str]] = {}
         self._cancel_callbacks: dict[str, JobCancelCallback] = {}
         self._completion_callbacks: dict[str, JobCompletionCallback] = {}
         self._pending_events: dict[str, list[JobCompletionEvent]] = {}
         self._emitted_jobs: set[str] = set()
+        self._runtime_status_events: set[tuple[str, str]] = set()
 
     def start_task(
         self,
@@ -196,6 +201,7 @@ class JobRuntime:
             metadata=dict(metadata or {}),
             notify_on_complete=notify_on_complete,
         )
+        self._submit_runtime_task(record)
         self._jobs[record.job_id] = record
         self._logs[record.job_id] = []
         record.task = asyncio.create_task(self._run_record(record, task_factory), context=contextvars.Context())
@@ -206,6 +212,7 @@ class JobRuntime:
         try:
             record.status = "running"
             record.started_at = _now()
+            self._append_runtime_status_event(record, "task.started")
             outcome = await task_factory(context)
             if isinstance(outcome, JobOutcome):
                 if outcome.summary:
@@ -229,19 +236,23 @@ class JobRuntime:
             if record.status not in TERMINAL_JOB_STATUSES and record.status != "blocked_needs_user":
                 record.status = "succeeded"
                 record.completed_at = _now()
+                self._append_runtime_status_event(record, "task.succeeded")
             elif record.status in TERMINAL_JOB_STATUSES and record.completed_at is None:
                 record.completed_at = _now()
+                self._append_runtime_status_event(record, f"task.{record.status}")
         except asyncio.CancelledError:
             if record.status != "cancelled":
                 record.status = "cancelled"
                 record.summary = record.summary or "job cancelled"
                 record.completed_at = _now()
+            self._append_runtime_status_event(record, "task.cancelled")
             raise
         except Exception as exc:
             record.status = "failed"
             record.summary = str(exc)
             record.completed_at = _now()
             self.append_log(record.job_id, f"error: {exc}")
+            self._append_runtime_status_event(record, "task.failed")
         finally:
             if record.status in TERMINAL_JOB_STATUSES or record.status == "blocked_needs_user":
                 self._emit_completion_once(record)
@@ -321,6 +332,7 @@ class JobRuntime:
         record.status = "cancelled"
         record.summary = record.summary or "job cancelled"
         record.completed_at = _now()
+        self._append_runtime_status_event(record, "task.cancelled")
         callback = self._cancel_callbacks.get(job_id)
         if callback is not None:
             value = callback()
@@ -357,6 +369,19 @@ class JobRuntime:
         if len(log) > self.max_log_lines:
             del log[: len(log) - self.max_log_lines]
         record.log_tail = self._bounded_tail(log)
+        self._append_runtime_events(
+            record,
+            [
+                RuntimeEvent(
+                    type="task.log",
+                    aggregate_type="task",
+                    aggregate_id=record.job_id,
+                    actor=self._runtime_actor(record),
+                    payload={"stream": "stdout", "text": line},
+                )
+                for line in lines
+            ],
+        )
 
     def set_summary(self, job_id: str, summary: str) -> None:
         self.get(job_id).summary = str(summary)
@@ -377,6 +402,79 @@ class JobRuntime:
         record.summary = str(summary)
         if metadata:
             record.metadata.update(dict(metadata))
+        self._append_runtime_status_event(record, "task.blocked")
+
+    def _submit_runtime_task(self, record: JobRecord) -> None:
+        if self.control_plane is None:
+            return
+        payload = {
+            "task_id": record.job_id,
+            "owner_session_id": record.owner_session_id,
+            "owner_turn_id": record.owner_turn_id,
+            "core_id": record.metadata.get("core_id") or record.metadata.get("child_core_id"),
+            "notify_policy": "completion_event" if record.notify_on_complete else "silent",
+            "backend": record.backend,
+            "source_tool": record.source_tool,
+            "write_scope": record.write_scope,
+            "metadata": dict(record.metadata),
+        }
+        self.control_plane.submit(
+            ActionSpec(
+                kind=_action_kind_for_backend(record.backend),
+                payload=payload,
+                idempotency_key=f"job:{record.job_id}:submitted",
+            ),
+            source=ActionSource(
+                actor="host.job_runtime",
+                session_id=record.owner_session_id,
+                turn_id=record.owner_turn_id,
+                core_id=payload["core_id"],
+                metadata={"backend": record.backend, "source_tool": record.source_tool},
+            ),
+        )
+
+    def _append_runtime_status_event(self, record: JobRecord, event_type: str) -> None:
+        if (record.job_id, event_type) in self._runtime_status_events:
+            return
+        self._runtime_status_events.add((record.job_id, event_type))
+        payload: dict[str, Any] = {
+            "status": record.status,
+            "backend": record.backend,
+            "source_tool": record.source_tool,
+            "summary": record.summary,
+            "result_ref": record.result_ref,
+            "metadata": dict(record.metadata),
+        }
+        if event_type == "task.failed":
+            payload["error"] = {"message": record.summary or "job failed"}
+        elif event_type == "task.cancelled":
+            payload["error"] = {"message": record.summary or "job cancelled"}
+        self._append_runtime_events(
+            record,
+            [
+                RuntimeEvent(
+                    type=event_type,
+                    aggregate_type="task",
+                    aggregate_id=record.job_id,
+                    actor=self._runtime_actor(record),
+                    payload=payload,
+                )
+            ],
+        )
+
+    def _append_runtime_events(self, record: JobRecord, events: list[RuntimeEvent]) -> None:
+        if self.control_plane is None or not events:
+            return
+        self.control_plane.store.append(events)
+
+    def _runtime_actor(self, record: JobRecord) -> dict[str, Any]:
+        return {
+            "actor": "host.job_runtime",
+            "session_id": record.owner_session_id,
+            "turn_id": record.owner_turn_id,
+            "core_id": record.metadata.get("core_id") or record.metadata.get("child_core_id"),
+            "metadata": {"backend": record.backend, "source_tool": record.source_tool},
+        }
 
     def _ensure_scope_available(self, write_scope: str | None) -> None:
         if not write_scope:
@@ -424,3 +522,13 @@ class JobRuntime:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _action_kind_for_backend(backend: str):
+    if backend == "terminal":
+        return "terminal.exec"
+    if backend == "evolve":
+        return "evolver.run"
+    if backend == "agent":
+        return "agent.spawn"
+    return "tool.call"

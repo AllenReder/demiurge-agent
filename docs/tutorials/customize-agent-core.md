@@ -33,40 +33,39 @@ Create this directory:
 ~/.demiurge/agents/assistant/agent/input/concise_hint/
 ```
 
-Add `slot.yaml`:
-
-```yaml
-entrypoint: module:process
-description: "Adds a concise-answer hint to the current turn."
-failure_policy: soft
-capabilities: []
-```
-
 Add `module.py`:
 
 ```python
 def process(ctx):
-    ctx.input.add("system", "For this turn, prefer a concise answer.")
+    ctx.input.add_context("For this turn, prefer a concise answer.", role="system")
 ```
 
 The slot is core-local. It does not call the provider, execute tools, write
 state, or bypass approvals.
 
-## 3. Add the Slot to the Pipeline
+## 3. Add the Slot to `slots.yaml`
 
 Edit:
 
 ```text
-~/.demiurge/agents/assistant/agent/input/pipeline.yaml
+~/.demiurge/agents/assistant/agent/slots.yaml
 ```
 
-Place the hint before `base_input`:
+Declare the slot and place it before `base_input`:
 
 ```yaml
-serial:
-  - concise_hint
-  - base_input
-parallel: []
+slots:
+  input:
+    concise_hint:
+      failure: soft
+      capabilities: []
+      description: "Adds a concise-answer hint to the current turn."
+pipelines:
+  input:
+    serial:
+      - concise_hint
+      - base_input
+    parallel: []
 ```
 
 The input pipeline is ordered. `base_input` appends the raw user text, so hints
@@ -91,7 +90,7 @@ If the core does not load, inspect the exact error and compare the slot with
 
 ## 5. Undo the Change
 
-Remove `concise_hint` from `pipeline.yaml`, then delete:
+Remove `concise_hint` from `agent/slots.yaml`, then delete:
 
 ```text
 ~/.demiurge/agents/assistant/agent/input/concise_hint/

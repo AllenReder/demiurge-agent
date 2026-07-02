@@ -1,2 +1,2 @@
 def process(ctx):
-    ctx.input.add("user", ctx.input.raw_input.text)
+    ctx.input.add_context(ctx.input.raw_text, role="user")

@@ -1,29 +1,105 @@
-schema_version: 2
+schema_version: 3
 id: memory_basic
 name: Basic Memory
 summary: Add Hermes-style local USER.md and MEMORY.md persistent memory.
 tags:
-  - memory
-  - context
-components:
-  - id: memory_lib
-    kind: lib
-    source: memory_basic
-    target: agent/lib/memory_basic
-    config:
-      storage:
-        relative_to: core_root
-        path: memory
-      limits:
-        memory_chars: 2200
-        user_chars: 1375
-  - id: memory_basic
-    kind: bootstrap
-    source: memory_basic
-    target: agent/bootstrap/memory_basic
-    pipeline:
-      after: session_context
-  - id: memory_tool
-    kind: tool
-    source: memory
-    target: agent/tools/memory
+- memory
+- context
+config_defaults: {}
+capabilities: []
+slots:
+- id: memory_basic
+  source: memory_basic
+  target: agent/bootstrap/memory_basic
+  pipeline:
+    after: session_context
+  phase: bootstrap
+  metadata:
+    entrypoint: module:process
+    failure_policy: soft
+    description: Injects session bootstrap context from basic local memory.
+    capabilities: []
+tools:
+- id: memory_tool
+  source: memory
+  target: agent/tools/memory
+  metadata:
+    entrypoint: module:execute
+    input_schema:
+      type: object
+      properties:
+        target:
+          type: string
+          enum:
+          - memory
+          - user
+          - all
+          description: memory stores environment/project/tool notes; user stores profile
+            and preferences; all is only valid with action=list and returns both stores.
+        action:
+          type: string
+          enum:
+          - add
+          - replace
+          - remove
+          - list
+          description: Single-operation action. Use list to read current live memory
+            entries; omit when using operations.
+        content:
+          type: string
+          description: Entry content for add or replace.
+        old_text:
+          type: string
+          description: Required for replace or remove; a short unique substring from
+            the existing entry.
+        operations:
+          type: array
+          description: Batch operations for the same target. Each operation is add,
+            replace, or remove.
+          items:
+            type: object
+            properties:
+              action:
+                type: string
+                enum:
+                - add
+                - replace
+                - remove
+              content:
+                type: string
+              old_text:
+                type: string
+            required:
+            - action
+            additionalProperties: false
+      required:
+      - target
+      additionalProperties: false
+    model_output_policy: content
+    approval_policy: auto
+    display_policy: summary
+    risk: medium
+    description: Save durable facts to local persistent memory that survives across
+      sessions. Use this when the user states a stable preference, correction, profile
+      detail, project convention, environment fact, or tool/workflow lesson that should
+      reduce future repetition. Do not save task progress, temporary todos, raw data
+      dumps, commit or PR status, easily rediscovered facts, or reusable procedures
+      that belong in a skill. Use action=list with target=all when the user asks to
+      view, list, inspect, or confirm what is currently stored in memory; list is
+      read-only, does not save or delete anything, and does not refresh the current
+      session's bootstrap memory context. Make multiple changes in one operations
+      batch when possible; batch writes are all-or-nothing against the final character
+      budget.
+    capabilities: []
+files:
+- id: memory_lib
+  kind: lib
+  source: memory_basic
+  target: agent/lib/memory_basic
+  config:
+    storage:
+      relative_to: core_root
+      path: memory
+    limits:
+      memory_chars: 2200
+      user_chars: 1375

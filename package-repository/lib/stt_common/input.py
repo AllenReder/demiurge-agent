@@ -14,7 +14,7 @@ def build_process(
 ):
     async def process(ctx):
         config = load_transcription_config(slot_file)
-        attachments = tuple(ctx.input.raw_input.attachments or ())
+        attachments = tuple(ctx.input.attachments or ())
         if not attachments:
             return
 
@@ -33,7 +33,7 @@ def build_process(
             session_root=session_root,
         )
         if result.text.strip():
-            ctx.input.add("user", _render_transcript(result.text, result.metadata, config), history_policy="persist")
+            ctx.input.add_context(_render_transcript(result.text, result.metadata, config), role="user")
 
     return process
 

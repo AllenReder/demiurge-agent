@@ -509,6 +509,7 @@ class SlotDefinition:
     path: Path
     relative_path: str
     manifest: dict[str, Any]
+    core_root: Path | None = None
     entrypoint: str | None = None
     description: str = ""
     input_schema: dict[str, Any] = field(default_factory=dict)
@@ -658,13 +659,14 @@ class CoreLoader:
             raise CoreLoadError(f"missing authored surface: {surface_root}")
 
         soul = self._load_soul(core_root, manifest, surface_root)
-        bootstrap_root = manifest.slots.get("bootstrap") or (surface_root / "bootstrap").relative_to(core_root).as_posix()
-        bootstrap_slots = self._discover_slot_dir(core_root, bootstrap_root, "bootstrap")
-        bootstrap_pipeline, bootstrap_enabled = self._load_bootstrap_pipeline(core_root, bootstrap_root, bootstrap_slots)
-        input_slots = self._discover_slot_dir(core_root, manifest.slots.get("input"), "input")
-        output_slots = self._discover_slot_dir(core_root, manifest.slots.get("output"), "output")
-        input_pipeline = self._load_phase_pipeline(core_root, manifest.slots.get("input"), "input", input_slots)
-        output_pipeline = self._load_phase_pipeline(core_root, manifest.slots.get("output"), "output", output_slots)
+        slots_manifest = self._load_slots_manifest(core_root, surface_root)
+        bootstrap_slots = slots_manifest["bootstrap_slots"]
+        bootstrap_pipeline = slots_manifest["bootstrap_pipeline"]
+        bootstrap_enabled = bool(bootstrap_slots or bootstrap_pipeline.serial)
+        input_slots = slots_manifest["input_slots"]
+        output_slots = slots_manifest["output_slots"]
+        input_pipeline = slots_manifest["input_pipeline"]
+        output_pipeline = slots_manifest["output_pipeline"]
         tool_slots = self._discover_slot_dir(core_root, manifest.slots.get("tools"), "tool")
         skills = self._discover_skills(
             core_root,
@@ -720,6 +722,170 @@ class CoreLoader:
                 parts.append(path.read_text(encoding="utf-8").strip())
         return "\n\n".join(part for part in parts if part)
 
+    def _load_slots_manifest(self, core_root: Path, surface_root: Path) -> dict[str, Any]:
+        slots_path = surface_root / "slots.yaml"
+        if not slots_path.exists():
+            raise CoreLoadError(f"missing slots.yaml: {slots_path.relative_to(core_root).as_posix()}")
+        try:
+            raw = yaml.safe_load(slots_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise CoreLoadError(f"invalid slots.yaml: {slots_path.relative_to(core_root).as_posix()}: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise CoreLoadError("invalid slots.yaml: expected mapping")
+        if raw.get("version") != 2:
+            raise CoreLoadError("invalid slots.yaml: version must be 2")
+        slots_raw = raw.get("slots") or {}
+        pipelines_raw = raw.get("pipelines") or {}
+        if not isinstance(slots_raw, dict):
+            raise CoreLoadError("invalid slots.yaml slots: expected mapping")
+        if not isinstance(pipelines_raw, dict):
+            raise CoreLoadError("invalid slots.yaml pipelines: expected mapping")
+        unknown_slot_phases = sorted(set(slots_raw) - {"bootstrap", "input", "output"})
+        if unknown_slot_phases:
+            raise CoreLoadError(f"invalid slots.yaml phase(s): {', '.join(unknown_slot_phases)}")
+        unknown_pipeline_phases = sorted(set(pipelines_raw) - {"bootstrap", "input", "output"})
+        if unknown_pipeline_phases:
+            raise CoreLoadError(f"invalid slots.yaml pipeline phase(s): {', '.join(unknown_pipeline_phases)}")
+
+        phase_slots: dict[str, list[SlotDefinition]] = {}
+        seen_ids: dict[str, str] = {}
+        for phase in ("bootstrap", "input", "output"):
+            phase_raw = slots_raw.get(phase) or {}
+            if not isinstance(phase_raw, dict):
+                raise CoreLoadError(f"invalid slots.yaml slots.{phase}: expected mapping")
+            slots: list[SlotDefinition] = []
+            for slot_id, slot_manifest in phase_raw.items():
+                slot = self._slot_from_slots_yaml(
+                    core_root=core_root,
+                    surface_root=surface_root,
+                    phase=phase,
+                    slot_id=str(slot_id),
+                    raw=slot_manifest or {},
+                )
+                prior = seen_ids.get(slot.slot_id)
+                if prior:
+                    raise CoreLoadError(f"duplicate slot id {slot.slot_id}: {prior}, {slot.relative_path}")
+                seen_ids[slot.slot_id] = slot.relative_path
+                slots.append(slot)
+            phase_slots[phase] = sorted(slots, key=lambda item: item.slot_id)
+
+        bootstrap_pipeline = self._load_slots_yaml_pipeline(
+            "bootstrap",
+            pipelines_raw.get("bootstrap") or {},
+            phase_slots["bootstrap"],
+            allow_parallel=False,
+        )
+        input_pipeline = self._load_slots_yaml_pipeline(
+            "input",
+            pipelines_raw.get("input") or {},
+            phase_slots["input"],
+            allow_parallel=True,
+        )
+        output_pipeline = self._load_slots_yaml_pipeline(
+            "output",
+            pipelines_raw.get("output") or {},
+            phase_slots["output"],
+            allow_parallel=True,
+        )
+        return {
+            "bootstrap_slots": phase_slots["bootstrap"],
+            "bootstrap_pipeline": bootstrap_pipeline,
+            "input_slots": phase_slots["input"],
+            "input_pipeline": input_pipeline,
+            "output_slots": phase_slots["output"],
+            "output_pipeline": output_pipeline,
+        }
+
+    def _slot_from_slots_yaml(
+        self,
+        *,
+        core_root: Path,
+        surface_root: Path,
+        phase: str,
+        slot_id: str,
+        raw: Any,
+    ) -> SlotDefinition:
+        if not slot_id.strip():
+            raise CoreLoadError(f"invalid slots.yaml slots.{phase}: slot id must not be empty")
+        if not isinstance(raw, dict):
+            raise CoreLoadError(f"invalid slots.yaml slots.{phase}.{slot_id}: expected mapping")
+        unknown_keys = sorted(
+            set(raw)
+            - {
+                "run",
+                "entrypoint",
+                "description",
+                "input_schema",
+                "capabilities",
+                "timeout_seconds",
+                "failure",
+                "failure_policy",
+                "default_placement",
+                "history_policy",
+            }
+        )
+        if unknown_keys:
+            raise CoreLoadError(
+                f"invalid slots.yaml slots.{phase}.{slot_id} key(s): {', '.join(unknown_keys)}"
+            )
+        slot_dir = require_relative_path(surface_root / phase / slot_id, core_root)
+        run = raw.get("run") or raw.get("entrypoint") or "module:process"
+        rel = slot_dir.relative_to(core_root).as_posix()
+        return SlotDefinition(
+            kind=phase,
+            slot_id=slot_id,
+            path=slot_dir,
+            relative_path=rel,
+            manifest=dict(raw),
+            core_root=core_root,
+            entrypoint=str(run),
+            description=str(raw.get("description") or ""),
+            input_schema=raw.get("input_schema", {}) or {},
+            capabilities=[str(item) for item in (raw.get("capabilities") or [])],
+            timeout_seconds=(float(raw["timeout_seconds"]) if raw.get("timeout_seconds") is not None else None),
+            failure_policy=str(raw.get("failure") or raw.get("failure_policy") or "soft"),
+            default_placement=str(raw.get("default_placement") or "pre_current_user"),
+            history_policy=str(raw.get("history_policy") or "persist"),
+        )
+
+    def _load_slots_yaml_pipeline(
+        self,
+        phase: str,
+        raw: Any,
+        slots: list[SlotDefinition],
+        *,
+        allow_parallel: bool,
+    ) -> PhasePipeline:
+        if not isinstance(raw, dict):
+            raise CoreLoadError(f"invalid slots.yaml pipelines.{phase}: expected mapping")
+        allowed = {"serial", "parallel"} if allow_parallel else {"serial"}
+        unknown_keys = sorted(set(raw) - allowed)
+        if unknown_keys:
+            raise CoreLoadError(f"invalid slots.yaml pipelines.{phase} key(s): {', '.join(unknown_keys)}")
+        slots_by_id = {slot.slot_id: slot for slot in slots}
+        seen: dict[str, str] = {}
+
+        def resolve_group(name: str) -> list[SlotDefinition]:
+            values = raw.get(name) or []
+            if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+                raise CoreLoadError(f"invalid slots.yaml pipelines.{phase}.{name}: expected list of slot ids")
+            resolved: list[SlotDefinition] = []
+            for slot_id in values:
+                prior = seen.get(slot_id)
+                if prior:
+                    raise CoreLoadError(f"duplicate {phase} pipeline slot {slot_id}: {prior}, {name}")
+                slot = slots_by_id.get(slot_id)
+                if slot is None:
+                    raise CoreLoadError(f"unknown {phase} pipeline slot: {slot_id}")
+                seen[slot_id] = name
+                resolved.append(slot)
+            return resolved
+
+        return PhasePipeline(
+            serial=resolve_group("serial"),
+            parallel=resolve_group("parallel") if allow_parallel else [],
+        )
+
     def _discover_slot_dir(
         self,
         core_root: Path,
@@ -737,13 +903,14 @@ class CoreLoader:
         for child in sorted(slot_root.iterdir(), key=lambda item: item.name):
             if not child.is_dir():
                 continue
-            slot_manifest_path = child / "slot.yaml"
+            metadata_name = "tool.yaml" if kind == "tool" else "slot.yaml"
+            slot_manifest_path = child / metadata_name
             if not slot_manifest_path.exists():
                 continue
             try:
                 slot_manifest = yaml.safe_load(slot_manifest_path.read_text(encoding="utf-8")) or {}
             except yaml.YAMLError as exc:
-                raise CoreLoadError(f"invalid slot.yaml: {slot_manifest_path}: {exc}") from exc
+                raise CoreLoadError(f"invalid {metadata_name}: {slot_manifest_path}: {exc}") from exc
             rel = child.relative_to(core_root).as_posix()
             slots.append(
                 SlotDefinition(
@@ -752,7 +919,8 @@ class CoreLoader:
                     path=require_relative_path(child, core_root),
                     relative_path=rel,
                     manifest=slot_manifest,
-                    entrypoint=slot_manifest.get("entrypoint"),
+                    core_root=core_root,
+                    entrypoint=slot_manifest.get("entrypoint") or ("module:execute" if kind == "tool" else None),
                     description=slot_manifest.get("description", ""),
                     input_schema=slot_manifest.get("input_schema", {}) or {},
                     capabilities=list(slot_manifest.get("capabilities", []) or []),
@@ -768,101 +936,18 @@ class CoreLoader:
             )
         return slots
 
-    def _load_phase_pipeline(
-        self,
-        core_root: Path,
-        configured: str | None,
-        kind: str,
-        slots: list[SlotDefinition],
-    ) -> PhasePipeline:
-        if not configured:
-            raise CoreLoadError(f"missing {kind} slot root for phase pipeline")
-        slot_root = require_relative_path(core_root / configured, core_root)
-        pipeline_path = slot_root / "pipeline.yaml"
-        if not pipeline_path.exists():
-            raise CoreLoadError(f"missing {kind} pipeline: {pipeline_path.relative_to(core_root).as_posix()}")
-        try:
-            raw = yaml.safe_load(pipeline_path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise CoreLoadError(f"invalid {kind} pipeline.yaml: {pipeline_path}: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise CoreLoadError(f"invalid {kind} pipeline.yaml: expected mapping")
-        unknown_keys = sorted(set(raw) - {"serial", "parallel"})
-        if unknown_keys:
-            raise CoreLoadError(f"invalid {kind} pipeline.yaml key(s): {', '.join(unknown_keys)}")
-        slots_by_id = {slot.slot_id: slot for slot in slots}
-        seen: dict[str, str] = {}
-
-        def resolve_group(name: str) -> list[SlotDefinition]:
-            values = raw.get(name) or []
-            if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
-                raise CoreLoadError(f"invalid {kind} pipeline.yaml {name}: expected list of slot ids")
-            resolved: list[SlotDefinition] = []
-            for slot_id in values:
-                prior = seen.get(slot_id)
-                if prior:
-                    raise CoreLoadError(f"duplicate {kind} pipeline slot {slot_id}: {prior}, {name}")
-                slot = slots_by_id.get(slot_id)
-                if slot is None:
-                    raise CoreLoadError(f"unknown {kind} pipeline slot: {slot_id}")
-                seen[slot_id] = name
-                resolved.append(slot)
-            return resolved
-
-        return PhasePipeline(serial=resolve_group("serial"), parallel=resolve_group("parallel"))
-
-    def _load_bootstrap_pipeline(
-        self,
-        core_root: Path,
-        configured: str | None,
-        slots: list[SlotDefinition],
-    ) -> tuple[PhasePipeline, bool]:
-        if not configured:
-            return PhasePipeline(), False
-        slot_root = require_relative_path(core_root / configured, core_root)
-        if not slot_root.exists():
-            return PhasePipeline(), False
-        pipeline_path = slot_root / "pipeline.yaml"
-        if not pipeline_path.exists():
-            raise CoreLoadError(f"missing bootstrap pipeline: {pipeline_path.relative_to(core_root).as_posix()}")
-        try:
-            raw = yaml.safe_load(pipeline_path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise CoreLoadError(f"invalid bootstrap pipeline.yaml: {pipeline_path}: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise CoreLoadError("invalid bootstrap pipeline.yaml: expected mapping")
-        unknown_keys = sorted(set(raw) - {"serial"})
-        if unknown_keys:
-            raise CoreLoadError(f"invalid bootstrap pipeline.yaml key(s): {', '.join(unknown_keys)}")
-        values = raw.get("serial") or []
-        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
-            raise CoreLoadError("invalid bootstrap pipeline.yaml serial: expected list of slot ids")
-        slots_by_id = {slot.slot_id: slot for slot in slots}
-        seen: set[str] = set()
-        resolved: list[SlotDefinition] = []
-        for slot_id in values:
-            if slot_id in seen:
-                raise CoreLoadError(f"duplicate bootstrap pipeline slot {slot_id}: serial")
-            seen.add(slot_id)
-            slot = slots_by_id.get(slot_id)
-            if slot is None:
-                raise CoreLoadError(f"unknown bootstrap pipeline slot: {slot_id}")
-            resolved.append(slot)
-        return PhasePipeline(serial=resolved, parallel=[]), True
-
     def _validate_toolsets(self, manifest: CoreManifest) -> None:
         unknown = sorted(set(manifest.tools.toolsets) - set(BUILTIN_TOOLSETS))
         if unknown:
             raise CoreLoadError(f"unknown toolset(s): {', '.join(unknown)}")
 
     def _reject_duplicate_ids(self, slots: list[SlotDefinition]) -> None:
-        seen: dict[tuple[str, str], str] = {}
+        seen: dict[str, str] = {}
         for slot in slots:
-            key = (slot.kind, slot.slot_id)
-            prior = seen.get(key)
+            prior = seen.get(slot.slot_id)
             if prior:
-                raise CoreLoadError(f"duplicate {slot.kind} slot id {slot.slot_id}: {prior}, {slot.relative_path}")
-            seen[key] = slot.relative_path
+                raise CoreLoadError(f"duplicate slot id {slot.slot_id}: {prior}, {slot.relative_path}")
+            seen[slot.slot_id] = slot.relative_path
 
     def _discover_skills(self, core_root: Path, configured: str | None) -> list[SkillDefinition]:
         if not configured:
@@ -1136,13 +1221,20 @@ def load_slot_callable(slot: SlotDefinition) -> Callable[..., Any]:
 
 
 def _load_module_from_slot(slot: SlotDefinition, module_name: str) -> ModuleType:
-    module_path = slot.path / (module_name.replace(".", "/") + ".py")
+    import_name = module_name
+    if module_name.endswith(".py") or "/" in module_name:
+        if slot.core_root is None:
+            raise CoreLoadError(f"path entrypoint requires core root: {slot.entrypoint}")
+        module_path = require_relative_path(slot.core_root / module_name, slot.core_root)
+        import_name = module_path.stem
+    else:
+        module_path = slot.path / (module_name.replace(".", "/") + ".py")
     if not module_path.exists():
         raise CoreLoadError(f"slot module not found: {module_path}")
     package_name = _slot_package_name(slot)
     _ensure_slot_package(package_name, _slot_package_paths(slot))
-    _ensure_slot_parent_packages(package_name, module_name, slot.path)
-    unique_name = f"{package_name}.{module_name}"
+    _ensure_slot_parent_packages(package_name, import_name, slot.path)
+    unique_name = f"{package_name}.{import_name}"
     spec = importlib.util.spec_from_file_location(unique_name, module_path)
     if spec is None or spec.loader is None:
         raise CoreLoadError(f"could not load module spec: {module_path}")

@@ -54,17 +54,17 @@ packages/<package_id>.yaml
 Rules:
 
 - Package ids are unique within the repository.
-- Component ids are unique within a recipe.
-- Component sources stay inside the repository.
-- Component sources cannot be symlinks.
-- Pipeline edits are allowed only for bootstrap, input, and output components.
+- Entry ids are unique within a recipe.
+- Entry sources stay inside the repository.
+- Entry sources cannot be symlinks.
+- Pipeline edits are allowed only for entries in `slots`.
 - Bootstrap pipeline edits are serial-only.
-- `mcp` and `schedule` components install one YAML file each.
+- `mcp` and `schedule` file entries install one YAML file each.
 - `mcp` defaults to the target core's `slots.mcp` root.
 - `schedule` defaults to the target core's `slots.schedules` root.
 - `mcp` and `schedule` targets must be YAML files directly inside their slot
   root.
-- `mcp` and `schedule` component `config` is rendered with package options and
+- `mcp` and `schedule` entry `config` is rendered with package options and
   applied as a manifest overlay before validation.
 - `manual_dependencies` are warnings only.
 - Recipes do not edit host dependency files.
@@ -76,7 +76,9 @@ servers. The host still owns MCP transport, schedule claims, approvals, and
 execution.
 
 ```yaml
-components:
+schema_version: 3
+id: docs_and_daily
+files:
   - id: docs
     kind: mcp
     source: docs.yaml
@@ -88,6 +90,10 @@ components:
     config:
       schedule: "0 9 * * *"
       prompt: "Write a daily summary."
+slots: []
+tools: []
+config_defaults: {}
+capabilities: []
 ```
 
 The source files may be incomplete bases as long as the rendered final manifest

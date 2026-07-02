@@ -1,6 +1,7 @@
 import shutil
 
 import pytest
+import yaml
 
 from demiurge.app import create_app, source_agents_root
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
@@ -29,17 +30,15 @@ def _write_bootstrap_module(agents, code, *, slot_id="session_context", failure_
     bootstrap_dir = agents / "assistant" / "agent" / "bootstrap"
     slot_dir = bootstrap_dir / slot_id
     slot_dir.mkdir(parents=True, exist_ok=True)
+    slots_path = agents / "assistant" / "agent" / "slots.yaml"
+    slots = yaml.safe_load(slots_path.read_text(encoding="utf-8"))
+    slots["slots"].setdefault("bootstrap", {})[slot_id] = {
+        "failure": failure_policy,
+        "capabilities": [],
+    }
     if pipeline:
-        (bootstrap_dir / "pipeline.yaml").write_text(
-            f"serial:\n  - {slot_id}\n",
-            encoding="utf-8",
-        )
-    (slot_dir / "slot.yaml").write_text(
-        "entrypoint: module:process\n"
-        f"failure_policy: {failure_policy}\n"
-        "capabilities: []\n",
-        encoding="utf-8",
-    )
+        slots["pipelines"]["bootstrap"] = {"serial": [slot_id]}
+    slots_path.write_text(yaml.safe_dump(slots, sort_keys=False), encoding="utf-8")
     (slot_dir / "module.py").write_text(code, encoding="utf-8")
 
 

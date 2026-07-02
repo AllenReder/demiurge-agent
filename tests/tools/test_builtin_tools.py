@@ -563,6 +563,10 @@ async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
     assert waited.data["running"] is False
     assert "ready" in log.content
     assert process_id in listed.content
+    task = app.control_plane.read(process_id, view="debug")
+    assert task["kind"] == "terminal.exec"
+    assert task["status"] == "succeeded"
+    assert any("ready" in line["text"] for line in task["logs"])
 
 
 @pytest.mark.asyncio
@@ -587,6 +591,10 @@ async def test_terminal_background_job_can_be_managed_with_job_tool_and_notifies
     assert job_id in listed.content
     events = app.job_runtime.pending_events_for_session("session_test")
     assert [event.job_id for event in events] == [job_id]
+    task = app.control_plane.read(job_id, view="debug")
+    assert task["kind"] == "terminal.exec"
+    assert task["status"] == "succeeded"
+    assert any("job-ready" in line["text"] for line in task["logs"])
 
 
 @pytest.mark.asyncio
@@ -615,6 +623,10 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
     assert app.version_store.active_pointer("assistant").active_version == before
     candidate_soul = tmp_path / waited.data["metadata"]["candidate_path"] / "agent" / "SOUL.md"
     assert "Background evolve edit." in candidate_soul.read_text(encoding="utf-8")
+    task = app.control_plane.read(job_id, view="debug")
+    assert task["kind"] == "evolver.run"
+    assert task["status"] == "succeeded"
+    assert task["result_ref"] == waited.data["result_ref"]
 
 
 @pytest.mark.asyncio

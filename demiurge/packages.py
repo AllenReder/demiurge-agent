@@ -33,6 +33,18 @@ COMPONENT_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib", "core
 CORE_LOCAL_KINDS = {"bootstrap", "input", "output", "tool", "skill", "lib"}
 CORE_TARGET_KINDS = CORE_LOCAL_KINDS | MANIFEST_FILE_KINDS
 PIPELINE_KINDS = {"bootstrap", "input", "output"}
+FILE_COMPONENT_KINDS = {"skill", "lib", "core", *MANIFEST_FILE_KINDS}
+INSTALL_KIND_ORDER = {
+    "lib": 0,
+    "bootstrap": 1,
+    "input": 2,
+    "output": 3,
+    "tool": 4,
+    "skill": 5,
+    "core": 6,
+    "mcp": 7,
+    "schedule": 8,
+}
 DEFAULT_TARGET_ROOTS = {
     "bootstrap": "agent/bootstrap",
     "input": "agent/input",
@@ -120,6 +132,7 @@ class PackageComponent:
     config: dict[str, Any] | None = None
     when: dict[str, Any] = field(default_factory=dict)
     config_when: list[ConditionalConfig] = field(default_factory=list)
+    authored_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +143,8 @@ class PackageInfo:
     tags: list[str]
     components: list[PackageComponent]
     options: list[PackageOption] = field(default_factory=list)
+    config_defaults: dict[str, Any] = field(default_factory=dict)
+    capabilities: list[str] = field(default_factory=list)
     manual_dependencies: list[str] = field(default_factory=list)
     repository_alias: str = ""
     repository_id: str = ""
@@ -251,6 +266,10 @@ class PackageRepository:
             return result
         for path in sorted(packages_root.glob("*.yaml"), key=lambda item: item.name):
             raw = _read_yaml_mapping(path)
+            if raw.get("schema_version") != 3:
+                raise PackageRepositoryError(f"package {path} schema_version must be 3")
+            if "components" in raw:
+                raise PackageRepositoryError(f"package {path} must use schema v3 slots/tools/files, not components")
             package_id = _required_str(raw, "id", path=path)
             if package_id in result:
                 raise PackageRepositoryError(f"duplicate package id: {package_id}")
@@ -260,10 +279,21 @@ class PackageRepository:
             manual_dependencies = raw.get("manual_dependencies") or []
             if not isinstance(manual_dependencies, list) or any(not isinstance(item, str) for item in manual_dependencies):
                 raise PackageRepositoryError(f"package manual_dependencies must be a list of strings: {path}")
-            raw_components = raw.get("components") or []
-            if not isinstance(raw_components, list) or any(not isinstance(item, Mapping) for item in raw_components):
-                raise PackageRepositoryError(f"package components must be a list of objects: {path}")
-            components = [PackageRepository._parse_component(item, package_id=package_id, path=path) for item in raw_components]
+            config_defaults = raw.get("config_defaults") or {}
+            if not isinstance(config_defaults, Mapping):
+                raise PackageRepositoryError(f"package config_defaults must be a mapping: {path}")
+            raw_capabilities = raw.get("capabilities") or []
+            if not isinstance(raw_capabilities, list) or any(not isinstance(item, str) for item in raw_capabilities):
+                raise PackageRepositoryError(f"package capabilities must be a list of strings: {path}")
+            raw_components = PackageRepository._v3_components(raw, package_id=package_id, path=path)
+            components = [
+                PackageRepository._parse_component(
+                    PackageRepository._with_config_defaults(item, config_defaults),
+                    package_id=package_id,
+                    path=path,
+                )
+                for item in raw_components
+            ]
             PackageRepository._reject_duplicate_component_ids(package_id, components)
             options = PackageRepository._parse_options(raw.get("options"), path=path, package_id=package_id)
             PackageRepository._validate_component_conditions(package_id, components=components, options=options)
@@ -274,6 +304,8 @@ class PackageRepository:
                 tags=list(tags),
                 components=components,
                 options=options,
+                config_defaults=dict(config_defaults),
+                capabilities=list(raw_capabilities),
                 manual_dependencies=list(manual_dependencies),
                 repository_alias=source.alias,
                 repository_id=repository.repository_id,
@@ -282,6 +314,61 @@ class PackageRepository:
                 repository_commit=source.commit,
             )
         return result
+
+    @staticmethod
+    def _v3_components(raw: Mapping[str, Any], *, package_id: str, path: Path) -> list[dict[str, Any]]:
+        slots = raw.get("slots") or []
+        tools = raw.get("tools") or []
+        files = raw.get("files") or []
+        if not isinstance(slots, list) or any(not isinstance(item, Mapping) for item in slots):
+            raise PackageRepositoryError(f"package slots must be a list of objects: {path}")
+        if not isinstance(tools, list) or any(not isinstance(item, Mapping) for item in tools):
+            raise PackageRepositoryError(f"package tools must be a list of objects: {path}")
+        if not isinstance(files, list) or any(not isinstance(item, Mapping) for item in files):
+            raise PackageRepositoryError(f"package files must be a list of objects: {path}")
+        components: list[tuple[int, dict[str, Any]]] = []
+        index = 0
+        for item in slots:
+            phase = str(item.get("phase") or "").strip()
+            if phase not in PIPELINE_KINDS:
+                raise PackageRepositoryError(f"package {package_id} slot has invalid phase: {phase}")
+            components.append((index, {**dict(item), "kind": phase}))
+            index += 1
+        for item in tools:
+            components.append((index, {**dict(item), "kind": "tool"}))
+            index += 1
+        for item in files:
+            kind = str(item.get("kind") or "").strip()
+            if kind not in FILE_COMPONENT_KINDS:
+                raise PackageRepositoryError(f"package {package_id} file has invalid kind: {kind}")
+            components.append((index, dict(item)))
+            index += 1
+        return [
+            item
+            for _, item in sorted(
+                components,
+                key=lambda pair: (INSTALL_KIND_ORDER.get(str(pair[1].get("kind") or ""), 100), pair[0]),
+            )
+        ]
+
+    @staticmethod
+    def _with_config_defaults(raw: Mapping[str, Any], config_defaults: Mapping[str, Any]) -> dict[str, Any]:
+        item = dict(raw)
+        if not config_defaults:
+            return item
+        kind = str(item.get("kind") or "")
+        component_id = str(item.get("id") or item.get("source") or "")
+        merged: dict[str, Any] = {}
+        for key in ("all", kind, component_id):
+            value = config_defaults.get(key)
+            if isinstance(value, Mapping):
+                merged = _merge_mapping(merged, value)
+        config = item.get("config")
+        if isinstance(config, Mapping):
+            merged = _merge_mapping(merged, config)
+        if merged:
+            item["config"] = merged
+        return item
 
     @staticmethod
     def _parse_component(raw: Mapping[str, Any], *, package_id: str, path: Path) -> PackageComponent:
@@ -299,6 +386,9 @@ class PackageRepository:
         if config is not None and not isinstance(config, Mapping):
             raise PackageRepositoryError(f"component {component_id} config must be a mapping: {path}")
         config_when = PackageRepository._parse_config_when(raw.get("config_when"), package_id=package_id, path=path)
+        authored_metadata = raw.get("metadata") or {}
+        if authored_metadata is not None and not isinstance(authored_metadata, Mapping):
+            raise PackageRepositoryError(f"component {component_id} metadata must be a mapping: {path}")
         return PackageComponent(
             component_id=component_id,
             kind=kind,
@@ -309,6 +399,7 @@ class PackageRepository:
             config=dict(config) if isinstance(config, Mapping) else None,
             when=PackageRepository._parse_condition(raw.get("when"), package_id=package_id, path=path),
             config_when=config_when,
+            authored_metadata=dict(authored_metadata or {}),
         )
 
     @staticmethod
@@ -1038,6 +1129,13 @@ class PackageManager:
             if component.kind in PIPELINE_KINDS:
                 operation["slot_id"] = target_path.name
                 operation["pipeline"] = dict(component.pipeline or {"group": "serial"})
+                operation["slot_manifest"] = self._slot_manifest_from_source(
+                    source_path,
+                    config,
+                    component.authored_metadata,
+                )
+            if component.kind == "tool":
+                operation["tool_manifest"] = self._tool_manifest(component.authored_metadata)
             return operation
         target_core_id = component.target_core_id or component.component_id
         self._validate_core_id(target_core_id)
@@ -1211,6 +1309,20 @@ class PackageManager:
             return self._component_record(operation)
         if operation["kind"] in CORE_LOCAL_KINDS:
             self._copy_component_source(source_path, target_path)
+            if operation["kind"] in PIPELINE_KINDS:
+                legacy_manifest = target_path / "slot.yaml"
+                if legacy_manifest.exists():
+                    legacy_manifest.unlink()
+            if operation["kind"] == "tool":
+                legacy_manifest = target_path / "slot.yaml"
+                if legacy_manifest.exists():
+                    legacy_manifest.unlink()
+                tool_manifest = operation.get("tool_manifest")
+                if isinstance(tool_manifest, dict):
+                    (target_path / "tool.yaml").write_text(
+                        yaml.safe_dump(tool_manifest, sort_keys=False, allow_unicode=True),
+                        encoding="utf-8",
+                    )
             config = operation.get("config")
             if isinstance(config, dict):
                 if not target_path.is_dir():
@@ -1220,6 +1332,7 @@ class PackageManager:
                     encoding="utf-8",
                 )
             if operation["kind"] in PIPELINE_KINDS:
+                self._upsert_slot_declaration(core_path, operation)
                 self._insert_pipeline_slot(core_path, operation)
             return self._component_record(operation)
         shutil.copytree(source_path, target_path, ignore=_COPYTREE_IGNORE)
@@ -1282,6 +1395,58 @@ class PackageManager:
             return
         ensure_dir(target_path.parent)
         shutil.copy2(source_path, target_path)
+
+    def _slot_manifest_from_source(
+        self,
+        source_path: Path,
+        config: dict[str, Any] | None,
+        authored_metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        manifest_path = source_path / "slot.yaml" if source_path.is_dir() else None
+        raw: dict[str, Any] = {}
+        if manifest_path is not None and manifest_path.exists():
+            raw = _read_yaml_mapping(manifest_path)
+        if authored_metadata:
+            raw = {**raw, **dict(authored_metadata)}
+        result: dict[str, Any] = {}
+        if raw.get("description") is not None:
+            result["description"] = str(raw.get("description") or "")
+        failure = raw.get("failure") or raw.get("failure_policy")
+        if failure is not None:
+            result["failure"] = str(failure)
+        capabilities = raw.get("capabilities")
+        if isinstance(capabilities, list):
+            result["capabilities"] = [str(item) for item in capabilities]
+        else:
+            result["capabilities"] = []
+        if raw.get("timeout_seconds") is not None:
+            result["timeout_seconds"] = raw.get("timeout_seconds")
+        entrypoint = raw.get("entrypoint")
+        if entrypoint and str(entrypoint) != "module:process":
+            result["run"] = str(entrypoint)
+        return result
+
+    def _tool_manifest(self, authored_metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        raw = dict(authored_metadata or {})
+        result: dict[str, Any] = {}
+        for key in (
+            "entrypoint",
+            "description",
+            "input_schema",
+            "failure",
+            "failure_policy",
+            "capability",
+            "risk",
+            "approval_policy",
+            "display_policy",
+            "model_output_policy",
+            "capabilities",
+        ):
+            if raw.get(key) is not None:
+                result[key] = copy.deepcopy(raw[key])
+        result.setdefault("entrypoint", "module:execute")
+        result.setdefault("capabilities", [])
+        return result
 
     def _component_record(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         keep = {
@@ -1403,6 +1568,54 @@ class PackageManager:
         if slot_id in set(pipeline.get("serial") or []) | set(pipeline.get("parallel") or []):
             raise PackageOperationError(f"{kind} pipeline already contains slot: {slot_id}")
 
+    def _slots_yaml_path(self, core_path: Path) -> Path:
+        return core_path / "agent" / "slots.yaml"
+
+    def _read_slots_yaml(self, core_path: Path) -> dict[str, Any]:
+        path = self._slots_yaml_path(core_path)
+        if not path.exists():
+            return {
+                "version": 2,
+                "slots": {"bootstrap": {}, "input": {}, "output": {}},
+                "pipelines": {
+                    "bootstrap": {"serial": []},
+                    "input": {"serial": [], "parallel": []},
+                    "output": {"serial": [], "parallel": []},
+                },
+            }
+        raw = _read_yaml_mapping(path)
+        if raw.get("version") != 2:
+            raise PackageOperationError("agent/slots.yaml version must be 2")
+        slots = raw.setdefault("slots", {})
+        pipelines = raw.setdefault("pipelines", {})
+        if not isinstance(slots, dict) or not isinstance(pipelines, dict):
+            raise PackageOperationError("agent/slots.yaml slots and pipelines must be mappings")
+        for phase in ("bootstrap", "input", "output"):
+            slots.setdefault(phase, {})
+            pipelines.setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
+        return raw
+
+    def _write_slots_yaml(self, core_path: Path, data: Mapping[str, Any]) -> None:
+        path = self._slots_yaml_path(core_path)
+        ensure_dir(path.parent)
+        path.write_text(yaml.safe_dump(dict(data), sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+    def _upsert_slot_declaration(self, core_path: Path, operation: Mapping[str, Any]) -> None:
+        kind = str(operation["kind"])
+        if kind not in PIPELINE_KINDS:
+            return
+        slot_id = str(operation["slot_id"])
+        data = self._read_slots_yaml(core_path)
+        slots = data["slots"]
+        for phase, declarations in slots.items():
+            if phase != kind and isinstance(declarations, Mapping) and slot_id in declarations:
+                raise PackageOperationError(f"slot id already exists in {phase}: {slot_id}")
+        declarations = slots.setdefault(kind, {})
+        if not isinstance(declarations, dict):
+            raise PackageOperationError(f"agent/slots.yaml slots.{kind} must be a mapping")
+        declarations[slot_id] = dict(operation.get("slot_manifest") or {"failure": "soft", "capabilities": []})
+        self._write_slots_yaml(core_path, data)
+
     def _insert_pipeline_slot(self, core_path: Path, operation: Mapping[str, Any]) -> None:
         kind = str(operation["kind"])
         slot_id = str(operation["slot_id"])
@@ -1433,10 +1646,15 @@ class PackageManager:
                 changed = True
         if changed:
             self._write_pipeline(core_path, kind, pipeline)
+        data = self._read_slots_yaml(core_path)
+        declarations = data.get("slots", {}).get(kind)
+        if isinstance(declarations, dict) and slot_id in declarations:
+            declarations.pop(slot_id)
+            self._write_slots_yaml(core_path, data)
 
     def _read_pipeline(self, core_path: Path, kind: str) -> dict[str, list[str]]:
-        path = core_path / "agent" / kind / "pipeline.yaml"
-        raw = _read_yaml_mapping(path)
+        data = self._read_slots_yaml(core_path)
+        raw = data.get("pipelines", {}).get(kind) or {}
         groups = self._pipeline_groups(kind)
         unknown_keys = sorted(set(raw) - set(groups))
         if unknown_keys:
@@ -1450,17 +1668,13 @@ class PackageManager:
         return result
 
     def _write_pipeline(self, core_path: Path, kind: str, pipeline: Mapping[str, list[str]]) -> None:
-        path = core_path / "agent" / kind / "pipeline.yaml"
-        data = {"serial": pipeline.get("serial") or []}
+        slots_yaml = self._read_slots_yaml(core_path)
+        pipelines = slots_yaml.setdefault("pipelines", {})
+        phase_pipeline = {"serial": pipeline.get("serial") or []}
         if "parallel" in self._pipeline_groups(kind):
-            data["parallel"] = pipeline.get("parallel") or []
-        path.write_text(
-            yaml.safe_dump(
-                data,
-                sort_keys=False,
-            ),
-            encoding="utf-8",
-        )
+            phase_pipeline["parallel"] = pipeline.get("parallel") or []
+        pipelines[kind] = phase_pipeline
+        self._write_slots_yaml(core_path, slots_yaml)
 
     def _pipeline_groups(self, kind: str) -> tuple[str, ...]:
         return ("serial",) if kind == "bootstrap" else ("serial", "parallel")
@@ -1639,6 +1853,16 @@ def _read_yaml_mapping(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PackageRepositoryError(f"expected mapping YAML: {path}")
     return dict(raw)
+
+
+def _merge_mapping(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(base))
+    for key, value in update.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), dict):
+            result[str(key)] = _merge_mapping(result[str(key)], value)
+        else:
+            result[str(key)] = copy.deepcopy(value)
+    return result
 
 
 def _required_str(raw: Mapping[str, Any], key: str, *, path: Path) -> str:

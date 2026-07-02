@@ -21,7 +21,7 @@ _MD_EXCESS_NL = re.compile(r"\n{3,}")
 
 async def process(ctx):
     config = load_synthesis_config(__file__)
-    text = str(ctx.output.content or "").strip()
+    text = str(ctx.output.response_text or "").strip()
     summarizer_core = config.get("summarizer_core")
     if summarizer_core:
         summary = await ctx.agents.run(
@@ -62,7 +62,7 @@ async def process(ctx):
         media_type=media_type,
         summary=summary or None,
         artifact_metadata=synthesis.metadata,
-        history_policy="transient",
+        write_history=False,
     )
 
 

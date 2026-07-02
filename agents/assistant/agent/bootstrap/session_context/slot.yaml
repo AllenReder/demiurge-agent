@@ -1,4 +1,0 @@
-entrypoint: module:process
-description: "Adds default session environment context."
-failure_policy: soft
-capabilities: []

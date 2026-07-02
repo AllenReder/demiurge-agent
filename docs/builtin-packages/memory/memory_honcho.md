@@ -37,24 +37,24 @@ agent/tools/honcho_reasoning/
 agent/tools/honcho_conclude/
 ```
 
-It also edits the slot pipelines:
+It also edits `agent/slots.yaml`:
 
 ```yaml
-agent/bootstrap/pipeline.yaml:
-  serial:
-    - session_context
-    - memory_honcho
-
-agent/input/pipeline.yaml:
-  serial:
-    - memory_honcho_recall
-    - base_input
-
-agent/output/pipeline.yaml:
-  serial:
-    - base_output
-  parallel:
-    - memory_honcho_sync
+pipelines:
+  bootstrap:
+    serial:
+      - session_context
+      - memory_honcho
+  input:
+    serial:
+      - memory_honcho_recall
+      - base_input
+    parallel: []
+  output:
+    serial:
+      - base_output
+    parallel:
+      - memory_honcho_sync
 ```
 
 Runtime memory data is not package-owned. It is stored under:

@@ -1,5 +1,0 @@
-entrypoint: module:process
-description: Injects the latest bounded continuity reseed note at session start.
-failure_policy: soft
-capabilities:
-  - fs.read

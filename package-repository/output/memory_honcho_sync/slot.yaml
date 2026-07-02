@@ -1,8 +1,0 @@
-entrypoint: module:process
-description: Mirrors completed turns into Honcho memory and refreshes next-turn context cache.
-failure_policy: soft
-history_policy: transient
-capabilities:
-  - fs.read
-  - fs.write
-  - network.fetch

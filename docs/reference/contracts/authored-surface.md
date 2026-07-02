@@ -19,6 +19,7 @@ A concrete runtime core has this shape:
   packages.yaml
   agent/
     SOUL.md
+    slots.yaml
     bootstrap/
     input/
     output/
@@ -39,6 +40,7 @@ Agent Core authors may edit:
 
 - `agent.yaml`
 - `agent/SOUL.md`
+- `agent/slots.yaml`
 - `agent/bootstrap/`
 - `agent/input/`
 - `agent/output/`
@@ -70,6 +72,17 @@ Current runtime mode is `host_shared`. Agent Slot code runs in the host
 Python environment. Candidate cores must not add Python dependencies
 automatically. If a change needs a dependency, document it as a manual dependency
 review item.
+
+## Slot Rule
+
+`agent/slots.yaml` is the only authored metadata and pipeline graph for
+bootstrap, input, and output slots. Slot code stays in `agent/bootstrap/`,
+`agent/input/`, and `agent/output/`.
+
+`base_input` and `base_output` are editable seed slots. The host does not treat
+them as required built-ins. If no input slot contributes prompt content, the
+turn fails; if no output slot sends or records the assistant response, the raw
+provider response remains only in task/debug records.
 
 ## Verification
 

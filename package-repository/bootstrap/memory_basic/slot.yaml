@@ -1,4 +1,0 @@
-entrypoint: module:process
-description: Injects session bootstrap context from basic local memory.
-failure_policy: soft
-capabilities: []

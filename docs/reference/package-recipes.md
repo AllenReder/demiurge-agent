@@ -20,7 +20,7 @@ boundary inside the agent loop.
 ## Recipe Shape
 
 ```yaml
-schema_version: 2
+schema_version: 3
 id: reply_style
 name: Reply Style
 summary: Add a reply style input module.
@@ -38,29 +38,41 @@ options:
         description: Prefer direct answers.
       - value: detailed
         description: Prefer detailed answers.
-components:
+config_defaults: {}
+capabilities: []
+slots:
   - id: reply_style_input
-    kind: input
+    phase: input
     source: reply_style
     target: agent/input/reply_style
+    metadata:
+      failure: soft
+      capabilities: []
+      description: "Adds a reply style input module."
     pipeline:
       before: base_input
     config:
       tone: ${options.tone}
+tools: []
+files: []
 ```
 
 ## Top-Level Fields
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Recipe schema version. Current built-in recipes use `2`. |
+| `schema_version` | Recipe schema version. Current recipes use `3`. |
 | `id` | Package id. Must be unique in the repository. |
 | `name` | Display name. |
 | `summary` | Short package summary. |
 | `tags` | List of string tags. |
 | `manual_dependencies` | Warning strings for dependencies Demiurge will not install. |
 | `options` | User-provided install options. |
-| `components` | Files or cores to install. |
+| `config_defaults` | Optional config fragments merged into matching entries. |
+| `capabilities` | Package-level capability summary for review. |
+| `slots` | Bootstrap/input/output slot entries to install. |
+| `tools` | Authored tool entries to install. |
+| `files` | Libraries, skills, child cores, MCP declarations, and schedules. |
 
 ## Option Types
 
@@ -75,28 +87,32 @@ Supported option types:
 `choice` options require `choices`. Secret values are redacted in
 `packages.yaml`.
 
-## Component Kinds
+## Entry Kinds
 
-| Kind | Default target root |
+| Section | Kind field | Default target root |
 | --- | --- |
-| `bootstrap` | `agent/bootstrap` |
-| `input` | `agent/input` |
-| `output` | `agent/output` |
-| `tool` | `agent/tools` |
-| `skill` | `agent/skills` |
-| `lib` | `agent/lib` |
-| `core` | Another runtime core by `target_core_id`. |
+| `slots` | `phase: bootstrap` | `agent/bootstrap` |
+| `slots` | `phase: input` | `agent/input` |
+| `slots` | `phase: output` | `agent/output` |
+| `tools` | implicit `tool` | `agent/tools` |
+| `files` | `kind: skill` | `agent/skills` |
+| `files` | `kind: lib` | `agent/lib` |
+| `files` | `kind: core` | Another runtime core by `target_core_id`. |
+| `files` | `kind: mcp` | The target core's MCP declaration root. |
+| `files` | `kind: schedule` | The target core's schedule declaration root. |
 
-## Component Fields
+## Entry Fields
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Component id, unique within the recipe. |
-| `kind` | Component kind. |
+| `id` | Entry id, unique within the recipe. |
+| `phase` | Slot phase for `slots` entries. |
+| `kind` | File kind for `files` entries. |
 | `source` | Repository-relative component source id. |
 | `target` | Runtime-core-relative target path for core-local kinds. |
 | `target_core_id` | Target core id for `kind: core`. |
-| `pipeline` | Pipeline edit for bootstrap/input/output components. |
+| `metadata` | Slot or tool metadata written to `agent/slots.yaml` or `tool.yaml`. |
+| `pipeline` | Pipeline edit for bootstrap/input/output slot entries. |
 | `config` | Config written into the installed component. |
 | `when` | Option condition that includes or skips the component. |
 | `config_when` | Conditional config merge list. |

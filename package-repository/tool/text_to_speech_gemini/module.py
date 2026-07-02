@@ -30,7 +30,7 @@ async def execute(ctx, args):
         synthesis.path,
         media_type=synthesis.media_type,
         artifact_metadata=synthesis.metadata,
-        history_policy="transient",
+        write_history=False,
     )
     return ToolResult(
         content="sent audio",

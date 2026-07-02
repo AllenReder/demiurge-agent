@@ -75,6 +75,30 @@ def _write_module(root, rel_path, code):
 
 def _write_slot(root, rel_path, text):
     path = root / rel_path
+    parts = path.relative_to(root).parts
+    if len(parts) == 5 and parts[1] == "agent" and parts[2] == "tools" and parts[4] == "slot.yaml":
+        path = path.with_name("tool.yaml")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return
+    if len(parts) == 5 and parts[1] == "agent" and parts[2] in {"bootstrap", "input", "output"} and parts[4] == "slot.yaml":
+        core_id, _, phase, slot_id, _ = parts
+        raw = yaml.safe_load(text) or {}
+        declaration = {}
+        entrypoint = raw.get("entrypoint")
+        if entrypoint and entrypoint != "module:process":
+            declaration["run"] = str(entrypoint)
+        if raw.get("description") is not None:
+            declaration["description"] = str(raw.get("description") or "")
+        declaration["failure"] = str(raw.get("failure") or raw.get("failure_policy") or "soft")
+        declaration["capabilities"] = [str(item) for item in (raw.get("capabilities") or [])]
+        for key in ("input_schema", "timeout_seconds", "default_placement", "history_policy"):
+            if raw.get(key) is not None:
+                declaration[key] = raw[key]
+        slots = _load_slots_yaml(root, core_id)
+        slots["slots"].setdefault(phase, {})[slot_id] = declaration
+        _write_slots_yaml(root, core_id, slots)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
@@ -82,20 +106,30 @@ def _write_slot(root, rel_path, text):
 def _write_pipeline(root, phase, *, serial=None, parallel=None, core_id="assistant"):
     serial = serial or []
     parallel = parallel or []
-    lines = ["serial:"]
-    if serial:
-        lines.extend(f"  - {slot_id}" for slot_id in serial)
-    else:
-        lines = ["serial: []"]
-    if parallel:
-        lines.append("parallel:")
-        lines.extend(f"  - {slot_id}" for slot_id in parallel)
-    else:
-        lines.append("parallel: []")
-    (root / core_id / "agent" / phase / "pipeline.yaml").write_text(
-        "\n".join(lines) + "\n",
-        encoding="utf-8",
-    )
+    slots = _load_slots_yaml(root, core_id)
+    slots["pipelines"][phase] = {"serial": list(serial)}
+    if phase != "bootstrap":
+        slots["pipelines"][phase]["parallel"] = list(parallel)
+    _write_slots_yaml(root, core_id, slots)
+
+
+def _load_slots_yaml(root, core_id="assistant"):
+    path = root / core_id / "agent" / "slots.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else None
+    data = raw if isinstance(raw, dict) else {}
+    data.setdefault("version", 2)
+    data.setdefault("slots", {})
+    data.setdefault("pipelines", {})
+    for phase in ("bootstrap", "input", "output"):
+        data["slots"].setdefault(phase, {})
+        data["pipelines"].setdefault(phase, {"serial": []} if phase == "bootstrap" else {"serial": [], "parallel": []})
+    return data
+
+
+def _write_slots_yaml(root, core_id, data):
+    path = root / core_id / "agent" / "slots.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 def _slot_text(*, description="test slot", failure_policy="soft", capabilities=None):
@@ -185,7 +219,7 @@ async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_
         "    ctx.bootstrap.add('BOOT SYSTEM')\n",
     )
     _write_slot(agents, "assistant/agent/bootstrap/boot/slot.yaml", _slot_text())
-    (agents / "assistant" / "agent" / "bootstrap" / "pipeline.yaml").write_text("serial:\n  - boot\n", encoding="utf-8")
+    _write_pipeline(agents, "bootstrap", serial=["boot"])
     _write_module(
         agents,
         "assistant/agent/input/debug_system/module.py",
@@ -361,8 +395,8 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
         agents,
         "assistant/agent/output/immediate/module.py",
         "def process(ctx):\n"
-        "    ctx.output.send_text('persist immediate', history_policy='persist', delivery='immediate')\n"
-        "    ctx.output.send_text('hidden immediate', history_policy='model_hidden', delivery='immediate')\n"
+        "    ctx.output.send_text('persist immediate')\n"
+        "    ctx.output.send_text('hidden immediate', visible=False, write_history=True)\n"
         "    recent = [(m.content, m.model_visible) for m in ctx.history.recent_messages(5)]\n"
         "    ctx.result.set({'recent': recent})\n",
     )
@@ -382,19 +416,18 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == [
         "persist immediate",
-        "hidden immediate",
     ]
     messages = app.runner.session_store.read_messages(app.runner.session_id)
-    assert [(message.role, message.content, message.model_visible) for message in messages] == [
-        ("user", "hello", True),
-        ("assistant", "persist immediate", True),
-        ("assistant", "hidden immediate", False),
+    assert [(message.role, message.content, message.visible, message.model_visible) for message in messages] == [
+        ("user", "hello", True, True),
+        ("assistant", "persist immediate", True, True),
+        ("assistant", "hidden immediate", False, True),
     ]
     completed = next(event for event in app.runner.event_log.tail(30) if event["type"] == "turn.completed")
     assert ("persist immediate", True) in {
         tuple(item) for item in completed["agent_result"]["recent"]
     }
-    assert ("hidden immediate", False) in {
+    assert ("hidden immediate", True) in {
         tuple(item) for item in completed["agent_result"]["recent"]
     }
 
@@ -429,23 +462,23 @@ async def test_module_contexts_do_not_expose_path_attachment_api(tmp_path):
         "def process(ctx):\n"
         f"    if hasattr(ctx.input, {removed_api!r}):\n"
         "        raise RuntimeError('ctx.input path attachment API should not exist')\n"
-        "    ctx.input.add('user', ctx.input.raw_input.text)\n"
-        "    ctx.input.send_text('input probe', history_policy='transient')\n",
+        "    ctx.input.add_context(ctx.input.raw_text, role='user')\n"
+        "    ctx.input.send_text('input probe', write_history=False)\n",
     )
     _write_module(
         agents,
-        "assistant/agent/output/probe/module.py",
+        "assistant/agent/output/output_probe/module.py",
         "def process(ctx):\n"
         "    ctx.result.set({\n"
         f"        'output_has_attach': hasattr(ctx.output, {removed_api!r}),\n"
         f"        'result_has_attach': hasattr(ctx.result, {removed_api!r}),\n"
         "    })\n"
-        "    ctx.output.send_text(ctx.output.content)\n",
+        "    ctx.output.send_text(ctx.output.response_text)\n",
     )
     _write_slot(agents, "assistant/agent/input/probe/slot.yaml", _slot_text())
-    _write_slot(agents, "assistant/agent/output/probe/slot.yaml", _slot_text())
+    _write_slot(agents, "assistant/agent/output/output_probe/slot.yaml", _slot_text())
     _write_pipeline(agents, "input", serial=["probe"])
-    _write_pipeline(agents, "output", serial=["probe"])
+    _write_pipeline(agents, "output", serial=["output_probe"])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     app.runner.provider = RecordingProvider(default="main")
 
@@ -585,7 +618,7 @@ async def test_authored_tool_can_send_transient_audio_without_history(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tool_output_uses_slot_default_history_policy_when_omitted(tmp_path):
+async def test_tool_output_defaults_to_persist_when_write_history_is_omitted(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
         agents,
@@ -599,8 +632,7 @@ async def test_tool_output_uses_slot_default_history_policy_when_omitted(tmp_pat
         agents,
         "assistant/agent/tools/default_sender/slot.yaml",
         "entrypoint: module:execute\n"
-        "description: Send text with slot default policy.\n"
-        "history_policy: model_hidden\n"
+            "description: Send text with default history write behavior.\n"
         "input_schema:\n"
         "  type: object\n"
         "  properties: {}\n"
@@ -619,27 +651,27 @@ async def test_tool_output_uses_slot_default_history_policy_when_omitted(tmp_pat
     result = await app.runner.run_turn("default policy")
 
     delivery = next(delivery for delivery in result.deliveries if delivery.text == "default policy")
-    assert delivery.history_policy == "model_hidden"
+    assert delivery.history_policy == "persist"
     messages = app.runner.session_store.read_messages(app.runner.session_id)
     assistant_delivery = next(
         message for message in messages if message.role == "assistant" and message.content == "default policy"
     )
     assert assistant_delivery.visible is True
-    assert assistant_delivery.model_visible is False
+    assert assistant_delivery.model_visible is True
     tool_message = next(message for message in messages if message.role == "tool")
     assert tool_message.content == "default ok"
     assert tool_message.model_visible is True
 
 
 @pytest.mark.asyncio
-async def test_tool_slot_end_delivery_schedules_after_tool_returns(tmp_path):
+async def test_tool_delivery_schedules_immediately_after_tool_returns(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
         agents,
         "assistant/agent/tools/slot_end_sender/module.py",
         "from demiurge.sdk import ToolResult\n"
         "def execute(ctx, args):\n"
-        "    ctx.output.send_text('slot end delivery', history_policy='transient', delivery='slot_end')\n"
+            "    ctx.output.send_text('tool immediate delivery', write_history=False)\n"
         "    return ToolResult(content='slot end ok')\n",
     )
     _write_slot(
@@ -674,7 +706,7 @@ async def test_tool_slot_end_delivery_schedules_after_tool_returns(tmp_path):
         for outbound in bridge.outbounds
         for delivery in outbound.deliveries
     ]
-    assert "slot end delivery" in delivered
+    assert "tool immediate delivery" in delivered
 
 
 @pytest.mark.asyncio
@@ -877,13 +909,13 @@ async def test_immediate_delivery_failure_is_nonfatal_and_keeps_history(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_delivery_slot_end_defers_channel_send_but_commits_history_immediately(tmp_path):
+async def test_output_send_commits_history_and_schedules_delivery_immediately(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
         agents,
         "assistant/agent/output/slot_end/module.py",
         "def process(ctx):\n"
-        "    ctx.output.send_text('slot-end', delivery='slot_end')\n"
+        "    ctx.output.send_text('slot-end')\n"
         "    recent = [m.content for m in ctx.history.recent_messages(10)]\n"
         "    ctx.result.set({'saw_slot_end': 'slot-end' in recent})\n",
     )
@@ -941,7 +973,7 @@ async def test_parallel_output_without_bridge_writes_delivery_failed_event(tmp_p
         and event.get("channel") == "telegram"
         and event.get("slot") == "agent/output/async_extra"
         and event.get("delivery_id")
-        and event.get("history_policy") == "persist"
+        and event.get("history_policy") == "transient"
         for event in app.runner.event_log.tail(30)
     )
 

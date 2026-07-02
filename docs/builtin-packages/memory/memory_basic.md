@@ -22,12 +22,13 @@ agent/bootstrap/memory_basic/
 agent/tools/memory/
 ```
 
-It also edits the bootstrap pipeline:
+It also edits `agent/slots.yaml`:
 
 ```yaml
-agent/bootstrap/pipeline.yaml:
-  serial:
-    - memory_basic
+pipelines:
+  bootstrap:
+    serial:
+      - memory_basic
 ```
 
 If the core already has the default `session_context` bootstrap slot, the

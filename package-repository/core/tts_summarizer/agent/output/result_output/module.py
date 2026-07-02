@@ -1,2 +1,2 @@
 def process(ctx):
-    ctx.result.set({"text": str(ctx.output.content or "").strip()})
+    ctx.result.set({"text": str(ctx.output.response_text or "").strip()})

@@ -34,6 +34,14 @@ def _manager(app) -> PackageManager:
     return PackageManager(version_store=app.version_store, repository=repositories)
 
 
+def _slots_yaml(core_path) -> dict:
+    return yaml.safe_load((core_path / "agent" / "slots.yaml").read_text(encoding="utf-8"))
+
+
+def _pipeline(core_path, phase: str) -> dict:
+    return _slots_yaml(core_path)["pipelines"][phase]
+
+
 class _RecordingProvider:
     def __init__(self, responses=None, *, default: str = "main"):
         self.responses = list(responses or [])
@@ -221,15 +229,12 @@ def test_install_and_uninstall_memory_honcho_preserves_data(tmp_path):
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["installed"][0]["options"]["api_key"] == "<redacted>"
 
-    bootstrap_pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    input_pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    output_pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert bootstrap_pipeline["serial"] == ["session_context", "memory_honcho"]
-    assert input_pipeline == {"serial": ["memory_honcho_recall", "base_input"], "parallel": []}
-    assert output_pipeline == {"serial": ["base_output"], "parallel": ["memory_honcho_sync"]}
+    assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context", "memory_honcho"]
+    assert _pipeline(core_path, "input") == {"serial": ["memory_honcho_recall", "base_input"], "parallel": []}
+    assert _pipeline(core_path, "output") == {"serial": ["base_output"], "parallel": ["memory_honcho_sync"]}
 
-    conclude_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_conclude" / "slot.yaml").read_text())
-    search_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_search" / "slot.yaml").read_text())
+    conclude_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_conclude" / "tool.yaml").read_text())
+    search_slot = yaml.safe_load((core_path / "agent" / "tools" / "honcho_search" / "tool.yaml").read_text())
     assert conclude_slot["approval_policy"] == "prompt"
     assert conclude_slot["failure_policy"] == "soft"
     assert search_slot["approval_policy"] == "auto"
@@ -251,14 +256,12 @@ def test_install_and_uninstall_memory_honcho_preserves_data(tmp_path):
     for tool in HONCHO_TOOLS:
         assert not (core_path / "agent" / "tools" / tool).exists()
     assert (data_dir / "cache.json").read_text(encoding="utf-8") == '{"kept": true}'
-    assert yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())["serial"] == [
-        "session_context"
-    ]
-    assert yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text()) == {
+    assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context"]
+    assert _pipeline(core_path, "input") == {
         "serial": ["base_input"],
         "parallel": [],
     }
-    assert yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text()) == {
+    assert _pipeline(core_path, "output") == {
         "serial": ["base_output"],
         "parallel": [],
     }

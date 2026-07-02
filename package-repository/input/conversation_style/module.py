@@ -35,12 +35,12 @@ def process(ctx):
     ]
 
     if _config_bool(config.get("channel_hint"), default=True):
-        channel = str(ctx.input.raw_input.metadata.get("channel") or ctx.turn.metadata.get("channel") or "").strip().lower()
+        channel = str(ctx.turn.metadata.get("channel") or "").strip().lower()
         channel_hint = CHANNEL_HINTS.get(channel)
         if channel_hint:
             parts.append(f"- {channel_hint}")
 
-    ctx.input.add("system", "\n".join(parts), history_policy="transient")
+    ctx.input.add_context("\n".join(parts), role="system", write_history=False)
 
     if _config_bool(config.get("activate_skill"), default=True):
         ctx.skills.activate("conversation_style")

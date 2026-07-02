@@ -22,7 +22,7 @@ def process(ctx):
     note = store.write_turn_note(
         turn_id=ctx.turn.turn_id,
         user_text=user_text,
-        assistant_text=str(ctx.output.content or ""),
+        assistant_text=str(ctx.output.response_text or ""),
         history=ctx.history.recent_messages(8, roles=("user", "assistant")),
     )
     if store.notice:

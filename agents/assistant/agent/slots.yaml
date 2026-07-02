@@ -1,0 +1,29 @@
+version: 2
+slots:
+  bootstrap:
+    session_context:
+      failure: soft
+      capabilities: []
+      description: "Adds default session environment context."
+  input:
+    base_input:
+      failure: hard
+      capabilities: []
+      description: "Appends the raw channel text to the current user turn input."
+  output:
+    base_output:
+      failure: hard
+      capabilities: []
+      description: "Delivers the model output through the host output surface."
+pipelines:
+  bootstrap:
+    serial:
+      - session_context
+  input:
+    serial:
+      - base_input
+    parallel: []
+  output:
+    serial:
+      - base_output
+    parallel: []

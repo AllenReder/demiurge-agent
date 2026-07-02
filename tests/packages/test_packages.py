@@ -26,6 +26,8 @@ from demiurge.ui_gateway import TuiInteractionBridge
 
 
 def _manager(app, repository_root: Path | None = None) -> PackageManager:
+    if repository_root is not None:
+        _upgrade_test_repository_to_v3(repository_root)
     configs = (
         {"builtin": {"type": "builtin"}}
         if repository_root is None
@@ -33,6 +35,90 @@ def _manager(app, repository_root: Path | None = None) -> PackageManager:
     )
     repositories = load_package_repository_collection(home=app.home, repository_configs=configs)
     return PackageManager(version_store=app.version_store, repository=repositories)
+
+
+def _slots_yaml(core_path: Path) -> dict:
+    return yaml.safe_load((core_path / "agent" / "slots.yaml").read_text(encoding="utf-8"))
+
+
+def _pipeline(core_path: Path, phase: str) -> dict:
+    return _slots_yaml(core_path)["pipelines"][phase]
+
+
+def _slot_declaration(core_path: Path, phase: str, slot_id: str) -> dict:
+    return _slots_yaml(core_path)["slots"][phase][slot_id]
+
+
+def _upgrade_test_repository_to_v3(root: Path) -> None:
+    packages = root / "packages"
+    if not packages.exists():
+        return
+    metadata_keys = {
+        "entrypoint",
+        "description",
+        "input_schema",
+        "failure",
+        "failure_policy",
+        "timeout_seconds",
+        "default_placement",
+        "history_policy",
+        "capability",
+        "risk",
+        "approval_policy",
+        "display_policy",
+        "model_output_policy",
+        "capabilities",
+    }
+    for path in sorted(packages.glob("*.yaml")):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if raw.get("schema_version") == 3 and "components" not in raw:
+            continue
+        components = raw.pop("components", [])
+        slots: list[dict] = []
+        tools: list[dict] = []
+        files: list[dict] = []
+        for component in components:
+            kind = component["kind"]
+            item = {key: value for key, value in component.items() if key != "kind"}
+            metadata_path = root / kind / component["source"] / "slot.yaml"
+            if metadata_path.exists():
+                metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+                item["metadata"] = {key: metadata[key] for key in metadata_keys if key in metadata}
+            if kind in {"bootstrap", "input", "output"}:
+                item["phase"] = kind
+                slots.append(item)
+            elif kind == "tool":
+                tools.append(item)
+            else:
+                item["kind"] = kind
+                files.append(item)
+        raw["schema_version"] = 3
+        if slots:
+            raw["slots"] = slots
+        if tools:
+            raw["tools"] = tools
+        if files:
+            raw["files"] = files
+        raw.setdefault("config_defaults", {})
+        raw.setdefault("capabilities", [])
+        ordered = {}
+        for key in [
+            "schema_version",
+            "id",
+            "name",
+            "summary",
+            "tags",
+            "manual_dependencies",
+            "options",
+            "config_defaults",
+            "capabilities",
+            "slots",
+            "tools",
+            "files",
+        ]:
+            if key in raw:
+                ordered[key] = raw[key]
+        path.write_text(yaml.safe_dump(ordered, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 class _FakeHTTPResponse:
@@ -511,9 +597,8 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert config["storage"] == {"relative_to": "core_root", "path": "memory"}
     assert "snapshot" not in config
     assert config["limits"] == {"memory_chars": 2200, "user_chars": 1375}
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["session_context", "memory_basic"]
-    slot = yaml.safe_load((core_path / "agent" / "tools" / "memory" / "slot.yaml").read_text())
+    assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context", "memory_basic"]
+    slot = yaml.safe_load((core_path / "agent" / "tools" / "memory" / "tool.yaml").read_text())
     assert slot["risk"] == "medium"
     assert slot["approval_policy"] == "auto"
     assert slot["display_policy"] == "summary"
@@ -531,8 +616,7 @@ def test_install_and_uninstall_memory_basic_preserves_data(tmp_path):
     assert not (core_path / "agent" / "tools" / "memory").exists()
     assert not (core_path / "agent" / "lib" / "memory_basic").exists()
     assert (memory_dir / "USER.md").read_text(encoding="utf-8") == "User prefers concise Chinese replies."
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["session_context"]
+    assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context"]
 
 
 @pytest.mark.parametrize(
@@ -558,7 +642,7 @@ def test_install_and_uninstall_web_search_provider_package(tmp_path, package_id,
     assert lib_config["provider"] == package_id
     assert lib_config["api_key"] == "secret-value"
     assert lib_config["api_key_env"] == env_name
-    slot = yaml.safe_load((tool_path / "slot.yaml").read_text())
+    slot = yaml.safe_load((tool_path / "tool.yaml").read_text())
     assert slot["capability"] == "network.fetch"
     assert slot["capabilities"] == ["network.fetch"]
     assert slot["display_policy"] == "summary"
@@ -601,6 +685,7 @@ def test_repository_rejects_component_source_escape(tmp_path):
         "    source: ../bad\n",
         encoding="utf-8",
     )
+    _upgrade_test_repository_to_v3(root)
 
     with pytest.raises(PackageRepositoryError, match="component source must stay inside"):
         PackageRepository.load(root)
@@ -622,6 +707,7 @@ def test_repository_rejects_top_level_component_source_symlink(tmp_path):
         "    source: voice_link\n",
         encoding="utf-8",
     )
+    _upgrade_test_repository_to_v3(root)
 
     with pytest.raises(PackageRepositoryError, match="component source cannot be a symlink"):
         PackageRepository.load(root)
@@ -666,9 +752,8 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert output_config["summary"] == "MiniMax TTS audio"
     assert "provider" not in output_config
     assert "api_key_env" not in output_config
-    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_output"]
-    assert pipeline["parallel"] == ["tts_minimax"]
+    assert _pipeline(core_path, "output")["serial"] == ["base_output"]
+    assert _pipeline(core_path, "output")["parallel"] == ["tts_minimax"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["schema_version"] == 3
     assert registry["installed"][0]["package_id"] == "tts_minimax"
@@ -683,9 +768,8 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "output" / "tts_minimax").exists()
     assert not (core_path / "agent" / "lib" / "tts_minimax").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_output"]
-    assert pipeline["parallel"] == []
+    assert _pipeline(core_path, "output")["serial"] == ["base_output"]
+    assert _pipeline(core_path, "output")["parallel"] == []
     assert not (core_path / "packages.yaml").exists()
 
 
@@ -738,10 +822,9 @@ def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id,
     assert output_config["summarizer_core"] is None
     assert f"{provider}" in output_config["summary"].lower()
     assert output_config["max_text_length"] == (32000 if provider == "gemini" else 10000)
-    output_slot = yaml.safe_load((core_path / "agent" / "output" / f"tts_{provider}" / "slot.yaml").read_text())
+    output_slot = _slot_declaration(core_path, "output", f"tts_{provider}")
     assert output_slot["capabilities"] == ["network.fetch"]
-    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert pipeline["parallel"] == [f"tts_{provider}"]
+    assert _pipeline(core_path, "output")["parallel"] == [f"tts_{provider}"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["installed"][0]["package_id"] == package_id
     assert registry["installed"][0]["repository_alias"] == "builtin"
@@ -753,8 +836,7 @@ def test_install_and_uninstall_provider_tts_direct_package(tmp_path, package_id,
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "output" / f"tts_{provider}").exists()
     assert not (core_path / "agent" / "lib" / f"tts_{provider}").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert pipeline["parallel"] == []
+    assert _pipeline(core_path, "output")["parallel"] == []
 
 
 @pytest.mark.parametrize(
@@ -794,10 +876,9 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     else:
         assert lib_config["api_key_env"] == env_name
         assert lib_config["api_key"] is None
-    input_slot = yaml.safe_load((core_path / "agent" / "input" / "speech_to_text" / "slot.yaml").read_text())
+    input_slot = _slot_declaration(core_path, "input", "speech_to_text")
     assert input_slot["capabilities"] == ["network.fetch"]
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["speech_to_text", "base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["speech_to_text", "base_input"]
     registry = yaml.safe_load((core_path / "packages.yaml").read_text())
     assert registry["installed"][0]["package_id"] == package_id
     assert registry["installed"][0]["repository_alias"] == "builtin"
@@ -815,8 +896,7 @@ def test_install_and_uninstall_provider_stt_package(tmp_path, package_id, provid
     assert not (core_path / "agent" / "input" / "speech_to_text").exists()
     assert not (core_path / "agent" / "lib" / f"stt_{provider}").exists()
     assert not (core_path / "agent" / "lib" / "stt_common").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["base_input"]
 
 
 def test_install_provider_tts_summary_reuses_shared_summarizer_core(tmp_path):
@@ -831,7 +911,7 @@ def test_install_provider_tts_summary_reuses_shared_summarizer_core(tmp_path):
     assert yaml.safe_load((child_core / "agent.yaml").read_text())["agent"]["id"] == "tts_summarizer"
     config = yaml.safe_load((core_path / "agent" / "output" / "tts_openai" / "config.yaml").read_text())
     assert config["summarizer_core"] == "tts_summarizer"
-    slot = yaml.safe_load((core_path / "agent" / "output" / "tts_openai" / "slot.yaml").read_text())
+    slot = _slot_declaration(core_path, "output", "tts_openai")
     assert slot["capabilities"] == ["agents.run:tts_summarizer", "network.fetch"]
 
 
@@ -895,16 +975,14 @@ def test_install_conversation_style_updates_input_pipeline_and_skill(tmp_path):
     assert (core_path / "agent" / "skills" / "conversation_style" / "SKILL.md").exists()
     config = yaml.safe_load((core_path / "agent" / "input" / "conversation_style" / "config.yaml").read_text())
     assert config == {"style": "technical", "channel_hint": False, "activate_skill": True}
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["conversation_style", "base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["conversation_style", "base_input"]
 
     removed = manager.uninstall(core_id="assistant", package_id="conversation_style")
 
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "input" / "conversation_style").exists()
     assert not (core_path / "agent" / "skills" / "conversation_style").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "input" / "pipeline.yaml").read_text())
-    assert pipeline["serial"] == ["base_input"]
+    assert _pipeline(core_path, "input")["serial"] == ["base_input"]
 
 
 def test_install_context_reseed_preserves_generated_note_on_uninstall(tmp_path):
@@ -915,32 +993,30 @@ def test_install_context_reseed_preserves_generated_note_on_uninstall(tmp_path):
 
     core_path = app.version_store.active_core_path("assistant")
     assert (core_path / "agent" / "lib" / "context_reseed" / "store.py").exists()
-    assert (core_path / "agent" / "bootstrap" / "context_reseed" / "module.py").exists()
-    assert (core_path / "agent" / "output" / "context_reseed" / "module.py").exists()
+    assert (core_path / "agent" / "bootstrap" / "context_reseed_bootstrap" / "module.py").exists()
+    assert (core_path / "agent" / "output" / "context_reseed_output" / "module.py").exists()
     assert (core_path / "agent" / "skills" / "context_reseed" / "SKILL.md").exists()
     lib_config = yaml.safe_load((core_path / "agent" / "lib" / "context_reseed" / "config.yaml").read_text())
     assert lib_config["storage"] == {"relative_to": "core_root", "path": "context/reseed.md"}
     assert lib_config["mode"] == "explicit"
     assert lib_config["max_chars"] == "900"
-    output_config = yaml.safe_load((core_path / "agent" / "output" / "context_reseed" / "config.yaml").read_text())
+    output_config = yaml.safe_load((core_path / "agent" / "output" / "context_reseed_output" / "config.yaml").read_text())
     assert output_config == {"mode": "explicit", "max_chars": "900", "notice": False}
-    bootstrap_slot = yaml.safe_load((core_path / "agent" / "bootstrap" / "context_reseed" / "slot.yaml").read_text())
+    bootstrap_slot = _slot_declaration(core_path, "bootstrap", "context_reseed_bootstrap")
     assert bootstrap_slot["capabilities"] == ["fs.read"]
-    output_slot = yaml.safe_load((core_path / "agent" / "output" / "context_reseed" / "slot.yaml").read_text())
+    output_slot = _slot_declaration(core_path, "output", "context_reseed_output")
     assert output_slot["capabilities"] == ["fs.write"]
-    bootstrap_pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert bootstrap_pipeline["serial"] == ["session_context", "context_reseed"]
-    output_pipeline = yaml.safe_load((core_path / "agent" / "output" / "pipeline.yaml").read_text())
-    assert output_pipeline["serial"] == ["base_output", "context_reseed"]
-    assert output_pipeline["parallel"] == []
+    assert _pipeline(core_path, "bootstrap")["serial"] == ["session_context", "context_reseed_bootstrap"]
+    assert _pipeline(core_path, "output")["serial"] == ["base_output", "context_reseed_output"]
+    assert _pipeline(core_path, "output")["parallel"] == []
 
     note_dir = core_path / "context"
     note_dir.mkdir()
     (note_dir / "reseed.md").write_text("durable generated note", encoding="utf-8")
     manager.uninstall(core_id="assistant", package_id="context_reseed")
 
-    assert not (core_path / "agent" / "output" / "context_reseed").exists()
-    assert not (core_path / "agent" / "bootstrap" / "context_reseed").exists()
+    assert not (core_path / "agent" / "output" / "context_reseed_output").exists()
+    assert not (core_path / "agent" / "bootstrap" / "context_reseed_bootstrap").exists()
     assert not (core_path / "agent" / "lib" / "context_reseed").exists()
     assert (note_dir / "reseed.md").read_text(encoding="utf-8") == "durable generated note"
 
@@ -1040,15 +1116,13 @@ def test_install_and_uninstall_bootstrap_package_updates_serial_pipeline(tmp_pat
     assert (core_path / "agent" / "bootstrap" / "before_session" / "module.py").exists()
     config = yaml.safe_load((core_path / "agent" / "bootstrap" / "before_session" / "config.yaml").read_text())
     assert config["label"] == "before"
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline == {"serial": ["before_session", "session_context"]}
+    assert _pipeline(core_path, "bootstrap") == {"serial": ["before_session", "session_context"]}
 
     removed = manager.uninstall(core_id="assistant", package_id="bootstrap_before")
 
     assert removed.action == "uninstall"
     assert not (core_path / "agent" / "bootstrap" / "before_session").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline == {"serial": ["session_context"]}
+    assert _pipeline(core_path, "bootstrap") == {"serial": ["session_context"]}
 
 
 def test_bootstrap_pipeline_after_ordering(tmp_path):
@@ -1060,8 +1134,7 @@ def test_bootstrap_pipeline_after_ordering(tmp_path):
     manager.install(core_id="assistant", package_id="bootstrap_after")
 
     core_path = app.version_store.active_core_path("assistant")
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline == {"serial": ["session_context", "after_session"]}
+    assert _pipeline(core_path, "bootstrap") == {"serial": ["session_context", "after_session"]}
 
 
 def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
@@ -1075,8 +1148,7 @@ def test_bootstrap_package_rejects_parallel_pipeline_group(tmp_path):
 
     core_path = app.version_store.active_core_path("assistant")
     assert not (core_path / "agent" / "bootstrap" / "parallel_session").exists()
-    pipeline = yaml.safe_load((core_path / "agent" / "bootstrap" / "pipeline.yaml").read_text())
-    assert pipeline == {"serial": ["session_context"]}
+    assert _pipeline(core_path, "bootstrap") == {"serial": ["session_context"]}
 
 
 def test_mcp_package_installs_normalized_manifest_under_configured_slot_root(tmp_path):
@@ -1839,11 +1911,11 @@ async def test_context_reseed_rejects_symlink_storage_escape(tmp_path):
 
     assert not (escaped / "reseed.md").exists()
     assert any(
-        event["type"] == "module.failed"
-        and event["slot"] == "agent/output/context_reseed"
-        and "must resolve inside the core root" in event["error"]
-        for event in app.runner.event_log.tail(30)
-    )
+            event["type"] == "module.failed"
+            and event["slot"] == "agent/output/context_reseed_output"
+            and "must resolve inside the core root" in event["error"]
+            for event in app.runner.event_log.tail(30)
+        )
 
 
 @pytest.mark.asyncio
@@ -2049,7 +2121,7 @@ async def test_web_search_tool_requires_network_fetch_capability(tmp_path, monke
     raw_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     raw_manifest["capabilities"]["defaults"].pop("network.fetch", None)
     manifest_path.write_text(yaml.safe_dump(raw_manifest, sort_keys=False), encoding="utf-8")
-    slot_path = core_path / "agent" / "tools" / "web_search" / "slot.yaml"
+    slot_path = core_path / "agent" / "tools" / "web_search" / "tool.yaml"
     slot = yaml.safe_load(slot_path.read_text(encoding="utf-8"))
     slot["capabilities"] = []
     slot.pop("capability", None)
@@ -2571,6 +2643,7 @@ def _write_test_repository(root: Path) -> None:
             "      after: base_output\n",
             encoding="utf-8",
         )
+    _upgrade_test_repository_to_v3(root)
 
 
 def _write_shared_lib_repository(root: Path) -> None:
@@ -2589,6 +2662,7 @@ def _write_shared_lib_repository(root: Path) -> None:
             "    target: agent/lib/shared\n",
             encoding="utf-8",
         )
+    _upgrade_test_repository_to_v3(root)
 
 
 def _write_bootstrap_repository(root: Path) -> None:
@@ -2645,6 +2719,7 @@ def _write_bootstrap_repository(root: Path) -> None:
         "      group: parallel\n",
         encoding="utf-8",
     )
+    _upgrade_test_repository_to_v3(root)
 
 
 def _write_manifest_file_repository(root: Path) -> None:
@@ -2692,6 +2767,7 @@ def _write_manifest_file_repository(root: Path) -> None:
         "      prompt: ${options.prompt}\n",
         encoding="utf-8",
     )
+    _upgrade_test_repository_to_v3(root)
 
 
 class _FakePrompt:
@@ -2786,3 +2862,4 @@ def _write_option_repository(root: Path, *, required_default: bool) -> None:
         "      voice: ${options.voice}\n",
         encoding="utf-8",
     )
+    _upgrade_test_repository_to_v3(root)

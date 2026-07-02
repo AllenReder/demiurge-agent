@@ -11,6 +11,6 @@ def process(ctx):
     ctx.capability.require("fs.read", slot_path=ctx.slot_path)
     ctx.capability.require("fs.write", slot_path=ctx.slot_path)
     ctx.capability.require("network.fetch", slot_path=ctx.slot_path)
-    block = recall(str(ctx.input.raw_input.text or ""), ctx, config)
+    block = recall(str(ctx.input.raw_text or ""), ctx, config)
     if block:
-        ctx.input.add("system", block, history_policy="transient")
+        ctx.input.add_context(block, role="system", write_history=False)

@@ -7,6 +7,37 @@ from demiurge.app import source_agents_root
 from demiurge.core import CoreLoadError, CoreLoader, load_slot_callable
 
 
+def _slots_yaml_path(core_root):
+    return core_root / "agent" / "slots.yaml"
+
+
+def _read_slots_yaml(core_root):
+    return yaml.safe_load(_slots_yaml_path(core_root).read_text(encoding="utf-8"))
+
+
+def _write_slots_yaml(core_root, data):
+    _slots_yaml_path(core_root).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _declare_slot(core_root, phase, slot_id, **values):
+    data = _read_slots_yaml(core_root)
+    declaration = {"failure": "soft", "capabilities": []}
+    declaration.update(values)
+    data["slots"].setdefault(phase, {})[slot_id] = declaration
+    _write_slots_yaml(core_root, data)
+
+
+def _set_pipeline(core_root, phase, *, serial=None, parallel=None, extra=None):
+    data = _read_slots_yaml(core_root)
+    pipeline = {"serial": list(serial or [])}
+    if phase != "bootstrap":
+        pipeline["parallel"] = list(parallel or [])
+    if extra:
+        pipeline.update(extra)
+    data["pipelines"][phase] = pipeline
+    _write_slots_yaml(core_root, data)
+
+
 def test_loader_discovers_source_agent_slots():
     core = CoreLoader().load(source_agents_root() / "assistant")
 
@@ -388,19 +419,13 @@ def test_loader_rejects_duplicate_skill_ids(tmp_path):
         raise AssertionError("expected CoreLoadError")
 
 
-def test_loader_requires_input_and_output_pipeline_files(tmp_path):
+def test_loader_requires_slots_yaml(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    (target / "agent" / "input" / "pipeline.yaml").unlink()
+    _slots_yaml_path(target).unlink()
 
-    with pytest.raises(CoreLoadError, match="missing input pipeline"):
-        CoreLoader().load(target)
-
-    shutil.copytree(source, target, dirs_exist_ok=True)
-    (target / "agent" / "output" / "pipeline.yaml").unlink()
-
-    with pytest.raises(CoreLoadError, match="missing output pipeline"):
+    with pytest.raises(CoreLoadError, match="missing slots.yaml"):
         CoreLoader().load(target)
 
 
@@ -408,21 +433,6 @@ def test_loader_discovers_optional_bootstrap_serial_pipeline(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    bootstrap_dir = target / "agent" / "bootstrap"
-    shutil.rmtree(bootstrap_dir, ignore_errors=True)
-    slot_dir = bootstrap_dir / "session_context"
-    slot_dir.mkdir(parents=True)
-    (bootstrap_dir / "pipeline.yaml").write_text(
-        "serial:\n  - session_context\n",
-        encoding="utf-8",
-    )
-    (slot_dir / "slot.yaml").write_text(
-        "entrypoint: module:process\n"
-        "description: test bootstrap\n"
-        "failure_policy: hard\n"
-        "capabilities: []\n",
-        encoding="utf-8",
-    )
 
     core = CoreLoader().load(target)
 
@@ -436,15 +446,9 @@ def test_loader_rejects_bootstrap_parallel_key(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    bootstrap_dir = target / "agent" / "bootstrap"
-    shutil.rmtree(bootstrap_dir, ignore_errors=True)
-    bootstrap_dir.mkdir(parents=True)
-    (bootstrap_dir / "pipeline.yaml").write_text(
-        "serial: []\nparallel: []\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "bootstrap", serial=[], extra={"parallel": []})
 
-    with pytest.raises(CoreLoadError, match="invalid bootstrap pipeline.yaml key"):
+    with pytest.raises(CoreLoadError, match="invalid slots.yaml pipelines.bootstrap key"):
         CoreLoader().load(target)
 
 
@@ -452,13 +456,7 @@ def test_loader_rejects_unknown_bootstrap_pipeline_slot(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    bootstrap_dir = target / "agent" / "bootstrap"
-    shutil.rmtree(bootstrap_dir, ignore_errors=True)
-    bootstrap_dir.mkdir(parents=True)
-    (bootstrap_dir / "pipeline.yaml").write_text(
-        "serial:\n  - missing\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "bootstrap", serial=["missing"])
 
     with pytest.raises(CoreLoadError, match="unknown bootstrap pipeline slot: missing"):
         CoreLoader().load(target)
@@ -468,20 +466,7 @@ def test_loader_rejects_duplicate_bootstrap_pipeline_slot(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    bootstrap_dir = target / "agent" / "bootstrap"
-    shutil.rmtree(bootstrap_dir, ignore_errors=True)
-    slot_dir = bootstrap_dir / "session_context"
-    slot_dir.mkdir(parents=True)
-    (bootstrap_dir / "pipeline.yaml").write_text(
-        "serial:\n  - session_context\n  - session_context\n",
-        encoding="utf-8",
-    )
-    (slot_dir / "slot.yaml").write_text(
-        "entrypoint: module:process\n"
-        "failure_policy: soft\n"
-        "capabilities: []\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "bootstrap", serial=["session_context", "session_context"])
 
     with pytest.raises(CoreLoadError, match="duplicate bootstrap pipeline slot session_context"):
         CoreLoader().load(target)
@@ -491,17 +476,10 @@ def test_loader_rejects_invalid_bootstrap_failure_policy(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    bootstrap_dir = target / "agent" / "bootstrap"
-    shutil.rmtree(bootstrap_dir, ignore_errors=True)
-    slot_dir = bootstrap_dir / "bad_policy"
+    slot_dir = target / "agent" / "bootstrap" / "bad_policy"
     slot_dir.mkdir(parents=True)
-    (bootstrap_dir / "pipeline.yaml").write_text("serial:\n  - bad_policy\n", encoding="utf-8")
-    (slot_dir / "slot.yaml").write_text(
-        "entrypoint: module:process\n"
-        "failure_policy: explode\n"
-        "capabilities: []\n",
-        encoding="utf-8",
-    )
+    _declare_slot(target, "bootstrap", "bad_policy", failure="explode")
+    _set_pipeline(target, "bootstrap", serial=["bad_policy"])
 
     with pytest.raises(CoreLoadError, match="invalid bootstrap module failure_policy"):
         CoreLoader().load(target)
@@ -511,10 +489,7 @@ def test_loader_rejects_unknown_pipeline_slot(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    (target / "agent" / "input" / "pipeline.yaml").write_text(
-        "serial:\n  - missing\nparallel: []\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "input", serial=["missing"], parallel=[])
 
     with pytest.raises(CoreLoadError, match="unknown input pipeline slot: missing"):
         CoreLoader().load(target)
@@ -524,10 +499,7 @@ def test_loader_rejects_duplicate_pipeline_slot(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    (target / "agent" / "output" / "pipeline.yaml").write_text(
-        "serial:\n  - base_output\nparallel:\n  - base_output\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "output", serial=["base_output"], parallel=["base_output"])
 
     with pytest.raises(CoreLoadError, match="duplicate output pipeline slot base_output"):
         CoreLoader().load(target)
@@ -537,12 +509,9 @@ def test_loader_rejects_unknown_pipeline_keys(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"
     shutil.copytree(source, target)
-    (target / "agent" / "input" / "pipeline.yaml").write_text(
-        "serial:\n  - base_input\nunexpected:\n  - profile\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "input", serial=["base_input"], extra={"unexpected": ["profile"]})
 
-    with pytest.raises(CoreLoadError, match="invalid input pipeline.yaml key"):
+    with pytest.raises(CoreLoadError, match="invalid slots.yaml pipelines.input key"):
         CoreLoader().load(target)
 
 
@@ -553,14 +522,7 @@ def test_slot_modules_use_isolated_relative_imports(tmp_path):
     for slot_id, value in {"relative_a": "A", "relative_b": "B"}.items():
         slot = target / "agent" / "output" / slot_id
         slot.mkdir(parents=True)
-        (slot / "slot.yaml").write_text(
-            "entrypoint: module:process\n"
-            "description: relative import test\n"
-            "failure_policy: hard\n"
-            "capabilities:\n"
-            "  []\n",
-            encoding="utf-8",
-        )
+        _declare_slot(target, "output", slot_id, description="relative import test", failure="hard")
         (slot / "module.py").write_text(
             "from .helper import VALUE\n\n"
             "def process(ctx):\n"
@@ -568,14 +530,7 @@ def test_slot_modules_use_isolated_relative_imports(tmp_path):
             encoding="utf-8",
         )
         (slot / "helper.py").write_text(f"VALUE = {value!r}\n", encoding="utf-8")
-    (target / "agent" / "output" / "pipeline.yaml").write_text(
-        "serial:\n"
-        "  - base_output\n"
-        "  - relative_a\n"
-        "  - relative_b\n"
-        "parallel: []\n",
-        encoding="utf-8",
-    )
+    _set_pipeline(target, "output", serial=["base_output", "relative_a", "relative_b"], parallel=[])
 
     core = CoreLoader().load(target)
     slots = {slot.slot_id: slot for slot in core.output_slots}

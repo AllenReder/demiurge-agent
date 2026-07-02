@@ -36,20 +36,11 @@ summary: Local example packages for testing.
 
 ## 2. Add an Input Component
 
-Create `input/reply_style/slot.yaml`:
-
-```yaml
-entrypoint: module:process
-description: "Adds a package-provided reply style hint."
-failure_policy: soft
-capabilities: []
-```
-
 Create `input/reply_style/module.py`:
 
 ```python
 def process(ctx):
-    ctx.input.add("system", "Package hint: answer with direct, concrete steps.")
+    ctx.input.add_context("Package hint: answer with direct, concrete steps.", role="system")
 ```
 
 ## 3. Add a Package Recipe
@@ -57,23 +48,32 @@ def process(ctx):
 Create `packages/reply_style.yaml`:
 
 ```yaml
-schema_version: 2
+schema_version: 3
 id: reply_style
 name: Reply Style
 summary: Add a package-provided reply style hint.
 tags:
   - style
-components:
+slots:
   - id: reply_style_input
-    kind: input
+    phase: input
     source: reply_style
     target: agent/input/reply_style
+    metadata:
+      failure: soft
+      capabilities: []
+      description: "Adds a package-provided reply style hint."
     pipeline:
       before: base_input
+tools: []
+files: []
+config_defaults: {}
+capabilities: []
 ```
 
 The `source` path is repository-relative under `input/`. The `target` path is
-runtime-core-relative.
+runtime-core-relative. Installing the package merges the slot declaration and
+pipeline entry into the target core's `agent/slots.yaml`.
 
 ## 4. Trust and Add the Repository
 

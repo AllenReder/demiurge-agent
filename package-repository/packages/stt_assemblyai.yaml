@@ -1,90 +1,105 @@
-schema_version: 2
+schema_version: 3
 id: stt_assemblyai
 name: AssemblyAI STT
 summary: Transcribe voice and audio attachments with AssemblyAI before the model request.
 tags:
-  - audio
-  - stt
-  - speech-to-text
-  - input
-  - provider:assemblyai
+- audio
+- stt
+- speech-to-text
+- input
+- provider:assemblyai
 options:
-  - id: api_key
-    type: secret
-    prompt: AssemblyAI API key
-    description: Optional direct AssemblyAI API key; leave empty to read DEMIURGE_ASSEMBLYAI_API_KEY.
-    required: false
-    default: null
-  - id: language
-    type: string
-    prompt: Spoken language
-    description: Optional language code such as en, zh, ja, or fr; leave empty for language detection when enabled.
-    required: false
-    default: null
-  - id: detect_language
-    type: bool
-    prompt: Detect language
-    description: Ask AssemblyAI to detect the spoken language when no language hint is supplied.
-    default: true
-  - id: speaker_labels
-    type: bool
-    prompt: Speaker labels
-    description: Request speaker labels and utterance metadata when supported.
-    default: false
-  - id: include_metadata
-    type: bool
-    prompt: Include transcript metadata
-    description: Add compact provider/source metadata next to the transcript in the user prompt.
-    default: true
-components:
-  - id: stt_common_lib
-    kind: lib
-    source: stt_common
-    target: agent/lib/stt_common
-  - id: stt_lib
-    kind: lib
-    source: stt_assemblyai
-    target: agent/lib/stt_assemblyai
-    config:
-      provider: stt_assemblyai
-      base_url: https://api.assemblyai.com/v2
-      upload_endpoint: /upload
-      transcript_endpoint: /transcript
-      model: universal
-      api_key: ${options.api_key}
-      api_key_env: DEMIURGE_ASSEMBLYAI_API_KEY
-      fallback_envs:
-        - ASSEMBLYAI_API_KEY
-      language: ${options.language}
-      detect_language: ${options.detect_language}
-      speaker_labels: ${options.speaker_labels}
-      punctuate: true
-      format_text: true
-      include_metadata: ${options.include_metadata}
-      transcript_label: Voice message transcript
-      max_audio_mb: 100
-      max_audio_seconds: 7200
-      max_polls: 30
-      poll_interval_seconds: 3
-      allowed_mime_types:
-        - audio/aac
-        - audio/flac
-        - audio/m4a
-        - audio/mp3
-        - audio/mpeg
-        - audio/mp4
-        - audio/ogg
-        - audio/opus
-        - audio/wav
-        - audio/webm
-        - audio/x-m4a
-        - audio/x-wav
-        - video/mp4
-        - video/webm
-  - id: stt_input
-    kind: input
-    source: stt_assemblyai
-    target: agent/input/speech_to_text
-    pipeline:
-      group: serial
-      before: base_input
+- id: api_key
+  type: secret
+  prompt: AssemblyAI API key
+  description: Optional direct AssemblyAI API key; leave empty to read DEMIURGE_ASSEMBLYAI_API_KEY.
+  required: false
+  default: null
+- id: language
+  type: string
+  prompt: Spoken language
+  description: Optional language code such as en, zh, ja, or fr; leave empty for language
+    detection when enabled.
+  required: false
+  default: null
+- id: detect_language
+  type: bool
+  prompt: Detect language
+  description: Ask AssemblyAI to detect the spoken language when no language hint
+    is supplied.
+  default: true
+- id: speaker_labels
+  type: bool
+  prompt: Speaker labels
+  description: Request speaker labels and utterance metadata when supported.
+  default: false
+- id: include_metadata
+  type: bool
+  prompt: Include transcript metadata
+  description: Add compact provider/source metadata next to the transcript in the
+    user prompt.
+  default: true
+config_defaults: {}
+capabilities:
+- network.fetch
+slots:
+- id: stt_input
+  source: stt_assemblyai
+  target: agent/input/speech_to_text
+  pipeline:
+    group: serial
+    before: base_input
+  phase: input
+  metadata:
+    entrypoint: module:process
+    history_policy: persist
+    failure_policy: soft
+    description: Transcribe voice/audio attachments with AssemblyAI STT and add the
+      transcript to the user prompt.
+    capabilities:
+    - network.fetch
+files:
+- id: stt_common_lib
+  kind: lib
+  source: stt_common
+  target: agent/lib/stt_common
+- id: stt_lib
+  kind: lib
+  source: stt_assemblyai
+  target: agent/lib/stt_assemblyai
+  config:
+    provider: stt_assemblyai
+    base_url: https://api.assemblyai.com/v2
+    upload_endpoint: /upload
+    transcript_endpoint: /transcript
+    model: universal
+    api_key: ${options.api_key}
+    api_key_env: DEMIURGE_ASSEMBLYAI_API_KEY
+    fallback_envs:
+    - ASSEMBLYAI_API_KEY
+    language: ${options.language}
+    detect_language: ${options.detect_language}
+    speaker_labels: ${options.speaker_labels}
+    punctuate: true
+    format_text: true
+    include_metadata: ${options.include_metadata}
+    transcript_label: Voice message transcript
+    max_audio_mb: 100
+    max_audio_seconds: 7200
+    max_polls: 30
+    poll_interval_seconds: 3
+    allowed_mime_types:
+    - audio/aac
+    - audio/flac
+    - audio/m4a
+    - audio/mp3
+    - audio/mpeg
+    - audio/mp4
+    - audio/ogg
+    - audio/opus
+    - audio/wav
+    - audio/webm
+    - audio/x-m4a
+    - audio/x-wav
+    - video/mp4
+    - video/webm

@@ -1,5 +1,0 @@
-entrypoint: module:process
-description: Return the summarized spoken text to the parent core.
-failure_policy: hard
-capabilities:
-  []
