@@ -36,6 +36,7 @@ class RuntimeQuery:
     table: Literal[
         "runtime_events",
         "tasks",
+        "task_dependencies",
         "task_logs",
         "leases",
         "approvals",
@@ -270,6 +271,29 @@ class RuntimeStore:
                     event["aggregate_id"],
                 ),
             )
+        elif event_type == "task.controlled":
+            command = str(payload.get("command") or "")
+            status = "queued" if command == "retry" else payload.get("status")
+            notify_policy = {
+                "mute": "silent",
+                "notify": "notify",
+                "handoff": "handoff",
+            }.get(command)
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = COALESCE(?, status),
+                    notify_policy = COALESCE(?, notify_policy),
+                    completed_at = CASE WHEN ? = 'retry' THEN NULL ELSE completed_at END
+                WHERE task_id = ?
+                """,
+                (
+                    status,
+                    notify_policy,
+                    command,
+                    event["aggregate_id"],
+                ),
+            )
         elif event_type == "task.log":
             connection.execute(
                 "INSERT INTO task_logs (task_id, stream, text, created_at) VALUES (?, ?, ?, ?)",
@@ -298,6 +322,171 @@ class RuntimeStore:
                     None,
                 ),
             )
+        elif event_type == "session.created":
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO sessions (
+                    session_id, core_id, status, channel, target_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["aggregate_id"],
+                    payload.get("core_id"),
+                    payload.get("status", "active"),
+                    payload.get("channel"),
+                    json.dumps(payload.get("target") or {}, ensure_ascii=False, sort_keys=True),
+                    payload.get("created_at") or event["created_at"],
+                    payload.get("updated_at") or event["created_at"],
+                ),
+            )
+        elif event_type in {"session.updated", "session.resumed"}:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET core_id = COALESCE(?, core_id),
+                    status = COALESCE(?, status),
+                    channel = COALESCE(?, channel),
+                    target_json = COALESCE(?, target_json),
+                    updated_at = COALESCE(?, updated_at)
+                WHERE session_id = ?
+                """,
+                (
+                    payload.get("core_id"),
+                    payload.get("status"),
+                    payload.get("channel"),
+                    json.dumps(payload.get("target"), ensure_ascii=False, sort_keys=True)
+                    if payload.get("target") is not None
+                    else None,
+                    payload.get("updated_at") or event["created_at"],
+                    event["aggregate_id"],
+                ),
+            )
+        elif event_type == "turn.started":
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO turns (
+                    turn_id, session_id, task_id, status, input_ref, result_ref, created_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["aggregate_id"],
+                    payload.get("session_id"),
+                    payload.get("task_id"),
+                    payload.get("status", "running"),
+                    payload.get("input_ref"),
+                    payload.get("result_ref"),
+                    payload.get("created_at") or event["created_at"],
+                    None,
+                ),
+            )
+        elif event_type in {"turn.completed", "turn.failed", "turn.cancelled"}:
+            connection.execute(
+                """
+                UPDATE turns
+                SET status = ?,
+                    result_ref = COALESCE(?, result_ref),
+                    completed_at = COALESCE(?, completed_at)
+                WHERE turn_id = ?
+                """,
+                (
+                    payload.get("status") or event_type.split(".", 1)[1],
+                    payload.get("result_ref"),
+                    payload.get("completed_at") or event["created_at"],
+                    event["aggregate_id"],
+                ),
+            )
+        elif event_type == "message.persisted":
+            content = payload.get("content")
+            if not isinstance(content, dict):
+                content = {"text": payload.get("text") or "", "metadata": payload.get("metadata") or {}}
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO messages (
+                    message_id, session_id, turn_id, role, visibility, content_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["aggregate_id"],
+                    payload.get("session_id"),
+                    payload.get("turn_id"),
+                    payload.get("role"),
+                    payload.get("visibility") or ("visible" if payload.get("visible", True) else "hidden"),
+                    json.dumps(content, ensure_ascii=False, sort_keys=True),
+                    payload.get("created_at") or event["created_at"],
+                ),
+            )
+        elif event_type == "tool.call.started":
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO tool_calls (
+                    call_id, task_id, turn_id, tool_name, status, args_json, result_json, created_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["aggregate_id"],
+                    payload.get("task_id"),
+                    payload.get("turn_id"),
+                    payload.get("tool_name"),
+                    payload.get("status", "running"),
+                    json.dumps(payload.get("args") or {}, ensure_ascii=False, sort_keys=True),
+                    json.dumps({}, ensure_ascii=False, sort_keys=True),
+                    payload.get("created_at") or event["created_at"],
+                    None,
+                ),
+            )
+        elif event_type in {"tool.call.completed", "tool.call.failed"}:
+            connection.execute(
+                """
+                UPDATE tool_calls
+                SET status = ?,
+                    result_json = ?,
+                    completed_at = ?
+                WHERE call_id = ?
+                """,
+                (
+                    payload.get("status") or ("failed" if event_type == "tool.call.failed" else "succeeded"),
+                    json.dumps(payload.get("result") or {}, ensure_ascii=False, sort_keys=True),
+                    payload.get("completed_at") or event["created_at"],
+                    event["aggregate_id"],
+                ),
+            )
+        elif event_type == "scheduler.claimed":
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO scheduler_instances (
+                    core_id, schedule_id, due_at, task_id, claim_status, idempotency_key
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.get("core_id"),
+                    payload.get("schedule_id"),
+                    payload.get("due_at"),
+                    payload.get("task_id"),
+                    payload.get("claim_status", "claimed"),
+                    payload.get("idempotency_key"),
+                ),
+            )
+        elif event_type in {"scheduler.completed", "scheduler.error"}:
+            connection.execute(
+                """
+                UPDATE scheduler_instances
+                SET task_id = COALESCE(?, task_id),
+                    claim_status = ?
+                WHERE core_id = ? AND schedule_id = ? AND due_at = ?
+                """,
+                (
+                    payload.get("task_id"),
+                    payload.get("claim_status") or ("error" if event_type == "scheduler.error" else "completed"),
+                    payload.get("core_id"),
+                    payload.get("schedule_id"),
+                    payload.get("due_at"),
+                ),
+            )
 
     def _decode_row(self, row: dict[str, Any]) -> dict[str, Any]:
         for key in list(row):
@@ -311,6 +500,7 @@ class RuntimeStore:
 _QUERY_TABLES = {
     "runtime_events",
     "tasks",
+    "task_dependencies",
     "task_logs",
     "leases",
     "approvals",

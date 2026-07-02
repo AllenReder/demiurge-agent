@@ -155,6 +155,76 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             }
         ),
     ),
+    "delegate_task": ToolDefinition(
+        name="delegate_task",
+        description=(
+            "Spawn a child agent task. Child output is evidence for the parent by default; it is not delivered "
+            "directly to the user unless handoff/channel policy explicitly allows it."
+        ),
+        input_schema=_schema(
+            {
+                "goal": {"type": "string"},
+                "core_id": {"type": "string"},
+                "context_mode": {"type": "string", "enum": ["isolated", "fork", "handoff"], "default": "isolated"},
+                "notify_policy": {"type": "string", "default": "return_to_parent"},
+                "tool_policy": {"type": "object"},
+                "max_depth": {"type": "integer"},
+            },
+            required=["goal"],
+        ),
+    ),
+    "task_status": ToolDefinition(
+        name="task_status",
+        description="Inspect a delegated task or runtime control-plane task.",
+        input_schema=_schema(
+            {
+                "task_id": {"type": "string"},
+                "view": {"type": "string", "enum": ["model", "operator", "debug"], "default": "model"},
+            },
+            required=["task_id"],
+        ),
+    ),
+    "task_control": ToolDefinition(
+        name="task_control",
+        description="Cancel or control a delegated task.",
+        input_schema=_schema(
+            {
+                "task_id": {"type": "string"},
+                "command": {
+                    "type": "string",
+                    "enum": ["cancel", "retry", "handoff", "mute", "notify"],
+                    "default": "cancel",
+                },
+            },
+            required=["task_id"],
+        ),
+    ),
+    "yield_until": ToolDefinition(
+        name="yield_until",
+        description="Wait briefly for a delegated/background task to complete and return its status.",
+        input_schema=_schema(
+            {
+                "task_id": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 30},
+            },
+            required=["task_id"],
+        ),
+    ),
+    "run_terminal": ToolDefinition(
+        name="run_terminal",
+        description="Run a terminal command as a runtime task. Defaults to background=true.",
+        input_schema=_schema(
+            {
+                "command": {"type": "string"},
+                "workspace": {"type": "string"},
+                "cwd": {"type": "string", "default": "."},
+                "background": {"type": "boolean", "default": True},
+                "timeout_seconds": {"type": "integer", "default": 30},
+                "risk": {"type": "string"},
+            },
+            required=["command"],
+        ),
+    ),
     "skills_list": ToolDefinition(
         name="skills_list",
         description="List available skills with minimal metadata. Use skill_view(name) to load full content.",
@@ -279,6 +349,11 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
     "job": {"risk": "medium", "capability": "job.control", "approval_policy": "auto"},
     "process": {"risk": "medium", "capability": "terminal.exec", "approval_policy": "auto"},
+    "delegate_task": {"risk": "medium", "approval_policy": "auto"},
+    "task_status": {"risk": "low", "capability": "job.control", "approval_policy": "auto"},
+    "task_control": {"risk": "medium", "capability": "job.control", "approval_policy": "auto"},
+    "yield_until": {"risk": "low", "capability": "job.control", "approval_policy": "auto"},
+    "run_terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
     "skills_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_view": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_manage": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},

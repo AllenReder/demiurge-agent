@@ -33,6 +33,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("packages", "List or install agent packages", "Tools", "/packages [package|install <package>|uninstall <package>]"),
     SlashCommandSpec("tool-display", "Show or change tool display", "Tools", "/tool-display quiet|summary|full"),
     SlashCommandSpec("sessions", "List recent sessions", "Sessions", "/sessions [limit]", surfaces=("tui", "telegram")),
+    SlashCommandSpec("subagents", "List, inspect, or cancel child agent tasks", "Sessions", "/subagents [task_id|cancel <task_id>]", surfaces=("tui", "telegram")),
     SlashCommandSpec(
         "resume",
         "Resume by id or numbered list entry",

@@ -15,11 +15,9 @@ The new deep Modules are:
 
 - `RuntimeStore`: SQLite event store and projection surface.
 - `RuntimeControlPlane`: host-owned action and task seam.
-- `SessionRuntime`: admission, session projections, busy queues, and completion
-  merge.
-- `TurnEngine`: one `agent.turn` task, including provider/tool loop and slot
-  invocation.
-- `SlotRuntime`: phase-specific authored slot execution.
+- `SessionRuntime`: session admission and session/turn/message projections.
+- `TurnEngine`: one `agent.turn` task's provider/tool loop.
+- `SlotRuntime`: phase-specific authored slot callable execution.
 
 The control-plane model is:
 
@@ -87,3 +85,35 @@ every send records a delivery intent immediately.
 Serial slots can affect the main flow. Parallel slots are non-blocking
 background side-effect lanes and cannot modify prompt, assistant response, or
 session history.
+
+## Current Implementation Slice
+
+The first implemented slice keeps the existing JSON `SessionStore` as the local
+session-file adapter while projecting `agent.turn` tasks, session, turn,
+message, tool-call, task, job-log, scheduler-instance, and outbox events into
+SQLite. `JobRuntime` still owns in-process execution for active jobs, but task
+status and logs are mirrored into `RuntimeControlPlane`.
+
+`SessionTurnStepRunner` now delegates:
+
+- session creation, update, turn lifecycle, and message persistence to
+  `SessionRuntime`;
+- provider/tool loop execution to `TurnEngine`;
+- authored bootstrap/input/output slot callable loading and invocation to
+  `SlotRuntime`.
+
+The model-facing delegation tools are:
+
+- `delegate_task(goal, core_id=None, context_mode="isolated",
+  notify_policy="return_to_parent", tool_policy=None, max_depth=None)`;
+- `task_status(task_id, view="model")`;
+- `task_control(task_id, command="cancel"|"retry"|"handoff"|"mute"|"notify")`;
+- `yield_until(task_id, timeout_seconds=30)`;
+- `run_terminal(command, background=true, workspace=None, risk=None)`.
+
+`delegate_task` currently supports `isolated` and `fork` context modes, enforces
+the default depth and child-count limits, and returns an explicit error for
+non-empty `tool_policy` until child tool filtering is implemented. `handoff`
+returns a policy error until channel handoff ownership is implemented. Child
+output is evidence for the parent by default; child tasks do not deliver
+directly to the user unless a later channel handoff policy grants that path.

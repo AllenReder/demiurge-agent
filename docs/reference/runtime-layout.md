@@ -37,6 +37,7 @@ Common children:
 | `config.yaml` | Host config. |
 | `.env` | Local secret environment file. |
 | `agents/` | Runtime Agent Cores. |
+| `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
 | `sessions/` | Session records. |
 | `scheduler/` | Scheduler state and run records. |
 | `workspace/` | Non-local fallback workspace. |

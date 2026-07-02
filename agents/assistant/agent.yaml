@@ -128,6 +128,8 @@ capabilities:
       scope: workspace
     job.control:
       scope: session
+    agents.spawn:evolver:
+      max_children_per_turn: 4
     tool.call:evolve_core:
       max_calls_per_turn: 1
     tool.call:rollback_core:

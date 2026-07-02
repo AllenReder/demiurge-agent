@@ -12,8 +12,8 @@ and MCP tools.
 
 | Toolset | Examples |
 | --- | --- |
-| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `job`, `process`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search`. |
-| `demiurge_control` | `tools_list`, `evolve_core`, `rollback_core`. |
+| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `job`, `process`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search`. |
+| `demiurge_control` | `tools_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core`. |
 | `schedule` | `schedule_manage`. |
 
 ## Authored Tools
@@ -49,6 +49,7 @@ runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
 | `patch` | Apply an exact text replacement. |
 | `search_files` | Search file contents or names. |
 | `terminal` | Run a command inside the workspace. |
+| `run_terminal` | Run a command as a runtime task; defaults to background execution. |
 | `job` | Manage background jobs. |
 | `process` | Compatibility view for terminal background jobs. Prefer `job`. |
 | `web_extract` | Fetch and extract text from a known URL. |
@@ -60,6 +61,10 @@ runtime. They are not Agent Slots and are not declared in `agent/slots.yaml`.
 | `session_search` | Search or browse local session messages. |
 | `schedule_manage` | Manage core-authored schedule YAML. |
 | `tools_list` | List tools visible to the active core. |
+| `delegate_task` | Spawn a child agent task. |
+| `task_status` | Inspect a delegated task or runtime task. |
+| `task_control` | Cancel or control a delegated task. |
+| `yield_until` | Wait briefly for a delegated or background task. |
 | `evolve_core` | Create, gate, and promote a candidate core through the host. |
 | `rollback_core` | Switch back to a previous stable core version. |
 
@@ -69,10 +74,10 @@ host runtime, not to individual schedule YAML files.
 
 ## Background Jobs
 
-`terminal(background=true)`, `ctx.agents.spawn(...)`, and
-`evolve_core(background=true)` submit host-owned tasks. Background tool calls
-return a `job_id`; terminal calls also return `process_id` as a compatibility
-alias.
+`terminal(background=true)`, `run_terminal(...)`, `delegate_task(...)`,
+`ctx.agents.spawn(...)`, and `evolve_core(background=true)` submit host-owned
+tasks. Background tool calls return a `job_id`; terminal calls also return
+`process_id` as a compatibility alias.
 
 `background=true` defaults to `notify_on_complete=true`. When a job completes,
 the host queues a synthetic model turn in the originating session. If a user
@@ -80,6 +85,14 @@ turn is already running, the completion waits. If user input and completion are
 both pending, user input runs first and pending completion summaries are merged
 into that user turn. `/stop` cancels only the foreground turn; use
 `job(action="cancel", job_id="...")` to stop a background job.
+
+Delegation tools are the preferred model-facing controls for child agents.
+`delegate_task` defaults to isolated context and `return_to_parent` notification;
+child output is evidence for the parent and is not sent directly to the user.
+Use `task_status`, `task_control`, and `yield_until` for follow-up inspection or
+control. Operators can use `/subagents`, `/subagents <task_id>`, and
+`/subagents cancel <task_id>` from TUI or Telegram to list, inspect, or cancel
+child agent tasks for the current session.
 
 The `job` tool supports:
 

@@ -22,6 +22,7 @@ BUILTIN_TOOLSETS: dict[str, list[str]] = {
         "patch",
         "search_files",
         "terminal",
+        "run_terminal",
         "job",
         "process",
         "web_extract",
@@ -34,6 +35,10 @@ BUILTIN_TOOLSETS: dict[str, list[str]] = {
     ],
     "demiurge_control": [
         "tools_list",
+        "delegate_task",
+        "task_status",
+        "task_control",
+        "yield_until",
         "evolve_core",
         "rollback_core",
     ],

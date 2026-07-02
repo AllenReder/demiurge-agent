@@ -23,6 +23,7 @@ from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
 from demiurge.jobs import JobCompletionEvent, JobRuntime
+from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
 from demiurge.providers import ToolCall
@@ -809,6 +810,7 @@ class TelegramInteractionBridge:
             "queue": self._command_queue,
             "busy": self._command_busy,
             "sessions": self._command_sessions,
+            "subagents": self._command_subagents,
             "resume": self._command_resume,
             "tools": self._command_tools,
             "skills": self._command_skills,
@@ -915,6 +917,14 @@ class TelegramInteractionBridge:
         limit = int(args.strip()) if args.strip().isdigit() else 10
         records = state.runtime.runner.session_store.list_sessions(core_id=state.runtime.runner.core_id, limit=limit)
         await self._send_text(inbound.source, self._sessions_text(records, state.runtime.runner.session_id), reply_to=inbound.reply_to)
+
+    async def _command_subagents(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
+        text = await subagents_command_text(
+            state.runtime.runner.job_runtime,
+            session_id=state.runtime.runner.session_id,
+            args=args,
+        )
+        await self._send_text(inbound.source, text[:3800], reply_to=inbound.reply_to)
 
     async def _command_resume(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         raw = args.strip()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import math
 from dataclasses import asdict, dataclass, field
@@ -11,7 +10,8 @@ from typing import Any, Callable, Mapping
 from demiurge.jobs import JobConflictError, JobContext, JobOutcome, JobRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.runtime.context import ContextAssembler
-from demiurge.core import CoreLoader, LoadedCore, SlotDefinition, load_slot_callable
+from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
+from demiurge.runtime.control import ActionSource, ActionSpec
 from demiurge.runtime.delivery import (
     CONTENT_BLOCK_TYPES,
     DELIVERY_MODES,
@@ -33,6 +33,10 @@ from demiurge.runtime.interactions import (
     InteractionOutbound,
     get_current_bridge,
 )
+from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.slots import SlotInvocation, SlotRuntime
+from demiurge.runtime.store import RuntimeEvent
+from demiurge.runtime.turn import TurnEngine, TurnEngineRequest
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
@@ -917,7 +921,7 @@ class RuntimeIO:
     ) -> SessionMessage | None:
         if not content:
             return None
-        message = self.runner.session_store.append_message(
+        message = self.runner.session_runtime.append_message(
             self.runner.session_id,
             role="user",
             content=content,
@@ -944,7 +948,7 @@ class RuntimeIO:
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
     ) -> tuple[SessionMessage, list[InteractionItem]]:
-        message = self.runner.session_store.append_message(
+        message = self.runner.session_runtime.append_message(
             self.runner.session_id,
             role="assistant",
             content=content,
@@ -996,7 +1000,7 @@ class RuntimeIO:
         interaction_bridge: InteractionBridge | None,
     ) -> InteractionItem:
         content = self.runner._truncate_model_content(self.runner._tool_result_model_content(record.result))
-        message = self.runner.session_store.append_message(
+        message = self.runner.session_runtime.append_message(
             self.runner.session_id,
             role="tool",
             content=content,
@@ -1206,6 +1210,9 @@ class SessionTurnStepRunner:
         show_system_prompt: bool = False,
         runtime_timezone: RuntimeTimezone | None = None,
         job_runtime: JobRuntime | None = None,
+        session_runtime: SessionRuntime | None = None,
+        slot_runtime: SlotRuntime | None = None,
+        turn_engine: TurnEngine | None = None,
     ):
         self.home = home
         self.version_store = version_store
@@ -1222,7 +1229,11 @@ class SessionTurnStepRunner:
         self.show_system_prompt = show_system_prompt
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
         self.job_runtime = job_runtime or getattr(tool_runtime, "job_runtime", None) or JobRuntime()
-        self.session_store = SessionStore(home)
+        self.session_runtime = session_runtime or SessionRuntime(session_store=SessionStore(home))
+        self.session_store = self.session_runtime.session_store
+        self.slot_runtime = slot_runtime or SlotRuntime()
+        self.turn_engine = turn_engine or TurnEngine(self)
+        self.tool_runtime.delegation_adapter = self._handle_delegation_tool
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
         self.runtime_io = RuntimeIO(self)
@@ -1284,6 +1295,8 @@ class SessionTurnStepRunner:
             core_version=core.version,
             **interaction_metadata,
         )
+        turn_task_id = self._submit_turn_task(core=core, turn_id=turn_id, metadata=interaction_metadata)
+        self.session_runtime.start_turn(session_id=self.session_id, turn_id=turn_id, task_id=turn_task_id)
         self.event_log.emit("message.inbound", turn_id=turn_id, content=text, **interaction_metadata)
 
         user_text, persisted_user_text, context, input_items = await self._run_input_slots(
@@ -1305,150 +1318,25 @@ class SessionTurnStepRunner:
                 content=persisted_user_text,
                 interaction_metadata=interaction_metadata,
             )
-        turn_messages: list[LLMMessage] = [LLMMessage(role="user", content=user_text)]
-        tool_records: list[ToolExecutionRecord] = []
         items: list[InteractionItem] = list(input_items)
         await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
         available_tools = self.tool_runtime.definitions_for(core)
-
-        final_output = ""
-        needs_user = False
-        max_model_steps = core.manifest.runtime.max_model_steps
-        for step_index in range(1, max_model_steps + 1):
-            step_id = f"{turn_id}_step_{step_index}"
-            self.event_log.emit(
-                "step.started",
-                turn_id=turn_id,
-                step_id=step_id,
-                tools=[tool.name for tool in available_tools],
-                **interaction_metadata,
-            )
-            messages = self._build_messages(core, context, turn_messages, turn_id=turn_id, step_id=step_id)
-            await self._maybe_deliver_system_prompt_debug(
-                messages,
+        engine_result = await self.turn_engine.run(
+            TurnEngineRequest(
+                core=core,
                 turn=turn,
-                step_id=step_id,
+                capability=capability,
+                context=context,
+                available_tools=available_tools,
                 interaction_metadata=interaction_metadata,
                 interaction_bridge=get_current_bridge(),
             )
-            request = LLMRequest(
-                model=self._resolve_model_name(core),
-                messages=messages,
-                tools=available_tools,
-                metadata={"turn_id": turn_id, "step_id": step_id},
-            )
-            response = await self.provider.complete(request)
-            if response.tool_calls:
-                assistant_step_message = LLMMessage(
-                    role="assistant",
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    persist=False,
-                )
-                turn_messages.append(assistant_step_message)
-                persisted_assistant, interim_items = await self.runtime_io.send_assistant_step(
-                    turn=turn,
-                    step_id=step_id,
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    interaction_metadata=interaction_metadata,
-                    interaction_bridge=get_current_bridge(),
-                )
-                items.extend(interim_items)
-                self.event_log.emit(
-                    "actions.requested",
-                    turn_id=turn_id,
-                    step_id=step_id,
-                    actions=[asdict(call) for call in response.tool_calls],
-                    **interaction_metadata,
-                )
-                terminated = False
-                for call in response.tool_calls:
-                    tool_items: list[InteractionItem] = []
-                    result = await self.tool_runtime.execute(
-                        call,
-                        core=core,
-                        turn=turn,
-                        capability=capability,
-                        emit_event=self.event_log.emit,
-                        output_factory=lambda slot: self._module_io_client(
-                            slot,
-                            turn=turn,
-                            capability=capability,
-                            interaction_metadata=interaction_metadata,
-                            interaction_bridge=get_current_bridge(),
-                            items=tool_items,
-                        ),
-                    )
-                    items.extend(tool_items)
-                    record = ToolExecutionRecord(call=call, result=result)
-                    tool_records.append(record)
-                    turn_messages.append(
-                        LLMMessage(
-                            role="tool",
-                            name=call.name,
-                            tool_call_id=call.id,
-                            content=self._truncate_model_content(self._tool_result_model_content(result)),
-                            persist=False,
-                        )
-                    )
-                    self.event_log.emit(
-                        "action.result",
-                        turn_id=turn_id,
-                        step_id=step_id,
-                        tool_name=call.name,
-                        tool_call_id=call.id,
-                        content=result.content,
-                        model_output=result.model_output,
-                        display_output=result.display_output,
-                        data=result.data,
-                        is_error=result.is_error,
-                        terminate=result.terminate,
-                        **interaction_metadata,
-                    )
-                    items.append(
-                        self.runtime_io.send_tool_result(
-                            turn=turn,
-                            step_id=step_id,
-                            record=record,
-                            interaction_metadata=interaction_metadata,
-                            interaction_bridge=get_current_bridge(),
-                        )
-                    )
-                    if result.terminate:
-                        final_output = result.content
-                        needs_user = bool(isinstance(result.data, dict) and result.data.get("needs_user"))
-                        turn_messages.append(LLMMessage(role="assistant", content=final_output))
-                        self.event_log.emit(
-                            "message.completed",
-                            turn_id=turn_id,
-                            content=final_output,
-                            needs_user=needs_user,
-                            **interaction_metadata,
-                        )
-                        terminated = True
-                        break
-                if terminated:
-                    break
-                continue
-
-            final_output = response.content
-            turn_messages.append(LLMMessage(role="assistant", content=final_output))
-            self.event_log.emit("message.completed", turn_id=turn_id, content=final_output, **interaction_metadata)
-            break
-        else:
-            final_output = (
-                "The provider did not produce a final assistant message within "
-                f"the configured step budget of {max_model_steps}."
-            )
-            turn_messages.append(LLMMessage(role="assistant", content=final_output))
-            self.event_log.emit(
-                "message.completed",
-                turn_id=turn_id,
-                content=final_output,
-                is_error=True,
-                **interaction_metadata,
-            )
+        )
+        final_output = engine_result.final_output
+        needs_user = engine_result.needs_user
+        tool_records = engine_result.tool_records
+        turn_messages = engine_result.turn_messages
+        items.extend(engine_result.items)
 
         result_client = self._module_result_client(writable=True)
         output_items = await self._run_output_slots(
@@ -1496,6 +1384,8 @@ class SessionTurnStepRunner:
             needs_user=needs_user,
             **interaction_metadata,
         )
+        self._complete_turn_task(turn_id, result_ref=turn_id)
+        self.session_runtime.complete_turn(session_id=self.session_id, turn_id=turn_id, result_ref=turn_id)
         return TurnResult(
             session_id=self.session_id,
             turn_id=turn_id,
@@ -1764,7 +1654,7 @@ class SessionTurnStepRunner:
         reply_to: str | None = None,
     ) -> str:
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
-        record = self.session_store.create_session(
+        record = self.session_runtime.create_session(
             core_id=core.core_id,
             core_version=core.version,
             channel=channel,
@@ -1856,7 +1746,7 @@ class SessionTurnStepRunner:
             if not summary_body:
                 raise ValueError("provider returned an empty compaction summary")
             summary = f"{SUMMARY_PREFIX}\n\n{summary_body}\n\n{SUMMARY_END_MARKER}"
-            summary_message = self.session_store.write_compaction_summary(
+            summary_message = self.session_runtime.write_compaction_summary(
                 self.session_id,
                 content=summary,
                 turn_id=turn_id,
@@ -1905,7 +1795,7 @@ class SessionTurnStepRunner:
 
     def _ensure_current_session(self) -> None:
         core = self.core_loader.load(self.initial_core_path or self.version_store.active_core_path(self.core_id))
-        _, created = self.session_store.ensure_session(
+        _, created = self.session_runtime.ensure_session(
             self.session_id,
             core_id=core.core_id,
             core_version=core.version,
@@ -1963,7 +1853,7 @@ class SessionTurnStepRunner:
                 channel=str(channel),
                 conversation_key=None,
             ):
-                self.session_store.update_session(
+                self.session_runtime.update_session(
                     self.session_id,
                     core_id=core.core_id,
                     core_version=core.version,
@@ -1990,7 +1880,7 @@ class SessionTurnStepRunner:
             channel=str(channel),
             conversation_key=str(conversation_key),
         ):
-            self.session_store.update_session(
+            self.session_runtime.update_session(
                 self.session_id,
                 core_id=core.core_id,
                 core_version=core.version,
@@ -2199,8 +2089,25 @@ class SessionTurnStepRunner:
             show_system_prompt=self.show_system_prompt,
             runtime_timezone=self.runtime_timezone,
             job_runtime=self.job_runtime,
+            session_runtime=self.session_runtime,
+            slot_runtime=self.slot_runtime,
         )
-        result = await child_runner.run_turn(raw_input, injected_system_context=context)
+        child_metadata = {
+            "delegation_depth": int(parent_turn.metadata.get("delegation_depth") or 0) + 1,
+            "parent_session_id": parent_turn.session_id,
+            "parent_turn_id": parent_turn.turn_id,
+            "parent_slot": parent_slot_path,
+        }
+        result = await child_runner.run_turn(
+            raw_input,
+            interaction=InteractionInbound(
+                channel="agent",
+                text=raw_input,
+                source=parent_turn.session_id,
+                metadata=child_metadata,
+            ),
+            injected_system_context=context,
+        )
         needs_user = result.needs_user or self._turn_result_needs_user(result)
         return AgentRunResult(
             content="\n\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip(),
@@ -2338,6 +2245,155 @@ class SessionTurnStepRunner:
                 if approval.get("value") == "deny" and "no active interaction bridge" in reason:
                     return True
         return False
+
+    async def _handle_delegation_tool(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+    ) -> ToolResult:
+        if call.name == "delegate_task":
+            return self._delegate_task(call, core=core, turn=turn)
+        if call.name == "task_status":
+            return self._task_status(call)
+        if call.name == "task_control":
+            return await self._task_control(call)
+        if call.name == "yield_until":
+            return await self._yield_until(call)
+        return ToolResult(content=f"unsupported delegation tool: {call.name}", is_error=True)
+
+    def _delegate_task(self, call: ToolCall, *, core: LoadedCore, turn: TurnContext) -> ToolResult:
+        goal = str(call.arguments.get("goal") or "").strip()
+        if not goal:
+            return ToolResult(content="goal is required", is_error=True)
+        tool_policy = call.arguments.get("tool_policy")
+        if tool_policy:
+            return ToolResult(content="delegate_task tool_policy is not implemented yet", is_error=True)
+        child_core_id = str(call.arguments.get("core_id") or core.core_id).strip()
+        context_mode = str(call.arguments.get("context_mode") or "isolated").strip()
+        if context_mode not in {"isolated", "fork", "handoff"}:
+            return ToolResult(content=f"unsupported context_mode: {context_mode}", is_error=True)
+        if context_mode == "handoff":
+            return ToolResult(content="handoff context mode requires channel handoff policy and is not active", is_error=True)
+        depth = int(turn.metadata.get("delegation_depth") or 0)
+        max_depth = int(call.arguments.get("max_depth") or 2)
+        if depth >= max_depth:
+            return ToolResult(content=f"delegation depth limit exceeded: max_depth={max_depth}", is_error=True)
+        total_children = [
+            job
+            for job in self.job_runtime.list_jobs(owner_session_id=turn.session_id, backend="agent")
+            if job.owner_turn_id == turn.turn_id
+        ]
+        if len(total_children) >= 4:
+            return ToolResult(content="delegation limit exceeded: max_children=4", is_error=True)
+        running_children = self.job_runtime.list_jobs(
+            owner_session_id=turn.session_id,
+            backend="agent",
+            include_completed=False,
+        )
+        if len(running_children) >= 2:
+            return ToolResult(content="delegation limit exceeded: max_concurrent_children=2", is_error=True)
+        notify_policy = str(call.arguments.get("notify_policy") or "return_to_parent").strip()
+        context = self._delegation_context(context_mode)
+        handle = self._spawn_child_agent(
+            core_id=child_core_id,
+            raw_input=goal,
+            parent_turn=turn,
+            parent_slot_path="builtin:delegate_task",
+            context=context,
+        )
+        payload = {
+            "task_id": handle.job_id,
+            "job_id": handle.job_id,
+            "core_id": handle.core_id,
+            "session_id": handle.session_id,
+            "status": handle.status,
+            "context_mode": context_mode,
+            "notify_policy": notify_policy,
+        }
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+
+    def _delegation_context(self, context_mode: str) -> list[str]:
+        if context_mode == "isolated":
+            return []
+        messages = self.session_store.history_for_context(self.session_id)[-12:]
+        if not messages:
+            return []
+        transcript = "\n".join(f"{message.role}: {message.content}" for message in messages if message.content.strip())
+        return [f"Parent session fork context:\n{transcript}"] if transcript.strip() else []
+
+    def _task_status(self, call: ToolCall) -> ToolResult:
+        task_id = str(call.arguments.get("task_id") or "").strip()
+        if not task_id:
+            return ToolResult(content="task_id is required", is_error=True)
+        view = str(call.arguments.get("view") or "model").strip()
+        payload = self._task_view(task_id, include_log=view in {"operator", "debug"})
+        if payload is None:
+            return ToolResult(content=f"task not found: {task_id}", is_error=True)
+        content = json.dumps(payload, ensure_ascii=False)
+        return ToolResult(content=content, data=payload, model_output=content)
+
+    async def _task_control(self, call: ToolCall) -> ToolResult:
+        task_id = str(call.arguments.get("task_id") or "").strip()
+        if not task_id:
+            return ToolResult(content="task_id is required", is_error=True)
+        command = str(call.arguments.get("command") or "cancel").strip()
+        if command == "cancel":
+            try:
+                record = await self.job_runtime.cancel(task_id)
+                payload = record.to_payload(include_log=True, log=self.job_runtime.log(task_id))
+            except KeyError:
+                payload = self._control_plane_command(task_id, "cancel")
+                if payload is None:
+                    return ToolResult(content=f"task not found: {task_id}", is_error=True)
+            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+        payload = self._control_plane_command(task_id, command)
+        if payload is None:
+            return ToolResult(content=f"task not found: {task_id}", is_error=True)
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+
+    async def _yield_until(self, call: ToolCall) -> ToolResult:
+        task_id = str(call.arguments.get("task_id") or "").strip()
+        if not task_id:
+            return ToolResult(content="task_id is required", is_error=True)
+        timeout = int(call.arguments.get("timeout_seconds") or 30)
+        try:
+            record = await self.job_runtime.wait(task_id, timeout_seconds=timeout)
+        except KeyError:
+            payload = self._task_view(task_id, include_log=False)
+            if payload is None:
+                return ToolResult(content=f"task not found: {task_id}", is_error=True)
+            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+        except asyncio.TimeoutError:
+            payload = self._task_view(task_id, include_log=False) or {"task_id": task_id, "status": "unknown"}
+            payload["timed_out"] = True
+            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=True)
+        payload = record.to_payload(include_log=True, log=self.job_runtime.log(task_id))
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=record.running)
+
+    def _task_view(self, task_id: str, *, include_log: bool) -> dict[str, Any] | None:
+        try:
+            record = self.job_runtime.get(task_id)
+        except KeyError:
+            control_plane = getattr(self.job_runtime, "control_plane", None)
+            if control_plane is None:
+                return None
+            try:
+                return control_plane.read(task_id, view="operator" if include_log else "model")
+            except KeyError:
+                return None
+        return record.to_payload(include_log=include_log, log=self.job_runtime.log(task_id) if include_log else None)
+
+    def _control_plane_command(self, task_id: str, command: str) -> dict[str, Any] | None:
+        control_plane = getattr(self.job_runtime, "control_plane", None)
+        if control_plane is None:
+            return None
+        try:
+            return control_plane.control(task_id, command)
+        except KeyError:
+            return None
 
     async def _run_input_slots(
         self,
@@ -3053,7 +3109,7 @@ class SessionTurnStepRunner:
         content = fallback_text
         message_id = None
         if history_policy != "transient":
-            message = self.session_store.append_message(
+            message = self.session_runtime.append_message(
                 self.session_id,
                 role="assistant",
                 content=content,
@@ -3083,6 +3139,33 @@ class SessionTurnStepRunner:
             history_policy=history_policy,
             artifacts=[artifact.artifact_id for artifact in artifacts],
             **interaction_metadata,
+        )
+        self._append_runtime_event(
+            RuntimeEvent(
+                type="delivery.queued",
+                aggregate_type="delivery",
+                aggregate_id=request.delivery_id,
+                payload={
+                    "task_id": turn.turn_id,
+                    "channel": interaction_metadata.get("channel"),
+                    "target": {
+                        "conversation_key": interaction_metadata.get("conversation_key"),
+                        "source": interaction_metadata.get("source"),
+                        "reply_to": interaction_metadata.get("reply_to"),
+                    },
+                    "status": "queued",
+                    "idempotency_key": request.delivery_id,
+                    "payload": {
+                        "kind": request.kind,
+                        "visible": request.visible,
+                        "history_policy": history_policy,
+                        "message_id": message_id,
+                        "fallback_text": fallback_text,
+                        "blocks": delivery_blocks,
+                        "artifacts": delivery_artifacts,
+                    },
+                },
+            )
         )
         if unsupported_blocks:
             self.event_log.emit(
@@ -3192,6 +3275,56 @@ class SessionTurnStepRunner:
     def background_task_count(self) -> int:
         return sum(1 for task in self._background_tasks if not task.done()) + self.job_runtime.active_count
 
+    def _submit_turn_task(self, *, core: LoadedCore, turn_id: str, metadata: Mapping[str, Any]) -> str | None:
+        control_plane = getattr(self.session_runtime, "control_plane", None)
+        if control_plane is None:
+            return None
+        control_plane.submit(
+            ActionSpec(
+                kind="agent.turn",
+                payload={
+                    "task_id": turn_id,
+                    "owner_session_id": self.session_id,
+                    "owner_turn_id": turn_id,
+                    "core_id": core.core_id,
+                    "notify_policy": "session",
+                    "metadata": dict(metadata),
+                },
+                idempotency_key=f"turn:{turn_id}:submitted",
+            ),
+            source=ActionSource(
+                actor="host.session_runtime",
+                session_id=self.session_id,
+                turn_id=turn_id,
+                core_id=core.core_id,
+                metadata=dict(metadata),
+            ),
+        )
+        self._append_runtime_event(
+            RuntimeEvent(
+                type="task.started",
+                aggregate_type="task",
+                aggregate_id=turn_id,
+                payload={"status": "running"},
+            )
+        )
+        return turn_id
+
+    def _complete_turn_task(self, turn_id: str, *, result_ref: str | None = None) -> None:
+        self._append_runtime_event(
+            RuntimeEvent(
+                type="task.succeeded",
+                aggregate_type="task",
+                aggregate_id=turn_id,
+                payload={"status": "succeeded", "result_ref": result_ref},
+            )
+        )
+
+    def _append_runtime_event(self, event: RuntimeEvent) -> None:
+        control_plane = getattr(self.session_runtime, "control_plane", None)
+        if control_plane is not None:
+            control_plane.store.append([event])
+
     def _interaction_item_outbound_metadata(
         self,
         interaction_metadata: dict[str, Any],
@@ -3234,11 +3367,9 @@ class SessionTurnStepRunner:
         return {key: value for key, value in metadata.items() if key != "turn_id"}
 
     async def _call_slot(self, slot: SlotDefinition, ctx: Any) -> Any:
-        func = load_slot_callable(slot)
-        value = func(ctx)
-        if inspect.isawaitable(value):
-            return await value
-        return value
+        outcome = await self.slot_runtime.invoke(SlotInvocation(slot=slot, context=ctx, phase=slot.kind))
+        outcome.raise_for_error()
+        return outcome.value
 
     def _normalize_context_items(
         self,

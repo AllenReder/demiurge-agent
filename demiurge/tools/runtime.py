@@ -147,6 +147,7 @@ class ToolRuntime:
         self.mcp_runtime = mcp_runtime
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
         self.job_runtime = job_runtime or JobRuntime()
+        self.delegation_adapter: Callable[..., Any] | None = None
 
     async def prepare_for_turn(
         self,
@@ -351,10 +352,24 @@ class ToolRuntime:
             return await self._patch(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "terminal":
             return await self._terminal(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
+        if call.name == "run_terminal":
+            arguments = dict(call.arguments)
+            arguments.setdefault("background", True)
+            if arguments.get("workspace") and not arguments.get("cwd"):
+                arguments["cwd"] = arguments["workspace"]
+            return await self._terminal(
+                ToolCall(id=call.id, name="terminal", arguments=arguments),
+                core=core,
+                turn=turn,
+                capability=capability,
+                emit_event=emit_event,
+            )
         if call.name == "job":
             return await self._job(call, capability=capability)
         if call.name == "process":
             return await self._process(call, capability=capability)
+        if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
+            return await self._delegation_tool(call, core=core, turn=turn, capability=capability)
         if call.name == "skills_list":
             return self._skills_list(call, core=core)
         if call.name == "skill_view":
@@ -856,6 +871,28 @@ class ToolRuntime:
     async def _process(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
         capability.require("terminal.exec")
         return await self._job_action(call, compatibility_process=True)
+
+    async def _delegation_tool(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+    ) -> ToolResult:
+        if call.name == "delegate_task":
+            target_core = str(call.arguments.get("core_id") or core.core_id).strip()
+            capability.require(f"agents.spawn:{target_core}")
+        else:
+            capability.require("job.control")
+        if self.delegation_adapter is None:
+            return ToolResult(content="delegation runtime is not configured", is_error=True)
+        value = self.delegation_adapter(call, core=core, turn=turn, capability=capability)
+        if inspect.isawaitable(value):
+            value = await value
+        if isinstance(value, ToolResult):
+            return value
+        return ToolResult(content=json.dumps(value, ensure_ascii=False), data=value)
 
     async def _job_action(self, call: ToolCall, *, compatibility_process: bool) -> ToolResult:
         action = str(call.arguments.get("action") or "list").strip().lower()

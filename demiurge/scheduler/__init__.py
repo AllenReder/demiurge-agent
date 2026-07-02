@@ -18,8 +18,10 @@ else:
     import fcntl
 
 from demiurge.core import LoadedCore, ScheduleDefinition
+from demiurge.runtime.control import ActionSource, ActionSpec
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
 
@@ -346,6 +348,8 @@ class SchedulerService:
         session_id: str | None = None
         turn_id: str | None = None
         deliveries = 0
+        task_id = claim.run_id
+        self._record_claim_task(core, schedule, claim, task_id=task_id)
         try:
             if schedule.delivery.mode != "local":
                 self._require_channel_target_allowed(core, schedule)
@@ -369,6 +373,14 @@ class SchedulerService:
                 turn_id=turn_id,
                 deliveries=deliveries,
             )
+            self._record_claim_completed(
+                core,
+                schedule,
+                claim,
+                task_id=task_id,
+                status="completed",
+                result_ref=f"session:{session_id}:{turn_id}",
+            )
             return ScheduleRunResult(
                 run_id=claim.run_id,
                 schedule_id=claim.schedule_id,
@@ -386,6 +398,14 @@ class SchedulerService:
                 session_id=session_id,
                 turn_id=turn_id,
                 deliveries=deliveries,
+                error=str(exc),
+            )
+            self._record_claim_completed(
+                core,
+                schedule,
+                claim,
+                task_id=task_id,
+                status="error",
                 error=str(exc),
             )
             return ScheduleRunResult(
@@ -415,6 +435,102 @@ class SchedulerService:
             workspace=self.app.runner.workspace,
             show_system_prompt=self.app.runner.show_system_prompt,
             runtime_timezone=self.app.runtime_timezone,
+            job_runtime=self.app.job_runtime,
+        )
+
+    def _record_claim_task(
+        self,
+        core: LoadedCore,
+        schedule: ScheduleDefinition,
+        claim: ScheduleRunClaim,
+        *,
+        task_id: str,
+    ) -> None:
+        control_plane = getattr(self.app, "control_plane", None)
+        if control_plane is None:
+            return
+        idempotency_key = f"schedule:{core.core_id}:{schedule.schedule_id}:{format_instant(claim.due_at)}"
+        control_plane.submit(
+            ActionSpec(
+                kind="schedule.fire",
+                payload={
+                    "task_id": task_id,
+                    "core_id": core.core_id,
+                    "owner_session_id": None,
+                    "notify_policy": "schedule_delivery",
+                    "schedule_id": schedule.schedule_id,
+                    "due_at": format_instant(claim.due_at),
+                    "scheduled_at": format_instant(claim.scheduled_at),
+                },
+                idempotency_key=idempotency_key,
+            ),
+            source=ActionSource(actor="host.scheduler", core_id=core.core_id),
+        )
+        control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type="task.started",
+                    aggregate_type="task",
+                    aggregate_id=task_id,
+                    payload={"status": "running"},
+                ),
+                RuntimeEvent(
+                    type="scheduler.claimed",
+                    aggregate_type="scheduler_instance",
+                    aggregate_id=task_id,
+                    payload={
+                        "core_id": core.core_id,
+                        "schedule_id": schedule.schedule_id,
+                        "due_at": format_instant(claim.due_at),
+                        "task_id": task_id,
+                        "claim_status": "claimed",
+                        "idempotency_key": idempotency_key,
+                    },
+                ),
+            ]
+        )
+
+    def _record_claim_completed(
+        self,
+        core: LoadedCore,
+        schedule: ScheduleDefinition,
+        claim: ScheduleRunClaim,
+        *,
+        task_id: str,
+        status: str,
+        result_ref: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        control_plane = getattr(self.app, "control_plane", None)
+        if control_plane is None:
+            return
+        task_event = "task.succeeded" if status == "completed" else "task.failed"
+        scheduler_event = "scheduler.completed" if status == "completed" else "scheduler.error"
+        control_plane.store.append(
+            [
+                RuntimeEvent(
+                    type=task_event,
+                    aggregate_type="task",
+                    aggregate_id=task_id,
+                    payload={
+                        "status": "succeeded" if status == "completed" else "failed",
+                        "result_ref": result_ref,
+                        "error": {"message": error} if error else None,
+                    },
+                ),
+                RuntimeEvent(
+                    type=scheduler_event,
+                    aggregate_type="scheduler_instance",
+                    aggregate_id=task_id,
+                    payload={
+                        "core_id": core.core_id,
+                        "schedule_id": schedule.schedule_id,
+                        "due_at": format_instant(claim.due_at),
+                        "task_id": task_id,
+                        "claim_status": status,
+                    },
+                ),
+            ]
         )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:

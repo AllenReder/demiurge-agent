@@ -11,6 +11,7 @@ from demiurge.diagnostics.doctor import DoctorRuntime
 from demiurge.jobs import JobCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
+from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
@@ -269,6 +270,7 @@ class TuiInteractionBridge:
             "packages": self._packages,
             "tool-display": self._tool_display,
             "sessions": self._sessions,
+            "subagents": self._subagents,
             "resume": self._resume,
             "new": self._new,
             "compact": self._compact,
@@ -613,6 +615,15 @@ class TuiInteractionBridge:
         limit = int(args.strip()) if args.strip().isdigit() else 20
         records = self.app.runner.session_store.list_sessions(core_id=self.app.runner.core_id, limit=limit)
         await self._emit_command_output("sessions", _format_sessions(records, active_session_id=self.app.runner.session_id))
+        return True
+
+    async def _subagents(self, args: str) -> bool:
+        text = await subagents_command_text(
+            self.app.job_runtime,
+            session_id=self.app.runner.session_id,
+            args=args,
+        )
+        await self._emit_command_output("subagents", text)
         return True
 
     async def _resume(self, args: str) -> bool:

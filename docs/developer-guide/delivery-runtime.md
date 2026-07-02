@@ -8,6 +8,11 @@ description: Contributor notes for session records, live output, artifacts, and 
 Delivery runtime converts output requests into durable session records, live
 events, artifacts, and channel items.
 
+Every output `send_*` call also writes a delivery intent into the SQLite
+runtime `outbox` projection. Existing channel bridges still perform immediate
+delivery, but retry/idempotency work should build on the runtime outbox instead
+of adding channel-local queues.
+
 ## Sources
 
 Delivery requests can come from:

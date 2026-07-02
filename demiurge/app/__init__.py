@@ -21,6 +21,7 @@ from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider
 from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
 from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
@@ -223,6 +224,7 @@ class DemiurgeApp:
     evolution_runtime: EvolutionRuntime
     runtime_store: RuntimeStore
     control_plane: RuntimeControlPlane
+    session_runtime: SessionRuntime
     job_runtime: JobRuntime
     tool_runtime: ToolRuntime
     approval_runtime: ApprovalRuntime
@@ -538,6 +540,7 @@ def create_app(
     mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
     runtime_store = RuntimeStore.default(home)
     control_plane = RuntimeControlPlane(runtime_store)
+    session_runtime = SessionRuntime(session_store=SessionStore(home), control_plane=control_plane)
     job_runtime = JobRuntime(control_plane=control_plane)
     tool_runtime = ToolRuntime(
         version_store,
@@ -579,6 +582,7 @@ def create_app(
         show_system_prompt=host_config.debug.show_system_prompt,
         runtime_timezone=runtime_timezone,
         job_runtime=job_runtime,
+        session_runtime=session_runtime,
     )
     return DemiurgeApp(
         home=home,
@@ -589,6 +593,7 @@ def create_app(
         evolution_runtime=evolution_runtime,
         runtime_store=runtime_store,
         control_plane=control_plane,
+        session_runtime=session_runtime,
         job_runtime=job_runtime,
         tool_runtime=tool_runtime,
         approval_runtime=approval_runtime,

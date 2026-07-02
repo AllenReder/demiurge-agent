@@ -39,6 +39,20 @@ def test_control_plane_submit_control_read_and_stream(tmp_path):
     assert [event["type"] for event in batch.events] == ["task.submitted", "task.cancelled"]
 
 
+def test_control_plane_projects_non_cancel_task_control(tmp_path):
+    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
+    handle = control.submit(
+        ActionSpec(kind="agent.spawn", payload={"task_id": "task_1", "notify_policy": "return_to_parent"}),
+        source=ActionSource(actor="model"),
+    )
+
+    muted = control.control(handle.task_id, "mute")
+    retried = control.control(handle.task_id, "retry")
+
+    assert muted["notify_policy"] == "silent"
+    assert retried["status"] == "queued"
+
+
 def test_runtime_store_projects_blocked_task_status(tmp_path):
     store = RuntimeStore(tmp_path / "runtime.sqlite3")
     store.append(

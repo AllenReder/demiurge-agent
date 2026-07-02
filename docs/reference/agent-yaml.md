@@ -103,7 +103,7 @@ Built-in toolsets:
 | Toolset | Includes |
 | --- | --- |
 | `coding` | File, terminal, search, process, web extract, skills, todo, clarify, session search. |
-| `demiurge_control` | `tools_list`, `evolve_core`, `rollback_core`. |
+| `demiurge_control` | `tools_list`, child-task delegation controls, `evolve_core`, `rollback_core`. |
 | `schedule` | `schedule_manage`. |
 
 ## Channel Sections

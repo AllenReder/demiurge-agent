@@ -9,6 +9,7 @@ from demiurge.app import create_app, source_agents_root
 from demiurge.channels.telegram import TelegramInteractionBridge
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionRuntime
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.scheduler import SchedulerService, SchedulerStore, next_fire_after, parse_instant, start_scheduler_for_app
 from demiurge.storage import EventLog
 
@@ -218,6 +219,18 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
     assert completed_log["due_at"] == "2026-06-28T10:00:00Z"
     assert completed_log["due_at_local"] == "2026-06-28T18:00:00+08:00"
     assert completed_log["runtime_timezone"] == "Asia/Shanghai"
+    task = app.control_plane.read(result.run_id)
+    assert task["kind"] == "schedule.fire"
+    assert task["status"] == "succeeded"
+    instances = app.runtime_store.query(
+        RuntimeQuery(
+            table="scheduler_instances",
+            where={"core_id": "assistant", "schedule_id": "daily", "due_at": "2026-06-28T10:00:00Z"},
+            limit=1,
+        )
+    ).rows
+    assert instances[0]["task_id"] == result.run_id
+    assert instances[0]["claim_status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -235,6 +248,7 @@ async def test_scheduler_marks_needs_user_as_error(tmp_path):
     assert results[0].status == "error"
     assert "requested user input" in results[0].error
     assert service.store.read_run_logs()[-1]["event"] == "error"
+    assert app.control_plane.read(results[0].run_id)["status"] == "failed"
 
 
 @pytest.mark.asyncio

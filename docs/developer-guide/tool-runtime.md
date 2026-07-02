@@ -35,14 +35,20 @@ submit work to the shared `JobRuntime`:
 
 - `terminal(background=true)` creates a `terminal` backend job and captures
   stdout/stderr into the job log.
+- `run_terminal(...)` is a model-facing alias that defaults terminal execution
+  to `background=true`.
 - `evolve_core(background=true)` creates an `evolve` backend job and runs with
   `auto_promote=false`; it produces a candidate and report but does not switch
   the active core.
 - `ctx.agents.spawn(...)` is routed by the runner into an `agent` backend job.
+- `delegate_task(...)` routes through the runner delegation adapter and creates
+  an `agent` backend job with child output returned as parent evidence.
 
-`job` is the general control tool for `list`, `poll`, `log`, `wait`, and
-`cancel`. `process` remains only as a compatibility view over terminal jobs.
-Jobs are in-memory only and are not recovered after process restart.
+`job` is the compatibility control tool for `list`, `poll`, `log`, `wait`, and
+`cancel`. `task_status`, `task_control`, and `yield_until` are the model-facing
+runtime-task controls. `process` remains only as a compatibility view over
+terminal jobs. Active execution is still in-process, while task and log
+projections are mirrored into SQLite through `RuntimeControlPlane`.
 
 Each job records `backend`, owner session/turn, `source_tool`, status, summary,
 bounded log tail, result reference, and an optional `write_scope`. A new active
