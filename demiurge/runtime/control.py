@@ -22,7 +22,7 @@ ActionKind = Literal[
     "artifact.write",
 ]
 
-TaskCommand = Literal["cancel", "retry", "handoff", "mute", "notify"]
+TaskCommand = Literal["cancel"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,18 +120,146 @@ class RuntimeControlPlane:
         return TaskHandle(task_id=str(row["aggregate_id"]), kind=spec.kind, status="queued")
 
     def control(self, task_id: str, command: TaskCommand) -> TaskRecord:
-        event_type = "task.cancelled" if command == "cancel" else "task.controlled"
+        if command != "cancel":
+            raise ValueError(f"unsupported task control command: {command}")
+        return self.cancel(task_id)
+
+    def mark_started(self, task_id: str, *, source: ActionSource | None = None) -> TaskRecord:
+        self._append_task_event(
+            "task.started",
+            task_id,
+            payload={"status": "running"},
+            source=source,
+        )
+        return self.read(task_id, view="operator")
+
+    def succeed(
+        self,
+        task_id: str,
+        *,
+        result_ref: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source: ActionSource | None = None,
+    ) -> TaskRecord:
+        payload: dict[str, Any] = {"status": "succeeded"}
+        if result_ref is not None:
+            payload["result_ref"] = result_ref
+        if summary is not None:
+            payload["summary"] = summary
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        self._append_task_event("task.succeeded", task_id, payload=payload, source=source)
+        return self.read(task_id, view="operator")
+
+    def fail(
+        self,
+        task_id: str,
+        *,
+        error: str,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source: ActionSource | None = None,
+    ) -> TaskRecord:
+        payload: dict[str, Any] = {
+            "status": "failed",
+            "summary": summary if summary is not None else error,
+            "error": {"message": error},
+        }
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        self._append_task_event("task.failed", task_id, payload=payload, source=source)
+        return self.read(task_id, view="operator")
+
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        summary: str = "task cancelled",
+        metadata: dict[str, Any] | None = None,
+        source: ActionSource | None = None,
+    ) -> TaskRecord:
+        payload: dict[str, Any] = {
+            "status": "cancelled",
+            "summary": summary,
+            "error": {"message": summary},
+        }
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        self._append_task_event("task.cancelled", task_id, payload=payload, source=source)
+        return self.read(task_id, view="operator")
+
+    def block(
+        self,
+        task_id: str,
+        *,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+        source: ActionSource | None = None,
+    ) -> TaskRecord:
+        payload: dict[str, Any] = {"status": "blocked_needs_user", "summary": summary}
+        if metadata:
+            payload["metadata"] = dict(metadata)
+        self._append_task_event("task.blocked", task_id, payload=payload, source=source)
+        return self.read(task_id, view="operator")
+
+    def append_task_log(
+        self,
+        task_id: str,
+        text: str,
+        *,
+        stream: str = "stdout",
+        source: ActionSource | None = None,
+    ) -> None:
+        lines = str(text).splitlines() or [str(text)]
         self.store.append(
             [
                 RuntimeEvent(
-                    type=event_type,
+                    type="task.log",
                     aggregate_type="task",
                     aggregate_id=task_id,
-                    payload={"command": command},
+                    actor=self._source_actor(source) if source is not None else None,
+                    payload={"stream": stream, "text": line},
                 )
+                for line in lines
             ]
         )
-        return self.read(task_id, view="operator")
+
+    def emit_completion_ready(
+        self,
+        *,
+        event_id: str,
+        task_id: str,
+        payload: dict[str, Any],
+        source: ActionSource | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.store.append(
+            [
+                RuntimeEvent(
+                    type="task.completion_ready",
+                    aggregate_type="task_completion",
+                    aggregate_id=event_id,
+                    actor=self._source_actor(source) if source is not None else None,
+                    payload={"task_id": task_id, **payload},
+                )
+            ],
+            idempotency_key=idempotency_key,
+        )
+        return dict(result.events[-1])
+
+    def clear_completion(self, event_id: str) -> None:
+        self.store.append(
+            [
+                RuntimeEvent(
+                    type="task.completion_cleared",
+                    aggregate_type="task_completion",
+                    aggregate_id=event_id,
+                    payload={"event_id": event_id, "status": "cleared"},
+                )
+            ],
+            idempotency_key=f"task_completion:{event_id}:cleared",
+        )
 
     def query(self, filter: TaskFilter) -> list[TaskRecord]:
         where: dict[str, Any] = {}
@@ -177,6 +305,26 @@ class RuntimeControlPlane:
         events = tuple(event for event in page.rows if int(event["seq"]) > cursor.seq)
         next_seq = max((int(event["seq"]) for event in events), default=cursor.seq)
         return EventBatch(events=events, next_cursor=EventCursor(seq=next_seq))
+
+    def _append_task_event(
+        self,
+        event_type: str,
+        task_id: str,
+        *,
+        payload: dict[str, Any],
+        source: ActionSource | None,
+    ) -> None:
+        self.store.append(
+            [
+                RuntimeEvent(
+                    type=event_type,
+                    aggregate_type="task",
+                    aggregate_id=task_id,
+                    actor=self._source_actor(source) if source is not None else None,
+                    payload=payload,
+                )
+            ]
+        )
 
     def _source_actor(self, source: ActionSource) -> dict[str, Any]:
         return {

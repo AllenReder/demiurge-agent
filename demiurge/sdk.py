@@ -163,7 +163,7 @@ class AgentRunResult:
 
 @dataclass(slots=True)
 class AgentSpawnHandle:
-    job_id: str
+    task_id: str
     core_id: str
     session_id: str
     status: str = "running"

@@ -1275,10 +1275,10 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     assert not any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
     provider.release_child.set()
     await app.runner.drain_background_tasks()
-    agent_jobs = app.task_worker.list_tasks(backend="agent")
-    assert len(agent_jobs) == 1
-    assert agent_jobs[0].status == "succeeded"
-    assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].job_id == agent_jobs[0].job_id
+    agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
+    assert len(agent_tasks) == 1
+    assert agent_tasks[0].status == "succeeded"
+    assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].task_id == agent_tasks[0].task_id
     messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.content for message in messages if message.role == "assistant"] == [
         "parent",
@@ -1288,7 +1288,7 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_agents_spawn_marks_job_blocked_when_child_needs_user(tmp_path):
+async def test_agents_spawn_marks_task_blocked_when_child_needs_user(tmp_path):
     agents = _copy_agents(tmp_path)
     evolver_manifest = agents / "evolver" / "agent.yaml"
     raw = yaml.safe_load(evolver_manifest.read_text(encoding="utf-8"))
@@ -1318,9 +1318,9 @@ async def test_agents_spawn_marks_job_blocked_when_child_needs_user(tmp_path):
     await app.runner.run_turn("hello")
     await app.runner.drain_background_tasks()
 
-    agent_jobs = app.task_worker.list_tasks(backend="agent")
-    assert len(agent_jobs) == 1
-    assert agent_jobs[0].status == "blocked_needs_user"
+    agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
+    assert len(agent_tasks) == 1
+    assert agent_tasks[0].status == "blocked_needs_user"
     assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].status == "blocked_needs_user"
     assert any(event["type"] == "agent_spawn.blocked" for event in app.runner.event_log.tail(50))
 

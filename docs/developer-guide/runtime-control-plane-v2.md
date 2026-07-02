@@ -25,16 +25,16 @@ The control-plane model is:
 ActionSpec -> Task -> Event -> Projection
 ```
 
-Every turn, subagent, terminal process, evolver run, scheduled fire, delivery,
+Every turn, subagent, terminal command, evolver run, scheduled fire, delivery,
 approval, MCP call, authored tool call, state patch, and artifact write should
 enter through `RuntimeControlPlane`.
 
 ## Storage
 
 The runtime database is `~/.demiurge/runtime/runtime.sqlite3`. It uses Python
-stdlib `sqlite3` with WAL mode. Old JSON/JSONL session, scheduler, and job state
-is not migrated. In-progress local process/subprocess work found after restart
-must be marked `lost` or `interrupted`; the host must not replay dangerous
+stdlib `sqlite3` with WAL mode. Old JSON/JSONL session, scheduler, and
+background-task state is not migrated. In-progress subprocess work found after
+restart must be marked `lost` or `interrupted`; the host must not replay dangerous
 effects after a crash.
 
 ## Agent Slot v2
@@ -93,7 +93,7 @@ messages, task status, task logs, scheduler instances, artifacts, and delivery
 outbox rows. Old JSON session and scheduler files may still exist on disk from
 older installs, but runtime code does not read, migrate, or dual-write them.
 
-`RuntimeTaskWorker` is the in-process backend for active subprocess, terminal,
+`RuntimeTaskWorker` is the live worker for active subprocess, terminal,
 evolver, and child-agent work. It keeps only non-durable process handles,
 cancel callbacks, and live completion subscribers in memory. Public task reads,
 lists, logs, waits, cancellation results, and pending completion notifications
@@ -116,14 +116,14 @@ The model-facing delegation tools are:
 
 - `delegate_task(goal, core_id=None, context_mode="isolated",
   notify_policy="return_to_parent", tool_policy=None, max_depth=None)`;
+- `task_list(kind=None, owner_session_id=None)`;
 - `task_status(task_id, view="model")`;
-- `task_control(task_id, command="cancel"|"retry"|"handoff"|"mute"|"notify")`;
+- `task_control(task_id, command="cancel")`;
 - `yield_until(task_id, timeout_seconds=30)`;
 - `run_terminal(command, background=true, workspace=None, risk=None)`.
 
 `delegate_task` currently supports `isolated` and `fork` context modes, enforces
 the default depth and child-count limits, and applies child `tool_policy`
-filters during visible-tool construction and dispatch. `handoff` returns a
-policy error until channel handoff ownership is implemented. Child output is
-evidence for the parent by default; child tasks do not deliver directly to the
-user unless a later channel handoff policy grants that path.
+filters during visible-tool construction and dispatch. `notify_policy` accepts
+only `return_to_parent` and `silent`; the former emits a completion event and
+the latter suppresses it. Child output is evidence for the parent by default.

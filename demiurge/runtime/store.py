@@ -277,29 +277,6 @@ class RuntimeStore:
                     event["aggregate_id"],
                 ),
             )
-        elif event_type == "task.controlled":
-            command = str(payload.get("command") or "")
-            status = "queued" if command == "retry" else payload.get("status")
-            notify_policy = {
-                "mute": "silent",
-                "notify": "notify",
-                "handoff": "handoff",
-            }.get(command)
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = COALESCE(?, status),
-                    notify_policy = COALESCE(?, notify_policy),
-                    completed_at = CASE WHEN ? = 'retry' THEN NULL ELSE completed_at END
-                WHERE task_id = ?
-                """,
-                (
-                    status,
-                    notify_policy,
-                    command,
-                    event["aggregate_id"],
-                ),
-            )
         elif event_type == "task.log":
             connection.execute(
                 "INSERT INTO task_logs (task_id, stream, text, created_at) VALUES (?, ?, ?, ?)",

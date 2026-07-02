@@ -47,7 +47,7 @@ capabilities:
     fs.read: {}
     fs.write: {}
     terminal.exec: {}
-    job.control: {}
+    task.control: {}
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false

@@ -5,6 +5,8 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionQuery, SessionRuntime
 from demiurge.runtime.store import RuntimeQuery, RuntimeStore
+from demiurge.sdk import AgentInput, TurnContext
+from demiurge.security.capabilities import CapabilityFacade
 
 
 class StaticProvider:
@@ -104,6 +106,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     assert session_rows[0]["core_id"] == "assistant"
     assert app.control_plane.read(result.turn_id)["kind"] == "agent.turn"
     assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+    assert app.task_worker.list_tasks(owner_session_id=result.session_id) == []
     assert turn_rows[0]["status"] == "completed"
     assert turn_rows[0]["task_id"] == result.turn_id
     assert [row["role"] for row in message_rows] == ["user", "assistant"]
@@ -111,6 +114,36 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     assert message_rows[1]["content"]["text"] == "assistant reply"
     assert outbox_rows[0]["status"] == "queued"
     assert outbox_rows[0]["payload"]["fallback_text"] == "assistant reply"
+
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    status_turn = TurnContext(
+        session_id=result.session_id,
+        turn_id=result.turn_id,
+        core_id=core.core_id,
+        core_version=core.version,
+        user_input=AgentInput(content="", metadata={}),
+        state={},
+        metadata={},
+    )
+    status = await app.runner.execute_tool(
+        ToolCall(name="task_status", arguments={"task_id": result.turn_id}),
+        core=core,
+        turn=status_turn,
+        capability=CapabilityFacade(core),
+        emit_event=app.runner.event_log.emit,
+    )
+    control = await app.runner.execute_tool(
+        ToolCall(name="task_control", arguments={"task_id": result.turn_id}),
+        core=core,
+        turn=status_turn,
+        capability=CapabilityFacade(core),
+        emit_event=app.runner.event_log.emit,
+    )
+    assert status.is_error is True
+    assert control.is_error is True
+    assert "background task not found" in status.content
+    assert "background task not found" in control.content
+    assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
 
 
 @pytest.mark.asyncio

@@ -60,7 +60,7 @@ uv run demiurge init --check
 uv run demiurge gateway --core assistant
 ```
 
-Schedules are host-owned runtime jobs. The schedule toolset can manage schedule
+Schedules are host-owned runtime runs. The schedule toolset can manage schedule
 files through approved host capabilities when it is enabled for the core.
 
 ## Boundary

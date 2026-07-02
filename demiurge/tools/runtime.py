@@ -17,7 +17,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskContext, RuntimeTaskOutcome, RuntimeTaskWorker
+from demiurge.runtime.tasks import (
+    RuntimeTaskConflictError,
+    RuntimeTaskContext,
+    RuntimeTaskKindError,
+    RuntimeTaskOutcome,
+    RuntimeTaskWorker,
+)
 from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
@@ -378,7 +384,7 @@ class ToolRuntime:
             notify_on_complete = bool(call.arguments.get("notify_on_complete", True))
             goal = str(call.arguments.get("goal") or "")
             if background:
-                return self._start_evolve_job(
+                return self._start_evolve_task(
                     core=core,
                     turn=turn,
                     goal=goal,
@@ -412,10 +418,8 @@ class ToolRuntime:
                 capability=capability,
                 emit_event=emit_event,
             )
-        if call.name == "job":
-            return await self._job(call, capability=capability)
-        if call.name == "process":
-            return await self._process(call, capability=capability)
+        if call.name == "task_list":
+            return self._task_list(call, capability=capability)
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
             return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
         if call.name == "skills_list":
@@ -729,7 +733,7 @@ class ToolRuntime:
         env = self.runtime_timezone.apply_subprocess_env(env)
         execution_command = _terminal_execution_command(command)
         if bool(call.arguments.get("background", False)):
-            return self._start_background_process(
+            return self._start_background_task(
                 command=command,
                 execution_command=execution_command,
                 cwd=cwd,
@@ -772,7 +776,7 @@ class ToolRuntime:
                 data={"executionStarted": True, "exit_code": 124, "cwd": cwd.relative, "timed_out": True},
             )
 
-    def _start_background_process(
+    def _start_background_task(
         self,
         *,
         command: str,
@@ -783,7 +787,7 @@ class ToolRuntime:
         owner_turn_id: str,
         notify_on_complete: bool,
     ) -> ToolResult:
-        async def run_terminal_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+        async def run_terminal_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             process = await asyncio.create_subprocess_shell(
                 execution_command,
                 cwd=cwd.path,
@@ -794,7 +798,6 @@ class ToolRuntime:
             ctx.update_metadata(
                 {
                     "pid": process.pid,
-                    "process_id": ctx.job_id,
                     "command": command,
                     "cwd": cwd.relative,
                     "returncode": None,
@@ -817,33 +820,24 @@ class ToolRuntime:
             ctx.update_metadata({"returncode": returncode})
             summary = f"terminal command exited {returncode}"
             ctx.set_summary(summary)
-            if returncode != 0 and self.task_worker.get(ctx.job_id).status != "cancelled":
+            if returncode != 0 and self.task_worker.get(ctx.task_id).status != "cancelled":
                 raise RuntimeError(summary)
             return RuntimeTaskOutcome(summary=summary, metadata={"returncode": returncode})
 
         try:
             record = self.task_worker.start_task(
-                backend="terminal",
+                kind="terminal.exec",
                 owner_session_id=owner_session_id,
                 owner_turn_id=owner_turn_id,
                 source_tool="terminal",
-                task_factory=run_terminal_job,
+                task_factory=run_terminal_task,
                 write_scope=f"terminal:{cwd.path}",
                 notify_on_complete=notify_on_complete,
-                metadata={"command": command, "cwd": cwd.relative, "process_id": ""},
+                metadata={"command": command, "cwd": cwd.relative},
             )
         except RuntimeTaskConflictError as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
-        payload = {
-            "executionStarted": True,
-            "job_id": record.job_id,
-            "process_id": record.job_id,
-            "pid": None,
-            "cwd": cwd.relative,
-            "running": True,
-            "status": record.status,
-            "notify_on_complete": record.notify_on_complete,
-        }
+        payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     async def _capture_process_output(
@@ -863,7 +857,7 @@ class ToolRuntime:
         await asyncio.gather(read_stream(process.stdout, "stdout"), read_stream(process.stderr, "stderr"))
         await process.wait()
 
-    def _start_evolve_job(
+    def _start_evolve_task(
         self,
         *,
         core: LoadedCore,
@@ -873,7 +867,7 @@ class ToolRuntime:
     ) -> ToolResult:
         assert self.evolution_runtime is not None
 
-        async def run_evolve_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+        async def run_evolve_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             result = await self.evolution_runtime.evolve(
                 target_core_id=core.core_id,
                 goal=goal,
@@ -884,109 +878,42 @@ class ToolRuntime:
             ctx.update_metadata(payload)
             ctx.set_result_ref(result.report_path)
             if result.evolver.get("needs_user"):
-                summary = f"evolve job needs user input for {core.core_id}"
+                summary = f"evolve task needs user input for {core.core_id}"
                 ctx.mark_blocked(summary, metadata=payload)
                 return RuntimeTaskOutcome(summary=summary, result_ref=result.report_path, metadata=payload)
             return RuntimeTaskOutcome(summary=result.summary, result_ref=result.report_path, metadata=payload)
 
         try:
             record = self.task_worker.start_task(
-                backend="evolve",
+                kind="evolver.run",
                 owner_session_id=turn.session_id,
                 owner_turn_id=turn.turn_id,
                 source_tool="evolve_core",
-                task_factory=run_evolve_job,
+                task_factory=run_evolve_task,
                 write_scope=f"evolve:{core.core_id}",
                 notify_on_complete=notify_on_complete,
                 metadata={"target_core_id": core.core_id, "goal": goal},
             )
         except RuntimeTaskConflictError as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
-        payload = {
-            "executionStarted": True,
-            "job_id": record.job_id,
-            "backend": record.backend,
-            "status": record.status,
-            "target_core_id": core.core_id,
-            "notify_on_complete": record.notify_on_complete,
-        }
+        payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    async def _job(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
-        capability.require("job.control")
-        return await self._job_action(call, compatibility_process=False)
-
-    async def _process(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
-        capability.require("terminal.exec")
-        return await self._job_action(call, compatibility_process=True)
-
-    async def _job_action(self, call: ToolCall, *, compatibility_process: bool) -> ToolResult:
-        action = str(call.arguments.get("action") or "list").strip().lower()
-        if compatibility_process and action == "kill":
-            action = "cancel"
-        if action == "list":
-            backend = "terminal" if compatibility_process else call.arguments.get("backend")
-            jobs = [
-                self._job_payload(record, include_log=False, compatibility_process=compatibility_process)
-                for record in self.task_worker.list_tasks(
-                    owner_session_id=call.arguments.get("owner_session_id"),
-                    backend=str(backend) if backend else None,
-                )
-            ]
-            key = "processes" if compatibility_process else "jobs"
-            return ToolResult(
-                content=json.dumps({key: jobs}, ensure_ascii=False),
-                data={key: jobs},
-            )
-        job_id = str(call.arguments.get("job_id") or call.arguments.get("process_id") or "").strip()
-        if not job_id:
-            return ToolResult(content=("process_id" if compatibility_process else "job_id") + " is required", is_error=True)
+    def _task_list(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
+        capability.require("task.control")
+        kind = call.arguments.get("kind")
+        include_completed = bool(call.arguments.get("include_completed", True))
         try:
-            record = self.task_worker.get(job_id)
-        except KeyError:
-            label = "process" if compatibility_process else "job"
-            return ToolResult(content=f"{label} not found: {job_id}", is_error=True)
-        if compatibility_process and record.backend != "terminal":
-            return ToolResult(content=f"process not found: {job_id}", is_error=True)
-        if action == "poll":
-            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
-        if action == "log":
-            tail = call.arguments.get("tail")
-            log = self.task_worker.log(job_id, tail=int(tail) if tail is not None else None)
-            content = "\n".join(log) or "(no output)"
-            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
-            return ToolResult(content=content, data=payload, model_output=content)
-        if action == "wait":
-            timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
-            try:
-                record = await self.task_worker.wait(job_id, timeout_seconds=timeout)
-            except asyncio.TimeoutError:
-                payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
-                payload["timed_out"] = True
-                return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=True)
-            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=payload["running"])
-        if action == "cancel":
-            record = await self.task_worker.cancel(job_id)
-            payload = self._job_payload(record, include_log=True, compatibility_process=compatibility_process)
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
-        label = "process" if compatibility_process else "job"
-        return ToolResult(content=f"unsupported {label} action: {action}", is_error=True)
-
-    def _job_payload(self, record: Any, *, include_log: bool, compatibility_process: bool) -> dict[str, Any]:
-        log = self.task_worker.log(record.job_id) if include_log else None
-        payload = record.to_payload(include_log=include_log, log=log)
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        if compatibility_process:
-            payload["process_id"] = record.job_id
-            payload["pid"] = metadata.get("pid")
-            payload["command"] = metadata.get("command", "")
-            payload["cwd"] = metadata.get("cwd", "")
-            payload["returncode"] = metadata.get("returncode")
-            if include_log:
-                payload["output"] = list(log or [])
-        return payload
+            records = self.task_worker.list_tasks(
+                owner_session_id=call.arguments.get("owner_session_id"),
+                kind=str(kind) if kind else None,
+                include_completed=include_completed,
+            )
+        except RuntimeTaskKindError as exc:
+            return ToolResult(content=str(exc), is_error=True)
+        tasks = [record.to_payload(include_log=False) for record in records]
+        payload = {"tasks": tasks}
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, model_output=json.dumps(payload, ensure_ascii=False))
 
     def _skills_list(self, call: ToolCall, *, core: LoadedCore) -> ToolResult:
         category = str(call.arguments.get("category") or "").strip()

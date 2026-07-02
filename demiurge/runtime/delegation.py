@@ -14,22 +14,22 @@ async def subagents_command_text(task_worker: RuntimeTaskWorker, *, session_id: 
             record = await task_worker.cancel(parts[1])
         except KeyError:
             return f"Subagent task not found: {parts[1]}"
-        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.job_id)), title="Cancelled Subagent")
+        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.task_id)), title="Cancelled Subagent")
     if parts:
         task_id = parts[0]
         try:
             record = task_worker.get(task_id)
         except KeyError:
             return f"Subagent task not found: {task_id}"
-        if record.backend != "agent":
+        if record.kind != "agent.spawn":
             return f"Task is not a subagent: {task_id}"
-        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.job_id)), title="Subagent")
-    records = task_worker.list_tasks(owner_session_id=session_id, backend="agent")
+        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.task_id)), title="Subagent")
+    records = task_worker.list_tasks(owner_session_id=session_id, kind="agent.spawn")
     if not records:
         return "No subagents for this session."
     rows = [
         (
-            record.job_id,
+            record.task_id,
             record.status,
             str(record.metadata.get("child_core_id") or ""),
             str(record.metadata.get("child_session_id") or ""),
@@ -42,7 +42,7 @@ async def subagents_command_text(task_worker: RuntimeTaskWorker, *, session_id: 
 
 def _format_task(payload: dict[str, Any], *, title: str) -> str:
     lines = [f"# {title}", ""]
-    for key in ("job_id", "backend", "status", "owner_session_id", "owner_turn_id", "result_ref", "summary"):
+    for key in ("task_id", "kind", "status", "owner_session_id", "owner_turn_id", "result_ref", "summary"):
         value = payload.get(key)
         if value not in (None, ""):
             lines.append(f"- {key}: `{value}`")

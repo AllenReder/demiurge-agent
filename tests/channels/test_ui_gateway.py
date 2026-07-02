@@ -74,19 +74,19 @@ async def _wait_for(predicate, *, timeout: float = 2.0):
     raise AssertionError("condition timed out")
 
 
-async def _complete_background_job(app, *, summary: str = "background complete"):
+async def _complete_background_task(app, *, summary: str = "background complete"):
     async def task(ctx):
         ctx.append_log("background tail")
         return summary
 
     record = app.task_worker.start_task(
-        backend="test",
+        kind="terminal.exec",
         owner_session_id=app.runner.session_id,
         owner_turn_id="turn_origin",
         source_tool="test",
         task_factory=task,
     )
-    await app.task_worker.wait(record.job_id, timeout_seconds=1)
+    await app.task_worker.wait(record.task_id, timeout_seconds=1)
     return record
 
 
@@ -402,13 +402,13 @@ async def test_tui_bridge_runs_background_completion_turn_when_idle(tmp_path):
     bridge = TuiInteractionBridge(app, emit=sink)
 
     await bridge.initialize()
-    record = await _complete_background_job(app)
+    record = await _complete_background_task(app)
 
     await _wait_for(lambda: len(provider.requests) == 1 and not bridge.running)
 
     user_text = next(message.content for message in provider.requests[0].messages if message.role == "user")
-    assert "[SYSTEM: Background job event]" in user_text
-    assert record.job_id in user_text
+    assert "[SYSTEM: Background task event]" in user_text
+    assert record.task_id in user_text
     assert "background complete" in user_text
     assert sink.payloads("interaction.message") == []
 
@@ -424,7 +424,7 @@ async def test_tui_bridge_prioritizes_user_input_over_pending_completion(tmp_pat
     await bridge.initialize()
     await bridge.submit("first")
     await provider.started.wait()
-    record = await _complete_background_job(app)
+    record = await _complete_background_task(app)
     await _wait_for(lambda: bridge._queued_inputs.qsize() == 1)
 
     accepted = await bridge.submit("second")
@@ -434,8 +434,8 @@ async def test_tui_bridge_prioritizes_user_input_over_pending_completion(tmp_pat
     await _wait_for(lambda: "[next]" in sink.texts() and not bridge.running)
     user_text = next(message.content for message in reversed(provider.requests[-1].messages) if message.role == "user")
     assert user_text.startswith("second")
-    assert "[SYSTEM: Pending background job events merged into this user turn]" in user_text
-    assert record.job_id in user_text
+    assert "[SYSTEM: Pending background task events merged into this user turn]" in user_text
+    assert record.task_id in user_text
 
 
 @pytest.mark.asyncio

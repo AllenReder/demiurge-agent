@@ -452,15 +452,9 @@ class SchedulerService:
             ),
             source=ActionSource(actor="host.scheduler", core_id=core.core_id),
         )
-        control_plane.store.append(
-            [
-                RuntimeEvent(
-                    type="task.started",
-                    aggregate_type="task",
-                    aggregate_id=task_id,
-                    payload={"status": "running"},
-                ),
-            ]
+        control_plane.mark_started(
+            task_id,
+            source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
         )
 
     def _record_claim_completed(
@@ -477,20 +471,21 @@ class SchedulerService:
         control_plane = getattr(self.app, "control_plane", None)
         if control_plane is None:
             return
-        task_event = "task.succeeded" if status == "completed" else "task.failed"
         scheduler_event = "scheduler.completed" if status == "completed" else "scheduler.error"
+        if status == "completed":
+            control_plane.succeed(
+                task_id,
+                result_ref=result_ref,
+                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+            )
+        else:
+            control_plane.fail(
+                task_id,
+                error=error or "scheduled task failed",
+                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+            )
         control_plane.store.append(
             [
-                RuntimeEvent(
-                    type=task_event,
-                    aggregate_type="task",
-                    aggregate_id=task_id,
-                    payload={
-                        "status": "succeeded" if status == "completed" else "failed",
-                        "result_ref": result_ref,
-                        "error": {"message": error} if error else None,
-                    },
-                ),
                 RuntimeEvent(
                     type=scheduler_event,
                     aggregate_type="scheduler_instance",

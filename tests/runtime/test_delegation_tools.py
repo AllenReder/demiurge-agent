@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from demiurge.app import create_app
@@ -13,6 +15,19 @@ class StaticProvider:
         return LLMResponse(content="child done")
 
 
+class BlockingProvider:
+    def __init__(self):
+        self.started = 0
+        self.release = None
+
+    async def complete(self, request):
+        self.started += 1
+        if self.release is None:
+            self.release = asyncio.Event()
+        await self.release.wait()
+        return LLMResponse(content="child done")
+
+
 def _turn(app, core):
     return TurnContext(
         session_id=app.runner.session_id,
@@ -23,6 +38,12 @@ def _turn(app, core):
         state={},
         metadata={},
     )
+
+
+def _without_default_capability(core, name: str):
+    defaults = core.raw_manifest.setdefault("capabilities", {}).setdefault("defaults", {})
+    defaults.pop(name, None)
+    return core
 
 
 @pytest.mark.asyncio
@@ -42,6 +63,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     )
 
     assert delegated.is_error is False
+    assert set(delegated.data) == {"task_id"}
     task_id = delegated.data["task_id"]
     status = await app.runner.execute_tool(
         ToolCall(name="task_status", arguments={"task_id": task_id}),
@@ -58,13 +80,166 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         emit_event=app.runner.event_log.emit,
     )
 
-    assert status.data["job_id"] == task_id
+    assert status.data["task_id"] == task_id
     assert waited.data["status"] == "succeeded"
     assert app.control_plane.read(task_id)["kind"] == "agent.spawn"
     listing = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args="")
     detail = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args=task_id)
     assert task_id in listing
     assert "Subagent" in detail
+
+
+@pytest.mark.asyncio
+async def test_delegation_tools_require_capabilities(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+
+    no_spawn = _without_default_capability(core, "agents.spawn:evolver")
+    spawn = await app.runner.execute_tool(
+        ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
+        core=no_spawn,
+        turn=turn,
+        capability=CapabilityFacade(no_spawn),
+        emit_event=app.runner.event_log.emit,
+    )
+
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    no_task_control = _without_default_capability(core, "task.control")
+    status = await app.runner.execute_tool(
+        ToolCall(name="task_status", arguments={"task_id": "task_missing"}),
+        core=no_task_control,
+        turn=turn,
+        capability=CapabilityFacade(no_task_control),
+        emit_event=app.runner.event_log.emit,
+    )
+    control = await app.runner.execute_tool(
+        ToolCall(name="task_control", arguments={"task_id": "task_missing"}),
+        core=no_task_control,
+        turn=turn,
+        capability=CapabilityFacade(no_task_control),
+        emit_event=app.runner.event_log.emit,
+    )
+    waited = await app.runner.execute_tool(
+        ToolCall(name="yield_until", arguments={"task_id": "task_missing"}),
+        core=no_task_control,
+        turn=turn,
+        capability=CapabilityFacade(no_task_control),
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert spawn.is_error is True
+    assert "capability denied: agents.spawn:evolver" in spawn.content
+    assert status.is_error is True
+    assert control.is_error is True
+    assert waited.is_error is True
+    assert "capability denied: task.control" in status.content
+    assert "capability denied: task.control" in control.content
+    assert "capability denied: task.control" in waited.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["retry", "handoff", "mute", "notify"])
+async def test_task_control_rejects_unsupported_commands(tmp_path, command):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    result = await app.runner.execute_tool(
+        ToolCall(name="task_control", arguments={"task_id": "task_missing", "command": command}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert f"unsupported task_control command: {command}" in result.content
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_silent_notify_policy_suppresses_completion_event(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = StaticProvider()
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    delegated = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do quiet child work", "core_id": "evolver", "notify_policy": "silent"},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=2)
+
+    assert delegated.is_error is False
+    assert set(delegated.data) == {"task_id"}
+    assert app.task_worker.pending_events_for_session(app.runner.session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_rejects_unknown_notify_policy(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    result = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do child work", "core_id": "evolver", "notify_policy": "notify"},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert "unsupported notify_policy" in result.content
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_allows_two_concurrent_children(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = BlockingProvider()
+    app.runner.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    first = await app.runner.execute_tool(
+        ToolCall(name="delegate_task", arguments={"goal": "first child", "core_id": "evolver"}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    second = await app.runner.execute_tool(
+        ToolCall(name="delegate_task", arguments={"goal": "second child", "core_id": "evolver"}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert set(first.data) == {"task_id"}
+    assert set(second.data) == {"task_id"}
+    assert len(app.task_worker.list_tasks(owner_session_id=turn.session_id, kind="agent.spawn", include_completed=False)) == 2
+    for _ in range(50):
+        if provider.started >= 2 and provider.release is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert provider.started == 2
+    assert provider.release is not None
+    provider.release.set()
+    await app.runner.drain_background_tasks()
 
 
 @pytest.mark.asyncio
@@ -83,10 +258,10 @@ async def test_run_terminal_defaults_to_background_task(tmp_path):
     )
 
     assert result.is_error is False
-    assert result.data["executionStarted"] is True
-    assert result.data["job_id"].startswith("job_")
-    await app.task_worker.wait(result.data["job_id"], timeout_seconds=2)
-    assert app.control_plane.read(result.data["job_id"])["kind"] == "terminal.exec"
+    assert set(result.data) == {"task_id"}
+    assert result.data["task_id"].startswith("task_")
+    await app.task_worker.wait(result.data["task_id"], timeout_seconds=2)
+    assert app.control_plane.read(result.data["task_id"])["kind"] == "terminal.exec"
 
 
 @pytest.mark.asyncio
@@ -118,7 +293,8 @@ async def test_delegate_task_rejects_depth_excess_and_accepts_tool_policy(tmp_pa
     assert too_deep.is_error is True
     assert "max_depth=2" in too_deep.content
     assert tool_policy.is_error is False
-    assert tool_policy.data["tool_policy"] == {"deny": ["terminal"]}
+    record = app.task_worker.get(tool_policy.data["task_id"])
+    assert record.metadata["tool_policy"] == {"deny": ["terminal"]}
 
 
 @pytest.mark.asyncio

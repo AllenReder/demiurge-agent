@@ -7,7 +7,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskContext, RuntimeTaskOutcome, RuntimeTaskWorker
+from demiurge.runtime.tasks import (
+    RuntimeTaskConflictError,
+    RuntimeTaskContext,
+    RuntimeTaskKindError,
+    RuntimeTaskOutcome,
+    RuntimeTaskWorker,
+)
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
@@ -2176,15 +2182,16 @@ class SessionTurnStepRunner:
         parent_slot_path: str,
         context: list[str],
         tool_policy: Mapping[str, Any] | None = None,
+        notify_on_complete: bool = True,
     ) -> AgentSpawnHandle:
         session_id = utc_id("session_child_")
 
-        async def run_job(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+        async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.event_log.emit(
                 "agent_spawn.started",
                 turn_id=parent_turn.turn_id,
                 slot=parent_slot_path,
-                job_id=ctx.job_id,
+                task_id=ctx.task_id,
                 child_core_id=core_id,
                 child_session_id=session_id,
             )
@@ -2216,7 +2223,7 @@ class SessionTurnStepRunner:
                     event_name,
                     turn_id=parent_turn.turn_id,
                     slot=parent_slot_path,
-                    job_id=ctx.job_id,
+                    task_id=ctx.task_id,
                     child_core_id=core_id,
                     child_session_id=session_id,
                     child_turn_id=result.turn_id,
@@ -2236,7 +2243,7 @@ class SessionTurnStepRunner:
                     "agent_spawn.failed",
                     turn_id=parent_turn.turn_id,
                     slot=parent_slot_path,
-                    job_id=ctx.job_id,
+                    task_id=ctx.task_id,
                     child_core_id=core_id,
                     child_session_id=session_id,
                     error=str(exc),
@@ -2245,13 +2252,13 @@ class SessionTurnStepRunner:
 
         try:
             record = self.task_worker.start_task(
-                backend="agent",
+                kind="agent.spawn",
                 owner_session_id=parent_turn.session_id,
                 owner_turn_id=parent_turn.turn_id,
                 source_tool="agents.spawn",
-                task_factory=run_job,
-                write_scope=f"session:{parent_turn.session_id}",
-                notify_on_complete=True,
+                task_factory=run_task,
+                write_scope=f"agent-session:{session_id}",
+                notify_on_complete=notify_on_complete,
                 metadata={
                     "child_core_id": core_id,
                     "child_session_id": session_id,
@@ -2268,8 +2275,8 @@ class SessionTurnStepRunner:
                 child_session_id=session_id,
                 error=str(exc),
             )
-            return AgentSpawnHandle(job_id="", core_id=core_id, session_id=session_id, status="failed")
-        return AgentSpawnHandle(job_id=record.job_id, core_id=core_id, session_id=session_id)
+            return AgentSpawnHandle(task_id="", core_id=core_id, session_id=session_id, status="failed")
+        return AgentSpawnHandle(task_id=record.task_id, core_id=core_id, session_id=session_id)
 
     def _turn_result_needs_user(self, result: TurnResult) -> bool:
         for record in result.tool_results:
@@ -2314,17 +2321,33 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         capability: CapabilityFacade,
     ) -> ToolResult:
-        if call.name == "delegate_task":
-            return self._delegate_task(call, core=core, turn=turn)
-        if call.name == "task_status":
-            return self._task_status(call)
-        if call.name == "task_control":
-            return await self._task_control(call)
-        if call.name == "yield_until":
-            return await self._yield_until(call)
-        return ToolResult(content=f"unsupported delegation tool: {call.name}", is_error=True)
+        try:
+            visible_tools = {entry.name for entry in self.tool_runtime.registry_for(core, turn=turn)}
+            if call.name not in visible_tools:
+                return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
+            if call.name == "delegate_task":
+                return self._delegate_task(call, core=core, turn=turn, capability=capability)
+            if call.name == "task_status":
+                capability.require("task.control")
+                return self._task_status(call)
+            if call.name == "task_control":
+                capability.require("task.control")
+                return await self._task_control(call)
+            if call.name == "yield_until":
+                capability.require("task.control")
+                return await self._yield_until(call)
+            return ToolResult(content=f"unsupported delegation tool: {call.name}", is_error=True)
+        except CapabilityDenied as exc:
+            return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
 
-    def _delegate_task(self, call: ToolCall, *, core: LoadedCore, turn: TurnContext) -> ToolResult:
+    def _delegate_task(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+    ) -> ToolResult:
         goal = str(call.arguments.get("goal") or "").strip()
         if not goal:
             return ToolResult(content="goal is required", is_error=True)
@@ -2333,30 +2356,31 @@ class SessionTurnStepRunner:
             return ToolResult(content="delegate_task tool_policy must be an object", is_error=True)
         tool_policy = dict(raw_tool_policy or {})
         child_core_id = str(call.arguments.get("core_id") or core.core_id).strip()
+        capability.require(f"agents.spawn:{child_core_id}")
         context_mode = str(call.arguments.get("context_mode") or "isolated").strip()
-        if context_mode not in {"isolated", "fork", "handoff"}:
+        if context_mode not in {"isolated", "fork"}:
             return ToolResult(content=f"unsupported context_mode: {context_mode}", is_error=True)
-        if context_mode == "handoff":
-            return ToolResult(content="handoff context mode requires channel handoff policy and is not active", is_error=True)
         depth = int(turn.metadata.get("delegation_depth") or 0)
         max_depth = int(call.arguments.get("max_depth") or 2)
         if depth >= max_depth:
             return ToolResult(content=f"delegation depth limit exceeded: max_depth={max_depth}", is_error=True)
         total_children = [
-            job
-            for job in self.task_worker.list_tasks(owner_session_id=turn.session_id, backend="agent")
-            if job.owner_turn_id == turn.turn_id
+            task
+            for task in self.task_worker.list_tasks(owner_session_id=turn.session_id, kind="agent.spawn")
+            if task.owner_turn_id == turn.turn_id
         ]
         if len(total_children) >= 4:
             return ToolResult(content="delegation limit exceeded: max_children=4", is_error=True)
         running_children = self.task_worker.list_tasks(
             owner_session_id=turn.session_id,
-            backend="agent",
+            kind="agent.spawn",
             include_completed=False,
         )
         if len(running_children) >= 2:
             return ToolResult(content="delegation limit exceeded: max_concurrent_children=2", is_error=True)
         notify_policy = str(call.arguments.get("notify_policy") or "return_to_parent").strip()
+        if notify_policy not in {"return_to_parent", "silent"}:
+            return ToolResult(content=f"unsupported notify_policy: {notify_policy}", is_error=True)
         context = self._delegation_context(context_mode)
         handle = self._spawn_child_agent(
             core_id=child_core_id,
@@ -2365,17 +2389,9 @@ class SessionTurnStepRunner:
             parent_slot_path="builtin:delegate_task",
             context=context,
             tool_policy=tool_policy,
+            notify_on_complete=notify_policy == "return_to_parent",
         )
-        payload = {
-            "task_id": handle.job_id,
-            "job_id": handle.job_id,
-            "core_id": handle.core_id,
-            "session_id": handle.session_id,
-            "status": handle.status,
-            "context_mode": context_mode,
-            "notify_policy": notify_policy,
-            "tool_policy": tool_policy,
-        }
+        payload = {"task_id": handle.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     def _delegation_context(self, context_mode: str) -> list[str]:
@@ -2394,7 +2410,7 @@ class SessionTurnStepRunner:
         view = str(call.arguments.get("view") or "model").strip()
         payload = self._task_view(task_id, include_log=view in {"operator", "debug"})
         if payload is None:
-            return ToolResult(content=f"task not found: {task_id}", is_error=True)
+            return ToolResult(content=f"background task not found: {task_id}", is_error=True)
         content = json.dumps(payload, ensure_ascii=False)
         return ToolResult(content=content, data=payload, model_output=content)
 
@@ -2403,18 +2419,13 @@ class SessionTurnStepRunner:
         if not task_id:
             return ToolResult(content="task_id is required", is_error=True)
         command = str(call.arguments.get("command") or "cancel").strip()
-        if command == "cancel":
-            try:
-                record = await self.task_worker.cancel(task_id)
-                payload = record.to_payload(include_log=True, log=self.task_worker.log(task_id))
-            except KeyError:
-                payload = self._control_plane_command(task_id, "cancel")
-                if payload is None:
-                    return ToolResult(content=f"task not found: {task_id}", is_error=True)
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
-        payload = self._control_plane_command(task_id, command)
-        if payload is None:
-            return ToolResult(content=f"task not found: {task_id}", is_error=True)
+        if command != "cancel":
+            return ToolResult(content=f"unsupported task_control command: {command}", is_error=True)
+        try:
+            record = await self.task_worker.cancel(task_id)
+            payload = record.to_payload(include_log=True, log=self.task_worker.log(task_id))
+        except (KeyError, RuntimeTaskKindError):
+            return ToolResult(content=f"background task not found: {task_id}", is_error=True)
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     async def _yield_until(self, call: ToolCall) -> ToolResult:
@@ -2424,11 +2435,8 @@ class SessionTurnStepRunner:
         timeout = int(call.arguments.get("timeout_seconds") or 30)
         try:
             record = await self.task_worker.wait(task_id, timeout_seconds=timeout)
-        except KeyError:
-            payload = self._task_view(task_id, include_log=False)
-            if payload is None:
-                return ToolResult(content=f"task not found: {task_id}", is_error=True)
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+        except (KeyError, RuntimeTaskKindError):
+            return ToolResult(content=f"background task not found: {task_id}", is_error=True)
         except asyncio.TimeoutError:
             payload = self._task_view(task_id, include_log=False) or {"task_id": task_id, "status": "unknown"}
             payload["timed_out"] = True
@@ -2439,24 +2447,9 @@ class SessionTurnStepRunner:
     def _task_view(self, task_id: str, *, include_log: bool) -> dict[str, Any] | None:
         try:
             record = self.task_worker.get(task_id)
-        except KeyError:
-            control_plane = getattr(self.task_worker, "control_plane", None)
-            if control_plane is None:
-                return None
-            try:
-                return control_plane.read(task_id, view="operator" if include_log else "model")
-            except KeyError:
-                return None
+        except (KeyError, RuntimeTaskKindError):
+            return None
         return record.to_payload(include_log=include_log, log=self.task_worker.log(task_id) if include_log else None)
-
-    def _control_plane_command(self, task_id: str, command: str) -> dict[str, Any] | None:
-        control_plane = getattr(self.task_worker, "control_plane", None)
-        if control_plane is None:
-            return None
-        try:
-            return control_plane.control(task_id, command)
-        except KeyError:
-            return None
 
     async def _run_input_slots(
         self,
@@ -3371,25 +3364,22 @@ class SessionTurnStepRunner:
                 metadata=dict(metadata),
             ),
         )
-        self._append_runtime_event(
-            RuntimeEvent(
-                type="task.started",
-                aggregate_type="task",
-                aggregate_id=turn_id,
-                payload={"status": "running"},
-            )
+        control_plane.mark_started(
+            turn_id,
+            source=ActionSource(
+                actor="host.session_runtime",
+                session_id=self.session_id,
+                turn_id=turn_id,
+                core_id=core.core_id,
+                metadata=dict(metadata),
+            ),
         )
         return turn_id
 
     def _complete_turn_task(self, turn_id: str, *, result_ref: str | None = None) -> None:
-        self._append_runtime_event(
-            RuntimeEvent(
-                type="task.succeeded",
-                aggregate_type="task",
-                aggregate_id=turn_id,
-                payload={"status": "succeeded", "result_ref": result_ref},
-            )
-        )
+        control_plane = getattr(self.session_runtime, "control_plane", None)
+        if control_plane is not None:
+            control_plane.succeed(turn_id, result_ref=result_ref)
 
     def _append_runtime_event(self, event: RuntimeEvent) -> None:
         control_plane = getattr(self.session_runtime, "control_plane", None)

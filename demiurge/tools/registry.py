@@ -27,7 +27,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="evolve_core",
         description=(
             "Create and gate a candidate version of the active agent core. Foreground calls promote loadable "
-            "candidates; background=true leaves the candidate for review and reports through a background job."
+            "candidates; background=true leaves the candidate for review and reports through a background task."
         ),
         input_schema=_schema(
             {
@@ -116,7 +116,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="terminal",
         description=(
             "Run a shell command inside the configured workspace. Set background=true for long-running commands "
-            "and use job with the returned job_id to inspect or stop them."
+            "and use task_status, task_list, or task_control with the returned task_id to inspect or stop them."
         ),
         input_schema=_schema(
             {
@@ -130,28 +130,14 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             required=["command"],
         ),
     ),
-    "job": ToolDefinition(
-        name="job",
-        description="List, poll, read logs, wait for, or cancel background jobs.",
+    "task_list": ToolDefinition(
+        name="task_list",
+        description="List controllable background runtime tasks.",
         input_schema=_schema(
             {
-                "action": {"type": "string", "enum": ["list", "poll", "log", "wait", "cancel"], "default": "list"},
-                "job_id": {"type": "string"},
-                "backend": {"type": "string"},
+                "kind": {"type": "string", "enum": ["terminal.exec", "evolver.run", "agent.spawn"]},
                 "owner_session_id": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "default": 30},
-                "tail": {"type": "integer"},
-            }
-        ),
-    ),
-    "process": ToolDefinition(
-        name="process",
-        description="Compatibility alias for terminal background jobs. Prefer job for new code.",
-        input_schema=_schema(
-            {
-                "action": {"type": "string", "enum": ["list", "poll", "log", "wait", "kill"], "default": "list"},
-                "process_id": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "default": 30},
+                "include_completed": {"type": "boolean", "default": True},
             }
         ),
     ),
@@ -159,14 +145,14 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="delegate_task",
         description=(
             "Spawn a child agent task. Child output is evidence for the parent by default; it is not delivered "
-            "directly to the user unless handoff/channel policy explicitly allows it."
+            "directly to the user."
         ),
         input_schema=_schema(
             {
                 "goal": {"type": "string"},
                 "core_id": {"type": "string"},
-                "context_mode": {"type": "string", "enum": ["isolated", "fork", "handoff"], "default": "isolated"},
-                "notify_policy": {"type": "string", "default": "return_to_parent"},
+                "context_mode": {"type": "string", "enum": ["isolated", "fork"], "default": "isolated"},
+                "notify_policy": {"type": "string", "enum": ["return_to_parent", "silent"], "default": "return_to_parent"},
                 "tool_policy": {"type": "object"},
                 "max_depth": {"type": "integer"},
             },
@@ -186,13 +172,13 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     ),
     "task_control": ToolDefinition(
         name="task_control",
-        description="Cancel or control a delegated task.",
+        description="Cancel a delegated task or background runtime task.",
         input_schema=_schema(
             {
                 "task_id": {"type": "string"},
                 "command": {
                     "type": "string",
-                    "enum": ["cancel", "retry", "handoff", "mute", "notify"],
+                    "enum": ["cancel"],
                     "default": "cancel",
                 },
             },
@@ -305,7 +291,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="schedule_manage",
         description=(
             "List, create, update, enable, disable, or delete authored cron schedules in the active agent core. "
-            "This manages agent/schedules/*.yaml, not runtime-created jobs. "
+            "This manages agent/schedules/*.yaml, not runtime-created tasks. "
             "Create and update accept only standard cron expressions and self-contained prompts."
         ),
         input_schema=_schema(
@@ -347,12 +333,11 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "write_file": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},
     "patch": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},
     "terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
-    "job": {"risk": "medium", "capability": "job.control", "approval_policy": "auto"},
-    "process": {"risk": "medium", "capability": "terminal.exec", "approval_policy": "auto"},
+    "task_list": {"risk": "low", "capability": "task.control", "approval_policy": "auto"},
     "delegate_task": {"risk": "medium", "approval_policy": "auto"},
-    "task_status": {"risk": "low", "capability": "job.control", "approval_policy": "auto"},
-    "task_control": {"risk": "medium", "capability": "job.control", "approval_policy": "auto"},
-    "yield_until": {"risk": "low", "capability": "job.control", "approval_policy": "auto"},
+    "task_status": {"risk": "low", "capability": "task.control", "approval_policy": "auto"},
+    "task_control": {"risk": "medium", "capability": "task.control", "approval_policy": "auto"},
+    "yield_until": {"risk": "low", "capability": "task.control", "approval_policy": "auto"},
     "run_terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
     "skills_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_view": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},

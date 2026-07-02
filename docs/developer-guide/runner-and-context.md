@@ -44,7 +44,7 @@ within a session and safe to quote as reference context.
 
 ## Background Task Completion Turns
 
-The runner preserves one active turn per session. Background job completion is
+The runner preserves one active turn per session. Background task completion is
 modeled as a synthetic inbound event for the originating session rather than as
 direct channel output. Channel bridges use live subscription as a wakeup path
 and recover pending completion events from SQLite. If user input and completion
@@ -52,8 +52,7 @@ are both pending, the user input runs first and pending completion summaries are
 merged into that user turn.
 
 `/stop` and foreground cancellation affect only the active turn. Background
-tasks continue until they finish or a user calls `task_control(command="cancel")`
-or the compatibility `job(action="cancel")` tool.
+tasks continue until they finish or a user calls `task_control(command="cancel")`.
 
 Background work that needs user input is marked `blocked_needs_user` and is
 not auto-approved.

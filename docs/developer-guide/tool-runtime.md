@@ -28,11 +28,11 @@ The runtime:
 5. executes the built-in, authored, or MCP tool
 6. converts the result for model history and user display
 
-## Background Jobs
+## Background Tasks
 
 `ToolRuntime` does not own background state. Background-capable tools submit
 typed actions to the host runtime and use the shared `RuntimeTaskWorker` as the
-in-process backend for active work:
+live worker for active work:
 
 - `terminal(background=true)` creates a `terminal.exec` task and captures
   stdout/stderr into `task_logs`.
@@ -45,13 +45,13 @@ in-process backend for active work:
 - `delegate_task(...)` is executed by the active runner context and creates an
   `agent.spawn` task with child output returned as parent evidence.
 
-`job` is the compatibility control tool for `list`, `poll`, `log`, `wait`, and
-`cancel`. `task_status`, `task_control`, and `yield_until` are the model-facing
-runtime-task controls. `process` remains only as a compatibility view over
-terminal tasks. Active execution is still in-process, while task status and logs
-are read from SQLite projections through `RuntimeControlPlane`.
+`task_list`, `task_status`, `task_control`, and `yield_until` are the
+model-facing runtime-task controls. `task_control` supports only
+`command="cancel"`; non-cancel commands are rejected as unsupported. Active
+execution is still live in the host runtime, while task status and logs are read
+from SQLite projections through `RuntimeControlPlane`.
 
-Each background task records `backend`, owner session/turn, `source_tool`,
+Each background task records `kind`, owner session/turn, `source_tool`,
 status, summary, bounded log tail, result reference, and an optional
 `write_scope`. A new active background task with the same non-empty
 `write_scope` is rejected.

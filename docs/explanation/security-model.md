@@ -24,7 +24,7 @@ Capabilities describe effect classes such as:
 - `fs.read`
 - `fs.write`
 - `terminal.exec`
-- `job.control`
+- `task.control`
 - `network.fetch`
 - `schedule.manage`
 - `tool.call:evolve_core`
@@ -34,7 +34,7 @@ The host resolves capabilities and applies approval policy before the effect
 runs.
 
 Background completion turns use the originating session's normal capabilities
-and approvals. Background jobs do not auto-approve dangerous actions.
+and approvals. Background tasks do not auto-approve dangerous actions.
 
 ## Secrets
 

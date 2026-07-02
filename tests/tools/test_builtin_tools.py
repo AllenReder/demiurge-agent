@@ -102,7 +102,7 @@ def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
 
     assert set(core.builtin_tool_names) == expected
     defaults = core.raw_manifest["capabilities"]["defaults"]
-    assert {"fs.read", "fs.write", "terminal.exec", "job.control", "network.fetch", "schedule.manage"}.issubset(defaults)
+    assert {"fs.read", "fs.write", "terminal.exec", "task.control", "network.fetch", "schedule.manage"}.issubset(defaults)
 
 
 @pytest.mark.asyncio
@@ -545,56 +545,56 @@ async def test_global_terminal_deny_blocks_safe_commands(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_terminal_background_process_can_be_polled_and_waited(tmp_path):
+async def test_terminal_background_task_can_be_listed_and_waited(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     app.approval_runtime.provider = StaticApprovalProvider("deny")
-    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}, "task.control": {}})
 
     started = await _execute(app, core, "terminal", {"command": "printf ready", "background": True})
-    process_id = started.data["process_id"]
-    waited = await _execute(app, core, "process", {"action": "wait", "process_id": process_id, "timeout_seconds": 5})
-    log = await _execute(app, core, "process", {"action": "log", "process_id": process_id})
-    listed = await _execute(app, core, "process", {"action": "list"})
+    task_id = started.data["task_id"]
+    waited = await app.task_worker.wait(task_id, timeout_seconds=5)
+    log = app.task_worker.log(task_id)
+    listed = await _execute(app, core, "task_list", {"kind": "terminal.exec"})
 
     assert started.is_error is False
-    assert waited.is_error is False
-    assert waited.data["running"] is False
-    assert "ready" in log.content
-    assert process_id in listed.content
-    task = app.control_plane.read(process_id, view="debug")
+    assert set(started.data) == {"task_id"}
+    assert waited.running is False
+    assert any("ready" in line for line in log)
+    assert task_id in listed.content
+    task = app.control_plane.read(task_id, view="debug")
     assert task["kind"] == "terminal.exec"
     assert task["status"] == "succeeded"
+    assert task["notify_policy"] == "completion_event"
     assert any("ready" in line["text"] for line in task["logs"])
 
 
 @pytest.mark.asyncio
-async def test_terminal_background_job_can_be_managed_with_job_tool_and_notifies(tmp_path):
+async def test_terminal_background_task_notifies(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     app.approval_runtime.provider = StaticApprovalProvider("deny")
-    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}, "task.control": {}})
 
-    started = await _execute(app, core, "terminal", {"command": "printf job-ready", "background": True})
-    job_id = started.data["job_id"]
-    waited = await _execute(app, core, "job", {"action": "wait", "job_id": job_id, "timeout_seconds": 5})
-    log = await _execute(app, core, "job", {"action": "log", "job_id": job_id})
-    listed = await _execute(app, core, "job", {"action": "list", "backend": "terminal"})
+    started = await _execute(app, core, "terminal", {"command": "printf task-ready", "background": True})
+    task_id = started.data["task_id"]
+    waited = await app.task_worker.wait(task_id, timeout_seconds=5)
+    log = app.task_worker.log(task_id)
+    listed = await _execute(app, core, "task_list", {"kind": "terminal.exec"})
 
-    assert started.data["process_id"] == job_id
-    assert waited.is_error is False
-    assert waited.data["status"] == "succeeded"
-    assert waited.data["running"] is False
-    assert "job-ready" in log.content
-    assert job_id in listed.content
+    assert waited.status == "succeeded"
+    assert set(started.data) == {"task_id"}
+    assert waited.running is False
+    assert any("task-ready" in line for line in log)
+    assert task_id in listed.content
     events = app.task_worker.pending_events_for_session("session_test")
-    assert [event.job_id for event in events] == [job_id]
-    task = app.control_plane.read(job_id, view="debug")
+    assert [event.task_id for event in events] == [task_id]
+    task = app.control_plane.read(task_id, view="debug")
     assert task["kind"] == "terminal.exec"
     assert task["status"] == "succeeded"
-    assert any("job-ready" in line["text"] for line in task["logs"])
+    assert any("task-ready" in line["text"] for line in task["logs"])
 
 
 @pytest.mark.asyncio
@@ -612,21 +612,22 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
     app.evolution_runtime.evolver_runner = EditingEvolver()
 
     started = await _execute(app, core, "evolve_core", {"goal": "edit soul in background", "background": True})
-    job_id = started.data["job_id"]
-    waited = await _execute(app, core, "job", {"action": "wait", "job_id": job_id, "timeout_seconds": 5})
+    task_id = started.data["task_id"]
+    waited = await app.task_worker.wait(task_id, timeout_seconds=5)
+    waited_payload = waited.to_payload(include_log=True, log=app.task_worker.log(task_id))
 
-    assert waited.is_error is False
-    assert waited.data["status"] == "succeeded"
-    assert waited.data["metadata"]["promoted"] is False
-    assert waited.data["metadata"]["new_version"] is None
-    assert "ready for review" in waited.data["summary"]
+    assert set(started.data) == {"task_id"}
+    assert waited.status == "succeeded"
+    assert waited_payload["metadata"]["promoted"] is False
+    assert waited_payload["metadata"]["new_version"] is None
+    assert "ready for review" in waited_payload["summary"]
     assert app.version_store.active_pointer("assistant").active_version == before
-    candidate_soul = tmp_path / waited.data["metadata"]["candidate_path"] / "agent" / "SOUL.md"
+    candidate_soul = tmp_path / waited_payload["metadata"]["candidate_path"] / "agent" / "SOUL.md"
     assert "Background evolve edit." in candidate_soul.read_text(encoding="utf-8")
-    task = app.control_plane.read(job_id, view="debug")
+    task = app.control_plane.read(task_id, view="debug")
     assert task["kind"] == "evolver.run"
     assert task["status"] == "succeeded"
-    assert task["result_ref"] == waited.data["result_ref"]
+    assert task["result_ref"] == waited_payload["result_ref"]
 
 
 @pytest.mark.asyncio
@@ -818,6 +819,8 @@ async def test_removed_tool_names_are_not_aliases(tmp_path):
         "ask_question",
         "web_fetch",
         "web_search",
+        "process",
+        "jo" + "b",
     ]
     results = [await _execute(app, core, name, {}) for name in removed]
 
@@ -836,7 +839,8 @@ async def test_tools_list_returns_registry_metadata(tmp_path):
     payload = json.loads(result.content)
     assert payload["success"] is True
     names = {tool["name"] for tool in payload["tools"]}
-    assert {"tools_list", "skills_list", "read_file", "write_file", "patch", "terminal", "process", "echo"}.issubset(names)
+    assert {"tools_list", "task_list", "skills_list", "read_file", "write_file", "patch", "terminal", "echo"}.issubset(names)
+    assert {"jo" + "b", "process"}.isdisjoint(names)
     read_file = next(tool for tool in payload["tools"] if tool["name"] == "read_file")
     assert read_file["source"] == "builtin"
     assert read_file["capability"] == "fs.read"

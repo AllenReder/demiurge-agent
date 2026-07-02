@@ -126,7 +126,7 @@ capabilities:
       scope: workspace
     terminal.exec:
       scope: workspace
-    job.control:
+    task.control:
       scope: session
     agents.spawn:evolver:
       max_children_per_turn: 4

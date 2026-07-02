@@ -71,7 +71,7 @@ Rules:
 
 ## Manifest File Components
 
-MCP and schedule recipes install declarations, not runtime jobs or running
+MCP and schedule recipes install declarations, not runtime tasks or running
 servers. The host still owns MCP transport, schedule claims, approvals, and
 execution.
 

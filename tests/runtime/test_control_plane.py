@@ -1,3 +1,5 @@
+import pytest
+
 from demiurge.runtime.control import ActionSource, ActionSpec, EventCursor, EventFilter, RuntimeControlPlane, TaskFilter
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 
@@ -39,18 +41,16 @@ def test_control_plane_submit_control_read_and_stream(tmp_path):
     assert [event["type"] for event in batch.events] == ["task.submitted", "task.cancelled"]
 
 
-def test_control_plane_projects_non_cancel_task_control(tmp_path):
+def test_control_plane_rejects_unsupported_task_control(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
     handle = control.submit(
         ActionSpec(kind="agent.spawn", payload={"task_id": "task_1", "notify_policy": "return_to_parent"}),
         source=ActionSource(actor="model"),
     )
 
-    muted = control.control(handle.task_id, "mute")
-    retried = control.control(handle.task_id, "retry")
-
-    assert muted["notify_policy"] == "silent"
-    assert retried["status"] == "queued"
+    with pytest.raises(ValueError):
+        control.control(handle.task_id, "mute")  # type: ignore[arg-type]
+    assert control.read(handle.task_id)["notify_policy"] == "return_to_parent"
 
 
 def test_runtime_store_projects_blocked_task_status(tmp_path):
@@ -60,25 +60,25 @@ def test_runtime_store_projects_blocked_task_status(tmp_path):
             RuntimeEvent(
                 type="task.submitted",
                 aggregate_type="task",
-                aggregate_id="job_1",
+                aggregate_id="task_1",
                 payload={"kind": "agent.spawn", "status": "queued"},
             ),
             RuntimeEvent(
                 type="task.started",
                 aggregate_type="task",
-                aggregate_id="job_1",
+                aggregate_id="task_1",
                 payload={"status": "running"},
             ),
             RuntimeEvent(
                 type="task.blocked",
                 aggregate_type="task",
-                aggregate_id="job_1",
+                aggregate_id="task_1",
                 payload={"status": "blocked_needs_user", "summary": "approval needed"},
             ),
         ]
     )
 
-    task = store.query(RuntimeQuery(table="tasks", where={"task_id": "job_1"}, limit=1)).rows[0]
+    task = store.query(RuntimeQuery(table="tasks", where={"task_id": "task_1"}, limit=1)).rows[0]
 
     assert task["status"] == "blocked_needs_user"
     assert task["started_at"] is not None

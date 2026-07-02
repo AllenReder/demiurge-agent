@@ -1544,20 +1544,20 @@ def _task_completion_inbound(
 
 
 def _is_background_completion(inbound: InteractionInbound) -> bool:
-    return inbound.metadata.get("trigger") == "background_job"
+    return inbound.metadata.get("trigger") == "background_task"
 
 
 def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
     metadata = dict(user_inbound.metadata)
-    metadata["merged_background_jobs"] = [
-        item.metadata.get("job_id") for item in completions if item.metadata.get("job_id")
+    metadata["merged_background_tasks"] = [
+        item.metadata.get("task_id") for item in completions if item.metadata.get("task_id")
     ]
     completion_text = "\n\n".join(item.text for item in completions if item.text)
     text = "\n\n".join(
         part
         for part in [
             user_inbound.text,
-            "[SYSTEM: Pending background job events merged into this user turn]",
+            "[SYSTEM: Pending background task events merged into this user turn]",
             completion_text,
         ]
         if part

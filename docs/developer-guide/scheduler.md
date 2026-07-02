@@ -45,5 +45,5 @@ configured channel and target before sending.
 
 ## Boundary
 
-The Agent Core declares schedules. The host owns durable job state, claims, run
+The Agent Core declares schedules. The host owns durable run state, claims, run
 records, session creation, and channel delivery.
