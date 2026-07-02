@@ -1,22 +1,94 @@
-# Release Checklist
+# Release Guide
 
-demiurge is alpha software. Release notes must state that APIs, runtime layout,
-and authoring contracts may still change.
+Demiurge is `0.x` alpha software. Release notes must state that APIs, runtime
+layout, and authored Agent Core contracts may still change before `1.0`.
+
+The default public release is notes/tag-only: update the version and release
+notes, create an annotated tag, and publish a GitHub Release whose body comes
+from `docs/releases/<version>.md`. Do not build, upload, or attach wheel/sdist
+assets unless artifact publication is explicitly requested for that release.
 
 ## Repository Metadata
 
-Before making the repository public, confirm GitHub shows:
+Before a release, confirm GitHub shows:
 
-- description: local-first Python agent harness with authored agent cores;
+- description: local-first Python agent harness with authored Agent Cores;
 - topics: `agent`, `agent-framework`, `llm`, `local-first`, `automation`;
 - website/docs link: repository README or published docs URL;
 - license detected as Apache-2.0;
 - security policy detected from `SECURITY.md`;
 - contributing link detected from `CONTRIBUTING.md`.
 
-## Local Release Checks
+## Release Unit
 
-Run from a clean worktree, excluding unrelated local files:
+Prepare release changes as one unit:
+
+- `pyproject.toml` version;
+- `demiurge/__init__.py` `__version__`;
+- `uv.lock` entry for the local `demiurge` package;
+- `docs/releases/<version>.md`;
+- latest-release links in `README.md`, `README.zh-CN.md`, `docs/README.md`,
+  `website/docusaurus.config.ts`, and the zh-CN footer translation;
+- any user-facing documentation required by the behavior being released.
+
+The release note heading must be:
+
+```markdown
+# Demiurge <version>
+```
+
+## Official Workflow
+
+Use the manual GitHub Actions workflow from `main` after the release unit is
+merged:
+
+```bash
+gh workflow run Release \
+  --ref main \
+  -f version=<version> \
+  -f prerelease=false \
+  -f build_artifacts=false \
+  -f repair_existing_tag=false
+```
+
+The workflow has five phases:
+
+1. **Preflight** resolves the version and tag, requires a `main` branch release,
+   checks duplicate tag/release state, and allows repair mode only when the
+   existing tag points at the current commit.
+2. **Validate** checks version consistency, release-note heading, public release
+   links, Python gates, TUI gates, website build, and whitespace.
+3. **Optional artifacts** runs `uv build` and `scripts/smoke_wheel_install.sh`
+   only when `build_artifacts=true`, then uploads the `dist/` files for the
+   publish phase.
+4. **Publish** creates the annotated tag unless repair mode is being used, then
+   creates the GitHub Release from `docs/releases/<version>.md`. Artifact files
+   are attached only when `build_artifacts=true`.
+5. **Verify** checks the remote tag, GitHub Release fields, and the release
+   asset list. When `build_artifacts=false`, assets must be empty.
+
+## Repairing an Existing Tag
+
+Use repair mode only when a release tag already exists at the intended commit
+but the GitHub Release object is missing or needs to be created by the workflow:
+
+```bash
+gh workflow run Release \
+  --ref main \
+  -f version=<version> \
+  -f prerelease=false \
+  -f build_artifacts=false \
+  -f repair_existing_tag=true
+```
+
+Repair mode still validates the release unit and refuses to run unless the
+remote tag resolves to the current workflow commit. It does not overwrite an
+existing GitHub Release.
+
+## Local Validation
+
+The workflow is the preferred release gate. When validating locally before
+dispatching it, use the same checks:
 
 ```bash
 git status --short
@@ -30,80 +102,73 @@ cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 ```
 
-## Version and Tag Flow
+For artifact releases only, also run:
 
-The preferred release path is the manual GitHub Actions workflow
-`.github/workflows/release.yml`. Run it from `main` after the version bump,
-release notes, and release-link documentation updates are already merged.
+```bash
+uv build
+scripts/smoke_wheel_install.sh
+```
 
-The workflow verifies that:
+## Manual Fallback
 
-- `pyproject.toml`, `demiurge.__version__`, and the requested version match;
-- `docs/releases/<version>.md` exists and has the matching release heading;
-- the website release link points at `docs/releases/<version>`;
-- the target tag and GitHub Release do not already exist;
-- Python tests, TUI checks, website build, and diff checks all pass.
+Use this path only if GitHub Actions is unavailable.
 
-If all checks pass, the workflow creates an annotated `v<version>` tag, pushes
-it to `origin`, creates the GitHub Release with
-`docs/releases/<version>.md` as the release body, and verifies the remote tag
-and release object.
-
-Manual fallback, if GitHub Actions is unavailable:
-
-1. Update `pyproject.toml`, `demiurge/__init__.py`, and `uv.lock` to the same
-   version.
-2. Add or update `docs/releases/<version>.md` with user-visible changes,
-   breaking changes, known limitations, and verification commands. Keep this
-   checklist accurate when the release process changes.
-3. Update website or README release links that should point at the latest
-   release notes.
-4. Run the local release checks above.
-5. Create a signed or annotated tag when possible:
+1. Confirm the release unit is complete and the worktree is clean except for
+   intentional local-only files.
+2. Run the local validation checks above.
+3. Create an annotated tag:
 
 ```bash
 version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 git tag -a "v${version}" -m "demiurge ${version}"
 ```
 
-6. Push the tag and verify it exists remotely:
+4. Push and verify the remote tag:
 
 ```bash
 git push origin "v${version}"
 git ls-remote --tags origin "v${version}*"
 ```
 
-7. Create a GitHub release for that tag, pass the release note file as the
-   release body, and verify it:
+5. Create the GitHub Release with the release note file as the release body:
 
 ```bash
 gh release create "v${version}" \
   --title "Demiurge ${version}" \
   --notes-file "docs/releases/${version}.md"
-gh release view "v${version}" --json tagName,name,isDraft,isPrerelease,publishedAt,url
 ```
 
-For PEP 440 pre-releases such as `0.2.0a1`, use the clearer public tag spelling
-described in the versioning policy if needed.
+6. Verify the published release. For the default notes/tag-only path, the asset
+   list must be empty:
 
-## First Public Alpha Notes
+```bash
+gh release view "v${version}" --json tagName,name,isDraft,isPrerelease,publishedAt,url,assets
+```
 
-Release notes should explicitly mention:
+## Release Notes
+
+Release notes should include:
 
 - alpha/developer-preview status;
-- host-owned harness and Agent Core boundary;
-- default runtime home `~/.demiurge`;
-- default workspace `~/.demiurge/workspace`;
-- no container sandbox in v1;
+- user-visible changes;
+- fixes;
+- breaking changes, if any;
+- known limitations;
+- verification commands.
+
+Current alpha limitations that may need to appear in release notes include:
+
 - code slots run in the host-shared Python environment by default;
+- Candidate Agent Core evolution cannot add dependencies automatically;
 - Telegram is long-polling only;
-- package repositories can be local, built-in, or explicitly trusted Git/path sources;
-- LLM-driven evolver core is not complete.
+- package repositories can be local, built-in, or explicitly trusted Git/path
+  sources;
+- GitHub Releases do not attach wheel or sdist artifacts by default.
 
 ## PyPI Decision
 
-Do not publish the first public alpha to PyPI automatically. Treat PyPI as a
-separate release decision after:
+Do not publish to PyPI automatically. Treat PyPI as a separate release decision
+after:
 
 - package name ownership is confirmed;
 - wheel/sdist artifact production is intentionally enabled and tested;

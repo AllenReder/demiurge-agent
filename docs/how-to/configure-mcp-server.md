@@ -1,20 +1,25 @@
 ---
 title: Configure an MCP Server
-description: Add a core-local MCP server declaration.
+description: Add an MCP server declaration to an Agent Core.
 ---
 
 # Configure an MCP Server
 
-Agent Cores can declare MCP servers under `agent/mcp/`. The host owns
-transport, discovery, capability checks, approvals, and tool calls.
+Agent Cores declare MCP servers with YAML files. The host owns transport
+startup, tool discovery, namespacing, approvals, capability checks, and tool
+execution.
+
+By default, the loader looks under:
+
+```text
+agent/mcp/*.yaml
+```
+
+If `agent.yaml` sets `slots.mcp`, that value overrides the default MCP root.
 
 ## Add a Stdio Server
 
-Create:
-
-```text
-agent/mcp/filesystem.yaml
-```
+Create `agent/mcp/docs.yaml`:
 
 ```yaml
 enabled: true
@@ -24,49 +29,86 @@ args:
   - -y
   - "@modelcontextprotocol/server-filesystem"
   - /path/to/project
-env: {}
+env:
+  API_TOKEN: "${DOCS_TOKEN}"
+tools:
+  include:
+    - search*
+  exclude: []
 risk: medium
 approval_policy: prompt
+capability: mcp.call:docs
+connect_timeout_seconds: 30
+timeout_seconds: 60
 supports_parallel_tool_calls: false
-tools:
-  include: []
-  exclude: []
 ```
 
-Stdio servers require `command`.
+`transport: stdio` requires `command`. `args`, `env`, and `cwd` are optional.
+Relative `cwd` values are resolved from the runtime workspace.
+
+Environment references such as `${DOCS_TOKEN}` are resolved when the MCP catalog
+is built. If an environment variable is missing, the host records a diagnostic
+and skips that server for the turn.
 
 ## Add a Streamable HTTP Server
+
+Create `agent/mcp/remote_docs.yaml`:
 
 ```yaml
 enabled: true
 transport: streamable_http
-url: https://example.com/mcp
+url: https://example.test/mcp
 headers:
-  Authorization: "Bearer ${MCP_TOKEN}"
-risk: medium
-approval_policy: prompt
-supports_parallel_tool_calls: false
+  Authorization: "Bearer ${REMOTE_DOCS_TOKEN}"
 tools:
   include: []
   exclude: []
+risk: medium
+approval_policy: prompt
+capability: mcp.call:remote_docs
+connect_timeout_seconds: 30
+timeout_seconds: 60
+supports_parallel_tool_calls: false
 ```
 
-Streamable HTTP servers require an `http://` or `https://` URL.
+`transport: streamable_http` requires an `http://` or `https://` URL.
+
+## Grant the MCP Capability
+
+The server manifest's `capability` names the capability required to call tools
+from that server. It does not grant the capability by itself.
+
+Add the capability under the existing `capabilities.defaults` map in the
+concrete core manifest:
+
+```yaml
+capabilities:
+  defaults:
+    mcp.call:docs:
+      scope: core
+```
+
+If `capability` is omitted, the loader uses `mcp.call:<server_id>`.
 
 ## Filter Tools
+
+Use `tools.include` and `tools.exclude` to limit the tool catalog:
 
 ```yaml
 tools:
   include:
-    - search
-    - fetch
-  exclude: []
+    - search_docs
+    - fetch*
+  exclude:
+    - fetch_private
 ```
 
-Tool names are namespaced by the host to avoid collisions with built-in and
-authored tools.
+Filters match MCP server tool names before the host exposes them. Exposed tool
+names are host-safe and namespaced, for example `docs__search_docs`.
 
 ## Verify
+
+Run:
 
 ```bash
 uv run demiurge init --check
@@ -79,9 +121,14 @@ Inside the TUI:
 /tools
 ```
 
-MCP stderr logs are written under the runtime home logs area.
+If a server starts but tool discovery fails, inspect the runtime MCP stderr log:
+
+```text
+~/.demiurge/logs/mcp-stderr.log
+```
 
 ## Boundary
 
-The core declares MCP servers. It does not own the transport process, network
-permissions, approval policy, or tool execution loop.
+An Agent Core declares MCP servers. The host owns process startup, HTTP
+transport sessions, environment interpolation, catalog caching, approval
+prompts, capability enforcement, result conversion, and runtime cleanup.

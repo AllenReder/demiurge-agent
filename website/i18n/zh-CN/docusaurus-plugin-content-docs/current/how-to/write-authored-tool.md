@@ -1,21 +1,32 @@
 ---
 title: 编写 Authored Tool
-description: 添加一个 host 可以暴露给模型的 core-local tool。
+description: 在 authored surface 下添加 core-local、可由模型调用的 tool。
 ---
 
 # 编写 Authored Tool
 
-Authored tools 位于 Agent Core 中，并由 host tool runtime 执行。
+Authored tools 是公开的 Agent Core 文件，host tool runtime 可以把它们暴露给模型。它们位于具体 core 的 `agent.yaml` 中配置的 tool root 下。
 
-## 添加 Tool Directory
+源 `assistant` core 使用：
+
+```yaml
+slots:
+  tools: agent/tools
+```
+
+使用这个设置时，名为 `project_note` 的 tool 位于：
 
 ```text
 agent/tools/project_note/
-  slot.yaml
+  tool.yaml
   module.py
 ```
 
-## 定义 `slot.yaml`
+Authored tools 不是 input 或 output slots。不要把它们添加到 `agent/pipelines.yaml`。
+
+## 定义 `tool.yaml`
+
+创建 `agent/tools/project_note/tool.yaml`：
 
 ```yaml
 entrypoint: module:execute
@@ -26,15 +37,21 @@ input_schema:
     topic:
       type: string
   additionalProperties: false
+risk: low
+capability: tool.call:project_note
+approval_policy: auto
+display_policy: summary
+model_output_policy: content
 capabilities: []
 ```
 
-Tool id 是目录名。Host 暴露 tool 时，模型会看到 description 和 input schema。
+Tool id 是目录名。Host 暴露 tool 时，模型会看到 description 和 `input_schema`。
 
-Authored tools 复用 `slot.yaml` metadata format，但它们不是 Agent Slots。Tool 是
-model-callable action；slot 是 agent loop 中受治理的交互边界。
+单数的 `capability` 是这个 tool 的 metadata 和 approval policy 使用的主要 registry capability。`capabilities` 列表不同：它声明 tool implementation 可能通过 `ctx.capability.require(...)` 需要的 capabilities。
 
 ## 实现 `module.py`
+
+创建 `agent/tools/project_note/module.py`：
 
 ```python
 from demiurge.sdk import ToolResult
@@ -45,17 +62,49 @@ def execute(ctx, args):
     return ToolResult(content=f"Note about {topic}: keep changes scoped.")
 ```
 
-## 需要时启用 Capabilities
+默认 authored tool entrypoint 是 `module:execute`。
 
-如果 tool 需要 filesystem、terminal、network、state 或其他高风险效果，在
-`slot.yaml` 中声明 capability，并在 core manifest 中配置 approval policy。
+## 在需要时声明 Effect Capabilities
+
+如果 tool implementation 执行 host-guarded effect，请把该 effect 添加到 `capabilities`，并在代码中 require 它。
 
 ```yaml
+capability: tool.call:workspace_note
 capabilities:
   - fs.read
 ```
 
+```python
+from pathlib import Path
+
+from demiurge.sdk import ToolResult
+
+
+def execute(ctx, args):
+    ctx.capability.require("fs.read", slot_path=ctx.slot_path)
+    path = Path(ctx.workspace) / "README.md"
+    return ToolResult(content=path.read_text(encoding="utf-8")[:500])
+```
+
+声明 `capability` 不会授予 filesystem、terminal、network、state 或 agent 权限。只授予 implementation 实际使用的具体 effect capabilities。
+
+## 从 `agent.yaml` 覆盖 Metadata
+
+当你需要隐藏某个 tool，或不编辑 tool 目录就覆盖 registry metadata 时，使用 `tools.metadata`：
+
+```yaml
+tools:
+  metadata:
+    project_note:
+      approval_policy: prompt
+      risk: medium
+```
+
+对于 authored tools，metadata overrides 可以降低或提高 risk 和 approval policy。Built-in tools 更受限制：core metadata 不能降低它们的 risk，也不能弱化 approval policy。
+
 ## 验证
+
+运行：
 
 ```bash
 uv run demiurge init --check
@@ -68,7 +117,9 @@ uv run demiurge --provider fake
 /tools
 ```
 
-## 边界
+这个 tool 应该显示为 authored tool。如果没有，请确认：
 
-Authored tools 是 core-owned adapters。Host 仍然拥有 tool registration、capability
-checks、approval checks、workspace scope、execution 和 result conversion。
+- `agent.yaml` 有 `slots.tools: agent/tools`。
+- Tool 目录包含 `tool.yaml`。
+- `tool.yaml` 只使用支持的字段。
+- Tool id 与目录名匹配。

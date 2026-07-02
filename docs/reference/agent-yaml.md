@@ -1,18 +1,67 @@
 ---
 title: agent.yaml Reference
-description: Reference for global fallback and concrete Agent Core manifests.
+description: Reference for the global fallback file and concrete Agent Core manifests.
 ---
 
 # `agent.yaml` Reference
 
-`agent.yaml` appears in two roles:
+`agent.yaml` appears in two different places with different meanings.
 
-- `~/.demiurge/agents/agent.yaml` is a global fallback layer.
-- `~/.demiurge/agents/<core>/agent.yaml` is a concrete Agent Core manifest.
+| Path | Role |
+| --- | --- |
+| `~/.demiurge/agents/agent.yaml` | Global fallback config. Not an Agent Core. |
+| `~/.demiurge/agents/<core>/agent.yaml` | Concrete Agent Core manifest. |
 
-The fallback file is not an Agent Core. It provides defaults.
+The global fallback file may contain only global fields such as `model`, `ui`,
+and `approval`. Concrete core files contain the authored-surface bindings and
+core-specific runtime configuration.
+
+## Loader Requirements
+
+For a concrete core, the loader requires:
+
+- `<core>/agent.yaml`
+- the directory named by `runtime.surface_root` (default: `agent`)
+- `<surface_root>/pipelines.yaml`
+
+Bootstrap, input, and output slot directories are resolved from
+`runtime.surface_root`:
+
+```text
+<surface_root>/bootstrap/
+<surface_root>/input/
+<surface_root>/output/
+```
+
+Skills, schedules, and MCP roots are inferred from `runtime.surface_root` unless
+their `slots.*` root is configured. Authored tools are discovered from the
+configured `slots.tools` root.
+
+## Global Fallback Shape
+
+`~/.demiurge/agents/agent.yaml`:
+
+```yaml
+model:
+  provider: auto
+  model_name: null
+  model_options: {}
+ui:
+  tool_display: summary
+approval:
+  default: null
+  tools: {}
+  capabilities: {}
+  risks: {}
+```
+
+Use the fallback for shared model, UI, and approval defaults. Do not put
+`agent`, `runtime`, `channels`, `slots`, `tools`, `capabilities`,
+`dependencies`, or `tests` in the fallback file.
 
 ## Concrete Core Shape
+
+`~/.demiurge/agents/assistant/agent.yaml`:
 
 ```yaml
 schema_version: 1
@@ -20,7 +69,7 @@ agent:
   id: assistant
   version: "0001"
   parent: null
-  summary: "Initial Demiurge assistant core."
+  summary: "Initial demiurge assistant core."
 runtime:
   surface_root: agent
   max_model_steps: 90
@@ -34,12 +83,10 @@ ui:
 channels: {}
 slots:
   soul: agent/SOUL.md
-  input: agent/input
-  output: agent/output
   tools: agent/tools
   skills: agent/skills
-  mcp: agent/mcp
   schedules: agent/schedules
+  mcp: agent/mcp
 tools:
   toolsets:
     - coding
@@ -51,7 +98,9 @@ approval:
   tools: {}
   capabilities: {}
   risks: {}
-capabilities: {}
+capabilities:
+  defaults: {}
+  slots: {}
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
@@ -63,50 +112,73 @@ tests:
 
 ## Top-Level Fields
 
-| Field | Meaning |
-| --- | --- |
-| `schema_version` | Manifest schema version. Current default is `1`. |
-| `agent` | Core identity and version metadata. Required for concrete cores. |
-| `runtime` | Runtime parameters owned by the host. |
-| `model` | Provider and model defaults. |
-| `ui` | UI preferences such as tool display level. |
-| `channels` | External channel configuration. |
-| `slots` | Core-relative authored surface roots. This maps roots such as `agent/input`; it is not a list of individual Agent Slots. |
-| `tools` | Built-in toolsets and tool metadata overrides. |
-| `approval` | Approval policy overrides. |
-| `capabilities` | Capability configuration. |
-| `dependencies` | Runtime dependency mode. |
-| `tests` | Candidate test and smoke metadata. |
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `schema_version` | No | Manifest schema version. Current default is `1`. |
+| `agent` | Yes | Core id, version, parent, and summary. |
+| `runtime` | No | Host runtime options for this core. |
+| `model` | No | Core-level model/provider defaults. |
+| `ui` | No | Core-level UI preferences such as `tool_display`. |
+| `channels` | No | Gateway channel configuration. |
+| `slots` | No | Roots for authored surfaces that are configurable. |
+| `tools` | No | Built-in toolsets and metadata overrides. |
+| `approval` | No | Core-level approval policy overrides. |
+| `capabilities` | No | Capability grants for host-mediated effects. |
+| `dependencies` | No | Runtime dependency mode metadata. |
+| `tests` | No | Candidate validation metadata. |
 
-## Runtime Fields
+## `runtime`
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `surface_root` | `agent` | Directory containing the authored surface. |
-| `max_model_steps` | `90` | Maximum model/tool loop steps. |
-| `workspace` | `null` | Core default workspace for non-local runs. |
+| `surface_root` | `agent` | Directory containing `SOUL.md`, `pipelines.yaml`, and phase slot roots. |
+| `max_model_steps` | `90` | Host cap for model/tool loop steps. Valid range is `1` through `90`. |
+| `workspace` | `null` | Core default workspace when no CLI/env workspace is supplied. |
 
-`runtime.workspace` must be a non-empty string or `null`.
+`runtime.workspace` must be `null` or a non-empty string. Relative paths are
+resolved from the core root.
 
-## Model Fields
+## `slots`
 
-| Field | Meaning |
+| Field | Default / behavior |
 | --- | --- |
-| `provider` | Provider profile id, `auto`, `fake`, or `null`. |
-| `model_name` | Model name override for this core. |
-| `model_options` | Provider-specific options passed by the host. |
+| `soul` | Optional extra `SOUL.md` path. The loader also reads `<surface_root>/SOUL.md`. |
+| `tools` | Authored tool root. If omitted, authored tools are not discovered. |
+| `skills` | Defaults to `<surface_root>/skills` when omitted. |
+| `schedules` | Defaults to `<surface_root>/schedules` when omitted. |
+| `mcp` | Defaults to `<surface_root>/mcp` when omitted. |
 
-## Toolsets
+Bootstrap, input, and output roots are not configured here. They always come
+from `runtime.surface_root`.
+
+`slots.channels` is ignored by the current loader; channels are configured in
+the `channels` section.
+
+## `tools`
 
 Built-in toolsets:
 
 | Toolset | Includes |
 | --- | --- |
-| `coding` | File, terminal, search, web extract, skills, todo, clarify, session search. |
-| `demiurge_control` | `tools_list`, child-task delegation controls, `evolve_core`, `rollback_core`. |
-| `schedule` | `schedule_manage`. |
+| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search` |
+| `demiurge_control` | `tools_list`, `task_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core` |
+| `schedule` | `schedule_manage` |
 
-## Channel Sections
+Use `tools.metadata` to override registry metadata:
+
+```yaml
+tools:
+  metadata:
+    terminal:
+      approval_policy: deny
+    project_note:
+      enabled: false
+```
+
+Supported metadata keys are `risk`, `capability`, `approval_policy`,
+`model_output_policy`, `display_policy`, and `enabled`.
+
+## `channels`
 
 Supported channel names:
 
@@ -117,10 +189,51 @@ Supported channel names:
 - `matrix`
 - `email`
 
-Unknown channel configs are loaded as disabled or opaque configs, but only known
-channel types have runtime bridges.
+Unknown channel configs can be parsed as opaque configs, but enabled unknown
+channels have no runtime bridge and fail gateway startup.
 
-## Dependency Fields
+## `capabilities`
+
+Capabilities are grants checked by the host:
+
+```yaml
+capabilities:
+  defaults:
+    fs.read:
+      scope: workspace
+    mcp.call:docs:
+      scope: core
+  slots:
+    agent/output/archive_summary:
+      fs.write:
+        scope: workspace
+```
+
+The host treats capability keys and prefix wildcards as grants. For example,
+`mcp.call:*` can grant `mcp.call:docs`.
+
+Slot and authored-tool manifests can also declare a `capabilities` list for
+that specific component.
+
+## `approval`
+
+Approval policies are `auto`, `prompt`, or `deny`:
+
+```yaml
+approval:
+  default: null
+  tools:
+    terminal: prompt
+  capabilities:
+    fs.write: prompt
+  risks:
+    critical: deny
+```
+
+The host combines tool metadata, core approval config, and global fallback
+approval config when deciding whether to prompt.
+
+## `dependencies`
 
 ```yaml
 dependencies:
@@ -128,10 +241,6 @@ dependencies:
   allow_additional_dependencies: false
 ```
 
-`host_shared` is the default runtime mode. Candidate cores must not add Python
-dependencies automatically.
-
-## Boundary
-
-`agent.yaml` is core-owned configuration. It does not give slots permission to
-own provider calls, dependency installation, promotion, rollback, or host state.
+`host_shared` is the current default runtime mode. Candidate Agent Cores must
+not add Python dependencies automatically. Record dependency needs for manual
+review instead.

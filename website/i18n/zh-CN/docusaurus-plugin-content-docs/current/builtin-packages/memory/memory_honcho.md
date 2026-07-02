@@ -35,20 +35,19 @@ agent/tools/honcho_reasoning/
 agent/tools/honcho_conclude/
 ```
 
-它还会编辑 slot pipelines：
+它还会更新 `agent/pipelines.yaml`：
 
 ```yaml
-agent/bootstrap/pipeline.yaml:
+bootstrap:
   serial:
     - session_context
     - memory_honcho
-
-agent/input/pipeline.yaml:
+input:
   serial:
-    - memory_honcho_recall
     - base_input
-
-agent/output/pipeline.yaml:
+    - memory_honcho_recall
+  parallel: []
+output:
   serial:
     - base_output
   parallel:
@@ -267,7 +266,8 @@ guidance、automatic recall、completed-turn sync 和显式 Honcho tools。
 
 实现边界不同：
 
-- Demiurge 使用 package-owned slots 和 lib code。它不会新增 host harness lifecycle hooks。
+- Demiurge 使用 package-owned slots 和 lib code。它不会新增 host harness
+  lifecycle extension points。
 - 没有 `hermes memory setup` 等价命令。通过 package options、环境变量和已安装的
   `config.yaml` 配置该 package。
 - Package 不会安装 `honcho-ai`。

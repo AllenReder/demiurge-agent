@@ -34,12 +34,12 @@ type Copy = {
 const copy: Record<string, Copy> = {
   en: {
     badge: 'Alpha developer preview',
-    title: 'Build self-evolving agents with Agent Slots.',
+    title: 'Build file-backed, self-evolving Agent Cores.',
     subtitle:
-      'Agent Slots are governed interaction boundaries where an Agent Core can shape the loop, compose tools, skills, MCP, state, or child agents, and evolve without changing the host harness.',
-    primary: 'Understand Agent Slots',
+      'Demiurge runs local Agent Cores from ordinary files while the host owns provider calls, tools, approvals, delivery, promotion, and rollback.',
+    primary: 'Read the Manual',
     secondary: 'Quick Start',
-    github: 'View on GitHub',
+    github: 'Agent Slots',
     alpha:
       'APIs, runtime layout, and authoring contracts may still change while the project is in alpha.',
     previewLabel: 'agent slot loop',
@@ -116,12 +116,12 @@ const copy: Record<string, Copy> = {
   },
   'zh-CN': {
     badge: 'Alpha 开发者预览',
-    title: '用 Agent Slots 构建可自进化 Agent',
+    title: '打造文件化、可自进化的 Agent Core',
     subtitle:
-      'Agent Slots 是受 Host 治理的交互边界，让 Agent Core 可以塑造 loop，组合 tools、skills、MCP、state 或子 Agent，并在不修改 harness 的情况下演进。',
-    primary: '理解 Agent Slots',
+      'Demiurge 从普通文件运行本地 Agent Core，同时由 Host 负责 provider calls、tools、approvals、delivery、promotion 和 rollback。',
+    primary: '阅读手册',
     secondary: '快速开始',
-    github: '查看 GitHub',
+    github: 'Agent Slots',
     alpha: '项目仍处于 alpha 阶段，API、runtime 布局和 authoring contract 可能继续变化。',
     previewLabel: 'agent slot loop',
     composeTitle: 'Slots 可以组合',
@@ -202,13 +202,13 @@ function HomepageHeader() {
           </Heading>
           <p className="hero__subtitle">{text.subtitle}</p>
           <div className="hero__actions">
-            <Link className="button button--lg heroButton heroButton--primary" to="/docs/explanation/agent-slots">
+            <Link className="button button--lg heroButton heroButton--primary" to="/docs/">
               {text.primary}
             </Link>
             <Link className="button button--lg heroButton heroButton--soft" to="/docs/tutorials/quick-start">
               {text.secondary}
             </Link>
-            <Link className="button button--lg heroButton heroButton--ghost" href="https://github.com/AllenReder/demiurge-agent">
+            <Link className="button button--lg heroButton heroButton--ghost" to="/docs/explanation/agent-slots">
               {text.github}
             </Link>
           </div>

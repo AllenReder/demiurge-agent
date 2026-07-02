@@ -2,73 +2,95 @@
 slug: /
 sidebar_position: 0
 title: Demiurge Manual
-description: English-first manual for running Demiurge, authoring Agent Cores, and building package repositories.
+description: User manual for installing Demiurge, starting the TUI, configuring providers, choosing workspaces, and authoring Agent Cores.
 ---
 
 # Demiurge Manual
 
-Demiurge helps you build file-backed, self-evolving Agent Cores. The host owns
-the runtime harness. Agent Cores own the authored surface. Package repositories
-install reusable capabilities into runtime cores.
+Demiurge is an alpha agent framework for running file-backed Agent Cores under a
+host-owned runtime harness. The host owns sessions, turns, provider calls, tools,
+approvals, state, delivery, promotion, and rollback. Agent Cores own authored
+files such as `agent.yaml`, `SOUL.md`, Agent Slots, skills, tools, schedules,
+MCP declarations, tests, and local libraries.
 
-This manual is organized with the Diataxis documentation model:
+The manual uses the Diataxis documentation model:
 
-- **Tutorials** teach a complete path from zero to a working result.
-- **How-to guides** solve specific tasks.
+- **Tutorials** guide you through a complete learning path.
+- **How-to guides** solve one operational task.
 - **Explanation** pages describe why the system is shaped this way.
 - **Reference** pages define exact commands, schemas, and contracts.
 
-The reference contract pages are also intended to be readable by the `evolver`
-core when it receives project docs as read-only context.
+Reference contract pages are also intended to be readable by the `evolver` core
+when it receives project docs as read-only context.
 
 ## Start Here
 
-| Goal | Page |
-| --- | --- |
-| Start Demiurge locally | [tutorials/quick-start.md](tutorials/quick-start.md) |
-| Make a safe Agent Core change | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
-| Create an external package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
-| Configure a real model provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
-| Understand Agent Slots | [explanation/agent-slots.md](explanation/agent-slots.md) |
-| Understand the host/core boundary | [explanation/host-and-agent-core.md](explanation/host-and-agent-core.md) |
-| Read the stable authored-surface rules | [reference/contracts/authored-surface.md](reference/contracts/authored-surface.md) |
-
-## Reading Paths
-
-Alpha users should read:
+If you are new to Demiurge, read these in order:
 
 1. [Quick Start](tutorials/quick-start.md)
 2. [Configure a provider](how-to/configure-provider.md)
 3. [Choose a workspace](how-to/choose-workspace.md)
 4. [Troubleshoot](how-to/troubleshoot.md)
 
-Agent Core authors should read:
+## By Role
 
-1. [Host and Agent Core](explanation/host-and-agent-core.md)
-2. [Customize an Agent Core](tutorials/customize-agent-core.md)
-3. [Write an Agent Slot](how-to/write-slot-module.md)
-4. [Authored surface contract](reference/contracts/authored-surface.md)
+| Role | First pages |
+| --- | --- |
+| First-time user | [Quick Start](tutorials/quick-start.md), [Configure a provider](how-to/configure-provider.md), [Choose a workspace](how-to/choose-workspace.md) |
+| Local operator | [Troubleshoot](how-to/troubleshoot.md), [Configure channels](how-to/configure-channels.md), [Install packages](how-to/install-packages.md) |
+| Agent Core author | [Host and Agent Core](explanation/host-and-agent-core.md), [Customize an Agent Core](tutorials/customize-agent-core.md), [Write an Agent Slot](how-to/write-slot-module.md), [Authored surface contract](reference/contracts/authored-surface.md) |
+| Package author | [Package model](explanation/package-model.md), [Create an external package repository](tutorials/external-package-repository.md), [Package repository contract](reference/contracts/package-repositories.md) |
+| Contributor | [Architecture](developer-guide/architecture.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
 
-Package and repository authors should read:
+## Install Paths
 
-1. [Package model](explanation/package-model.md)
-2. [Create an external package repository](tutorials/external-package-repository.md)
-3. [Install packages](how-to/install-packages.md)
-4. [Built-in memory packages](builtin-packages/memory/memory_honcho.md)
-5. [Package repository contract](reference/contracts/package-repositories.md)
+For normal use, run the managed installer from a checkout of this repository:
 
-Contributors should read:
+```bash
+scripts/install.sh
+~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
+```
 
-1. [Architecture](developer-guide/architecture.md)
-2. [Runner and context](developer-guide/runner-and-context.md)
-3. [Tool runtime](developer-guide/tool-runtime.md)
-4. [Package installer](developer-guide/package-installer.md)
+The installer requires `git` and `uv`, creates or reuses
+`~/.demiurge/demiurge-agent`, runs `uv sync`, and initializes the runtime home.
+
+For source checkout development, stay in the repository and use `uv`:
+
+```bash
+uv sync --all-groups
+uv run demiurge init
+uv run demiurge --provider fake
+```
+
+The TUI requires Node.js 20 or newer. Running `demiurge` without a subcommand
+starts the TUI. The main subcommands are `init`, `doctor`, `package`, `update`,
+`setup`, and `gateway`.
+
+## Configuration Order
+
+Provider resolution uses this order:
+
+1. CLI override such as `--provider <provider-id>`.
+2. The selected runtime core manifest.
+3. The global fallback manifest.
+4. The host default provider.
+5. `fake`.
+
+Workspace resolution uses this order:
+
+1. `--workspace <path>`.
+2. `DEMIURGE_WORKSPACE`.
+3. The TUI launch directory.
+4. The selected core's `runtime.workspace`.
+5. `~/.demiurge/workspace`.
 
 ## Current Alpha Boundaries
 
+- Latest release notes: [0.4.1](releases/0.4.1.md).
 - Python dependencies are host-owned and locked by the source checkout.
 - Agent Slot code runs in the host-shared Python environment.
 - Candidate Agent Core evolution cannot add dependencies automatically.
 - Package recipes install files into runtime cores; they do not modify the host
   lock file.
-- Release notes are preserved under [releases/](releases/0.4.1.md).
+- Runtime layout, authoring contracts, package behavior, and troubleshooting
+  steps may still change before `1.0.0`.

@@ -1,86 +1,137 @@
 ---
 title: 配置 Provider
-description: 创建 provider profiles，并选择 core 使用的模型。
+description: 创建 provider profile，选择 core 使用的 model，并验证真实 provider。
 ---
 
 # 配置 Provider
 
-在 runtime 本地可用之前，先使用 fake provider。确认本地路径跑通后，再在 host
-config 中配置真实 provider profile。
+在 TUI 能够本地启动之前，请使用 fake provider。之后再在 host config 中添加真实
+provider profile，并让 runtime core 指向一个 model。
 
-## 交互式 Setup
+对于 managed install，请把 `uv run demiurge` 替换成：
+
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
+```
+
+## 1. 打开向导
+
+不带 setup subcommand 运行 setup：
 
 ```bash
 uv run demiurge setup
 ```
 
-Setup 流程可以创建 provider profiles、把 secrets 写入 `~/.demiurge/.env`、选择
-default provider，并设置 core model。
+wizard 可以创建 provider profiles、把 secrets 写入 `~/.demiurge/.env`、选择
+host default provider，并设置 core model。
 
-检查结果：
+## 2. 检查当前状态
+
+修改前后都可以使用：
 
 ```bash
 uv run demiurge setup status
 uv run demiurge setup status --json
 ```
 
-## 脚本式 Setup
+`setup status` 报告 secret sources，不报告 secret values。
 
-创建 OpenAI profile，并把它设为 host default：
+## 3. 添加 Provider Profile
 
-```bash
-uv run demiurge setup providers add openai --preset openai --set-default
-```
-
-为 `assistant` core 设置模型：
+如果你的 provider 匹配 built-in preset，请从该 preset 开始：
 
 ```bash
-uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
-```
-
-使用这个 provider 运行：
-
-```bash
-uv run demiurge --provider openai
-```
-
-## Secrets
-
-优先使用环境变量或 `~/.demiurge/.env` 保存 secrets：
-
-```bash
-uv run demiurge setup providers add openai \
-  --preset openai \
-  --api-key-env OPENAI_API_KEY \
+uv run demiurge setup providers add <provider-id> \
+  --preset <preset-id> \
+  --api-key-env <API_KEY_ENV> \
   --set-default
 ```
 
-本地测试时，可以让 setup 把提供的 key 写入 `.env`：
+如果你的 provider 是自定义 OpenAI-compatible endpoint，请提供 base URL：
 
 ```bash
-uv run demiurge setup providers add openai \
-  --preset openai \
-  --api-key "$OPENAI_API_KEY" \
+uv run demiurge setup providers add <provider-id> \
+  --base-url https://<provider-host>/v1 \
+  --api-key-env <API_KEY_ENV> \
+  --set-default
+```
+
+在 shell 中 export secret，或把它存入 `~/.demiurge/.env`：
+
+```bash
+export <API_KEY_ENV>=<api-key>
+```
+
+如果要让 setup 把提供的 key 写入 runtime `.env` 文件：
+
+```bash
+uv run demiurge setup providers add <provider-id> \
+  --preset <preset-id> \
+  --api-key "$<API_KEY_ENV>" \
   --write-env \
   --set-default
 ```
 
-`/status` 和 `setup status --json` 只报告 secret sources，不显示 secret values。
+## 4. 设置 Core Model
+
+设置 `assistant` core 使用的 model：
+
+```bash
+uv run demiurge setup model set \
+  --core assistant \
+  --provider <provider-id> \
+  --model <model-name>
+```
+
+使用你的 provider 预期的 model name。不要提交 secrets 或本地 provider choices，除非你
+确实希望共享它们。
+
+## 5. 测试并运行
+
+运行显式 provider test：
+
+```bash
+uv run demiurge setup providers test <provider-id> --model <model-name>
+```
+
+然后用该 provider 启动 TUI：
+
+```bash
+uv run demiurge --provider <provider-id>
+```
+
+如果启动失败，确认 fake provider 仍然可用：
+
+```bash
+uv run demiurge --provider fake
+```
+
+## Provider 解析顺序
+
+Demiurge 按以下顺序选择 provider：
+
+1. CLI override，例如 `--provider <provider-id>`。
+2. 选中的 runtime core manifest。
+3. global fallback manifest。
+4. host default provider。
+5. `fake`。
+
+当你需要区分 runtime 问题和 live provider 问题时，请使用 `--provider fake`。
 
 ## 常用命令
 
 ```bash
 uv run demiurge setup providers list
-uv run demiurge setup providers edit openai --base-url https://api.openai.com/v1
-uv run demiurge setup providers test openai --model gpt-5.5
-uv run demiurge setup providers set-default openai
-uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
-uv run demiurge setup timezone set Asia/Shanghai
+uv run demiurge setup providers show <provider-id>
+uv run demiurge setup providers edit <provider-id> --base-url https://<provider-host>/v1
+uv run demiurge setup providers set-default <provider-id>
+uv run demiurge setup providers remove <provider-id>
+uv run demiurge setup timezone set <IANA-timezone>
 uv run demiurge setup timezone clear
 ```
 
-## 边界
+## 边界和 Secrets
 
 Provider profiles 是 host-owned configuration。Agent Core 可以在 `agent.yaml`
 中声明 model defaults，但 Agent Slots 不应该直接构造 provider requests 或读取
-secrets。
+secrets。API keys 优先使用环境变量或 `~/.demiurge/.env`。

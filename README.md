@@ -21,62 +21,57 @@
   <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.4.1">Latest Release</a>
 </p>
 
-Demiurge is an alpha agent framework for building agents whose behavior lives in
-files and can evolve under host control. The host owns the runtime harness:
-sessions, turns, provider calls, tools, approvals, state, delivery, promotion,
-and rollback. An Agent Core owns the authored surface: `agent.yaml`, `SOUL.md`,
-Agent Slots, skills, tools, schedules, MCP declarations, tests, and local
-libraries.
+Demiurge is an alpha open-source agent framework for running local agents whose
+behavior lives in files. The host owns the runtime harness: sessions, turns,
+provider calls, tools, approvals, state, delivery, promotion, and rollback. An
+Agent Core owns the authored surface: `agent.yaml`, `SOUL.md`, Agent Slots,
+skills, tools, schedules, MCP declarations, tests, and local libraries.
 
-Use Demiurge when you want a local agent runtime where capabilities are
-installable and inspectable, but dangerous effects stay behind a stable host
-boundary.
+Use Demiurge when you want a terminal-first agent runtime where capabilities are
+installable and inspectable, while dangerous effects stay behind host-owned
+filesystem, terminal, network, state, and versioning boundaries.
 
 Status: **alpha / developer preview**. Runtime layout, authoring contracts, and
-package behavior may still change before `1.0.0`.
+package behavior may still change before `1.0.0`. Start with the fake provider
+before adding real provider secrets.
 
-## Quick Start
+## Prerequisites
 
-Managed install is the default user path:
+- `git`
+- `uv`
+- Node.js 20 or newer for the TUI
+- An OpenAI-compatible provider endpoint and API key when you are ready to use a
+  real model
+
+## Start with the Fake Provider
+
+The CLI starts the TUI when you run `demiurge` without a subcommand. The main
+subcommands are `init`, `doctor`, `package`, `update`, `setup`, and `gateway`.
+
+Managed install is the default user path. The installer requires `git` and `uv`,
+creates or reuses the managed checkout at `~/.demiurge/demiurge-agent`, runs
+`uv sync`, and initializes the runtime home:
 
 ```bash
 scripts/install.sh
 ~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
 ```
 
-Source checkout development uses `uv`:
+Use a source checkout when you are developing Demiurge itself:
 
 ```bash
 uv sync --all-groups
+uv run demiurge init
 uv run demiurge --provider fake
 ```
 
-The fake provider verifies the runtime without an API key. Use
+The fake provider verifies startup without an API key. Follow the
 [Quick Start](https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start)
-for the short tutorial, then configure a provider or install packages from there.
+for the full first run, then use
+[Configure a Provider](https://allenreder.github.io/demiurge-agent/docs/how-to/configure-provider)
+to add a real model profile.
 
-## How Agent Slots Work
-
-Agent Slots let packages attach bootstrap, input, and output behavior, and let
-custom code control subagent calls and authored logic, while the host keeps
-provider access, approvals, delivery, promotion, and rollback under control.
-
-<p>
-  <strong>Basic Memory System</strong><br>
-  <video src="https://github.com/user-attachments/assets/d5c98dae-74e5-452a-9f72-93a8c35b962b" controls muted playsinline width="100%"></video>
-</p>
-
-<p>
-  <strong>Text-to-speech output</strong><br>
-  <video src="https://github.com/user-attachments/assets/cd0af2be-3bb2-4b00-b69c-c0c133d0008e" controls muted playsinline width="100%"></video>
-</p>
-
-<p>
-  <strong>Speech-to-text input</strong><br>
-  <video src="https://github.com/user-attachments/assets/f0cca65a-8586-4599-bb03-583196e58aac" controls muted playsinline width="100%"></video>
-</p>
-
-## Core Shape
+## Runtime Shape
 
 ```text
 assistant/
@@ -99,33 +94,29 @@ The runtime copies source templates into `~/.demiurge/agents`. Edits to runtime
 cores are file-backed, diffable, and gateable. Package recipes install reusable
 components into those runtime cores without modifying the source templates.
 
-The built-in package repository includes optional packages for local and
-Honcho-backed memory, conversation style hints, context reseed notes,
-provider-owned web search, and provider-specific speech input/output.
+Workspaces control the filesystem and terminal scope used by tools. Resolution
+order is `--workspace`, `DEMIURGE_WORKSPACE`, the TUI launch directory, the
+core's `runtime.workspace`, then `~/.demiurge/workspace`.
+
+Provider resolution order is CLI override, core manifest, global fallback, host
+default, then `fake`.
+
+## Manual Entry Path
+
+- [Demiurge Manual](https://allenreder.github.io/demiurge-agent/docs/)
+- [Quick Start](https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start)
+- [Configure a Provider](https://allenreder.github.io/demiurge-agent/docs/how-to/configure-provider)
+- [Choose a Workspace](https://allenreder.github.io/demiurge-agent/docs/how-to/choose-workspace)
+- [Troubleshoot](https://allenreder.github.io/demiurge-agent/docs/how-to/troubleshoot)
+- [Latest Release: 0.4.1](https://allenreder.github.io/demiurge-agent/docs/releases/0.4.1)
 
 ## Contributor Path
 
-For local development:
+For repository workflow and verification rules, see
+[CONTRIBUTING.md](CONTRIBUTING.md). For project documentation, start with
+[docs/README.md](docs/README.md).
 
-```bash
-uv sync --all-groups
-uv run pytest
-```
-
-If you change the TUI:
-
-```bash
-cd ui-tui
-npm ci
-npm test -- --run
-npm run typecheck
-npm run build
-cd ..
-cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for repository workflow and verification
-rules.
+Source checkout development uses `uv sync --all-groups` and `uv run ...`.
 
 ## License
 

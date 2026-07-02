@@ -1,59 +1,78 @@
 # Contributing
 
-demiurge is an early alpha Python agent framework. The project is still moving
-quickly, so changes should stay grounded in the current code and documentation
-rather than preserving obsolete internal layouts by default.
+Demiurge is a `0.x` alpha Python agent framework. The project is public, but
+the runtime, authored Agent Core contracts, package repository behavior, and
+release process may still change before a stable `1.0` line.
 
-Large structural changes can be acceptable when they simplify the host harness,
-agent core authored surface, runtime layout, or testable contracts. They should
-still be proposed and reviewed as focused changes.
+Contributions are welcome when they are grounded in the current repository
+state and scoped to one clear outcome. During `0.x`, maintainers may choose
+simple breaking changes over compatibility layers when the change makes the
+host/runtime boundary easier to understand and test.
+
+## Governance
+
+Maintainers make final decisions on project direction, release timing, support
+scope, and whether a change belongs in the current alpha line. The default
+decision criteria are:
+
+- keep host-owned effects explicit and reviewable;
+- keep the authored Agent Core surface file-backed and understandable;
+- prefer narrow changes that can be validated in the checkout;
+- avoid new dependencies unless they are intentionally reviewed;
+- document user-visible behavior in the same change that introduces it.
+
+Open an issue before starting work that changes project direction, public
+contracts, runtime layout, security policy, package installation behavior, or
+release automation. Direct pull requests are fine for small fixes when the
+intent is obvious.
 
 ## Project Boundaries
 
 The host owns the runtime harness: sessions, turns, context assembly, provider
-calls, tool execution, approvals, state, promotion, and rollback.
+calls, tool execution, approvals, state, versioning, promotion, and rollback.
 
-Agent cores own the authored surface: instructions, skills, tool adapters,
-hooks, connections, schedules, input modules, output modules, tests, and
-evolution policy.
+Agent Cores own the authored surface: `agent.yaml`, instructions, skills, tool
+adapters, schedules, input modules, output modules, tests, and evolution policy.
 
-When a change affects this boundary, runtime layout, agent core schema, package
-recipes, safety policy, provider behavior, state/versioning behavior, or release
-workflow, open an issue first unless a maintainer has already asked for the
-specific PR.
+Changes that cross this boundary need extra review. This includes changes to
+tool capabilities, provider behavior, approval policy, state/versioning,
+package recipes, dependency handling, and any code path that executes authored
+modules.
 
 ## Good First Contributions
 
-Direct pull requests are usually fine for:
+Good first contributions are:
 
-- Documentation fixes.
-- Reproducible bug fixes.
-- Focused tests for current behavior.
-- Small CLI, TUI, package, or authoring usability improvements.
+- documentation fixes;
+- reproducible bug fixes;
+- focused tests for current behavior;
+- small CLI, TUI, package, or authoring usability improvements;
+- release-note corrections for already-published behavior.
 
 Please open an issue before working on:
 
-- New or updated Python, Node, system, or provider dependencies.
-- Runtime layout or agent core schema changes.
-- Host harness, tool runtime, approval, provider, state, promotion, or rollback
-  boundary changes.
-- Large refactors or compatibility layers.
-- Release process, packaging, or installation behavior changes.
+- new or updated Python, Node, system, or provider dependencies;
+- runtime layout or Agent Core schema changes;
+- host harness, tool runtime, approval, provider, state, promotion, or rollback
+  boundary changes;
+- compatibility layers for old internal layouts;
+- release process, packaging, or installation behavior changes;
+- security-sensitive behavior or public security policy changes.
 
 ## Pull Requests
 
 Keep pull requests scoped to one feature, fix, cleanup, or documentation pass.
 Avoid mixing unrelated refactors with behavior changes.
 
-Every behavior change should explain:
+Every behavior-changing pull request should explain:
 
-- What user-visible behavior changed.
-- Which runtime or authoring boundary is affected.
-- Whether docs were updated, or why docs are not needed.
-- Which verification commands were run.
+- what user-visible behavior changed;
+- which runtime or authoring boundary is affected;
+- whether documentation was updated, or why no documentation is needed;
+- which verification commands were run.
 
-Maintainers may squash commits when merging. Commit history inside a PR does not
-need to mirror the final release history.
+Maintainers may squash commits when merging. Commit history inside a pull
+request does not need to mirror the final release history.
 
 ## Setup
 
@@ -64,17 +83,21 @@ uv sync --all-groups
 uv run pytest
 ```
 
-The default local entry is:
+The default local entry point is:
 
 ```bash
 uv run demiurge --provider fake
 ```
 
+Do not add `requirements.txt`, `requirements.in`, or ad hoc virtualenv
+instructions. The source checkout and `uv.lock` are the dependency source of
+truth for development.
+
 ## TUI Development
 
-The terminal UI lives in the root `ui-tui/` TypeScript project. Wheels include a
-built JS asset, but source changes to `ui-tui/` must rebuild and copy the asset
-used by the Python package:
+The terminal UI lives in the root `ui-tui/` TypeScript project. The Python
+package includes a built JavaScript asset, so source changes to `ui-tui/` must
+rebuild and copy the asset used by the Python package:
 
 ```bash
 cd ui-tui
@@ -84,6 +107,7 @@ npm run typecheck
 npm run build
 cd ..
 cp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 ```
 
 ## Verification
@@ -93,11 +117,11 @@ Use the narrowest useful checks for the change.
 Documentation-only changes:
 
 ```bash
-git diff --check
+git diff --check -- README.md README.zh-CN.md docs website CONTRIBUTING.md SECURITY.md RELEASE.md
 ```
 
-Run targeted `rg` searches when docs rename commands, concepts, options, or
-runtime paths.
+Run targeted `rg` searches when docs rename commands, concepts, options,
+runtime paths, release links, or security claims.
 
 Focused Python changes:
 
@@ -122,34 +146,32 @@ cd ..
 cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
 ```
 
-Packaging or release-path changes:
+Release-path changes should preserve the default notes/tag-only release policy.
+Build artifacts are optional and must be requested explicitly:
 
 ```bash
 uv build
 scripts/smoke_wheel_install.sh
 ```
 
-Documentation-only changes do not need the full runtime test suite, but should
-run targeted consistency searches and `git diff --check`.
-
 ## Documentation
 
-Update docs in the same change when behavior changes. User-facing behavior,
+Update documentation in the same change when user-visible behavior changes.
 CLI/configuration, runtime layout, channel behavior, tool behavior, provider
 behavior, security policy, package behavior, state/versioning behavior, and
-test/gate workflow changes belong in `docs/`.
+test/gate workflow changes belong in the manual or public policy files.
 
 Documentation under `docs/` is English. The root `README.md` has a
-`README.zh-CN.md` mirror and both files should stay structurally aligned.
+`README.zh-CN.md` mirror and both files should stay structurally aligned when
+entry-point copy changes.
 
 ## Dependencies
 
-Do not add or update Python dependencies without explicit review. demiurge uses
-`uv`; do not introduce `requirements.txt`, `requirements.in`, or ad hoc
-virtualenv instructions.
+Do not add or update Python dependencies without explicit review. Demiurge uses
+`uv`; the lock file must stay aligned with `pyproject.toml`.
 
-Candidate agent cores must not automatically add Python dependencies outside the
-host `uv` lock. If a feature needs a dependency, document it as a manual
+Candidate Agent Cores must not automatically add Python dependencies outside
+the host lock file. If a feature needs a dependency, document it as a manual
 dependency review item.
 
 ## Working Tree Hygiene
@@ -164,5 +186,5 @@ Do not revert unrelated changes. If files are already dirty, preserve that work
 unless the owner explicitly asks for a revert. Keep commits scoped and stage
 only files relevant to the change.
 
-Do not include secrets, API keys, tokens, private local paths, or large generated
-logs in issues or pull requests.
+Do not include secrets, API keys, tokens, private local paths, or large
+generated logs in issues or pull requests.

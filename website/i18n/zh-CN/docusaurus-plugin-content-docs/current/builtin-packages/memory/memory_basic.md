@@ -22,16 +22,17 @@ agent/bootstrap/memory_basic/
 agent/tools/memory/
 ```
 
-它还会编辑 bootstrap pipeline：
+它还会更新 `agent/pipelines.yaml`：
 
 ```yaml
-agent/bootstrap/pipeline.yaml:
+bootstrap:
   serial:
+    - session_context
     - memory_basic
 ```
 
-如果 core 已经有 `session_context` bootstrap slot，package installer 会把
-`memory_basic` 插在它后面。
+Built-in packages 会把 slots append 到目标 pipeline。在默认 assistant core 中，
+这会把 `memory_basic` 放在 `session_context` 后面。
 
 持久 memory 文件位于 package-owned component directories 之外：
 

@@ -5,151 +5,192 @@ description: Reference for built-in, authored, and MCP tools.
 
 # Tools Reference
 
-The host builds a visible tool registry from built-in toolsets, authored tools,
-and MCP tools.
+The host builds the visible tool registry for each turn from:
+
+- built-in toolsets in `agent.yaml`
+- authored tools under `slots.tools`
+- MCP tools discovered from `slots.mcp`
+
+The Agent Core declares tool surfaces. The host owns selection, dispatch,
+capability checks, approvals, workspace scope, task control, and result
+conversion.
 
 ## Built-In Toolsets
 
-| Toolset | Examples |
+| Toolset | Tools |
 | --- | --- |
-| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search`. |
-| `demiurge_control` | `tools_list`, `task_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core`. |
-| `schedule` | `schedule_manage`. |
+| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search` |
+| `demiurge_control` | `tools_list`, `task_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core` |
+| `schedule` | `schedule_manage` |
+
+Unknown toolset names fail core loading.
+
+## Built-In Tool Metadata
+
+Built-in tools have host-defined risk, capability, and approval defaults. For
+example:
+
+| Tool | Capability | Default approval |
+| --- | --- | --- |
+| `read_file` | `fs.read` | `auto` for non-sensitive workspace reads |
+| `write_file` | `fs.write` | `prompt` |
+| `patch` | `fs.write` | `prompt` |
+| `terminal` | `terminal.exec` | `prompt` |
+| `web_extract` | `network.fetch` | `prompt` |
+| `schedule_manage` | `schedule.manage` | `prompt` |
+| `evolve_core` | `tool.call:evolve_core` | `prompt` |
+| `rollback_core` | `tool.call:rollback_core` | `prompt` |
+
+Core metadata can make built-in tools stricter, but it cannot lower their risk
+or weaken their approval policy.
 
 ## Authored Tools
 
-Authored tools live under:
+Authored tools live under the root configured by `slots.tools`, usually:
 
 ```text
 agent/tools/<tool_id>/
+  tool.yaml
+  module.py
 ```
 
-They use `tool.yaml` plus a Python entrypoint, usually:
+If `slots.tools` is omitted, authored tools are not discovered.
 
-```yaml
-entrypoint: module:execute
-description: "Return project information."
-capabilities: []
-```
+Accepted `tool.yaml` fields are:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `entrypoint` | `module:execute` | Callable loaded from the tool directory. |
+| `description` | `""` | Model-visible tool description. |
+| `input_schema` | `{}` | Model-visible JSON schema. |
+| `risk` | `medium` | Registry risk metadata. |
+| `capability` | `null` | Primary registry capability for this tool's approval metadata. |
+| `approval_policy` | `prompt` | Tool-level approval metadata. |
+| `display_policy` | `summary` | Operator display hint. |
+| `model_output_policy` | `content` | Model-output conversion hint. |
+| `capabilities` | `[]` | Capabilities the implementation may require through `ctx.capability.require(...)`. |
+
+`tool.yaml` does not accept slot-only fields such as `failure_policy`,
+`history_policy`, `default_placement`, or `timeout_seconds`.
+
+The singular `capability` and the `capabilities` list are separate:
+
+- `capability` identifies the tool in registry and approval metadata.
+- `capabilities` grants effect capabilities to the tool implementation.
+
+Authored tools are not listed in `agent/pipelines.yaml`.
+
+## Authored Tool Runtime
+
+The default entrypoint is:
 
 ```python
 def execute(ctx, args):
     ...
 ```
 
-Authored tools are model-callable actions executed through the host tool
-runtime. They are not Agent Slots and are not listed in `agent/pipelines.yaml`.
+The host passes a `ToolContext` with:
 
-## Built-In Tools
-
-| Tool | Purpose |
+| Attribute | Meaning |
 | --- | --- |
-| `read_file` | Read text inside the workspace. |
-| `write_file` | Replace a workspace file. |
-| `patch` | Apply an exact text replacement. |
-| `search_files` | Search file contents or names. |
-| `terminal` | Run a command inside the workspace. |
-| `run_terminal` | Run a command as a runtime task; defaults to background execution. |
-| `web_extract` | Fetch and extract text from a known URL. |
-| `skills_list` | List skill metadata. |
-| `skill_view` | Load a skill or linked skill file. |
-| `skill_manage` | Create, update, or delete runtime-core skills. |
-| `todo` | Maintain a per-session todo list. |
-| `clarify` | Ask the user for needed input. |
-| `session_search` | Search or browse local session messages. |
-| `schedule_manage` | Manage core-authored schedule YAML. |
-| `tools_list` | List tools visible to the active core. |
-| `task_list` | List controllable background tasks. |
-| `delegate_task` | Spawn a child agent task. |
-| `task_status` | Inspect a delegated task or runtime task. |
-| `task_control` | Cancel a delegated task or background runtime task. |
-| `yield_until` | Wait briefly for a delegated or background task. |
-| `evolve_core` | Create, gate, and promote a candidate core through the host. |
-| `rollback_core` | Switch back to a previous stable core version. |
+| `ctx.turn` | Current turn metadata. |
+| `ctx.slot_id` | Tool id. |
+| `ctx.slot_path` | Relative tool path, such as `agent/tools/project_note`. |
+| `ctx.capability` | Capability facade for `can(...)` and `require(...)`. |
+| `ctx.output` | Delivery client when the tool is called inside an active turn. |
+| `ctx.workspace` | Resolved workspace root. |
 
-`schedule_manage` creates schedules with explicit defaults for enabled state,
-`base_input`, `base_output`, and local delivery. Runtime timezone belongs to the
-host runtime, not to individual schedule YAML files.
+Return `demiurge.sdk.ToolResult`, a compatible dict, or any value that can be
+converted to text.
+
+## MCP Tools
+
+MCP servers live under the configured MCP root, usually:
+
+```text
+agent/mcp/<server_id>.yaml
+```
+
+For each enabled server, the host:
+
+1. Starts or connects to the server.
+2. Lists server tools.
+3. Applies `tools.include` and `tools.exclude`.
+4. Builds safe names such as `docs__search_docs`.
+5. Exposes those tools through the same registry as built-in and authored tools.
+
+MCP tool calls require the server capability, defaulting to
+`mcp.call:<server_id>` unless the server manifest sets `capability`.
+
+## Tool Metadata Overrides
+
+Use `agent.yaml`:
+
+```yaml
+tools:
+  metadata:
+    web_extract:
+      approval_policy: deny
+    project_note:
+      risk: low
+      enabled: false
+```
+
+Supported metadata keys are:
+
+- `risk`
+- `capability`
+- `approval_policy`
+- `model_output_policy`
+- `display_policy`
+- `enabled`
 
 ## Background Runtime Tasks
 
-`terminal(background=true)`, `run_terminal(...)`, `delegate_task(...)`,
-`ctx.agents.spawn(...)`, and `evolve_core(background=true)` submit host-owned
-background tasks. Background tool calls return a `task_id`.
+These calls submit host-owned background tasks:
 
-`background=true` defaults to `notify_on_complete=true`. When a task completes,
-the host records a pending completion event in SQLite and wakes any live channel
-subscriber. If a user turn is already running, the completion waits. If user
-input and completion are both pending, user input runs first and pending
-completion summaries are merged into that user turn. `/stop` cancels only the
-foreground turn; use `task_control(command="cancel", task_id="...")` to stop a
-background task.
+- `terminal(background=true)`
+- `run_terminal(...)`
+- `delegate_task(...)`
+- `ctx.agents.spawn(...)`
+- `evolve_core(background=true)`
 
-Delegation tools are the preferred model-facing controls for child agents.
-`delegate_task` defaults to isolated context and `return_to_parent` notification;
-child output is evidence for the parent and is not sent directly to the user.
-Use `task_list`, `task_status`, `task_control`, and `yield_until` for follow-up
-inspection or control. Operators can use `/subagents`, `/subagents <task_id>`, and
-`/subagents cancel <task_id>` from TUI or Telegram to list, inspect, or cancel
-child agent tasks for the current session.
+Background task tools return a `task_id`. Use `task_status`,
+`task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or
+control them.
 
-The task tools are:
-
-| Tool | Purpose |
-| --- | --- |
-| `task_list(kind=None, owner_session_id=None)` | List controllable background tasks. It never lists foreground `agent.turn` records. |
-| `task_status(task_id, view="model")` | Return status, metadata, summary, and log tail for one task. |
-| `yield_until(task_id, timeout_seconds=30)` | Wait briefly for task completion. |
-| `task_control(task_id, command="cancel")` | Cancel a queued or running task. Other commands are rejected as unsupported. |
-
-Task statuses are `queued`, `running`, `blocked_needs_user`, `succeeded`,
-`failed`, `cancelled`, and `lost`. Completion payloads include metadata,
-summary, result reference, and a bounded log tail.
-
-Runtime control-plane projections are the durable source of truth for new task
-state. Background tasks still declare a `write_scope`; another active task with
-the same scope is rejected to avoid foreground/background or
-background/background overwrite races.
+Foreground `/stop` cancels only the foreground turn. It does not cancel
+background tasks.
 
 ## Package-Provided Web Search
 
 `web_search` is not part of the default `coding` toolset. It is installed by
 provider packages such as `web_search_brave` or `web_search_tavily`.
 
-Both packages expose the same model-facing tool name, `web_search`, but own
-provider-specific request code and config in separate libraries. Because both
-packages target `agent/tools/web_search`, only one web search provider package
-can be installed in a core at a time.
+Both packages expose the model-facing tool name `web_search`. Because both
+packages target `agent/tools/web_search`, install only one web search provider
+package in a core at a time.
 
 `web_extract` remains the built-in tool for fetching a known URL.
 
-## MCP Tools
+## Inspect Visible Tools
 
-MCP tools come from declarations under:
+Use the built-in tool:
 
 ```text
-agent/mcp/*.yaml
+tools_list
 ```
 
-The host namespaces and filters MCP tools, then runs them through capability and
-approval policy.
+Or use the TUI command:
 
-## Output Policy
+```text
+/tools
+```
 
-Tool results can be model-visible, current-turn-only, or shaped by tool metadata
-depending on the registry entry. Tool runtime owns conversion to provider
-messages.
-
-TUI and gateway display can be controlled with:
+Tool display can be adjusted at startup:
 
 ```bash
 uv run demiurge --tool-display quiet
 uv run demiurge --tool-display summary
 uv run demiurge --tool-display full
 ```
-
-## Boundary
-
-Agent Cores can declare authored tools and MCP servers. The host owns visible
-tool selection, dispatch, approval, workspace checks, result conversion, and
-tool-call replay.

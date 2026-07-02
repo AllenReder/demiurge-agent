@@ -272,7 +272,7 @@ guidance, automatic recall, completed-turn sync, and explicit Honcho tools.
 The implementation boundary is different:
 
 - Demiurge uses package-owned slots and lib code. It does not add host harness
-  lifecycle hooks.
+  lifecycle extension points.
 - There is no `hermes memory setup` equivalent. Configure the package through
   package options, environment variables, and the installed `config.yaml`.
 - The package does not install `honcho-ai`.

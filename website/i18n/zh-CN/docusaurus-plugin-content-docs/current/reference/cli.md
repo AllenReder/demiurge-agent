@@ -60,8 +60,8 @@ uv run demiurge setup providers add openai --preset openai --set-default
 uv run demiurge setup providers edit openai --base-url https://api.openai.com/v1
 uv run demiurge setup providers remove openai
 uv run demiurge setup providers set-default openai
-uv run demiurge setup providers test openai --model gpt-5.5
-uv run demiurge setup model set --core assistant --provider openai --model gpt-5.5
+uv run demiurge setup providers test openai --model <model-name>
+uv run demiurge setup model set --core assistant --provider openai --model <model-name>
 uv run demiurge setup timezone set Asia/Shanghai
 uv run demiurge setup timezone clear
 ```

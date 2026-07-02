@@ -1,37 +1,36 @@
 ---
 sidebar_position: 3
-title: Text-to-Speech Packages
-description: 安装用于 assistant audio output 的内置 text-to-speech packages。
+title: 文字转语音包
+description: 安装内置 text-to-speech packages，用于 assistant 音频输出。
 ---
 
-# Text-to-Speech Packages
+# 文字转语音包
 
-内置 text-to-speech packages 会从 assistant replies 生成音频。每个 provider 会安装一个
-package-owned output slot，也可以选择安装一个 authored tool，用于按需生成语音。
+内置 text-to-speech packages 会从 assistant replies 生成音频。每个 provider 都会安装一个 output slot，并且可以选择安装一个 authored `text_to_speech` tool，用于按需生成。
 
-除非你确实想让多个 audio providers 在每次 assistant response 后都运行，否则每个 core
-只安装一个 TTS output package。
+除非你有意让多个音频 providers 在每次 assistant response 后运行，否则每个 core 只安装一个 TTS output package。
 
-## Packages
+## 包
 
-| Package | Provider |
-| --- | --- |
-| `tts_minimax` | MiniMax |
-| `tts_openai` | OpenAI |
-| `tts_gemini` | Gemini |
-| `tts_xai` | xAI |
+| 包 | Provider | 能力 |
+| --- | --- | --- |
+| `tts_minimax` | MiniMax | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_openai` | OpenAI | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_gemini` | Gemini | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_xai` | xAI | `network.fetch`, `agents.run:tts_summarizer` |
 
 ## 安装
 
-先 preview：
+使用交互式 manager：
+
+```bash
+uv run demiurge package
+```
+
+或者用 subcommands 预览并安装：
 
 ```bash
 uv run demiurge package install tts_minimax --core assistant --preview
-```
-
-安装 direct output mode：
-
-```bash
 uv run demiurge package install tts_minimax --core assistant
 ```
 
@@ -43,7 +42,7 @@ uv run demiurge package install tts_minimax \
   --option mode=summary
 ```
 
-安装 on-demand TTS tool：
+安装 on-demand tool：
 
 ```bash
 uv run demiurge package install tts_minimax \
@@ -51,51 +50,52 @@ uv run demiurge package install tts_minimax \
   --option enable_tool=true
 ```
 
-## Options
+## 共享选项
 
-| Option | Default | 说明 |
+所有内置 TTS packages 都支持：
+
+| 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `mode` | `direct` | `direct` 直接朗读 assistant reply。`summary` 会安装共享的 `tts_summarizer` core，并合成它生成的摘要。 |
-| `enable_tool` | `false` | 安装 authored `text_to_speech` tool，用于按需生成语音。 |
-| `api_key` | unset | 直接传入 provider API key。留空则使用环境变量。 |
+| `mode` | `direct` | `direct` 原样朗读 assistant reply。`summary` 安装 shared `tts_summarizer` child core，并朗读它的 summary。可选值：`direct`、`summary`。 |
+| `enable_tool` | `false` | 安装 authored `text_to_speech` tool 和 provider-specific TTS skill。 |
+| `api_key` | unset | 可选 direct provider API key。留空则使用环境变量。 |
 
-## Credential 环境变量
+在 `summary` mode 下，package 会安装或复用名为 `tts_summarizer` 的 package-owned child core。
 
-| Package | 环境变量 |
+## 凭证环境变量
+
+| 包 | 环境变量 |
 | --- | --- |
-| `tts_minimax` | `DEMIURGE_MINIMAX_API_KEY`；可选 `DEMIURGE_MINIMAX_GROUP_ID` |
-| `tts_openai` | `DEMIURGE_OPENAI_API_KEY` 或 `OPENAI_API_KEY` |
-| `tts_gemini` | `DEMIURGE_GEMINI_API_KEY`、`GEMINI_API_KEY` 或 `GOOGLE_API_KEY` |
-| `tts_xai` | `DEMIURGE_XAI_API_KEY` 或 `XAI_API_KEY` |
+| `tts_minimax` | `DEMIURGE_MINIMAX_API_KEY`; optional `DEMIURGE_MINIMAX_GROUP_ID` |
+| `tts_openai` | `DEMIURGE_OPENAI_API_KEY` or `OPENAI_API_KEY` |
+| `tts_gemini` | `DEMIURGE_GEMINI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` |
+| `tts_xai` | `DEMIURGE_XAI_API_KEY` or `XAI_API_KEY` |
 
-## Runtime 行为
+## 运行时行为
 
-已安装 output slot 会在 output pipeline 中的 `base_output` 之后运行。`direct` mode 会把
-assistant reply text 发送给 provider。`summary` mode 会先运行共享的
-`tts_summarizer` child core，再合成摘要。
+已安装 output slot 会在 model response 可用后，在 parallel output pipeline 中运行。在 `direct` mode 下，它会从 assistant reply 中去除常见 Markdown，将文本截断到已配置 provider limit，发送给 provider，并发出 audio artifact。
 
-生成的音频会写入 workspace 下：
+在 `summary` mode 下，它会先调用 `tts_summarizer` child core，然后合成返回的 summary。
+
+生成的音频写入 workspace 下：
 
 ```text
 .demiurge-tts/
 ```
 
-Output slot 会发出 audio artifact delivery。支持 audio 的 channels 可以把这个 artifact
-转发给用户。
+支持音频的 channels 可以把 audio artifact 转发给用户。
 
-## Tools
+## 工具
 
-`enable_tool=true` 时，package 会安装一个 authored TTS tool：
+当 `enable_tool=true` 时，package 会安装：
 
-| Package | Tool |
-| --- | --- |
-| `tts_minimax` | `text_to_speech` |
-| `tts_openai` | `text_to_speech` |
-| `tts_gemini` | `text_to_speech` |
-| `tts_xai` | `text_to_speech` |
+```text
+agent/tools/text_to_speech/
+```
 
-当 model 应该按需生成特定音频片段，而不是通过 output slot 朗读每次 assistant response
-时，使用这个 tool。
+Model 可以使用该 tool 按需生成特定 audio clip，而不是通过 output slot 朗读每次 assistant response。
+
+因为所有 provider packages 都 target `agent/tools/text_to_speech`，同一个 core 中一次只安装一个启用 tool 的 TTS provider。
 
 ## 验证
 
@@ -105,7 +105,7 @@ Output slot 会发出 audio artifact delivery。支持 audio 的 channels 可以
 uv run demiurge package list --core assistant
 ```
 
-运行一个 turn，然后检查 workspace：
+运行一个 turn，并检查 workspace：
 
 ```text
 .demiurge-tts/
@@ -116,3 +116,12 @@ uv run demiurge package list --core assistant
 ```text
 /tools
 ```
+
+## 卸载
+
+```bash
+uv run demiurge package uninstall tts_minimax --core assistant --preview
+uv run demiurge package uninstall tts_minimax --core assistant
+```
+
+Uninstall 会移除 package-owned output slots、provider libs、optional tool 和 skill files，以及 package-owned pipeline entries。它不会移除 `.demiurge-tts/` 下生成的音频。

@@ -92,7 +92,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          to: '/docs/tutorials/external-package-repository',
+          to: '/docs/how-to/install-packages',
           label: 'Packages',
           position: 'left',
         },

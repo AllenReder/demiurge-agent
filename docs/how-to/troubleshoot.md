@@ -5,11 +5,60 @@ description: Diagnose common Demiurge startup, configuration, package, and chann
 
 # Troubleshoot
 
-Start with the exact command and exact error text. Most failures are caused by
-runtime-home drift, missing secrets, invalid YAML, workspace scope, or channel
-allowlist configuration.
+Start with the exact command, exact error text, and whether you are using the
+managed checkout or a source checkout. Most onboarding failures are caused by
+Node.js version problems, runtime-home drift, missing provider secrets, invalid
+YAML, or an unexpected workspace.
 
-## Runtime Drift
+For a managed install, replace `uv run demiurge` with:
+
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge
+```
+
+## Confirm the Command Surface
+
+Running `demiurge` without a subcommand starts the TUI. The top-level
+subcommands are:
+
+- `init`
+- `doctor`
+- `package`
+- `update`
+- `setup`
+- `gateway`
+
+Run `demiurge setup` without another setup subcommand to open the setup wizard.
+
+## TUI Does Not Start
+
+The TUI requires Node.js 20 or newer:
+
+```bash
+node --version
+```
+
+If Node is missing or too old, install Node.js 20 or newer and retry:
+
+```bash
+uv run demiurge --provider fake
+```
+
+## Command Not Found
+
+For a managed install, use the managed command path:
+
+```bash
+~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
+```
+
+For a source checkout, run commands through `uv` from the repository:
+
+```bash
+uv run demiurge --provider fake
+```
+
+## Runtime Drift or Missing Runtime Files
 
 Check without writing files:
 
@@ -18,13 +67,17 @@ uv run demiurge init --check
 uv run demiurge doctor
 ```
 
-Refresh templates only when you intend to update runtime files:
+Refresh templates only after reviewing the drift and deciding to update runtime
+files:
 
 ```bash
 uv run demiurge init --refresh assistant
 ```
 
-## Missing Provider or API Key
+Use `init --refresh global` only for the global fallback config, and use
+`init --refresh all` only when you intend to refresh all runtime templates.
+
+## Provider or API Key Fails
 
 Inspect setup state:
 
@@ -32,13 +85,23 @@ Inspect setup state:
 uv run demiurge setup status
 ```
 
-Use the fake provider to separate runtime issues from provider issues:
+Use the fake provider to separate runtime issues from live provider issues:
 
 ```bash
 uv run demiurge --provider fake
 ```
 
-## Core Does Not Load
+If `fake` works, check:
+
+- The selected provider profile exists.
+- The provider profile has a base URL.
+- The configured `api_key_env` is exported or written to `~/.demiurge/.env`.
+- The selected core model uses the intended provider and `<model-name>`.
+
+Provider resolution order is CLI override, core manifest, global fallback, host
+default, then `fake`.
+
+## Core or Slot Does Not Load
 
 Run:
 
@@ -55,6 +118,25 @@ Then check the affected files:
 - authored tool `tool.yaml` when a tool fails to load
 
 Compare with [../reference/contracts/slot-modules.md](../reference/contracts/slot-modules.md).
+
+## Workspace Is Wrong or Tools Are Rejected
+
+Inside the TUI, run:
+
+```text
+/status
+```
+
+Workspace resolution order is `--workspace`, `DEMIURGE_WORKSPACE`, TUI launch
+directory, core `runtime.workspace`, then `~/.demiurge/workspace`.
+
+Run with an explicit workspace:
+
+```bash
+uv run demiurge --workspace /path/to/project --provider fake
+```
+
+Approvals and sensitive-path checks still apply inside the workspace.
 
 ## Package Install Fails
 
@@ -74,22 +156,6 @@ packages/<package_id>.yaml
 External repositories must be trusted before they can install local Agent Slot
 code.
 
-## File or Terminal Tool Is Rejected
-
-Check workspace:
-
-```text
-/status
-```
-
-Run with an explicit workspace:
-
-```bash
-uv run demiurge --workspace /path/to/project
-```
-
-Approvals and sensitive-path checks still apply.
-
 ## Telegram Does Not Respond
 
 Check:
@@ -103,7 +169,7 @@ Check:
 uv run demiurge gateway --core assistant --provider fake
 ```
 
-## Website or Manual Links Break
+## Manual Links Break
 
 Build the site:
 

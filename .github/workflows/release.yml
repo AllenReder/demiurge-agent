@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version from pyproject.toml, for example 0.3.2"
+        description: "Package version from pyproject.toml, for example 0.4.1"
         required: true
         type: string
       tag:
@@ -13,6 +13,16 @@ on:
         type: string
       prerelease:
         description: "Mark the GitHub Release as a prerelease."
+        required: true
+        default: false
+        type: boolean
+      build_artifacts:
+        description: "Build, smoke-test, upload, and attach wheel/sdist artifacts."
+        required: true
+        default: false
+        type: boolean
+      repair_existing_tag:
+        description: "Publish a missing GitHub Release for an existing tag at this commit."
         required: true
         default: false
         type: boolean
@@ -25,9 +35,141 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish release
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      notes: ${{ steps.resolve.outputs.notes }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      build_artifacts: ${{ steps.resolve.outputs.build_artifacts }}
+      repair_existing_tag: ${{ steps.resolve.outputs.repair_existing_tag }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release inputs
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_BUILD_ARTIFACTS: ${{ inputs.build_artifacts }}
+          INPUT_REPAIR_EXISTING_TAG: ${{ inputs.repair_existing_tag }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION#v}"
+          default_tag="v${version}"
+          tag="${INPUT_TAG:-$default_tag}"
+          notes="docs/releases/${version}.md"
+
+          case "$version" in
+            *[!0-9A-Za-z.-]* | "" )
+              echo "Invalid version: $version" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ "$tag" != "$default_tag" ]]; then
+            echo "Release tag must be ${default_tag}; got ${tag}" >&2
+            exit 1
+          fi
+
+          for value in "$INPUT_PRERELEASE" "$INPUT_BUILD_ARTIFACTS" "$INPUT_REPAIR_EXISTING_TAG"; do
+            if [[ "$value" != "true" && "$value" != "false" ]]; then
+              echo "Boolean workflow inputs must resolve to true or false; got ${value}" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "notes=$notes"
+            echo "prerelease=$INPUT_PRERELEASE"
+            echo "build_artifacts=$INPUT_BUILD_ARTIFACTS"
+            echo "repair_existing_tag=$INPUT_REPAIR_EXISTING_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "RELEASE_VERSION=$version"
+            echo "RELEASE_TAG=$tag"
+            echo "RELEASE_NOTES=$notes"
+            echo "PRERELEASE=$INPUT_PRERELEASE"
+            echo "BUILD_ARTIFACTS=$INPUT_BUILD_ARTIFACTS"
+            echo "REPAIR_EXISTING_TAG=$INPUT_REPAIR_EXISTING_TAG"
+          } >> "$GITHUB_ENV"
+
+      - name: Check branch, tag, and release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --tags origin
+
+          release_exists=false
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          remote_tag_commit="$(
+            git ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" | awk '{print $1}' | head -n 1
+          )"
+          if [[ -z "$remote_tag_commit" ]]; then
+            remote_tag_commit="$(
+              git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" | awk '{print $1}' | head -n 1
+            )"
+          fi
+
+          local_tag_exists=false
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            local_tag_exists=true
+          fi
+
+          if [[ "$REPAIR_EXISTING_TAG" == "true" ]]; then
+            if [[ -z "$remote_tag_commit" ]]; then
+              echo "Repair mode requires existing remote tag: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            if [[ "$remote_tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "Repair mode requires $RELEASE_TAG to point at $GITHUB_SHA; got $remote_tag_commit" >&2
+              exit 1
+            fi
+            if [[ "$release_exists" == "true" ]]; then
+              echo "GitHub Release already exists: $RELEASE_TAG" >&2
+              exit 1
+            fi
+          else
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "Releases must run from main. Use repair_existing_tag only for an existing tag at this commit." >&2
+              exit 1
+            fi
+            if [[ "$local_tag_exists" == "true" ]]; then
+              echo "Local tag already exists: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            if [[ -n "$remote_tag_commit" ]]; then
+              echo "Remote tag already exists: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            if [[ "$release_exists" == "true" ]]; then
+              echo "GitHub Release already exists: $RELEASE_TAG" >&2
+              exit 1
+            fi
+          fi
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    needs: preflight
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_NOTES: ${{ needs.preflight.outputs.notes }}
 
     steps:
       - name: Check out repository
@@ -57,72 +199,31 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked --group dev --python "3.11"
 
-      - name: Resolve release inputs
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          version="${INPUT_VERSION#v}"
-          tag="${INPUT_TAG:-v${version}}"
-          notes="docs/releases/${version}.md"
-
-          case "$version" in
-            *[!0-9A-Za-z.-]* | "" )
-              echo "Invalid version: $version" >&2
-              exit 1
-              ;;
-          esac
-
-          if [[ "$tag" != v* ]]; then
-            echo "Release tag must start with v: $tag" >&2
-            exit 1
-          fi
-
-          {
-            echo "RELEASE_VERSION=$version"
-            echo "RELEASE_TAG=$tag"
-            echo "RELEASE_NOTES=$notes"
-          } >> "$GITHUB_ENV"
-
-      - name: Verify version and release notes
+      - name: Verify version metadata, release notes, and public links
         run: |
           set -euo pipefail
           test -f "$RELEASE_NOTES"
 
-          pyproject_version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          pyproject_version="$(
+            uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+          )"
           package_version="$(uv run python -c 'import demiurge; print(demiurge.__version__)')"
+          lock_version="$(
+            uv run python -c 'import tomllib; data = tomllib.load(open("uv.lock", "rb")); print(next(pkg["version"] for pkg in data["package"] if pkg["name"] == "demiurge"))'
+          )"
 
           test "$pyproject_version" = "$RELEASE_VERSION"
           test "$package_version" = "$RELEASE_VERSION"
+          test "$lock_version" = "$RELEASE_VERSION"
 
           escaped_version="${RELEASE_VERSION//./\\.}"
           grep -nE "^# Demiurge ${escaped_version}$" "$RELEASE_NOTES"
-          grep -nF "/docs/releases/${RELEASE_VERSION}" \
+          grep -nF "docs/releases/${RELEASE_VERSION}" \
+            README.md \
+            README.zh-CN.md \
             website/docusaurus.config.ts \
             website/i18n/zh-CN/docusaurus-theme-classic/footer.json
-
-      - name: Check tag and release do not already exist
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git fetch --tags origin
-
-          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
-            echo "Local tag already exists: $RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          if git ls-remote --exit-code --tags origin "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Remote tag already exists: $RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub Release already exists: $RELEASE_TAG" >&2
-            exit 1
-          fi
+          grep -nE "releases/${escaped_version}(\\.md)?" docs/README.md
 
       - name: Compile Python sources
         run: uv run python -m compileall demiurge tests
@@ -165,7 +266,76 @@ jobs:
       - name: Check whitespace
         run: git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 
+  optional_artifacts:
+    name: Optional Artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - validate
+    if: needs.preflight.outputs.build_artifacts == 'true'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --locked --group dev --python "3.11"
+
+      - name: Build release artifacts
+        run: uv build
+
+      - name: Smoke-test wheel install
+        run: scripts/smoke_wheel_install.sh
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - validate
+      - optional_artifacts
+    if: always() && needs.preflight.result == 'success' && needs.validate.result == 'success' && (needs.optional_artifacts.result == 'success' || needs.optional_artifacts.result == 'skipped')
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_NOTES: ${{ needs.preflight.outputs.notes }}
+      PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+      BUILD_ARTIFACTS: ${{ needs.preflight.outputs.build_artifacts }}
+      REPAIR_EXISTING_TAG: ${{ needs.preflight.outputs.repair_existing_tag }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        if: env.BUILD_ARTIFACTS == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
       - name: Create annotated tag
+        if: env.REPAIR_EXISTING_TAG != 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -174,26 +344,88 @@ jobs:
           git push origin "$RELEASE_TAG"
 
       - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
           args=()
+          assets=()
+
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
+          fi
+
+          if [[ "$BUILD_ARTIFACTS" == "true" ]]; then
+            mapfile -t assets < <(find dist -maxdepth 1 -type f | sort)
+            if [[ "${#assets[@]}" -eq 0 ]]; then
+              echo "build_artifacts=true but no files were downloaded into dist/" >&2
+              exit 1
+            fi
           fi
 
           gh release create "$RELEASE_TAG" \
             --title "Demiurge ${RELEASE_VERSION}" \
             --notes-file "$RELEASE_NOTES" \
-            "${args[@]}"
+            "${args[@]}" \
+            "${assets[@]}"
 
-      - name: Verify published release
-        env:
-          GH_TOKEN: ${{ github.token }}
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - publish
+    if: needs.publish.result == 'success'
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+      BUILD_ARTIFACTS: ${{ needs.preflight.outputs.build_artifacts }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify remote tag
         run: |
           set -euo pipefail
-          git ls-remote --exit-code --tags origin "$RELEASE_TAG"
-          git ls-remote --exit-code --tags origin "${RELEASE_TAG}^{}"
-          gh release view "$RELEASE_TAG" --json tagName,name,isDraft,isPrerelease,publishedAt,url
+          git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}"
+          git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}^{}"
+
+      - name: Verify GitHub Release fields and assets
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json tagName,name,isDraft,isPrerelease,publishedAt,url,assets > release.json
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          release = json.load(open("release.json", encoding="utf-8"))
+          expected_tag = os.environ["RELEASE_TAG"]
+          expected_name = f"Demiurge {os.environ['RELEASE_VERSION']}"
+          expected_prerelease = os.environ["PRERELEASE"] == "true"
+          build_artifacts = os.environ["BUILD_ARTIFACTS"] == "true"
+
+          errors = []
+          if release.get("tagName") != expected_tag:
+              errors.append(f"tagName is {release.get('tagName')!r}, expected {expected_tag!r}")
+          if release.get("name") != expected_name:
+              errors.append(f"name is {release.get('name')!r}, expected {expected_name!r}")
+          if release.get("isDraft"):
+              errors.append("release is still a draft")
+          if bool(release.get("isPrerelease")) != expected_prerelease:
+              errors.append("prerelease flag does not match workflow input")
+          if not release.get("publishedAt"):
+              errors.append("release has no publishedAt timestamp")
+
+          assets = release.get("assets") or []
+          if build_artifacts and not assets:
+              errors.append("build_artifacts=true but no release assets are attached")
+          if not build_artifacts and assets != []:
+              errors.append(f"build_artifacts=false but assets were attached: {assets!r}")
+
+          if errors:
+              for error in errors:
+                  print(error, file=sys.stderr)
+              sys.exit(1)
+          PY

@@ -2,71 +2,94 @@
 slug: /
 sidebar_position: 0
 title: Demiurge 手册
-description: 面向运行 Demiurge、编写 Agent Core 和构建 package repository 的中文核心手册。
+description: 用于安装 Demiurge、启动 TUI、配置 provider、选择 workspace，以及编写 Agent Core 的用户手册。
 ---
 
 # Demiurge 手册
 
-Demiurge 用于打造文件化、可自进化的 Agent Core。host 拥有 runtime
-harness。Agent Core 拥有 authored surface。Package repository 会把可复用能力安装进
-runtime core。
+Demiurge 是 alpha 阶段的 agent framework，用于在 host-owned runtime harness
+下运行文件化的 Agent Core。host 拥有 session、turn、provider call、tool、
+approval、state、delivery、promotion 和 rollback。Agent Core 拥有作者维护的文件，
+例如 `agent.yaml`、`SOUL.md`、Agent Slots、skills、tools、schedules、MCP
+declarations、tests 和本地 libraries。
 
-本手册按 Diataxis 文档模型组织：
+本手册采用 Diataxis 文档模型：
 
-- **教程**带你从零完成一条可工作的路径。
-- **操作指南**解决具体任务。
-- **解释**说明系统为什么这样设计。
-- **参考**定义精确的命令、schema 和 contract。
+- **教程**引导你完成一条完整的学习路径。
+- **操作指南**解决一个具体的运维任务。
+- **解释**页面说明系统为什么这样设计。
+- **参考**页面定义精确的命令、schema 和 contract。
 
-参考里的 contract 页面也可以作为只读上下文提供给 `evolver` core，用于辅助它
-修改 Agent Core。
+参考里的 contract 页面也设计为可被 `evolver` core 阅读，前提是它们作为只读
+项目文档上下文提供给该 core。
 
 ## 从这里开始
 
-| 目标 | 页面 |
-| --- | --- |
-| 在本地启动 Demiurge | [tutorials/quick-start.md](tutorials/quick-start.md) |
-| 做一次安全的 Agent Core 修改 | [tutorials/customize-agent-core.md](tutorials/customize-agent-core.md) |
-| 创建外部 package repository | [tutorials/external-package-repository.md](tutorials/external-package-repository.md) |
-| 配置真实模型 provider | [how-to/configure-provider.md](how-to/configure-provider.md) |
-| 理解 Agent Slots | [explanation/agent-slots.md](explanation/agent-slots.md) |
-| 理解 host/core 边界 | [explanation/host-and-agent-core.md](explanation/host-and-agent-core.md) |
-| 阅读稳定 authored-surface 规则 | [reference/contracts/authored-surface.md](reference/contracts/authored-surface.md) |
-
-## 阅读路径
-
-Alpha 用户建议阅读：
+如果你刚开始使用 Demiurge，请按顺序阅读：
 
 1. [快速开始](tutorials/quick-start.md)
 2. [配置 provider](how-to/configure-provider.md)
 3. [选择 workspace](how-to/choose-workspace.md)
 4. [故障排查](how-to/troubleshoot.md)
 
-Agent Core 作者建议阅读：
+## 按角色阅读
 
-1. [Host 和 Agent Core](explanation/host-and-agent-core.md)
-2. [修改 Agent Core](tutorials/customize-agent-core.md)
-3. [编写 Agent Slot](how-to/write-slot-module.md)
-4. [Authored surface contract](reference/contracts/authored-surface.md)
+| 角色 | 首先阅读 |
+| --- | --- |
+| 首次用户 | [快速开始](tutorials/quick-start.md), [配置 provider](how-to/configure-provider.md), [选择 workspace](how-to/choose-workspace.md) |
+| 本地运行者 | [故障排查](how-to/troubleshoot.md), [配置 channels](how-to/configure-channels.md), [安装 packages](how-to/install-packages.md) |
+| Agent Core 作者 | [Host 和 Agent Core](explanation/host-and-agent-core.md), [修改 Agent Core](tutorials/customize-agent-core.md), [编写 Agent Slot](how-to/write-slot-module.md), [Authored surface contract](reference/contracts/authored-surface.md) |
+| Package 作者 | [Package 模型](explanation/package-model.md), [创建外部 package repository](tutorials/external-package-repository.md), [Package repository contract](reference/contracts/package-repositories.md) |
+| 贡献者 | [Architecture](developer-guide/architecture.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
 
-Package 和 repository 作者建议阅读：
+## 安装路径
 
-1. [Package 模型](explanation/package-model.md)
-2. [创建外部 package repository](tutorials/external-package-repository.md)
-3. [安装 package](how-to/install-packages.md)
-4. [Package repository contract](reference/contracts/package-repositories.md)
+正常使用时，从本仓库的 checkout 运行 managed installer：
 
-贡献者建议阅读：
+```bash
+scripts/install.sh
+~/.demiurge/demiurge-agent/.venv/bin/demiurge --provider fake
+```
 
-1. [Architecture](developer-guide/architecture.md)
-2. [Runner and context](developer-guide/runner-and-context.md)
-3. [Tool runtime](developer-guide/tool-runtime.md)
-4. [Package installer](developer-guide/package-installer.md)
+installer 要求 `git` 和 `uv`，会创建或复用
+`~/.demiurge/demiurge-agent`，运行 `uv sync`，并初始化 runtime home。
+
+如果是 source checkout 开发，请留在仓库内使用 `uv`：
+
+```bash
+uv sync --all-groups
+uv run demiurge init
+uv run demiurge --provider fake
+```
+
+TUI 要求 Node.js 20 或更新版本。不带 subcommand 运行 `demiurge` 会启动 TUI。
+主要 subcommands 是 `init`、`doctor`、`package`、`update`、`setup` 和
+`gateway`。
+
+## 配置解析顺序
+
+Provider resolution 使用以下顺序：
+
+1. CLI override，例如 `--provider <provider-id>`。
+2. 选中的 runtime core manifest。
+3. global fallback manifest。
+4. host default provider。
+5. `fake`。
+
+Workspace resolution 使用以下顺序：
+
+1. `--workspace <path>`。
+2. `DEMIURGE_WORKSPACE`。
+3. TUI launch directory。
+4. 选中 core 的 `runtime.workspace`。
+5. `~/.demiurge/workspace`。
 
 ## 当前 Alpha 边界
 
+- 最新 release notes：[0.4.1](releases/0.4.1.md)。
 - Python dependencies 由 host 拥有，并由 source checkout 锁定。
 - Agent Slot code 运行在 host-shared Python environment 中。
 - Candidate Agent Core evolution 不能自动添加 dependencies。
 - Package recipes 会把文件安装进 runtime cores；它们不会修改 host lock file。
-- Release notes 保留在 [releases/](releases/0.4.1.md) 下。
+- Runtime layout、authoring contracts、package behavior 和 troubleshooting
+  steps 在 `1.0.0` 之前仍可能变化。

@@ -1,21 +1,32 @@
 ---
-title: 配置渠道
-description: 为 Agent Core 启用外部 gateway channels。
+title: 配置 Channels
+description: 为 Agent Core 启用 external gateway channels。
 ---
 
-# 配置渠道
+# 配置 Channels
 
-External channels 默认是禁用的。只启用你打算暴露的 channels。
+Channels 在具体 core 的 `agent.yaml` 中配置。它们不是 slot modules，loader 也不会自动扫描 `agent/channels/`。
 
-## 启动 Gateway
+支持的 gateway channels 有：
+
+- Telegram
+- Webhook
+- Slack
+- Mattermost
+- Matrix
+- Email
+
+使用以下命令启动 gateway：
 
 ```bash
 uv run demiurge gateway --core assistant
 ```
 
-gateway 会为所选 core 运行已启用的 external channels。
+只有设置了 `enabled: true` 的 channels 会被启动。
 
 ## Telegram
+
+在 `~/.demiurge/agents/assistant/agent.yaml` 中添加或编辑 `channels.telegram`：
 
 ```yaml
 channels:
@@ -25,15 +36,23 @@ channels:
     allowed_users:
       - 123456789
     allowed_chats: []
+    unauthorized_response: brief
+    poll_timeout: 30
+    message_format: markdown_v2
+    register_commands: true
+    send_typing: true
+    rich_messages: true
     reply_to_mode: "off"
 ```
+
+然后运行：
 
 ```bash
 export DEMIURGE_TELEGRAM_BOT_TOKEN="..."
 uv run demiurge gateway --core assistant
 ```
 
-Telegram 是 deny-by-default 的。在暴露 bot 之前，先添加允许的 users 或 chats。
+Telegram 需要 allowlist。Private chats 要求 Telegram user id 位于 `allowed_users` 中。Group chats 同时要求 user id 位于 `allowed_users`，并且 chat id 位于 `allowed_chats`。
 
 ## Webhook
 
@@ -46,6 +65,12 @@ channels:
     path: /demiurge
     token_env: DEMIURGE_WEBHOOK_TOKEN
     allow_unauthenticated: false
+    callback_url_env: null
+    callback_url: null
+    allow_private_callback_urls: false
+    allowed_sources: []
+    delivery_targets:
+      project-status: https://example.test/status-callback
 ```
 
 ```bash
@@ -53,29 +78,98 @@ export DEMIURGE_WEBHOOK_TOKEN="..."
 uv run demiurge gateway --core assistant
 ```
 
-## Slack、Mattermost、Matrix 和 Email
+Requests 使用 `Authorization: Bearer <token>`、`X-Demiurge-Token` 或 body 中的 `token` 字段进行认证。Schedule delivery targets 必须是 `delivery_targets` 中的 keys。
 
-core manifest 支持这些 channel section：
+## Slack
 
-- `slack`
-- `mattermost`
-- `matrix`
-- `email`
+```yaml
+channels:
+  slack:
+    enabled: true
+    bot_token_env: SLACK_BOT_TOKEN
+    signing_secret_env: SLACK_SIGNING_SECRET
+    host: 127.0.0.1
+    port: 8766
+    path: /slack/events
+    bot_user_id: U0123456789
+    app_mentions_only: true
+    allowed_teams: []
+    allowed_channels: []
+    allowed_users: []
+```
 
-每个 channel 都有自己的 token fields、allowlist fields，以及 polling 或 HTTP
-行为。尽量把 secrets 放在 environment variables 中。
+Slack 同时需要 bot token 和 signing secret。如果存在 allowlists，inbound events 和 schedule targets 都必须匹配它们。
+
+## Mattermost
+
+```yaml
+channels:
+  mattermost:
+    enabled: true
+    base_url: https://mattermost.example
+    token_env: MATTERMOST_BOT_TOKEN
+    incoming_webhook_url_env: null
+    webhook_token_env: MATTERMOST_WEBHOOK_TOKEN
+    host: 127.0.0.1
+    port: 8767
+    path: /mattermost
+    allowed_channels: []
+    allowed_users: []
+```
+
+Mattermost 需要 `base_url` 加 bot token，或一个 incoming webhook URL。Inbound webhooks 还需要 `webhook_token_env` 或 `webhook_token`。
+
+## Matrix
+
+```yaml
+channels:
+  matrix:
+    enabled: true
+    homeserver_url: https://matrix.example
+    access_token_env: MATRIX_ACCESS_TOKEN
+    user_id: "@demiurge:example"
+    allowed_rooms: []
+    poll_timeout: 30
+```
+
+Matrix 会轮询 joined rooms。如果设置了 `allowed_rooms`，只有这些 room ids 会被接受，并且可用于 schedule delivery。
+
+## Email
+
+```yaml
+channels:
+  email:
+    enabled: true
+    smtp_host: smtp.example
+    smtp_port: 587
+    smtp_starttls: true
+    smtp_username_env: DEMIURGE_SMTP_USERNAME
+    smtp_password_env: DEMIURGE_SMTP_PASSWORD
+    imap_host: imap.example
+    imap_port: 993
+    imap_username_env: DEMIURGE_IMAP_USERNAME
+    imap_password_env: DEMIURGE_IMAP_PASSWORD
+    mailbox: INBOX
+    from_address: null
+    allowed_senders: []
+    allowed_recipients: []
+    trust_from_headers: false
+    poll_interval: 30
+```
+
+Email 需要 SMTP 和 IMAP credentials。如果设置了 `allowed_senders`，bridge 也要求 `trust_from_headers: true`，因为 sender headers 可能被伪造。
 
 ## 验证
+
+运行：
 
 ```bash
 uv run demiurge init --check
 uv run demiurge gateway --core assistant --provider fake
 ```
 
-在本地 run 中使用 logs 和 `/status` 来确认选中的 core、workspace 和 provider，然后
-再对外暴露 channel。
+在 local TUI 或 Telegram runs 中使用 `/status`，在暴露 channel 之前确认选定的 core、workspace、provider 和 runtime timezone。
 
 ## 边界
 
-Channels 会把外部事件转换为 host-owned inbound turns。它们不会赋予 Agent Core 直接
-的 network 或 filesystem authority。
+Channels 会把 external events 转换为 host-owned inbound turns，并把 host-owned deliveries 路由出去。它们不会授予 Agent Core 直接 network、filesystem、provider 或 approval 权限。

@@ -12,7 +12,7 @@
     "description": "The label for category 'How-to Guides' in sidebar 'docs'"
   },
   "sidebar.docs.category.Built-in Packages": {
-    "message": "内置 Packages",
+    "message": "内置包",
     "description": "The label for category 'Built-in Packages' in sidebar 'docs'"
   },
   "sidebar.docs.category.Explanation": {
@@ -24,7 +24,7 @@
     "description": "The label for category 'Reference' in sidebar 'docs'"
   },
   "sidebar.docs.category.Contracts": {
-    "message": "规则",
+    "message": "契约",
     "description": "The label for category 'Contracts' in sidebar 'docs'"
   },
   "sidebar.docs.category.Developer Guide": {

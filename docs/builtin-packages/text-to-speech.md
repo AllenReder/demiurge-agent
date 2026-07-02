@@ -7,32 +7,33 @@ description: Install built-in text-to-speech packages for assistant audio output
 # Text-to-Speech Packages
 
 Built-in text-to-speech packages generate audio from assistant replies. Each
-provider installs one package-owned output slot and can optionally install an
-authored tool for on-demand speech generation.
+provider installs an output slot and can optionally install an authored
+`text_to_speech` tool for on-demand generation.
 
 Install one TTS output package per core unless you intentionally want multiple
 audio providers to run after every assistant response.
 
 ## Packages
 
-| Package | Provider |
-| --- | --- |
-| `tts_minimax` | MiniMax |
-| `tts_openai` | OpenAI |
-| `tts_gemini` | Gemini |
-| `tts_xai` | xAI |
+| Package | Provider | Capabilities |
+| --- | --- | --- |
+| `tts_minimax` | MiniMax | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_openai` | OpenAI | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_gemini` | Gemini | `network.fetch`, `agents.run:tts_summarizer` |
+| `tts_xai` | xAI | `network.fetch`, `agents.run:tts_summarizer` |
 
 ## Install
 
-Preview first:
+Use the interactive manager:
+
+```bash
+uv run demiurge package
+```
+
+Or preview and install with subcommands:
 
 ```bash
 uv run demiurge package install tts_minimax --core assistant --preview
-```
-
-Install direct output mode:
-
-```bash
 uv run demiurge package install tts_minimax --core assistant
 ```
 
@@ -44,7 +45,7 @@ uv run demiurge package install tts_minimax \
   --option mode=summary
 ```
 
-Install with an on-demand TTS tool:
+Install with the on-demand tool:
 
 ```bash
 uv run demiurge package install tts_minimax \
@@ -52,13 +53,18 @@ uv run demiurge package install tts_minimax \
   --option enable_tool=true
 ```
 
-## Options
+## Shared Options
+
+All built-in TTS packages support:
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `mode` | `direct` | `direct` speaks the assistant reply as-is. `summary` installs the shared `tts_summarizer` core and synthesizes its summary instead. |
-| `enable_tool` | `false` | Installs the authored `text_to_speech` tool for on-demand speech generation. |
-| `api_key` | unset | Direct provider API key. Leave empty to use environment variables. |
+| `mode` | `direct` | `direct` speaks the assistant reply as-is. `summary` installs the shared `tts_summarizer` child core and speaks its summary. Choices: `direct`, `summary`. |
+| `enable_tool` | `false` | Installs the authored `text_to_speech` tool and a provider-specific TTS skill. |
+| `api_key` | unset | Optional direct provider API key. Leave empty to use environment variables. |
+
+In `summary` mode, the package installs or reuses a package-owned child core
+named `tts_summarizer`.
 
 ## Credential Environment Variables
 
@@ -71,10 +77,13 @@ uv run demiurge package install tts_minimax \
 
 ## Runtime Behavior
 
-The installed output slot runs in the output pipeline after `base_output`. In
-`direct` mode it sends the assistant reply text to the provider. In `summary`
-mode it first runs the shared `tts_summarizer` child core, then synthesizes the
-summary.
+The installed output slot runs in the parallel output pipeline after the model
+response is available. In `direct` mode it strips common Markdown from the
+assistant reply, truncates to the configured provider limit, sends the text to
+the provider, and emits an audio artifact.
+
+In `summary` mode it first calls the `tts_summarizer` child core, then
+synthesizes the returned summary.
 
 Generated audio is written under the workspace:
 
@@ -82,22 +91,21 @@ Generated audio is written under the workspace:
 .demiurge-tts/
 ```
 
-The output slot emits an audio artifact delivery. Channels that support audio
-can forward that artifact to the user.
+Channels that support audio can forward the audio artifact to the user.
 
-## Tools
+## Tool
 
-When `enable_tool=true`, the package installs an authored TTS tool:
+When `enable_tool=true`, the package installs:
 
-| Package | Tool |
-| --- | --- |
-| `tts_minimax` | `text_to_speech` |
-| `tts_openai` | `text_to_speech` |
-| `tts_gemini` | `text_to_speech` |
-| `tts_xai` | `text_to_speech` |
+```text
+agent/tools/text_to_speech/
+```
 
-Use the tool when the model should generate a specific audio clip on demand
-rather than speaking every assistant response through the output slot.
+The model can use that tool to generate a specific audio clip on demand instead
+of speaking every assistant response through the output slot.
+
+Because all provider packages target `agent/tools/text_to_speech`, install only
+one tool-enabled TTS provider in a core at a time.
 
 ## Verify
 
@@ -118,3 +126,14 @@ If `enable_tool=true`, inspect the tool registry in the TUI:
 ```text
 /tools
 ```
+
+## Uninstall
+
+```bash
+uv run demiurge package uninstall tts_minimax --core assistant --preview
+uv run demiurge package uninstall tts_minimax --core assistant
+```
+
+Uninstall removes package-owned output slots, provider libs, optional tool and
+skill files, and package-owned pipeline entries. It does not remove generated
+audio under `.demiurge-tts/`.

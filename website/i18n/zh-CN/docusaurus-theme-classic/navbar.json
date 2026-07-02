@@ -15,9 +15,9 @@
     "message": "快速开始",
     "description": "Navbar item with label Quick Start"
   },
-  "item.label.Contracts": {
-    "message": "规则",
-    "description": "Navbar item with label Contracts"
+  "item.label.Agent Slots": {
+    "message": "Agent Slots",
+    "description": "Navbar item with label Agent Slots"
   },
   "item.label.Packages": {
     "message": "Packages",

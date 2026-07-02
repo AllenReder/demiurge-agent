@@ -1,134 +1,214 @@
 ---
-title: 安装 Packages
-description: Preview、安装、列出和卸载可复用 Agent Core packages。
+title: 安装包
+description: 先使用交互式 package manager；需要时再用脚本列出、安装和卸载 package。
 ---
 
-# 安装 Packages
+# 安装包
 
-Packages 会把可复用 components 安装进 runtime Agent Core。它们可以安装 Agent
-Slots、tools、skills、libraries 和 child cores。
+当现有 Agent Core 需要可选能力时使用 package，例如 memory、speech-to-text、text-to-speech、web search、style hints、MCP declarations 或 schedules。
 
-## 使用交互式 Package Manager
-
-简单安装和管理 package 时，直接启动交互式 package manager：
+常规入口是交互式 package manager：
 
 ```bash
 uv run demiurge package
 ```
 
-用这个流程可以浏览 packages、为 runtime core 安装或卸载 packages，以及管理
-package repositories，不需要记住下面每个独立 subcommand。
+它可以选择 runtime core、浏览 package、按 repository 或 tag 过滤、预览变更、安装 package、卸载已安装 package，以及管理 package repositories。
 
-## 列出 Packages
+当你需要在脚本、runbook 或 issue comment 中使用可重复执行的命令时，再使用本页的 subcommands。
+
+## 安装前准备
+
+从已初始化的 runtime core 开始：
+
+```bash
+uv run demiurge init
+```
+
+列出可用 package：
 
 ```bash
 uv run demiurge package list --core assistant
-uv run demiurge package list --repo builtin
 ```
 
-## Preview 安装
+按 repository 或 tag 过滤：
+
+```bash
+uv run demiurge package list --repo builtin
+uv run demiurge package list --tag memory
+uv run demiurge package list --tag stt
+```
+
+如果两个 repositories 包含相同的 package id，使用带 repository 前缀的 ref：
+
+```bash
+builtin/memory_basic
+```
+
+## 预览安装
+
+先预览。预览会显示哪些 targets 将被写入或复用，以及哪些 manual warnings 适用。
 
 ```bash
 uv run demiurge package install memory_basic --core assistant --preview
 ```
 
-安装会添加 Agent Slots、tools 或外部 provider integration 的 package 前，先使用
-preview。
-
-## 安装
-
-```bash
-uv run demiurge package install memory_basic --core assistant
-```
-
-Package 名称有歧义时，使用 repository-qualified package id：
-
-```bash
-uv run demiurge package install builtin/memory_basic --core assistant
-```
-
-用重复的 `--option` flags 传入 options：
+Provider packages 通常需要凭证。用重复的 `--option` flags 传入 package options，或者保留可选 secret 为空，让已安装 component 在运行时读取文档说明的环境变量：
 
 ```bash
 uv run demiurge package install tts_minimax \
   --core assistant \
   --option mode=summary \
-  --option enable_tool=true
+  --option enable_tool=true \
+  --preview
 ```
 
-Provider-owned web search packages 会暴露同一个 model-facing tool name：
-`web_search`。
+## 安装包
+
+预览结果正确后再安装：
 
 ```bash
-uv run demiurge package install web_search_brave --core assistant --preview
-uv run demiurge package install web_search_tavily --core assistant --preview
+uv run demiurge package install memory_basic --core assistant
 ```
 
-因为两个 packages 都 target `agent/tools/web_search`，同一个 core 中一次只安装一个
-web search provider package。要切换 provider，先卸载当前 web search package。
-
-Provider-owned speech-to-text packages 会在 model request 前转录音频附件：
+需要时安装带 repository 前缀的 package：
 
 ```bash
-uv run demiurge package list --tag stt
-uv run demiurge package install stt_dashscope --core assistant --preview
+uv run demiurge package install builtin/memory_basic --core assistant
 ```
 
-内置 STT packages 包括 `stt_openai`、`stt_groq`、`stt_deepgram`、
-`stt_assemblyai`、`stt_gemini`、`stt_dashscope`、`stt_baidu` 和
-`stt_tencent`。它们都 target `agent/input/speech_to_text`，所以同一个 core 中一次只安装一个
-STT provider package。要切换 provider，先卸载当前 STT package。
+Install options 只在安装期间解析一次。Secret option values 可能会写入已安装 component config，但 `packages.yaml` 只保存已脱敏的 option snapshots。
 
-常用凭证环境变量：
+## 安装会写入什么
 
-| Package | 环境变量 |
+Package installation 会写入 active runtime core，而不是 source template checkout。对于默认 core，位置在：
+
+```text
+~/.demiurge/agents/assistant/
+```
+
+Installation 可以把 package-owned components 复制到：
+
+```text
+agent/bootstrap/
+agent/input/
+agent/output/
+agent/tools/
+agent/skills/
+agent/lib/
+```
+
+它还可以创建 package-owned child cores、MCP declaration YAML files 和 schedule declaration YAML files。
+
+当 package 安装 `bootstrap`、`input` 或 `output` slot 时，Demiurge 也会更新目标 core 的 `agent/pipelines.yaml`。Bootstrap slots 始终位于 serial bootstrap pipeline。Input 和 output slots 可以是 serial 或 parallel，取决于 package recipe。
+
+安装记录写入：
+
+```text
+~/.demiurge/agents/<core-id>/packages.yaml
+```
+
+Packages 不会安装 Python dependencies，也不会编辑 `uv.lock`。`manual_dependencies` 是给人工 dependency review 的 warnings。
+
+## 内置包家族
+
+内置 repository 目前提供：
+
+| Family | Packages |
 | --- | --- |
-| `stt_dashscope` | `DEMIURGE_DASHSCOPE_API_KEY` 或 `DASHSCOPE_API_KEY` |
-| `stt_baidu` | `DEMIURGE_BAIDU_ACCESS_TOKEN`，或 `DEMIURGE_BAIDU_API_KEY` 加 `DEMIURGE_BAIDU_SECRET_KEY` |
-| `stt_tencent` | `DEMIURGE_TENCENT_SECRET_ID` 加 `DEMIURGE_TENCENT_SECRET_KEY` |
+| Memory | `memory_basic`, `memory_honcho` |
+| Context | `context_reseed` |
+| Communication | `conversation_style` |
+| Web search | `web_search_brave`, `web_search_tavily` |
+| Speech-to-text | `stt_openai`, `stt_groq`, `stt_deepgram`, `stt_assemblyai`, `stt_gemini`, `stt_dashscope`, `stt_baidu`, `stt_tencent` |
+| Text-to-speech | `tts_minimax`, `tts_openai`, `tts_gemini`, `tts_xai` |
 
-## 卸载
+查看内置 package 页面，了解 package 行为和 options：
+
+- [memory_basic](../builtin-packages/memory/memory_basic.md)
+- [memory_honcho](../builtin-packages/memory/memory_honcho.md)
+- [context_reseed](../builtin-packages/context-reseed.md)
+- [conversation_style](../builtin-packages/conversation-style.md)
+- [Web Search Packages](../builtin-packages/web-search.md)
+- [Speech-to-Text Packages](../builtin-packages/speech-to-text.md)
+- [Text-to-Speech Packages](../builtin-packages/text-to-speech.md)
+
+## 切换 Provider 包
+
+有些 provider packages 会有意共享相同 target。例如，所有 STT packages 都 target `agent/input/speech_to_text`，两个 web search packages 都 target `agent/tools/web_search`。
+
+安装另一个 provider package 前，先卸载当前 provider package：
+
+```bash
+uv run demiurge package uninstall web_search_brave --core assistant --preview
+uv run demiurge package uninstall web_search_brave --core assistant
+uv run demiurge package install web_search_tavily --core assistant --preview
+uv run demiurge package install web_search_tavily --core assistant
+```
+
+STT packages 也使用相同模式：
+
+```bash
+uv run demiurge package uninstall stt_openai --core assistant
+uv run demiurge package install stt_gemini --core assistant
+```
+
+## 卸载包
+
+预览移除：
 
 ```bash
 uv run demiurge package uninstall memory_basic --core assistant --preview
+```
+
+卸载：
+
+```bash
 uv run demiurge package uninstall memory_basic --core assistant
 ```
 
-Uninstall 会移除 package-owned component targets，并更新 `packages.yaml`。它不会
-移除写在 owned targets 之外的 package data。
+Uninstall 会移除 package-owned component targets，移除 `bootstrap`、`input` 和 `output` slots 的 package-owned pipeline entries，并更新 `packages.yaml`。
 
-## 添加外部 Repository
-
-```bash
-uv run demiurge package repo add https://github.com/user/demiurge-packages.git \
-  --alias community \
-  --ref main \
-  --trust
-```
-
-本地 repository：
-
-```bash
-uv run demiurge package repo add ./local-packages --alias local --trust
-```
-
-Trust 必须显式授予，因为 repositories 可以安装可执行的本地 code。
+Uninstall 不会移除写在 package-owned targets 之外的数据。例如 memory data、generated audio、context notes、caches 和 provider outbox files 会保留，除非你自行删除。
 
 ## 验证
 
+列出该 core 已安装的 packages：
+
 ```bash
 uv run demiurge package list --core assistant
+```
+
+检查 runtime core 仍能加载：
+
+```bash
 uv run demiurge init --check
+```
+
+运行一个 fake-provider turn：
+
+```bash
 uv run demiurge --provider fake
 ```
 
-如果 package 安装了 tool，检查可见 tool registry：
+如果 package 安装了 tools，在 TUI 中检查 tool list：
 
 ```text
 /tools
 ```
 
+## 管理仓库
+
+用交互式 manager 处理 repository operations：
+
+```bash
+uv run demiurge package
+```
+
+需要脚本化 repository commands 时，参见 [管理 Package Repositories](manage-package-repositories.md)。
+
 ## 边界
 
 Package management 是用户控制的 CLI workflow。它不是 agent-callable model tool。
-Package recipes 不会安装 Python dependencies，也不会编辑 host `uv.lock`。
+
+Packages 安装 authored-surface files。Host 仍然拥有 sessions、provider calls、approvals、MCP transport、schedule execution 和 dependency policy。

@@ -1,163 +1,239 @@
 ---
 title: Install Packages
-description: Preview, install, list, and uninstall reusable Agent Core packages.
+description: Use the interactive package manager, then script package list, install, and uninstall operations when needed.
 ---
 
 # Install Packages
 
-Packages install reusable components into runtime Agent Cores. They can install
-Agent Slots, tools, skills, libraries, child cores, MCP declarations, and
-schedule declarations.
+Use packages when an existing Agent Core needs an optional capability such as
+memory, speech-to-text, text-to-speech, web search, style hints, MCP
+declarations, or schedules.
 
-## Use the Interactive Package Manager
-
-For simple package installation and management, start the interactive package
-manager:
+The normal entrypoint is the interactive package manager:
 
 ```bash
 uv run demiurge package
 ```
 
-Use this flow to browse packages, install or uninstall packages for a runtime
-core, and manage package repositories without memorizing the individual
-subcommands below.
+It lets you select a runtime core, browse packages, filter by repository or tag,
+preview changes, install packages, uninstall installed packages, and manage
+package repositories.
 
-## List Packages
+Use the subcommands on this page when you want a repeatable command for a
+script, runbook, or issue comment.
+
+## Before You Install
+
+Start from an initialized runtime core:
+
+```bash
+uv run demiurge init
+```
+
+List available packages:
 
 ```bash
 uv run demiurge package list --core assistant
+```
+
+Filter by repository or tag:
+
+```bash
 uv run demiurge package list --repo builtin
+uv run demiurge package list --tag memory
+uv run demiurge package list --tag stt
+```
+
+If two repositories contain the same package id, use a repository-qualified ref:
+
+```bash
+builtin/memory_basic
 ```
 
 ## Preview an Install
+
+Preview first. The preview shows which targets will be written or reused and
+which manual warnings apply.
 
 ```bash
 uv run demiurge package install memory_basic --core assistant --preview
 ```
 
-Use preview before installing packages that add Agent Slots, tools, or external
-provider integration.
-
-Packages can also install package-owned MCP server declarations and schedule
-declarations. The installed YAML files are owned by the package for uninstall,
-but the host still owns MCP transport, approvals, schedule claims, and schedule
-execution.
-
-## Install
-
-```bash
-uv run demiurge package install memory_basic --core assistant
-```
-
-For Honcho-backed memory, preview the package and review the manual SDK
-dependency warning before installing:
-
-```bash
-uv run demiurge package install memory_honcho --core assistant --preview
-uv run demiurge package install memory_honcho --core assistant
-```
-
-`memory_honcho` does not edit `uv.lock` or install `honcho-ai` for you. Install
-that dependency according to your host environment policy, then set
-`HONCHO_API_KEY` or pass a secret `api_key` option during package installation.
-The package installs automatic recall, turn sync, and `honcho_*` tools by
-default. Uninstall removes package-owned slots, tools, skill, and lib files, but
-leaves `memory/honcho/` cache and outbox data in place. See
-[memory_honcho](../builtin-packages/memory/memory_honcho.md) for the full usage
-guide.
-
-Use a repository-qualified package id when package names are ambiguous:
-
-```bash
-uv run demiurge package install builtin/memory_basic --core assistant
-```
-
-Pass options with repeated `--option` flags:
+Provider packages usually need credentials. Pass package options with repeated
+`--option` flags, or leave optional secrets unset so the installed component can
+read its documented environment variables at runtime:
 
 ```bash
 uv run demiurge package install tts_minimax \
   --core assistant \
   --option mode=summary \
-  --option enable_tool=true
+  --option enable_tool=true \
+  --preview
 ```
 
-Provider-owned web search packages expose the same model-facing tool name,
-`web_search`:
+## Install a Package
+
+Install after the preview looks right:
 
 ```bash
-uv run demiurge package install web_search_brave --core assistant --preview
-uv run demiurge package install web_search_tavily --core assistant --preview
+uv run demiurge package install memory_basic --core assistant
 ```
 
-Because both packages target `agent/tools/web_search`, install only one web
-search provider package in a core at a time. To switch providers, uninstall the
-current web search package first.
-
-Provider-owned speech-to-text packages transcribe audio attachments before the
-model request:
+Install a repository-qualified package when needed:
 
 ```bash
-uv run demiurge package list --tag stt
-uv run demiurge package install stt_dashscope --core assistant --preview
+uv run demiurge package install builtin/memory_basic --core assistant
 ```
 
-The built-in STT packages are `stt_openai`, `stt_groq`, `stt_deepgram`,
-`stt_assemblyai`, `stt_gemini`, `stt_dashscope`, `stt_baidu`, and
-`stt_tencent`. They all target `agent/input/speech_to_text`, so install only one
-STT provider package in a core at a time. To switch providers, uninstall the
-current STT package first.
+Install options are resolved once during installation. Secret option values may
+be written into the installed component config, but `packages.yaml` stores only
+redacted option snapshots.
 
-Common credential environment variables:
+## What Installation Writes
 
-| Package | Environment variables |
+Package installation writes into the active runtime core, not the source
+template checkout. For the default core this is under:
+
+```text
+~/.demiurge/agents/assistant/
+```
+
+Installation can copy package-owned components into:
+
+```text
+agent/bootstrap/
+agent/input/
+agent/output/
+agent/tools/
+agent/skills/
+agent/lib/
+```
+
+It can also create package-owned child cores, MCP declaration YAML files, and
+schedule declaration YAML files.
+
+When a package installs a `bootstrap`, `input`, or `output` slot, Demiurge also
+updates the target core's `agent/pipelines.yaml`. Bootstrap slots are always in
+the serial bootstrap pipeline. Input and output slots can be serial or parallel,
+depending on the package recipe.
+
+The install record is written to:
+
+```text
+~/.demiurge/agents/<core-id>/packages.yaml
+```
+
+Packages do not install Python dependencies and do not edit `uv.lock`.
+`manual_dependencies` are warnings for a human dependency review.
+
+## Built-in Package Families
+
+The built-in repository currently ships:
+
+| Family | Packages |
 | --- | --- |
-| `stt_dashscope` | `DEMIURGE_DASHSCOPE_API_KEY` or `DASHSCOPE_API_KEY` |
-| `stt_baidu` | `DEMIURGE_BAIDU_ACCESS_TOKEN`, or `DEMIURGE_BAIDU_API_KEY` plus `DEMIURGE_BAIDU_SECRET_KEY` |
-| `stt_tencent` | `DEMIURGE_TENCENT_SECRET_ID` plus `DEMIURGE_TENCENT_SECRET_KEY` |
+| Memory | `memory_basic`, `memory_honcho` |
+| Context | `context_reseed` |
+| Communication | `conversation_style` |
+| Web search | `web_search_brave`, `web_search_tavily` |
+| Speech-to-text | `stt_openai`, `stt_groq`, `stt_deepgram`, `stt_assemblyai`, `stt_gemini`, `stt_dashscope`, `stt_baidu`, `stt_tencent` |
+| Text-to-speech | `tts_minimax`, `tts_openai`, `tts_gemini`, `tts_xai` |
 
-## Uninstall
+See the built-in package pages for package behavior and options:
+
+- [memory_basic](../builtin-packages/memory/memory_basic.md)
+- [memory_honcho](../builtin-packages/memory/memory_honcho.md)
+- [context_reseed](../builtin-packages/context-reseed.md)
+- [conversation_style](../builtin-packages/conversation-style.md)
+- [Web Search Packages](../builtin-packages/web-search.md)
+- [Speech-to-Text Packages](../builtin-packages/speech-to-text.md)
+- [Text-to-Speech Packages](../builtin-packages/text-to-speech.md)
+
+## Switch a Provider Package
+
+Some provider packages intentionally share the same target. For example, all STT
+packages target `agent/input/speech_to_text`, and both web search packages
+target `agent/tools/web_search`.
+
+Uninstall the current provider package before installing another one:
+
+```bash
+uv run demiurge package uninstall web_search_brave --core assistant --preview
+uv run demiurge package uninstall web_search_brave --core assistant
+uv run demiurge package install web_search_tavily --core assistant --preview
+uv run demiurge package install web_search_tavily --core assistant
+```
+
+Use the same pattern for STT packages:
+
+```bash
+uv run demiurge package uninstall stt_openai --core assistant
+uv run demiurge package install stt_gemini --core assistant
+```
+
+## Uninstall a Package
+
+Preview removal:
 
 ```bash
 uv run demiurge package uninstall memory_basic --core assistant --preview
+```
+
+Uninstall:
+
+```bash
 uv run demiurge package uninstall memory_basic --core assistant
 ```
 
-Uninstall removes package-owned component targets and updates `packages.yaml`.
-It does not remove package data written outside owned targets.
+Uninstall removes package-owned component targets, removes package-owned
+pipeline entries for `bootstrap`, `input`, and `output` slots, and updates
+`packages.yaml`.
 
-## Add an External Repository
-
-```bash
-uv run demiurge package repo add https://github.com/user/demiurge-packages.git \
-  --alias community \
-  --ref main \
-  --trust
-```
-
-For a local repository:
-
-```bash
-uv run demiurge package repo add ./local-packages --alias local --trust
-```
-
-Trust is explicit because repositories can install executable local code.
+Uninstall does not remove data written outside package-owned targets. For
+example, memory data, generated audio, context notes, caches, and provider
+outbox files remain unless you remove them yourself.
 
 ## Verify
 
+List installed packages for the core:
+
 ```bash
 uv run demiurge package list --core assistant
+```
+
+Check that the runtime core still loads:
+
+```bash
 uv run demiurge init --check
+```
+
+Run a fake-provider turn:
+
+```bash
 uv run demiurge --provider fake
 ```
 
-If the package installs a tool, inspect the visible tool registry:
+If a package installs tools, inspect the TUI tool list:
 
 ```text
 /tools
 ```
 
-## Boundary
+## Manage Repositories
 
-Package management is a user-controlled CLI workflow. It is not an agent-callable
-model tool. Package recipes do not install Python dependencies or edit the host
-`uv.lock`.
+Use the interactive manager for repository operations:
+
+```bash
+uv run demiurge package
+```
+
+For scripted repository commands, see
+[Manage Package Repositories](manage-package-repositories.md).
+
+## Boundaries
+
+Package management is a user-controlled CLI workflow. It is not an
+agent-callable model tool.
+
+Packages install authored-surface files. The host still owns sessions, provider
+calls, approvals, MCP transport, schedule execution, and dependency policy.

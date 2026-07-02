@@ -1,17 +1,23 @@
 ---
 title: Customize an Agent Core
-description: Make a small runtime Agent Core change, load it, and verify the authored surface.
+description: Add a small input slot to a concrete runtime Agent Core and verify it.
 ---
 
 # Customize an Agent Core
 
-This tutorial adds a small input module to the runtime `assistant` core. The
-module adds a current-turn style hint before the user's message reaches the
-model.
+This tutorial adds one input slot to the runtime `assistant` core. The slot adds
+a current-turn instruction before the model sees the user's message.
 
-You will edit only the runtime core under `~/.demiurge/agents/assistant`.
+You will edit the concrete core under:
 
-## 1. Start from a Working Core
+```text
+~/.demiurge/agents/assistant/
+```
+
+Do not edit `~/.demiurge/agents/agent.yaml` for this tutorial. That file is the
+global fallback config, not an Agent Core.
+
+## Before You Start
 
 Initialize the runtime home if needed:
 
@@ -19,13 +25,24 @@ Initialize the runtime home if needed:
 uv run demiurge init
 ```
 
-Check the core loads:
+Check that the current runtime cores load:
 
 ```bash
 uv run demiurge init --check
 ```
 
-## 2. Create the Input Slot
+A concrete core must contain both of these files:
+
+```text
+~/.demiurge/agents/assistant/agent.yaml
+~/.demiurge/agents/assistant/agent/pipelines.yaml
+```
+
+`agent.yaml` points the loader at `runtime.surface_root`, which is normally
+`agent`. Bootstrap, input, and output slot directories are resolved from that
+surface root.
+
+## Create the Slot
 
 Create this directory:
 
@@ -37,79 +54,92 @@ Add `module.py`:
 
 ```python
 def process(ctx):
-    ctx.input.add_context("For this turn, prefer a concise answer.", role="system")
+    ctx.input.add_context(
+        "For this turn, prefer a concise answer with concrete next steps.",
+        role="system",
+    )
 ```
 
 Add `slot.yaml`:
 
 ```yaml
 entrypoint: module:process
-failure_policy: soft
-capabilities: []
 description: "Adds a concise-answer hint to the current turn."
+capabilities: []
+failure_policy: soft
 ```
 
-The slot is core-local. It does not call the provider, execute tools, write
-state, or bypass approvals.
+This slot does not call tools, write state, touch files, or bypass approvals.
 
-## 3. Add the Slot to `pipelines.yaml`
+## Add the Slot to the Existing Pipeline
 
-Edit:
+Open the existing file:
 
 ```text
 ~/.demiurge/agents/assistant/agent/pipelines.yaml
 ```
 
-Place the slot before `base_input`:
+Keep the existing file and insert the new slot id into `input.serial` before
+`base_input`:
 
 ```yaml
-schema_version: 1
 input:
   serial:
     - concise_hint
     - base_input
-  parallel: []
 ```
 
-The input pipeline is ordered. `base_input` appends the raw user text, so hints
-that should frame the current turn usually belong before it.
+Do not replace the whole `pipelines.yaml` file. Leave the existing
+`schema_version`, `bootstrap`, `output`, and `parallel` entries in place unless
+you are intentionally changing them.
 
-## 4. Verify the Core
+`base_input` is the seed input slot that appends the raw user text. Hints that
+should frame the user's message usually run before it.
+
+## Verify the Core
+
+Run the loader check again:
 
 ```bash
 uv run demiurge init --check
+```
+
+Then start a fake-provider turn:
+
+```bash
 uv run demiurge --provider fake
 ```
 
-Inside the TUI:
+Inside the TUI, check the runtime status and exit:
 
 ```text
 /status
 /exit
 ```
 
-If the core does not load, inspect the exact error and compare the slot with
-[../reference/contracts/slot-modules.md](../reference/contracts/slot-modules.md).
+If the core fails to load, compare the slot directory with
+[the slot module contract](../reference/contracts/slot-modules.md).
 
-## 5. Undo the Change
+## Undo the Change
 
-Remove `concise_hint` from `agent/pipelines.yaml`, then delete:
+Remove only `concise_hint` from `input.serial`, leaving the rest of
+`agent/pipelines.yaml` intact. Then delete:
 
 ```text
 ~/.demiurge/agents/assistant/agent/input/concise_hint/
 ```
 
-Run the same checks again:
+Run the same loader check:
 
 ```bash
 uv run demiurge init --check
-uv run demiurge --provider fake
 ```
 
 ## What You Learned
 
-- Runtime cores are the live editable surface.
-- Agent Slots are governed interaction boundaries loaded by the host.
-- Pipelines decide when input and output modules run.
-- Host-owned checks still control provider calls, tools, approvals, state, and
-  promotion.
+- `agents/agent.yaml` is the global fallback layer.
+- Concrete cores live under `agents/<core>/agent.yaml` plus `agents/<core>/agent/`.
+- Slot directories are loaded from `runtime.surface_root`.
+- `agent/pipelines.yaml` controls the bootstrap, input, and output phase order.
+- The host still owns provider calls, tool dispatch, approvals, state, version
+  promotion, and rollback.

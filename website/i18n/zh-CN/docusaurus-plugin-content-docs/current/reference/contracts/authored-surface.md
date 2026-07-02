@@ -1,23 +1,28 @@
 ---
-title: Authored Surface 规则
+title: Authored Surface 合约
 description: Agent Core 拥有的文件的稳定规则。
 ---
 
-# Authored Surface 规则
+# Authored Surface 合约
 
-本页定义 Demiurge Agent Core 的 authored surface。它面向人类作者，也面向在项目文档
-作为只读 reference context 提供时的 `evolver` core。
+这个 contract 定义 Demiurge Agent Core 的 authored surface。它面向人类 authors，也面向 `evolver` core（当 docs 作为 read-only reference context 提供时）。
 
-## Core Root
+## Core Identity
 
-一个具体 runtime core 的形状如下：
+全局 fallback config 不是 Agent Core：
 
 ```text
-<core>/
+agents/agent.yaml
+```
+
+具体 Agent Core 有自己的 manifest 和 authored surface：
+
+```text
+agents/<core>/
   agent.yaml
-  packages.yaml
   agent/
     SOUL.md
+    pipelines.yaml
     bootstrap/
     input/
     output/
@@ -29,15 +34,35 @@ description: Agent Core 拥有的文件的稳定规则。
     tests/
 ```
 
-`packages.yaml` 是 package install state。除非用户明确要求你修复 package state，
-否则不要手动编辑它。
+同样的形状存在于 runtime home 下的 `~/.demiurge/agents/<core>/`。
 
-## Agent Core 拥有
+## Loader Contract
 
-Agent Core 作者可以编辑：
+对于具体 core，loader 要求：
+
+- `<core>/agent.yaml`
+- `runtime.surface_root` 命名的目录
+- `<surface_root>/pipelines.yaml`
+
+使用默认 `runtime.surface_root: agent` 时，bootstrap、input 和 output slot roots 是：
+
+```text
+agent/bootstrap/
+agent/input/
+agent/output/
+```
+
+这些 phase roots 不会被 `slots.input` 或 `slots.output` 移动。
+
+Skills、schedules 和 MCP roots 会推断为 `agent/skills`、`agent/schedules` 和 `agent/mcp`，除非配置了 `slots.skills`、`slots.schedules` 或 `slots.mcp`。Authored tools 会从配置好的 `slots.tools` root 发现。
+
+## Core-Owned Files
+
+Agent Core authors 可以编辑：
 
 - `agent.yaml`
 - `agent/SOUL.md`
+- `agent/pipelines.yaml`
 - `agent/bootstrap/`
 - `agent/input/`
 - `agent/output/`
@@ -48,34 +73,64 @@ Agent Core 作者可以编辑：
 - `agent/lib/`
 - `agent/tests/`
 
-## Host 拥有
+`packages.yaml` 是 package install state。只有在明确修复 package state 时才编辑它。
 
-Agent Core 作者不能接管：
+## Host-Owned Systems
+
+Agent Core authors 不得接管：
 
 - provider request construction
 - provider calls
-- session、turn 和 step storage
+- session、turn、step、message、artifact 和 runtime event storage
 - tool registry and dispatch
 - approval decisions
 - workspace enforcement
 - production state mutation
 - package repository trust
 - dependency installation
-- promotion or rollback
+- version promotion or rollback
+- gateway channel transport
+- scheduler claims and run logs
+
+## Slot Contract
+
+Bootstrap、input 和 output slots 会把 code 与 metadata 放在一起：
+
+```text
+agent/input/<slot_id>/
+  module.py
+  slot.yaml
+```
+
+Phase order 只存在于 `agent/pipelines.yaml`。
+
+`base_input`、`base_output` 和 `session_context` 是默认 core 中可编辑的 seed slots。它们不是隐藏的 host built-ins。
+
+## Tool Contract
+
+Authored tools 是公开的 Agent Core 文件：
+
+```text
+agent/tools/<tool_id>/
+  tool.yaml
+  module.py
+```
+
+它们是 model-callable actions，不是 pipeline slots。Tool 的单数 `capability` 是 registry 和 approval metadata。它的 `capabilities` 列表让 implementation 可以满足 `ctx.capability.require(...)`。
 
 ## Dependency Rule
 
-当前 runtime mode 是 `host_shared`。Agent Slot code 运行在 host Python
-environment 中。Candidate cores 不能自动添加 Python dependencies。如果某次修改需要
-dependency，把它记录为 manual dependency review item。
+当前 runtime mode 是 `host_shared`。Authored Python code 运行在 host 的 uv-managed environment 中。
 
-## 验证
+Candidate cores 不得自动添加 Python dependencies。如果某个 change 需要 dependency，请把它记录为 manual dependency review item。
 
-Authored-surface edits 之后运行：
+## Verification
+
+Authored-surface edits 之后，运行：
 
 ```bash
 uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-编辑 packages、schedules、MCP servers 或 tools 时，使用对应页面里的更窄检查。
+编辑 tools、schedules、MCP servers 或 channels 时，使用相关 how-to 或 reference page 中更窄的 checks。

@@ -5,10 +5,37 @@ description: Stable rules for the host-managed evolver core.
 
 # Evolver-Safe Edit Contract
 
-The `evolver` core edits a candidate copy of another Agent Core after the active
-core requests evolution. This page defines the safe edit scope.
+The `evolver` core edits a candidate copy of another Agent Core after the
+active core requests evolution. The host creates the candidate workspace and
+performs gating and promotion.
 
-## Allowed Candidate Paths
+This contract defines safe edit scope for candidate work.
+
+## Candidate Scope
+
+The editable target is a candidate concrete core, not the global fallback
+config and not the source checkout.
+
+Safe candidate shape:
+
+```text
+candidate/
+  agent.yaml
+  agent/
+    SOUL.md
+    pipelines.yaml
+    bootstrap/
+    input/
+    output/
+    tools/
+    skills/
+    schedules/
+    mcp/
+    lib/
+    tests/
+```
+
+## Preferred Edit Paths
 
 Prefer edits under:
 
@@ -18,6 +45,7 @@ agent/tools/
 agent/input/
 agent/output/
 agent/bootstrap/
+agent/pipelines.yaml
 ```
 
 Allowed with care:
@@ -28,10 +56,12 @@ agent/schedules/
 agent/mcp/
 agent/lib/
 agent/tests/
+agent.yaml
 ```
 
 Change `agent.yaml` only when it is the minimum needed to keep the candidate
-loadable after an authored-surface edit.
+loadable or to declare a required authored-surface capability, tool root, MCP
+root, schedule root, channel config, or metadata override.
 
 ## Forbidden Paths
 
@@ -39,9 +69,11 @@ Do not edit:
 
 - source checkout files
 - host config
+- `agents/agent.yaml` global fallback config
 - registry files
 - session records
-- scheduler state
+- runtime SQLite files
+- scheduler/runtime task state
 - production state
 - release files
 - dependency files
@@ -60,7 +92,29 @@ Do not:
 - change the host lock file
 - run broad destructive cleanup
 - edit files outside the candidate workspace
-- bypass host file, terminal, network, or state capabilities
+- bypass host file, terminal, network, tool, channel, or state capabilities
+
+## Pipeline Edit Rule
+
+When adding a slot, edit the existing list in `agent/pipelines.yaml`.
+
+Good:
+
+```yaml
+input:
+  serial:
+    - concise_hint
+    - base_input
+```
+
+Bad:
+
+```text
+Replace pipelines.yaml with a minimal file that omits unrelated phases.
+```
+
+Keep unrelated phase entries and existing seed slots unless the goal explicitly
+requires changing them.
 
 ## Good Evolution Goals
 
@@ -81,6 +135,6 @@ At the end of an evolution run, summarize:
 - changed behavior
 - candidate files edited
 - verification performed
-- any limitations or follow-up needed
+- limitations or follow-up needed
 
 The host performs manifest checks and promotion.

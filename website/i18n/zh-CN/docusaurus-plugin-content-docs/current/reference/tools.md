@@ -1,116 +1,183 @@
 ---
 title: Tools 参考
-description: 内置、authored 和 MCP tools 的参考说明。
+description: Built-in、authored 和 MCP tools 的参考。
 ---
 
 # Tools 参考
 
-host 会从 built-in toolsets、authored tools 和 MCP tools 构建一个可见的 tool registry。
+Host 会在每个 turn 中从以下来源构建可见 tool registry：
 
-## 内置 Toolsets
+- `agent.yaml` 中的 built-in toolsets
+- `slots.tools` 下的 authored tools
+- 从 `slots.mcp` 发现的 MCP tools
 
-| Toolset | Examples |
+Agent Core 声明 tool surfaces。Host 拥有 selection、dispatch、capability checks、approvals、workspace scope、task control 和 result conversion。
+
+## Built-In Toolsets
+
+| Toolset | Tools |
 | --- | --- |
-| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `job`, `process`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search`. |
-| `demiurge_control` | `tools_list`, `evolve_core`, `rollback_core`. |
-| `schedule` | `schedule_manage`. |
+| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search` |
+| `demiurge_control` | `tools_list`, `task_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core` |
+| `schedule` | `schedule_manage` |
+
+未知 toolset names 会导致 core loading 失败。
+
+## Built-In Tool Metadata
+
+Built-in tools 有 host-defined risk、capability 和 approval defaults。例如：
+
+| Tool | Capability | Default approval |
+| --- | --- | --- |
+| `read_file` | `fs.read` | non-sensitive workspace reads 为 `auto` |
+| `write_file` | `fs.write` | `prompt` |
+| `patch` | `fs.write` | `prompt` |
+| `terminal` | `terminal.exec` | `prompt` |
+| `web_extract` | `network.fetch` | `prompt` |
+| `schedule_manage` | `schedule.manage` | `prompt` |
+| `evolve_core` | `tool.call:evolve_core` | `prompt` |
+| `rollback_core` | `tool.call:rollback_core` | `prompt` |
+
+Core metadata 可以让 built-in tools 更严格，但不能降低它们的 risk 或弱化它们的 approval policy。
 
 ## Authored Tools
 
-authored tools 位于：
+Authored tools 位于 `slots.tools` 配置的 root 下，通常是：
 
 ```text
 agent/tools/<tool_id>/
+  tool.yaml
+  module.py
 ```
 
-它们使用 `slot.yaml` 加上一个 Python entrypoint，通常是：
+如果省略 `slots.tools`，则不会发现 authored tools。
 
-```yaml
-entrypoint: module:execute
-```
+可接受的 `tool.yaml` 字段是：
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `entrypoint` | `module:execute` | 从 tool 目录加载的 callable。 |
+| `description` | `""` | Model-visible tool description。 |
+| `input_schema` | `{}` | Model-visible JSON schema。 |
+| `risk` | `medium` | Registry risk metadata。 |
+| `capability` | `null` | 这个 tool 的 approval metadata 使用的 primary registry capability。 |
+| `approval_policy` | `prompt` | Tool-level approval metadata。 |
+| `display_policy` | `summary` | Operator display hint。 |
+| `model_output_policy` | `content` | Model-output conversion hint。 |
+| `capabilities` | `[]` | Implementation 可通过 `ctx.capability.require(...)` 需要的 capabilities。 |
+
+`tool.yaml` 不接受 slot-only fields，例如 `failure_policy`、`history_policy`、`default_placement` 或 `timeout_seconds`。
+
+单数 `capability` 与 `capabilities` 列表是分开的：
+
+- `capability` 在 registry 和 approval metadata 中标识 tool。
+- `capabilities` 向 tool implementation 授予 effect capabilities。
+
+Authored tools 不会列在 `agent/pipelines.yaml` 中。
+
+## Authored Tool Runtime
+
+默认 entrypoint 是：
 
 ```python
 def execute(ctx, args):
     ...
 ```
 
-文件名与 Agent Slot metadata 共用，但 authored tools 是 tools：它们是通过 host tool runtime 执行的 model-callable actions。
+Host 传入一个 `ToolContext`，包含：
 
-## 内置 Tools
-
-| Tool | Purpose |
+| Attribute | Meaning |
 | --- | --- |
-| `read_file` | 读取 workspace 内的文本。 |
-| `write_file` | 替换一个 workspace file。 |
-| `patch` | 应用一次精确的文本替换。 |
-| `search_files` | 搜索文件内容或文件名。 |
-| `terminal` | 在 workspace 内运行一个命令。 |
-| `job` | 管理 background jobs。 |
-| `process` | terminal background jobs 的兼容视图。优先使用 `job`。 |
-| `web_extract` | 从已知 URL 获取并提取文本。 |
-| `skills_list` | 列出 skill metadata。 |
-| `skill_view` | 加载一个 skill 或已链接的 skill file。 |
-| `skill_manage` | 创建、更新或删除 runtime-core skills。 |
-| `todo` | 维护 per-session todo list。 |
-| `clarify` | 向用户询问所需输入。 |
-| `session_search` | 搜索或浏览本地 session messages。 |
-| `schedule_manage` | 管理 core-authored schedule YAML。 |
-| `tools_list` | 列出当前 core 可见的 tools。 |
-| `evolve_core` | 通过 host 创建、gate 并 promote 一个 candidate core。 |
-| `rollback_core` | 切回之前稳定的 core 版本。 |
+| `ctx.turn` | 当前 turn metadata。 |
+| `ctx.slot_id` | Tool id。 |
+| `ctx.slot_path` | 相对 tool path，例如 `agent/tools/project_note`。 |
+| `ctx.capability` | 用于 `can(...)` 和 `require(...)` 的 capability facade。 |
+| `ctx.output` | 当 tool 在 active turn 中被调用时可用的 delivery client。 |
+| `ctx.workspace` | 解析后的 workspace root。 |
 
-`schedule_manage` 会创建带有显式默认值的 schedules，包括 enabled state、`base_input`、`base_output` 和 local delivery。runtime timezone 属于 host runtime，而不是单个 schedule YAML 文件。
-
-## Background Jobs
-
-`terminal(background=true)`、`ctx.agents.spawn(...)` 和 `evolve_core(background=true)` 会提交 host-owned 的 in-memory jobs。background tool calls 返回 `job_id`；terminal calls 还会返回 `process_id`，作为兼容别名。
-
-`background=true` 默认等于 `notify_on_complete=true`。当 job 完成时，host 会在原始 session 中排队一个 synthetic model turn。如果用户 turn 已在运行，则完成会等待。如果用户输入和完成同时待处理，则先运行用户输入，并把待完成的 completion summaries 合并进那个用户 turn。`/stop` 只会取消 foreground turn；要停止 background job，请使用 `job(action="cancel", job_id="...")`。
-
-`job` tool 支持：
-
-| Action | Purpose |
-| --- | --- |
-| `list` | 列出 jobs，可按 `backend` 或 `owner_session_id` 过滤。 |
-| `poll` | 返回一个 job 的 status、metadata、summary 和 log tail。 |
-| `log` | 返回内存中的 job log。使用 `tail` 限制行数。 |
-| `wait` | 等待最多 `timeout_seconds` 直到完成。 |
-| `cancel` | 取消 queued 或 running 的 job。 |
-
-Job statuses 为 `queued`、`running`、`blocked_needs_user`、`succeeded`、`failed`、`cancelled` 和 `lost`。completion payloads 包含 metadata、summary、result reference 和受限的 log tail；完整的 in-memory logs 可通过 `job(action="log")` 获取。
-
-第一版实现只在内存中运行。正在运行的 jobs、logs 和待处理的 completion events 在 host process 退出时都会丢失。Jobs 会声明一个 `write_scope`；为了避免 foreground/background 或 background/background 的 overwrite races，另一个具有相同 scope 的活动 background job 会被拒绝。
-
-## Package-Provided Web Search
-
-`web_search` 不是默认 `coding` toolset 的一部分。它由 `web_search_brave` 或 `web_search_tavily` 之类的 provider packages 安装。
-
-这两个 package 会暴露相同的 model-facing tool name `web_search`，但各自拥有 provider-specific request code 和分离的 libraries。由于两个 package 都会目标到 `agent/tools/web_search`，同一个 core 中一次只能安装一个 web search provider package。
-
-`web_extract` 仍然是用于获取已知 URL 的 built-in tool。
+返回 `demiurge.sdk.ToolResult`、兼容的 dict，或任何可转换为 text 的值。
 
 ## MCP Tools
 
-MCP tools 来自以下声明：
+MCP servers 位于配置的 MCP root 下，通常是：
 
 ```text
-agent/mcp/*.yaml
+agent/mcp/<server_id>.yaml
 ```
 
-host 会为 MCP tools 做 namespace 和 filter，然后再通过 capability 和 approval policy 运行它们。
+对于每个 enabled server，host 会：
 
-## Output Policy
+1. 启动或连接到 server。
+2. 列出 server tools。
+3. 应用 `tools.include` 和 `tools.exclude`。
+4. 构建安全名称，例如 `docs__search_docs`。
+5. 通过与 built-in 和 authored tools 相同的 registry 暴露这些 tools。
 
-tool results 可以是 model-visible、current-turn-only，或者由 tool metadata 决定的形态。tool runtime 负责转换为 provider messages。
+MCP tool calls 需要 server capability，默认为 `mcp.call:<server_id>`，除非 server manifest 设置了 `capability`。
 
-TUI 和 gateway display 可以通过以下方式控制：
+## Tool Metadata Overrides
+
+使用 `agent.yaml`：
+
+```yaml
+tools:
+  metadata:
+    web_extract:
+      approval_policy: deny
+    project_note:
+      risk: low
+      enabled: false
+```
+
+支持的 metadata keys 是：
+
+- `risk`
+- `capability`
+- `approval_policy`
+- `model_output_policy`
+- `display_policy`
+- `enabled`
+
+## Background Runtime Tasks
+
+这些 calls 会提交 host-owned background tasks：
+
+- `terminal(background=true)`
+- `run_terminal(...)`
+- `delegate_task(...)`
+- `ctx.agents.spawn(...)`
+- `evolve_core(background=true)`
+
+Background task tools 会返回 `task_id`。使用 `task_status`、`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制它们。
+
+Foreground `/stop` 只会取消 foreground turn。它不会取消 background tasks。
+
+## Package-Provided Web Search
+
+`web_search` 不是默认 `coding` toolset 的一部分。它由 `web_search_brave` 或 `web_search_tavily` 等 provider packages 安装。
+
+两个 packages 都暴露面向模型的 tool name `web_search`。因为两个 packages 都以 `agent/tools/web_search` 为目标，所以每个 core 一次只安装一个 web search provider package。
+
+`web_extract` 仍是用于获取已知 URL 的 built-in tool。
+
+## 检查可见 Tools
+
+使用 built-in tool：
+
+```text
+tools_list
+```
+
+或使用 TUI 命令：
+
+```text
+/tools
+```
+
+Tool display 可以在启动时调整：
 
 ```bash
 uv run demiurge --tool-display quiet
 uv run demiurge --tool-display summary
 uv run demiurge --tool-display full
 ```
-
-## Boundary
-
-Agent Cores 可以声明 authored tools 和 MCP servers。host 负责 visible tool selection、dispatch、approval、workspace checks、result conversion 和 tool-call replay。

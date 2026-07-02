@@ -5,30 +5,49 @@ description: Stable rules for bootstrap, input, and output slots.
 
 # Agent Slot Contract
 
-Agent Slots are evolvable interaction boundaries loaded by the host. They let
-Core-defined behavior enter the agent loop at governed points. Slot code must
-stay inside the Agent Core authored surface.
+Agent Slots are governed extension points loaded from an Agent Core's authored
+surface. They let core-authored code run at specific points in the host-owned
+agent loop.
 
 ## Directory Contract
 
+With `runtime.surface_root: agent`, slot directories are:
+
 ```text
+agent/bootstrap/<slot_id>/
+  module.py
+  slot.yaml
 agent/input/<slot_id>/
+  module.py
+  slot.yaml
+agent/output/<slot_id>/
   module.py
   slot.yaml
 ```
 
-The same shape applies to current Agent Slot kinds:
+The loader discovers bootstrap, input, and output slots from
+`runtime.surface_root`, not from `slots.input` or `slots.output`.
 
-- `agent/bootstrap/<slot_id>/`
-- `agent/input/<slot_id>/`
-- `agent/output/<slot_id>/`
+## Manifest Contract
 
-Slot metadata lives in the slot directory's `slot.yaml`. Pipeline placement
-lives in `agent/pipelines.yaml`.
+`slot.yaml` accepts exactly these fields:
 
-## Entrypoints
+```yaml
+entrypoint: module:process
+description: "Short description."
+input_schema: {}
+capabilities: []
+timeout_seconds: null
+failure_policy: soft
+default_placement: pre_current_user
+history_policy: persist
+```
 
-Bootstrap, input, and output slots normally use:
+Unknown fields fail core loading.
+
+## Entrypoint Contract
+
+The normal entrypoint is:
 
 ```yaml
 entrypoint: module:process
@@ -39,15 +58,20 @@ def process(ctx):
     ...
 ```
 
-The `entrypoint` field is optional when the handler is the default
-`module:process` in the slot directory. Legacy `run` aliases are rejected.
+Entrypoints are loaded from the slot directory unless the manifest uses a
+core-root-relative Python file path.
 
-## Pipelines
+Relative imports are isolated by slot path. Shared helper code can live under
+`agent/lib/` for the default authored surface.
 
-`agent/pipelines.yaml` declares phase pipelines. Input and output support:
+## Pipeline Contract
+
+`agent/pipelines.yaml` is required:
 
 ```yaml
 schema_version: 1
+bootstrap:
+  serial: []
 input:
   serial: []
   parallel: []
@@ -56,46 +80,89 @@ output:
   parallel: []
 ```
 
-Bootstrap supports:
-
-```yaml
-schema_version: 1
-bootstrap:
-  serial: []
-```
-
-Within each phase:
-
-```yaml
-serial: []
-parallel: []
-```
-
 Rules:
 
-- Every pipeline entry must be a known slot id.
+- `schema_version` must be `1`.
+- Every pipeline entry must be a known slot id for that phase.
 - A slot id can appear only once in the same pipeline.
-- Bootstrap does not support `parallel`.
-- Unknown pipeline keys fail core loading.
+- Bootstrap supports only `serial`.
+- Unknown phases and pipeline keys fail core loading.
+
+When adding a slot, edit the existing list and preserve unrelated phases.
+
+## Bootstrap Context
+
+Bootstrap runs once per session before turns begin:
+
+```python
+def process(ctx):
+    ctx.bootstrap.add("Session-level context.")
+```
+
+Bootstrap return values are ignored. Use `ctx.bootstrap.add(...)` to add
+session-stable context.
+
+## Input Context
+
+Input slots run before the provider call:
+
+```python
+def process(ctx):
+    ctx.input.add_context("Prefer concise answers.", role="system")
+    ctx.input.add_context(ctx.input.raw_text, role="user")
+```
+
+The seed `base_input` slot appends the raw user text. If no input slot produces
+user text, the turn fails.
+
+Serial input slots can modify the prompt. Parallel input slots cannot modify the
+current prompt.
+
+## Output Context
+
+Output slots run after the provider response:
+
+```python
+def process(ctx):
+    ctx.output.send_text(ctx.output.response_text)
+```
+
+The seed `base_output` slot delivers the model response. If no output slot
+delivers or records the response, the raw provider response remains only in
+runtime records.
+
+Serial output slots can write history and result data. Parallel output slots
+cannot write session history or modify the current result.
 
 ## Capability Rule
 
-Slots should declare capabilities they need in `slot.yaml`, but the host decides
-whether the effect is allowed.
+Declare capabilities in `slot.yaml` when slot code requires host-mediated
+effects:
 
-Do not bypass host tools by directly touching paths, network, or process state
-when a host capability exists for the effect.
+```yaml
+capabilities:
+  - fs.read
+  - tool.call:project_note
+```
 
-Slots may compose tools, skills, MCP, state, or other agents through host-owned
-interfaces when the required capabilities allow it.
+Then require them in code:
+
+```python
+def process(ctx):
+    ctx.capability.require("fs.read", slot_path=ctx.slot_path)
+```
+
+Do not bypass host tools, workspace scope, channel policy, or state APIs when a
+host capability exists for the effect.
 
 ## Failure Rule
 
-Use `failure_policy: soft` unless the turn cannot proceed without the slot.
-Use `failure_policy: hard` for required base behavior such as raw input
-passthrough.
+Use `failure_policy: soft` for optional behavior. Use `failure_policy: hard`
+only when the phase cannot continue without the slot.
 
 ## Verification
+
+After slot edits, run:
 
 ```bash
 uv run demiurge init --check
