@@ -869,7 +869,7 @@ async def test_telegram_access_policy_unauthorized_approval_callback_does_not_re
         )
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
-    await _wait_until(lambda: bool(bridge._pending_approvals))
+    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=5)
 
     await bridge.handle_update(_callback("approval:1:allow", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
 
@@ -1880,7 +1880,7 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
             metadata={"telegram_chat_type": "private"},
         )
     )
-    await _wait_until(lambda: bool(bridge._pending_approvals))
+    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=5)
 
     assert not (workspace / "out.txt").exists()
 

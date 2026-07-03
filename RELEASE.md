@@ -96,11 +96,17 @@ uv run python -m compileall demiurge tests
 uv run pytest -vv --durations=20 -o faulthandler_timeout=60
 uv run demiurge --help
 uv run demiurge init --help
-(cd ui-tui && npm ci && npm run typecheck && npm test -- --run && npm run build)
-cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+uv run python scripts/smoke_managed_install.py
+(cd ui-tui && npm ci && npm run typecheck && npm test && npm run build)
+node --check ui-tui/dist/entry.js
+node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) process.exit(1);"
 (cd website && npm ci && npm run build)
 git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 ```
+
+The GitHub release workflow is the full cross-platform gate: Python validation
+runs on Ubuntu and Windows for Python 3.11, 3.12, and 3.13, and TUI validation
+runs on Ubuntu and Windows for Node.js 20 and 24.
 
 For artifact releases only, also run:
 

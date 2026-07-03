@@ -102,12 +102,13 @@ rebuild and copy the asset used by the Python package:
 ```bash
 cd ui-tui
 npm ci
-npm test -- --run
+npm test
 npm run typecheck
 npm run build
 cd ..
-cp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
-cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+node -e "require('fs').copyFileSync('ui-tui/dist/entry.js', 'demiurge/ui/tui_dist/entry.js')"
+node --check ui-tui/dist/entry.js
+node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) process.exit(1);"
 ```
 
 ## Verification
@@ -134,19 +135,27 @@ Broad Python runtime changes:
 ```bash
 uv run python -m compileall demiurge tests
 uv run pytest
+uv run python scripts/smoke_managed_install.py
 ```
 
 TUI changes:
 
 ```bash
-cd ui-tui && npm test -- --run
+cd ui-tui && npm test
 cd ui-tui && npm run typecheck
 cd ui-tui && npm run build
 cd ..
-cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+node --check ui-tui/dist/entry.js
+node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) process.exit(1);"
 ```
 
 Release-path changes should preserve the default notes/tag-only release policy.
+CI and release validation should cover the public support surface:
+
+- Python 3.11, 3.12, and 3.13 on Ubuntu and Windows;
+- TUI smoke checks on Node.js 20 and 24 on Ubuntu and Windows;
+- managed checkout installation smoke checks on Ubuntu and Windows.
+
 Build artifacts are optional and must be requested explicitly:
 
 ```bash

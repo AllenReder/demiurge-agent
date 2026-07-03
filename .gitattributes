@@ -1,0 +1,2 @@
+*.sh text eol=lf
+demiurge/ui/tui_dist/entry.js text eol=lf

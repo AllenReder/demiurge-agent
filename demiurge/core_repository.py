@@ -12,8 +12,9 @@ from typing import Any, Awaitable, Callable, Iterator
 
 if os.name != "nt":
     import fcntl
-else:  # pragma: no cover - Windows keeps the interface but not flock semantics.
+else:
     fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 import yaml
 
@@ -426,17 +427,30 @@ class CoreRepository:
     @contextmanager
     def locked(self) -> Iterator[None]:
         ensure_dir(self.home)
-        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
+        with self.lock_path.open("a+b") as lock_file:
             if fcntl is not None:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as exc:
+                    raise CoreRepositoryError(f"core repository is locked: {self.lock_path}") from exc
+            else:
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
                     raise CoreRepositoryError(f"core repository is locked: {self.lock_path}") from exc
             try:
                 yield
             finally:
                 if fcntl is not None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
     @contextmanager
     def live_transaction(self, *, reason: str) -> Iterator[Path]:
