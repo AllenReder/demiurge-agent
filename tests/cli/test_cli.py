@@ -161,6 +161,11 @@ def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
     soul.write_text(soul.read_text(encoding="utf-8") + "\n\nCLI rollback setup.\n", encoding="utf-8")
     changed = store.core_repository.commit_live(reason="test setup", summary="test setup")
 
+    cli.main(["--home", str(home), "core"])
+    bare_status_output = capsys.readouterr().out
+    assert "agents_root:" in bare_status_output
+    assert changed.revision[:12] in bare_status_output
+
     cli.main(["--home", str(home), "core", "status"])
     status_output = capsys.readouterr().out
     assert "agents_root:" in status_output

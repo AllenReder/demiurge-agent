@@ -16,6 +16,13 @@ def test_core_repository_initializes_live_tree_and_refs(tmp_path):
     assert pointer.previous_revision is None
     assert repo.previous_revision() is None
     assert repo.live_changed_paths() == []
+    assert repo.core_ignore_path.exists()
+    assert repo._run_git(["config", "--get", "core.excludesFile"]).stdout.strip() == str(repo.core_ignore_path)
+
+    cache_dir = repo.agents_root / "assistant" / "agent" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "module.cpython-311.pyc").write_bytes(b"cache")
+    assert repo.live_changed_paths() == []
 
 
 def test_core_repository_change_set_proposal_promote_discard_and_rollback(tmp_path):

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -21,6 +22,13 @@ LIVE_REF = "refs/demiurge/live"
 PREVIOUS_REF = "refs/demiurge/previous"
 RUN_REF_PREFIX = "refs/demiurge/runs"
 PROTECTED_DEPENDENCY_FILES = {"pyproject.toml", "uv.lock", "requirements.txt", "requirements.in"}
+CORE_EXCLUDE_PATTERNS = (
+    "__pycache__/",
+    "*.py[cod]",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+)
 
 
 class CoreRepositoryError(RuntimeError):
@@ -61,6 +69,7 @@ class CoreRepository:
         self.home = home.expanduser().resolve()
         self.agents_root = self.home / "agents"
         self.git_dir = self.home / ".core.git"
+        self.core_ignore_path = self.home / ".core-ignore"
         self.evolve_root = self.home / ".evolve" / "runs"
         self.lock_path = self.home / ".core.lock"
 
@@ -81,6 +90,7 @@ class CoreRepository:
                 f"core repository is not initialized: {self.git_dir}; "
                 "delete the old runtime home or run `demiurge init` for a fresh core repository"
             )
+        self.ensure_private_excludes()
 
     def initialize_from_source(self, source_agents: Path, *, reason: str = "init", force: bool = False) -> CorePointer:
         source_agents = source_agents.expanduser().resolve()
@@ -103,6 +113,7 @@ class CoreRepository:
             self._run(["init", "--bare", str(self.git_dir)], cwd=None, prefix=["git"])
             self._run_git(["config", "user.name", "Demiurge Host"])
             self._run_git(["config", "user.email", "demiurge@localhost"])
+            self.ensure_private_excludes()
             self._run_git(["add", "-A"], work_tree=self.agents_root)
             self._run_git(["commit", "-m", self._commit_message("core init", reason)], work_tree=self.agents_root)
             revision = self._run_git(["rev-parse", "HEAD"], work_tree=self.agents_root).stdout.strip()
@@ -112,8 +123,30 @@ class CoreRepository:
 
     def ensure_initialized(self, source_agents: Path) -> None:
         if self.git_dir.exists():
+            self.ensure_private_excludes()
             return
         self.initialize_from_source(source_agents, reason="auto init", force=False)
+
+    def ensure_private_excludes(self) -> None:
+        ensure_dir(self.home)
+        lines = [
+            "# Demiurge host-owned ignores for the runtime core repository.",
+            "# This file is not part of the authored agents tree.",
+            *CORE_EXCLUDE_PATTERNS,
+            "",
+        ]
+        content = "\n".join(lines)
+        if not self.core_ignore_path.exists() or self.core_ignore_path.read_text(encoding="utf-8") != content:
+            self.core_ignore_path.write_text(content, encoding="utf-8")
+        for _ in range(5):
+            configured = self._run_git(["config", "--get", "core.excludesFile"], check=False).stdout.strip()
+            if configured == str(self.core_ignore_path):
+                return
+            result = self._run_git(["config", "core.excludesFile", str(self.core_ignore_path)], check=False)
+            if result.returncode == 0:
+                return
+            time.sleep(0.05)
+        self._run_git(["config", "core.excludesFile", str(self.core_ignore_path)])
 
     def refresh_from_source(self, source_agents: Path, *, reason: str = "refresh") -> CommitResult:
         self.require_initialized()

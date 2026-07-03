@@ -86,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--core", dest="doctor_core", default=None, help="Core id to check")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     core_parser = subparsers.add_parser("core", help="Inspect and mutate the Git-backed Agent Core tree")
+    core_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     core_subparsers = core_parser.add_subparsers(dest="core_command")
     core_status = core_subparsers.add_parser("status", help="Show live core repository status")
     core_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -514,9 +515,10 @@ def _handle_core_command(args: argparse.Namespace) -> None:
     home = (args.home or default_home()).expanduser().resolve()
     version_store = VersionStore(home)
     command = args.core_command or "status"
+    as_json = bool(getattr(args, "json", False))
     if command == "status":
         status = version_store.core_repository.status()
-        if args.json:
+        if as_json:
             print(json.dumps(status, indent=2, ensure_ascii=False))
             return
         _print_core_status(status)
@@ -528,7 +530,7 @@ def _handle_core_command(args: argparse.Namespace) -> None:
             "previous": version_store.core_repository.previous_revision(),
             "revisions": revisions,
         }
-        if args.json:
+        if as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             return
         live = payload["live"]
@@ -549,7 +551,7 @@ def _handle_core_command(args: argparse.Namespace) -> None:
                 changed_paths=version_store.core_repository.live_changed_paths(),
             )
         )
-        if args.json:
+        if as_json:
             print(json.dumps(gates.as_dict(), indent=2, ensure_ascii=False))
             return
         for phase in gates.phases:
@@ -560,7 +562,7 @@ def _handle_core_command(args: argparse.Namespace) -> None:
     if command == "rollback":
         pointer = version_store.rollback(args.core or "assistant", target=args.target, reason=args.reason)
         payload = asdict(pointer)
-        if args.json:
+        if as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             return
         print(f"rollback committed: {pointer.active_revision[:12]}")
