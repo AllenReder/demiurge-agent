@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --import tsx src/entry.tsx",
     "start": "node dist/entry.js",
-    "build": "esbuild src/entry.tsx --bundle --minify --platform=node --format=esm --target=node20 --outfile=dist/entry.js --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
