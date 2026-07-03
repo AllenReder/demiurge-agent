@@ -26,24 +26,27 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "evolve_core": ToolDefinition(
         name="evolve_core",
         description=(
-            "Create and gate a candidate version of the active agent core. Foreground calls promote loadable "
-            "candidates; background=true leaves the candidate for review and reports through a background task."
+            "Manage a host-owned evolve change set for the active Agent Core tree. "
+            "Use start to create a run, review to gate and create a proposal revision, "
+            "promote to advance live, and discard to remove a run."
         ),
         input_schema=_schema(
             {
+                "action": {"type": "string", "enum": ["start", "review", "promote", "discard"], "default": "start"},
                 "goal": {"type": "string"},
+                "run_id": {"type": "string"},
                 "background": {"type": "boolean", "default": False},
                 "notify_on_complete": {"type": "boolean", "default": True},
-            },
-            required=["goal"],
+                "reason": {"type": "string"},
+            }
         ),
     ),
     "rollback_core": ToolDefinition(
         name="rollback_core",
-        description="Switch the active core pointer back to a previous stable version on the next turn.",
+        description="Create a rollback commit for the Agent Core tree. The new revision takes effect on the next turn.",
         input_schema=_schema(
             {
-                "target": {"type": "string", "default": "previous_stable"},
+                "target": {"type": "string", "default": "previous"},
                 "reason": {"type": "string"},
             }
         ),

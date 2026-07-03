@@ -33,7 +33,7 @@ def _turn(app, core):
         session_id=app.runner.session_id,
         turn_id="turn_delegate",
         core_id=core.core_id,
-        core_version=core.version,
+        core_revision=core.revision,
         user_input=AgentInput(content="delegate", metadata={}),
         state={},
         metadata={},

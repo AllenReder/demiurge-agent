@@ -13,9 +13,9 @@ Demiurge packages 是把可复用 authored-surface files 安装进 runtime Agent
 
 Agent Core 拥有 authored behavior：slots、tools、skills、libraries、child cores、MCP declarations 和 schedule declarations。Package 让这些 authored behavior 可以复用，而不需要手动编辑 source template。
 
-Host 仍然拥有 runtime harness：sessions、turns、provider calls、approvals、capabilities、MCP transport、schedule execution、state、versioning、promotion 和 rollback。
+Host 仍然拥有 runtime harness：sessions、turns、provider calls、approvals、capabilities、MCP transport、schedule execution、state、Git revisions、promotion 和 rollback。
 
-Package management 是用户控制的 CLI workflow。它不会暴露为 model-callable tool。
+Package management 是用户控制的 CLI workflow。Preview 是 read-only；install 和 uninstall 是 host-owned Git transactions。它不会暴露为 model-callable tool。
 
 ## 仓库
 
@@ -80,23 +80,23 @@ packages/<package_id>.yaml
 
 `mcp` 和 `schedule` components 安装 declarations，而不是 running services。Host 仍然拥有 MCP transport、server lifecycle、schedule claims、approvals 和 schedule execution。
 
-## 安装状态
+## Provenance 和 Drift
 
-安装 package 会把文件写入 active runtime core，并在这里记录 state：
+安装 package 会把文件写入 live runtime agents tree，并在这里记录 provenance：
 
 ```text
 ~/.demiurge/agents/<core-id>/packages.yaml
 ```
 
-Install record 保存 package id、repository alias、repository metadata、tags、installed component targets、warnings 和已脱敏 options。它不会保存完整 effective config 或 secrets。
+Install record 保存 package id、repository alias、repository metadata、tags、installed component targets、installed hashes、warnings 和已脱敏 options。它不会保存完整 effective config 或 secrets。`packages.yaml` 是 provenance，不是 runtime truth；runtime truth 是已提交的 agents tree。
 
-Installation 会拒绝 target conflicts，除非该 target 已由已安装 package 持有，且 repository alias、source、target 和 effective config hash 都相同。这样 packages 可以共享完全相同的 helper components，而不会悄悄覆盖本地文件。
+Installation 会拒绝 target conflicts，除非该 target 已由已安装 package 持有，且 repository alias、source、target 和 effective config hash 都相同。这样 packages 可以共享完全相同的 helper components，而不会悄悄覆盖本地文件。成功 install 会运行 gates 并提交一个新的 core revision。
 
 ## 卸载状态
 
 Uninstall 会移除 package-owned targets，并移除 `bootstrap`、`input` 和 `output` slots 的 package-owned pipeline entries。如果另一个已安装 package 仍引用相同的 shared component，该 target 会保留。
 
-Uninstall 会更新 `packages.yaml`。如果没有剩余 packages，registry file 可以被移除。
+Uninstall 会更新 `packages.yaml` 并提交 runtime agents tree。如果 recorded hash 和当前文件内容不匹配，uninstall 会报告 drift 并拒绝移除，除非 caller 提供显式 destructive strategy，例如 `--force-drift`。
 
 Uninstall 不会移除写在 package-owned targets 之外的数据。例如 memory files、generated audio、context reseed notes、provider caches 和 outbox files。
 

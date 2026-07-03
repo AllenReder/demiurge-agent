@@ -383,30 +383,61 @@ class ToolRuntime:
             capability.require("tool.call:rollback_core")
             pointer = self.version_store.rollback(
                 core.core_id,
-                target=str(call.arguments.get("target") or "previous_stable"),
+                target=str(call.arguments.get("target") or "previous"),
                 reason=str(call.arguments.get("reason") or "rollback_core"),
             )
-            return ToolResult(content=f"rollback scheduled: {pointer.active_version}", data=asdict(pointer))
+            payload = asdict(pointer)
+            return ToolResult(
+                content=f"rollback committed: {pointer.active_revision[:12]} (takes effect next turn)",
+                data=payload,
+                model_output=json.dumps(payload, ensure_ascii=False),
+            )
         if call.name == "evolve_core":
             capability.require("tool.call:evolve_core")
             if self.evolution_runtime is None:
                 return ToolResult(content="evolution runtime is not configured", is_error=True)
+            action = str(call.arguments.get("action") or "start").strip().lower()
             background = bool(call.arguments.get("background", False))
             notify_on_complete = bool(call.arguments.get("notify_on_complete", True))
             goal = str(call.arguments.get("goal") or "")
-            if background:
-                return self._start_evolve_task(
-                    core=core,
-                    turn=turn,
+            run_id = str(call.arguments.get("run_id") or "").strip()
+            reason = str(call.arguments.get("reason") or goal or f"evolve {action}").strip()
+            if action == "start":
+                if not goal.strip():
+                    return ToolResult(content="goal is required for evolve_core start", is_error=True)
+                if background:
+                    return self._start_evolve_task(
+                        core=core,
+                        turn=turn,
+                        goal=goal,
+                        notify_on_complete=notify_on_complete,
+                    )
+                result = await self.evolution_runtime.start(
+                    target_core_id=core.core_id,
                     goal=goal,
-                    notify_on_complete=notify_on_complete,
+                    source_turn_id=turn.turn_id,
                 )
-            result = await self.evolution_runtime.evolve(
-                target_core_id=core.core_id,
-                goal=goal,
-                source_turn_id=turn.turn_id,
-            )
-            return ToolResult(content=result.summary, data=asdict(result), is_error=not result.promoted)
+                payload = asdict(result)
+                return ToolResult(content=result.summary, data=payload, model_output=json.dumps(payload, ensure_ascii=False))
+            if action == "review":
+                if not run_id:
+                    return ToolResult(content="run_id is required for evolve_core review", is_error=True)
+                result = await self.evolution_runtime.review(run_id, target_core_id=core.core_id, goal=reason)
+                payload = asdict(result)
+                content = f"evolve review {run_id}: {'passed' if result.passed else 'failed'}"
+                return ToolResult(content=content, data=payload, is_error=not result.passed, model_output=json.dumps(payload, ensure_ascii=False))
+            if action == "promote":
+                if not run_id:
+                    return ToolResult(content="run_id is required for evolve_core promote", is_error=True)
+                result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
+                payload = asdict(result)
+                return ToolResult(content=result.summary, data=payload, is_error=not result.promoted, model_output=json.dumps(payload, ensure_ascii=False))
+            if action == "discard":
+                if not run_id:
+                    return ToolResult(content="run_id is required for evolve_core discard", is_error=True)
+                payload = self.evolution_runtime.discard(run_id)
+                return ToolResult(content=f"discarded evolve run {run_id}", data=payload, model_output=json.dumps(payload, ensure_ascii=False))
+            return ToolResult(content=f"unsupported evolve_core action: {action}", is_error=True)
         if call.name == "read_file":
             return await self._read_file(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "search_files":
@@ -879,11 +910,10 @@ class ToolRuntime:
         assert self.evolution_runtime is not None
 
         async def run_evolve_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
-            result = await self.evolution_runtime.evolve(
+            result = await self.evolution_runtime.start(
                 target_core_id=core.core_id,
                 goal=goal,
                 source_turn_id=turn.turn_id,
-                auto_promote=False,
             )
             payload = asdict(result)
             ctx.update_metadata(payload)

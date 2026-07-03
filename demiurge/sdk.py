@@ -105,7 +105,7 @@ class TurnContext:
     session_id: str
     turn_id: str
     core_id: str
-    core_version: str
+    core_revision: str
     user_input: AgentInput
     state: Mapping[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -213,7 +213,7 @@ class BootstrapContext:
 
     session_id: str
     core_id: str
-    core_version: str
+    core_revision: str
     workspace: str
     slot_id: str
     slot_path: str

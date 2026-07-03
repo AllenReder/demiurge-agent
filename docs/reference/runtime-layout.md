@@ -51,12 +51,10 @@ Common children:
 | --- | --- |
 | `config.yaml` | Host config, including default core, timezone, UI, providers, and package repositories. |
 | `.env` | Local environment file loaded by the host. |
+| `.core.git/` | Bare Git repository for the runtime agents tree. |
 | `agents/agent.yaml` | Runtime global fallback config. |
-| `agents/<core>/` | Active runtime copy of a concrete Agent Core. |
-| `registry/<core>.json` | Active pointer for each core. |
-| `history/<core>/` | Backups of previous active core versions. |
-| `history/_global/` | Backups of the global fallback config. |
-| `runs/<core>/<run_id>/candidate/` | Candidate core workspaces created by evolution. |
+| `agents/<core>/` | Active live checkout of a concrete Agent Core. |
+| `.evolve/runs/<run_id>/agents/` | Isolated evolve worktree over the whole agents tree. |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
 | `runtime/artifacts/` | Host-owned artifacts referenced by runtime records. |
 | `runtime/session-events/` | Per-session diagnostic event logs. |
@@ -82,7 +80,6 @@ Active runtime core:
     schedules/
     mcp/
     lib/
-    tests/
 ```
 
 The loader reads `agent.yaml`, resolves `runtime.surface_root`, then requires
@@ -107,7 +104,6 @@ With `runtime.surface_root: agent`, the defaults are:
 | Schedules | `agent/schedules/` |
 | MCP servers | `agent/mcp/` |
 | Shared authored helpers | `agent/lib/` |
-| Core-local tests | `agent/tests/` |
 
 Skills, schedules, and MCP roots are inferred from `runtime.surface_root` unless
 configured. Bootstrap, input, and output are always resolved from
@@ -123,3 +119,17 @@ Managed installs may keep a checkout under:
 
 Runtime cores still live under `~/.demiurge/agents/`; the managed checkout is
 not the active runtime core.
+
+## Core Git Refs
+
+Runtime core revisions are Git commits in `~/.demiurge/.core.git`.
+
+| Ref | Meaning |
+| --- | --- |
+| `refs/demiurge/live` | Commit checked out at `~/.demiurge/agents/`. |
+| `refs/demiurge/previous` | Default rollback target. |
+| `refs/demiurge/runs/<run_id>` | Reviewed evolve proposal commit. |
+
+`demiurge init` creates the repository from the source `agents/` tree on a
+fresh runtime home. It does not migrate the old `registry/`, `history/`, or
+`runs/` layouts.

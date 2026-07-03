@@ -5,8 +5,9 @@ description: Use the host-owned evolution path and rollback controls.
 
 # Evolve and Roll Back a Core
 
-Demiurge can ask the host-managed `evolver` core to edit a candidate copy of an
-active core. Promotion remains host-owned.
+Demiurge can ask the host-managed `evolver` core to edit an isolated Git
+worktree of the runtime agents tree. Review creates a proposal commit; promote
+advances the live Git ref.
 
 ## Evolve from the TUI
 
@@ -16,9 +17,32 @@ Inside the TUI:
 /evolve Add a concise Telegram reply style input module.
 ```
 
-The host creates a candidate core, runs the `evolver` core with
-candidate-scoped tools, checks that the manifest loads, and promotes the
-candidate only if the check passes.
+The host creates `.evolve/runs/<run_id>/agents`, runs the `evolver` core with
+candidate-scoped tools, and reports a `run_id`. The live core is unchanged.
+
+Review the run:
+
+```text
+/evolve review <run_id>
+```
+
+Review runs host-owned gates and creates or updates
+`refs/demiurge/runs/<run_id>`.
+
+Promote the reviewed run:
+
+```text
+/evolve promote <run_id>
+```
+
+Promote reruns gates, advances `refs/demiurge/previous` and
+`refs/demiurge/live`, and takes effect on the next turn.
+
+Discard an unwanted run:
+
+```text
+/evolve discard <run_id>
+```
 
 ## Give Functional Goals
 
@@ -32,7 +56,7 @@ Change only agent/output and the output pipeline.
 Avoid goals that ask the evolver to edit host runtime code, dependencies,
 release files, source checkout files, or `.temp/`.
 
-## Inspect Versions
+## Inspect Revisions
 
 Inside the TUI:
 
@@ -48,14 +72,20 @@ Inside the TUI:
 /rollback
 ```
 
-Rollback switches back to a previous stable core version through the host
-version store.
+Rollback returns the agents tree to a previous Git revision by creating a new
+rollback commit. It takes effect on the next turn.
+
+Use a specific target when needed:
+
+```text
+/rollback <revision>
+```
 
 ## Contract
 
 For exact rules, read
 [/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits).
 
-The evolver may edit the authored surface of a candidate core. It must not
-promote, roll back, edit host state, change dependencies, or edit files outside
-the candidate workspace.
+The evolver may edit the authored surface inside the candidate agents tree. It
+must not promote, roll back, edit host state, change dependencies, or edit
+files outside the candidate worktree.

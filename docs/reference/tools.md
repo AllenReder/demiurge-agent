@@ -166,6 +166,21 @@ absolute paths, parent traversal, hidden path segments, and writes outside the
 configured skills root. Changes take effect for later turns; the current turn
 does not hot-reload the active core.
 
+## Core Evolution Tools
+
+`evolve_core` is a single model-visible tool with four actions:
+
+| Action | Required fields | Effect |
+| --- | --- | --- |
+| `start` | `goal` | Creates `.evolve/runs/<run_id>/agents` and runs the host-managed evolver. |
+| `review` | `run_id` | Runs host-owned gates and writes `refs/demiurge/runs/<run_id>`. |
+| `promote` | `run_id` | Reruns gates and advances `refs/demiurge/previous` and `refs/demiurge/live`. |
+| `discard` | `run_id` | Removes the run worktree and metadata. |
+
+`promote` is a high-risk operation and requires approval. `rollback_core`
+creates a new rollback commit for the live Agent Core tree; the new revision
+takes effect on the next turn.
+
 ## Background Runtime Tasks
 
 These calls submit host-owned background tasks:
@@ -174,7 +189,7 @@ These calls submit host-owned background tasks:
 - `run_terminal(...)`
 - `delegate_task(...)`
 - `ctx.agents.spawn(...)`
-- `evolve_core(background=true)`
+- `evolve_core(action="start", background=true)`
 
 Background task tools return a `task_id`. Use `task_status`,
 `task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or

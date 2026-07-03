@@ -22,7 +22,7 @@ checks:
 - schedule management
 - state reads and writes
 - child agent runs and spawns
-- version promotion
+- Git revision promotion
 - rollback
 - package repository trust
 - dependency changes

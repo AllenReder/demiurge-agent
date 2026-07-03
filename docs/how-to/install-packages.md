@@ -87,7 +87,8 @@ uv run demiurge package install builtin/memory_basic --core assistant
 
 Install options are resolved once during installation. Secret option values may
 be written into the installed component config, but `packages.yaml` stores only
-redacted option snapshots.
+redacted option snapshots. A successful install is committed to the runtime
+core Git repository and reports the new core revision.
 
 ## What Installation Writes
 
@@ -125,6 +126,10 @@ The install record is written to:
 
 Packages do not install Python dependencies and do not edit `uv.lock`.
 `manual_dependencies` are warnings for a human dependency review.
+
+`packages.yaml` is provenance only. It records installed targets and
+file/tree hashes so Demiurge can report drift, but runtime behavior comes from
+the live files under `~/.demiurge/agents/`.
 
 ## Built-in Package Families
 
@@ -187,7 +192,22 @@ uv run demiurge package uninstall memory_basic --core assistant
 
 Uninstall removes package-owned component targets, removes package-owned
 pipeline entries for `bootstrap`, `input`, and `output` slots, and updates
-`packages.yaml`.
+`packages.yaml`. A successful uninstall is also committed to the runtime core
+Git repository.
+
+If package-owned files have drifted since installation, uninstall refuses by
+default:
+
+```bash
+uv run demiurge package uninstall memory_basic --core assistant
+```
+
+Use `--force-drift` only when you intentionally want to remove drifted
+package-owned targets:
+
+```bash
+uv run demiurge package uninstall memory_basic --core assistant --force-drift
+```
 
 Uninstall does not remove data written outside package-owned targets. For
 example, memory data, generated audio, context notes, caches, and provider
@@ -204,7 +224,7 @@ uv run demiurge package list --core assistant
 Check that the runtime core still loads:
 
 ```bash
-uv run demiurge init --check
+uv run demiurge core check
 ```
 
 Run a fake-provider turn:

@@ -19,6 +19,10 @@ The source checkout and runtime home have different roles.
 ~/.demiurge/
   config.yaml
   .env
+  .core.git/
+  .core.lock
+  .evolve/
+    runs/
   agents/
     agent.yaml
     assistant/
@@ -32,10 +36,12 @@ The source checkout and runtime home have different roles.
 ```
 
 `config.yaml` is host-owned runtime configuration. `.env` can hold local
-provider secrets. `agents/` contains live runtime Agent Cores. `runtime/`
-contains the SQLite control-plane database, delivery outbox projection,
-scheduler runtime projections, session event logs, and host-owned artifacts.
-`workspace/` is the non-local fallback workspace.
+provider secrets. `.core.git/` is the bare Git repository for the runtime
+agents tree, and `agents/` is the live checkout of that tree. `.evolve/` holds
+isolated change-set worktrees. `runtime/` contains the SQLite control-plane
+database, delivery outbox projection, scheduler runtime projections, session
+event logs, and host-owned artifacts. `workspace/` is the non-local fallback
+workspace.
 
 ## Source Templates vs Runtime Cores
 
@@ -45,14 +51,22 @@ The repository contains source templates under:
 agents/
 ```
 
-`demiurge init` copies or refreshes those templates into:
+On a fresh runtime home, `demiurge init` commits that tree into:
+
+```text
+~/.demiurge/.core.git
+```
+
+and checks out the live agents tree at:
 
 ```text
 ~/.demiurge/agents/
 ```
 
 Edit runtime cores for local behavior changes. Edit source templates only when
-you are changing the default packaged project behavior.
+you are changing the default packaged project behavior. This release does not
+migrate legacy runtime homes; delete an old `~/.demiurge` before first run if it
+was created by an older layout.
 
 ## Managed Checkout
 
@@ -62,8 +76,8 @@ Managed install places the checkout at:
 ~/.demiurge/demiurge-agent
 ```
 
-Live runtime cores remain separate, so updating the managed checkout does not
-overwrite edited Agent Cores.
+Live runtime cores remain separate Git revisions, so updating the managed
+checkout does not overwrite edited Agent Cores.
 
 ## Drift
 
@@ -74,8 +88,17 @@ uv run demiurge init --check
 uv run demiurge doctor
 ```
 
-Refresh intentionally:
+Refresh intentionally. Refresh is a Git transaction that creates a new live
+revision from the source templates:
 
 ```bash
 uv run demiurge init --refresh assistant
+```
+
+Inspect the live repository:
+
+```bash
+uv run demiurge core status
+uv run demiurge core versions
+uv run demiurge core check
 ```

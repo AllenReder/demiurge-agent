@@ -31,7 +31,6 @@ agents/<core>/
     schedules/
     mcp/
     lib/
-    tests/
 ```
 
 同样的形状存在于 runtime home 下的 `~/.demiurge/agents/<core>/`。
@@ -71,9 +70,8 @@ Agent Core authors 可以编辑：
 - `agent/schedules/`
 - `agent/mcp/`
 - `agent/lib/`
-- `agent/tests/`
 
-`packages.yaml` 是 package install state。只有在明确修复 package state 时才编辑它。
+`packages.yaml` 是 package provenance state。它记录 installed package targets 和 hashes，但不是 runtime truth。只有在明确修复 package state 时才编辑它。
 
 ## Host-Owned Systems
 
@@ -88,7 +86,7 @@ Agent Core authors 不得接管：
 - production state mutation
 - package repository trust
 - dependency installation
-- version promotion or rollback
+- Git revision promotion or rollback
 - gateway channel transport
 - scheduler claims and run logs
 

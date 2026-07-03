@@ -6,8 +6,10 @@ from rich.console import Console
 
 from demiurge import cli
 from demiurge import setup_cli
+from demiurge.app import init_runtime, source_agents_root
 from demiurge.provider_presets import get_provider_preset
 from demiurge.providers import LLMResponse
+from demiurge.storage import VersionStore
 from demiurge.ui import tui_launcher
 
 
@@ -148,6 +150,35 @@ def test_gateway_subcommand_reports_config_error(monkeypatch, tmp_path):
         cli.main(["gateway", "--home", str(tmp_path / "home")])
 
     assert str(exc.value) == "core `assistant` has no enabled gateway channels"
+
+
+def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+    store = VersionStore(home)
+    original = store.core_repository.live_revision()
+    soul = store.active_core_path("assistant") / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nCLI rollback setup.\n", encoding="utf-8")
+    changed = store.core_repository.commit_live(reason="test setup", summary="test setup")
+
+    cli.main(["--home", str(home), "core", "status"])
+    status_output = capsys.readouterr().out
+    assert "agents_root:" in status_output
+    assert changed.revision[:12] in status_output
+
+    cli.main(["--home", str(home), "core", "check"])
+    check_output = capsys.readouterr().out
+    assert "[ok] path_safety" in check_output
+
+    cli.main(["--home", str(home), "core", "versions", "--limit", "2"])
+    versions_output = capsys.readouterr().out
+    assert changed.revision in versions_output
+    assert original in versions_output
+
+    cli.main(["--home", str(home), "core", "rollback"])
+    rollback_output = capsys.readouterr().out
+    assert "rollback committed:" in rollback_output
+    assert "CLI rollback setup." not in soul.read_text(encoding="utf-8")
 
 
 def test_cli_help_does_not_expose_channel_flag():

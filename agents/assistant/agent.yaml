@@ -1,8 +1,6 @@
 schema_version: 1
 agent:
   id: assistant
-  version: "0001"
-  parent: null
   summary: "Initial demiurge assistant core."
 runtime:
   surface_root: agent
@@ -141,7 +139,3 @@ capabilities:
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
-tests:
-  commands: []
-  smoke:
-    fake_llm_script: agent/tests/fixtures/fake_llm/basic_turn.json

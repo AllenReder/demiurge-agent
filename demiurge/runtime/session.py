@@ -127,7 +127,7 @@ class SessionRuntime:
         *,
         session_id: str | None = None,
         core_id: str,
-        core_version: str,
+        core_revision: str,
         channel: str | None = None,
         conversation_key: str | None = None,
         workspace: str | None = None,
@@ -139,7 +139,7 @@ class SessionRuntime:
         record = SessionRecord(
             session_id=session_id or utc_id("session_"),
             core_id=core_id,
-            core_version=core_version,
+            core_revision=core_revision,
             created_at=now,
             updated_at=now,
             channel=channel,
@@ -157,7 +157,7 @@ class SessionRuntime:
         session_id: str,
         *,
         core_id: str | None = None,
-        core_version: str | None = None,
+        core_revision: str | None = None,
         channel: str | None = None,
         conversation_key: str | None = None,
         workspace: str | None = None,
@@ -180,7 +180,7 @@ class SessionRuntime:
         record = SessionRecord(
             session_id=session_id,
             core_id=core_id if core_id is not None else current.core_id,
-            core_version=core_version if core_version is not None else current.core_version,
+            core_revision=core_revision if core_revision is not None else current.core_revision,
             created_at=current.created_at,
             updated_at=utc_now() if touch else current.updated_at,
             channel=channel if channel is not None else current.channel,
@@ -521,7 +521,7 @@ class SessionRuntime:
             "compaction_summary_id": record.compaction_summary_id,
             "compacted_until_message_id": record.compacted_until_message_id,
             "metadata": record.metadata or {},
-            "core_version": record.core_version,
+            "core_revision": record.core_revision,
         }
         with_existing = self.store.query(
             RuntimeQuery(table="sessions", where={"session_id": record.session_id}, limit=1)
@@ -537,7 +537,7 @@ class SessionRuntime:
             aggregate_id=record.session_id,
             payload={
                 "core_id": record.core_id,
-                "core_version": record.core_version,
+                "core_revision": record.core_revision,
                 "status": "active",
                 "channel": record.channel,
                 "target": target,
@@ -583,7 +583,7 @@ class SessionRuntime:
         return SessionRecord(
             session_id=str(row["session_id"]),
             core_id=str(row.get("core_id") or ""),
-            core_version=str(target.get("core_version") or ""),
+            core_revision=str(target.get("core_revision") or ""),
             created_at=str(row.get("created_at") or ""),
             updated_at=str(row.get("updated_at") or ""),
             channel=row.get("channel"),

@@ -5,7 +5,7 @@ import { colors, type ThemeColors } from "./theme"
 
 export function Footer(props: { colors?: ThemeColors; columns: number; status: StatusState }) {
   const theme = props.colors ?? colors
-  const fixedLeft = compactJoin([`${props.status.core_id}@${props.status.core_version || "?"}`, shortSession(props.status.session_id)])
+  const fixedLeft = compactJoin([`${props.status.core_id}@${props.status.core_revision || "?"}`, shortSession(props.status.session_id)])
   const workspaceBudget = Math.max(0, Math.floor(props.columns * 0.45) - displayWidth(fixedLeft) - 3)
   const left = compactJoin([fixedLeft, truncateMiddle(props.status.workspace, workspaceBudget)])
   const right = compactJoin([

@@ -176,16 +176,19 @@ into:
 
 ## Install and Uninstall Contract
 
-Install writes package-owned runtime core targets, pipeline entries for slot
-components, and a package record in:
+Install writes package-owned runtime core targets and pipeline entries for slot
+components under the core repository lock. It runs host-owned gates, commits
+the live agents tree, and writes a provenance record in:
 
 ```text
 ~/.demiurge/agents/<core-id>/packages.yaml
 ```
 
 Uninstall removes package-owned targets and pipeline entries unless another
-installed package still references the same shared component. It then updates
-`packages.yaml`.
+installed package still references the same shared component. It refuses drifted
+package-owned files unless the operator supplies an explicit destructive
+strategy such as `--force-drift`. It then updates `packages.yaml` and commits
+the live agents tree.
 
 Data outside package-owned targets is outside the uninstall contract.
 
@@ -207,5 +210,5 @@ uv run demiurge package install <alias>/<package_id> --core assistant --preview
 Check the runtime after installation:
 
 ```bash
-uv run demiurge init --check
+uv run demiurge core check
 ```

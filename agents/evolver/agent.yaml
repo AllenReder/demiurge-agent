@@ -1,8 +1,6 @@
 schema_version: 1
 agent:
   id: evolver
-  version: "0001"
-  parent: null
   summary: "Host-managed evolver core for editing candidate agent-core versions."
 runtime:
   surface_root: agent
@@ -51,7 +49,3 @@ capabilities:
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
-tests:
-  commands: []
-  smoke:
-    fake_llm_script: null

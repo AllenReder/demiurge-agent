@@ -5,8 +5,8 @@ description: 使用 host-owned 的 evolution path 和 rollback controls。
 
 # 演化和回滚 Core
 
-Demiurge 可以让 host-managed 的 `evolver` core 去编辑 active core 的 candidate copy。
-Promotion 仍然由 host 拥有。
+Demiurge 可以让 host-managed 的 `evolver` core 编辑 runtime agents tree 的隔离 Git
+worktree。Review 会创建 proposal commit；promote 会推进 live Git ref。
 
 ## 从 TUI 演化
 
@@ -16,8 +16,31 @@ Promotion 仍然由 host 拥有。
 /evolve Add a concise Telegram reply style input module.
 ```
 
-host 会创建 candidate core，使用 candidate-scoped tools 运行 `evolver` core，检查
-manifest 是否能加载，并且只在检查通过时才 promote candidate。
+Host 会创建 `.evolve/runs/<run_id>/agents`，使用 candidate-scoped tools 运行
+`evolver` core，并返回 `run_id`。Live core 不会改变。
+
+Review 该 run：
+
+```text
+/evolve review <run_id>
+```
+
+Review 会运行 host-owned gates，并创建或更新 `refs/demiurge/runs/<run_id>`。
+
+Promote 已 review 的 run：
+
+```text
+/evolve promote <run_id>
+```
+
+Promote 会重新运行 gates，推进 `refs/demiurge/previous` 和
+`refs/demiurge/live`，并在下一 turn 生效。
+
+丢弃不需要的 run：
+
+```text
+/evolve discard <run_id>
+```
 
 ## 给出功能目标
 
@@ -31,7 +54,7 @@ Change only agent/output and the output pipeline.
 避免让 evolver 去编辑 host runtime code、dependencies、release files、source checkout
 files 或 `.temp/` 的 goals。
 
-## 查看版本
+## 查看 Revisions
 
 在 TUI 内：
 
@@ -47,7 +70,14 @@ files 或 `.temp/` 的 goals。
 /rollback
 ```
 
-Rollback 会通过 host version store 切回之前稳定的 core version。
+Rollback 会创建一个新的 rollback commit，把 agents tree 恢复到之前的 Git revision。
+它会在下一 turn 生效。
+
+需要指定 target 时：
+
+```text
+/rollback <revision>
+```
 
 ## 规则
 

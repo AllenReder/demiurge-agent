@@ -38,9 +38,9 @@ def test_init_runtime_with_evolver_core_does_not_initialize_twice(tmp_path):
 
     assert result["core_id"] == "evolver"
     assert result["active_path"] == str(home / "agents" / "evolver")
-    assert result["previous_stable_version"] is None
-    backups = list((home / "history" / "evolver").glob("*/agent.yaml"))
-    assert backups == []
+    assert result["previous_revision"] is None
+    assert (home / ".core.git").exists()
+    assert not (home / "history").exists()
 
 
 def test_init_runtime_backs_up_existing_active_before_overwrite(tmp_path):
@@ -51,10 +51,9 @@ def test_init_runtime_backs_up_existing_active_before_overwrite(tmp_path):
 
     result = init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
 
-    assert result["previous_stable_version"] == "0001"
-    history_copy = home / "history" / "assistant" / "0001" / "agent" / "SOUL.md"
-    assert history_copy.read_text(encoding="utf-8") == "custom active"
-    assert "demiurge assistant" in active_instructions.read_text(encoding="utf-8")
+    assert result["previous_revision"] is None
+    assert active_instructions.read_text(encoding="utf-8") == "custom active"
+    assert not (home / "history").exists()
 
 
 def test_init_runtime_backs_up_existing_fallback_before_overwrite(tmp_path):
@@ -65,12 +64,9 @@ def test_init_runtime_backs_up_existing_fallback_before_overwrite(tmp_path):
 
     init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
 
-    backups = sorted((home / "history" / "_global").glob("fallback_*/agent.yaml"))
-    assert backups
-    assert backups[-1].read_text(encoding="utf-8") == "model:\n  model_name: custom-model\n"
+    assert not (home / "history").exists()
     restored = load_agent_fallback(fallback)
-    assert restored.model.model_name is None
-    assert restored.ui.tool_display == "summary"
+    assert restored.model.model_name == "custom-model"
 
 
 def test_init_runtime_does_not_overwrite_existing_host_config(tmp_path):
@@ -94,7 +90,7 @@ def test_create_app_auto_initializes_missing_runtime_agent(tmp_path):
     assert (home / "agents" / "agent.yaml").exists()
     assert (home / "agents" / "assistant" / "agent.yaml").exists()
     assert (home / "agents" / "evolver" / "agent.yaml").exists()
-    assert app.version_store.active_pointer("assistant").reason == "auto init"
+    assert app.version_store.active_pointer("assistant").reason == "live"
 
 
 def test_create_app_only_fills_missing_runtime_defaults(tmp_path):
@@ -426,25 +422,27 @@ def test_cli_init_uses_agents_root_override(tmp_path, capsys):
     main(["--home", str(home), "--agents-root", str(custom), "init"])
 
     output = capsys.readouterr().out
-    assert "initialized assistant@0001" in output
+    assert "initialized assistant@" in output
     assert (home / "agents" / "agent.yaml").exists()
     assert (home / "agents" / "assistant" / "agent.yaml").exists()
     assert (home / "agents" / "evolver" / "agent.yaml").exists()
 
 
-def test_version_store_uses_runs_and_history_layout(tmp_path):
+def test_core_repository_uses_evolve_run_worktrees_and_git_refs(tmp_path):
     home = tmp_path / "home"
     store = VersionStore(home)
     store.init_from_source("assistant", source_agents_root() / "assistant")
 
-    candidate = store.create_candidate("assistant", run_id="manual")
-    assert candidate == home / "runs" / "assistant" / "manual" / "candidate"
+    change_set = store.core_repository.begin_change_set(kind="evolve", reason="test", run_id="manual")
+    candidate = change_set.agents_root / "assistant"
+    assert candidate == home / ".evolve" / "runs" / "manual" / "agents" / "assistant"
     (candidate / "agent" / "SOUL.md").write_text("candidate", encoding="utf-8")
 
-    new_version = store.promote_candidate("assistant", candidate, reason="test")
+    proposal = change_set.commit_proposal(reason="test")
+    promoted = store.core_repository.promote_run("manual", reason="test")
 
-    assert (home / "history" / "assistant" / "0001" / "agent.yaml").exists()
-    assert store.active_pointer("assistant").active_version == new_version
+    assert promoted.revision == proposal.revision
+    assert store.active_pointer("assistant").active_revision == promoted.revision
     assert (home / "agents" / "assistant" / "agent" / "SOUL.md").read_text(encoding="utf-8") == "candidate"
 
 
@@ -452,13 +450,17 @@ def test_rollback_restores_history_snapshot(tmp_path):
     home = tmp_path / "home"
     store = VersionStore(home)
     store.init_from_source("assistant", source_agents_root() / "assistant")
-    candidate = store.create_candidate("assistant", run_id="manual")
+    original = store.active_pointer("assistant").active_revision
+    change_set = store.core_repository.begin_change_set(kind="evolve", reason="test", run_id="manual")
+    candidate = change_set.agents_root / "assistant"
     (candidate / "agent" / "SOUL.md").write_text("candidate", encoding="utf-8")
-    store.promote_candidate("assistant", candidate, reason="test")
+    change_set.commit_proposal(reason="test")
+    store.core_repository.promote_run("manual", reason="test")
 
     rolled_back = store.rollback("assistant", reason="test rollback")
 
-    assert rolled_back.active_version == "0001"
+    assert rolled_back.active_revision != original
+    assert rolled_back.previous_revision is not None
     restored = home / "agents" / "assistant" / "agent" / "SOUL.md"
     assert "demiurge assistant" in restored.read_text(encoding="utf-8")
 

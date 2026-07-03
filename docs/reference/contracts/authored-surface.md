@@ -33,7 +33,6 @@ agents/<core>/
     schedules/
     mcp/
     lib/
-    tests/
 ```
 
 The same shape exists in the runtime home under
@@ -78,10 +77,10 @@ Agent Core authors may edit:
 - `agent/schedules/`
 - `agent/mcp/`
 - `agent/lib/`
-- `agent/tests/`
 
-`packages.yaml` is package install state. Edit it only during explicit package
-state repair.
+`packages.yaml` is package provenance state. It records installed package
+targets and hashes, but it is not runtime truth. Edit it only during explicit
+package state repair.
 
 ## Host-Owned Systems
 
@@ -96,7 +95,7 @@ Agent Core authors must not take ownership of:
 - production state mutation
 - package repository trust
 - dependency installation
-- version promotion or rollback
+- Git revision promotion or rollback
 - gateway channel transport
 - scheduler claims and run logs
 

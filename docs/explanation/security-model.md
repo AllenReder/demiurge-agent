@@ -43,7 +43,9 @@ Provider secrets belong in host config, environment variables, or
 printing secret values.
 
 Package component options of type `secret` can write component-local config, but
-`packages.yaml` stores only redacted option values.
+`packages.yaml` stores only redacted option values. Package provenance hashes in
+that file are used for drift reporting and uninstall safety; runtime truth is
+still the committed agents tree.
 
 ## Channels
 

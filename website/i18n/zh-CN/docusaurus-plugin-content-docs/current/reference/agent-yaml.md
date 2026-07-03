@@ -50,7 +50,7 @@ approval:
   risks: {}
 ```
 
-使用 fallback 提供共享的 model、UI 和 approval defaults。不要把 `agent`、`runtime`、`channels`、`slots`、`tools`、`capabilities`、`dependencies` 或 `tests` 放进 fallback 文件。
+使用 fallback 提供共享的 model、UI 和 approval defaults。不要把 `agent`、`runtime`、`channels`、`slots`、`tools`、`capabilities` 或 `dependencies` 放进 fallback 文件。
 
 ## 具体 Core 形状
 
@@ -60,8 +60,6 @@ approval:
 schema_version: 1
 agent:
   id: assistant
-  version: "0001"
-  parent: null
   summary: "Initial demiurge assistant core."
 runtime:
   surface_root: agent
@@ -97,10 +95,6 @@ capabilities:
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
-tests:
-  commands: []
-  smoke:
-    fake_llm_script: agent/tests/fixtures/fake_llm/basic_turn.json
 ```
 
 ## 顶层字段
@@ -108,7 +102,7 @@ tests:
 | 字段 | 必需 | 含义 |
 | --- | --- | --- |
 | `schema_version` | 否 | Manifest schema version。当前默认值是 `1`。 |
-| `agent` | 是 | Core id、version、parent 和 summary。 |
+| `agent` | 是 | Core id 和 summary。Git revision 由 host-owned core repository 管理，不写入 manifest。 |
 | `runtime` | 否 | 该 core 的 host runtime options。 |
 | `model` | 否 | Core-level model/provider defaults。 |
 | `ui` | 否 | Core-level UI preferences，例如 `tool_display`。 |
@@ -118,7 +112,6 @@ tests:
 | `approval` | 否 | Core-level approval policy overrides。 |
 | `capabilities` | 否 | Host-mediated effects 的 capability grants。 |
 | `dependencies` | 否 | Runtime dependency mode metadata。 |
-| `tests` | 否 | Candidate validation metadata。 |
 
 ## `runtime`
 

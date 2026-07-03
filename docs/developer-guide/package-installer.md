@@ -5,8 +5,9 @@ description: Contributor notes for package repository loading, previews, install
 
 # Package Installer
 
-The package installer manages user-controlled runtime-core edits from package
-repositories.
+The package installer plans user-controlled runtime-core edits from package
+repositories. Actual install and uninstall operations run as host-owned Git
+transactions against the live agents tree.
 
 ## Load
 
@@ -37,15 +38,20 @@ Preview must not write runtime files.
 ## Install
 
 Install copies component files, writes component `config.yaml` when needed,
-applies pipeline edits, installs child cores when requested, and records state
-in the target core's `packages.yaml`.
+applies pipeline edits, installs child cores when requested, records provenance
+hashes in the target core's `packages.yaml`, runs host-owned gates, and commits
+the live agents tree.
 
 ## Uninstall
 
 Uninstall removes package-owned component targets and updates `packages.yaml`.
-It should not delete package data written outside component-owned targets.
+It refuses drifted files unless the caller supplies an explicit destructive
+strategy such as `--force-drift`. It should not delete package data written
+outside component-owned targets.
 
 ## Boundary
 
 The installer does not install dependencies or edit `uv.lock`. Use
-`manual_dependencies` for dependency review warnings.
+`manual_dependencies` for dependency review warnings. `packages.yaml` is
+provenance, not runtime truth; runtime loading comes from the committed files in
+the agents tree.

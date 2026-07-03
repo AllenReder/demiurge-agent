@@ -1,8 +1,12 @@
+import shutil
+
+import pytest
 import yaml
 
 from demiurge.app import init_runtime, source_agents_root
 from demiurge.cli import main
 from demiurge.diagnostics.doctor import DoctorRuntime
+from demiurge.storage import VersionStore
 
 
 def test_doctor_detects_runtime_missing_source_tool(tmp_path):
@@ -68,17 +72,37 @@ def test_cli_init_check_is_read_only(tmp_path, capsys):
     assert not (home / "agents").exists()
 
 
-def test_cli_init_refresh_backs_up_and_overwrites_runtime_core(tmp_path, capsys):
+def test_cli_init_refresh_refuses_dirty_runtime_core(tmp_path, capsys):
     home = tmp_path / "home"
     init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
     instructions = home / "agents" / "assistant" / "agent" / "SOUL.md"
     instructions.write_text("local edit", encoding="utf-8")
 
-    main(["init", "--home", str(home), "--refresh", "assistant"])
+    with pytest.raises(SystemExit) as exc:
+        main(["init", "--home", str(home), "--refresh", "assistant"])
 
+    assert "uncommitted changes" in str(exc.value)
+    assert instructions.read_text(encoding="utf-8") == "local edit"
+    assert not capsys.readouterr().out
+
+
+def test_cli_init_refresh_commits_source_agents_tree(tmp_path, capsys):
+    source = tmp_path / "source-agents"
+    shutil.copytree(source_agents_root(), source)
+    source_instructions = source / "assistant" / "agent" / "SOUL.md"
+    source_instructions.write_text("source refresh content", encoding="utf-8")
+    home = tmp_path / "home"
+    init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
+    version_store = VersionStore(home)
+    before = version_store.core_repository.live_revision()
+
+    main(["init", "--home", str(home), "--agents-root", str(source), "--refresh", "assistant"])
+
+    after = version_store.core_repository.live_revision()
+    instructions = home / "agents" / "assistant" / "agent" / "SOUL.md"
     output = capsys.readouterr().out
     assert "refreshed assistant" in output
-    assert "demiurge assistant" in instructions.read_text(encoding="utf-8")
-    assert (home / "history" / "assistant" / "0001" / "agent" / "SOUL.md").read_text(
-        encoding="utf-8"
-    ) == "local edit"
+    assert after != before
+    assert version_store.core_repository.previous_revision() == before
+    assert instructions.read_text(encoding="utf-8") == "source refresh content"
+    assert not (home / "history").exists()

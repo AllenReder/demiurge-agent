@@ -51,6 +51,28 @@ uv run demiurge doctor --json
 
 检查 runtime/source template drift。
 
+## `core`
+
+```bash
+uv run demiurge core status
+uv run demiurge core versions
+uv run demiurge core check
+uv run demiurge core evolve start Improve concise replies
+uv run demiurge core evolve review <run_id>
+uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve discard <run_id>
+uv run demiurge core rollback
+uv run demiurge core rollback <revision>
+```
+
+检查并修改 Git-backed runtime agents tree。Revisions 是
+`~/.demiurge/.core.git` 中的 commits。
+
+`core check` 会对 live agents tree 运行 host-owned gates。`core evolve start`
+会在 `.evolve/runs/<run_id>/agents` 下创建隔离 worktree。Review 会记录
+`refs/demiurge/runs/<run_id>`，promote 会推进 `refs/demiurge/live`，rollback
+会创建新的 rollback commit。
+
 ## `setup`
 
 ```bash
@@ -82,6 +104,7 @@ uv run demiurge package install <package_id|repo/package_id> --core assistant
 uv run demiurge package install <package_id|repo/package_id> --core assistant --preview
 uv run demiurge package install <package_id|repo/package_id> --core assistant --option key=value
 uv run demiurge package uninstall <package_id|repo/package_id> --core assistant
+uv run demiurge package uninstall <package_id|repo/package_id> --core assistant --force-drift
 uv run demiurge package repo list
 uv run demiurge package repo add ./local-packages --alias local --trust
 uv run demiurge package repo add https://github.com/user/demiurge-packages.git --alias community --ref main --trust

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from demiurge.app import DemiurgeApp, load_host_config
@@ -270,6 +270,8 @@ class TuiInteractionBridge:
             "skills": self._skills,
             "skill": self._skill,
             "packages": self._packages,
+            "evolve": self._evolve,
+            "rollback": self._rollback,
             "tool-display": self._tool_display,
             "sessions": self._sessions,
             "subagents": self._subagents,
@@ -482,7 +484,7 @@ class TuiInteractionBridge:
         return {
             "workspace": str(self.app.workspace.root),
             "core_id": pointer.core_id,
-            "core_version": pointer.active_version,
+            "core_revision": pointer.active_revision,
             "session_id": self.app.runner.session_id,
             "provider": self.app.provider_name,
             "model": self.app.model_name,
@@ -558,13 +560,13 @@ class TuiInteractionBridge:
 
     async def _core(self, _: str) -> bool:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
-        await self._emit_command_output("core", f"{pointer.core_id}@{pointer.active_version}")
+        await self._emit_command_output("core", f"{pointer.core_id}@{pointer.active_revision}")
         return True
 
     async def _versions(self, _: str) -> bool:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
         versions = self.app.version_store.list_versions(pointer.core_id)
-        text = "\n".join(f"{'*' if version == pointer.active_version else ' '} {version}" for version in versions)
+        text = "\n".join(f"{'*' if version == pointer.active_revision else ' '} {version}" for version in versions)
         await self._emit_command_output("versions", text)
         return True
 
@@ -638,29 +640,45 @@ class TuiInteractionBridge:
             home=self.app.home,
             repository_configs=host_config.packages.repositories,
         )
-        manager = PackageManager(version_store=self.app.version_store, repository=repositories)
+        manager = PackageManager(agents_root=self.app.version_store.agents_root, repository=repositories)
         parts = args.split()
         core_id = self.app.runner.core_id
         if not parts:
             result = manager.list(core_id=core_id)
-            installed_ids = {item.package_id for item in result.installed}
+            installed_by_id = {item.package_id: item for item in result.installed}
             rows = [
-                ("*" if package.package_id in installed_ids else "", package.ref, ", ".join(package.tags), package.summary)
+                (
+                    "!" if installed_by_id.get(package.package_id) and installed_by_id[package.package_id].drift else "*" if package.package_id in installed_by_id else "",
+                    package.ref,
+                    ", ".join(package.tags),
+                    package.summary,
+                )
                 for package in result.packages
             ]
             await self._emit_command_output("packages", _format_table(["", "package", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
             return True
         action = parts[0]
         if action in {"install", "uninstall"}:
-            if len(parts) != 2:
-                await self._emit_command_output("packages", f"usage: /packages {action} <package>")
+            if len(parts) not in {2, 3}:
+                await self._emit_command_output("packages", f"usage: /packages {action} <package> [--force-drift]")
                 return True
             try:
-                result = manager.install(core_id=core_id, package_id=parts[1]) if action == "install" else manager.uninstall(core_id=core_id, package_id=parts[1])
+                if action == "install":
+                    result = await self._commit_package_transaction(
+                        f"install {parts[1]}",
+                        lambda: manager.install(core_id=core_id, package_id=parts[1]),
+                    )
+                else:
+                    force_drift = len(parts) == 3 and parts[2] == "--force-drift"
+                    result = await self._commit_package_transaction(
+                        f"uninstall {parts[1]}",
+                        lambda: manager.uninstall(core_id=core_id, package_id=parts[1], destructive=force_drift),
+                    )
             except PackageOperationError as exc:
                 await self._emit_command_output("packages", f"package {action} failed: {exc}")
                 return True
-            await self._emit_command_output("packages", f"{result.action}ed {result.package_ref} for {result.core_id}")
+            revision = f" @ {result.revision[:12]}" if result.revision else ""
+            await self._emit_command_output("packages", f"{result.action}ed {result.package_ref} for {result.core_id}{revision}")
             return True
         try:
             package = manager.repositories.resolve_package_ref(action)
@@ -668,6 +686,70 @@ class TuiInteractionBridge:
             package = None
         await self._emit_command_output("packages", f"unknown package: {action}" if package is None else _format_key_values(f"Package: {package.ref}", asdict(package)))
         return True
+
+    async def _evolve(self, args: str) -> bool:
+        parts = args.split(maxsplit=1)
+        if not parts:
+            await self._emit_command_output("evolve", "usage: /evolve <goal>|review <run_id>|promote <run_id>|discard <run_id>")
+            return True
+        action = parts[0]
+        if action in {"review", "promote", "discard"}:
+            run_id = parts[1].strip() if len(parts) > 1 else ""
+            if not run_id:
+                await self._emit_command_output("evolve", f"usage: /evolve {action} <run_id>")
+                return True
+            if action == "review":
+                result = await self.app.evolution_runtime.review(run_id, target_core_id=self.app.runner.core_id)
+                await self._emit_command_output(
+                    "evolve",
+                    f"review {run_id}: {'passed' if result.passed else 'failed'}\n"
+                    f"proposal: {result.proposal_revision or '(none)'}\n"
+                    f"report: {result.report_path}",
+                )
+                return True
+            if action == "promote":
+                result = await self.app.evolution_runtime.promote(run_id, target_core_id=self.app.runner.core_id, reason="tui promote")
+                await self._emit_command_output("evolve", f"{result.summary}\nreport: {result.report_path}")
+                return True
+            payload = self.app.evolution_runtime.discard(run_id)
+            await self._emit_command_output("evolve", json.dumps(payload, ensure_ascii=False, indent=2))
+            return True
+        result = await self.app.evolution_runtime.start(
+            target_core_id=self.app.runner.core_id,
+            goal=args,
+            source_turn_id=None,
+        )
+        await self._emit_command_output(
+            "evolve",
+            f"{result.summary}\nrun_id: {result.run_id}\nagents_root: {result.agents_root}\nreport: {result.report_path}",
+        )
+        return True
+
+    async def _rollback(self, args: str) -> bool:
+        target = args.strip() or "previous"
+        try:
+            pointer = self.app.version_store.rollback(self.app.runner.core_id, target=target, reason="tui rollback")
+        except Exception as exc:
+            await self._emit_command_output("rollback", f"rollback failed: {exc}")
+            return True
+        await self._emit_command_output(
+            "rollback",
+            f"rollback committed: {pointer.active_revision[:12]}\nprevious: {pointer.previous_revision[:12] if pointer.previous_revision else '(none)'}",
+        )
+        return True
+
+    async def _commit_package_transaction(self, action: str, operation):
+        repository = self.app.version_store.core_repository
+        with repository.live_transaction(reason=f"package {action}"):
+            result = operation()
+            changed_paths = repository.live_changed_paths()
+            gates = await self.app.gate_runner.run(repository.active_agents_root(), changed_paths=changed_paths)
+            if not gates.passed:
+                failures = [phase for phase in gates.phases if not phase.passed]
+                summary = "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
+                raise PackageOperationError("package gates failed: " + summary)
+            commit = repository.commit_live(reason=f"package {action}", summary=f"package {action}")
+            return replace(result, revision=commit.revision, previous_revision=commit.previous_revision)
 
     async def _sessions(self, args: str) -> bool:
         limit = int(args.strip()) if args.strip().isdigit() else 20
@@ -880,7 +962,7 @@ class TuiInteractionBridge:
             session_id=self.app.runner.session_id,
             turn_id="tui_command",
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self.app.version_store.active_pointer(core.core_id).active_revision,
             user_input=AgentInput(content=""),
             state={},
             metadata={"channel": "tui", "source": "local", "target": "local"},

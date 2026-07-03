@@ -131,4 +131,4 @@ uv run demiurge init --check
 - 具体 cores 位于 `agents/<core>/agent.yaml` 加上 `agents/<core>/agent/`。
 - Slot 目录从 `runtime.surface_root` 加载。
 - `agent/pipelines.yaml` 控制 bootstrap、input 和 output 阶段顺序。
-- Host 仍然拥有 provider calls、tool dispatch、approvals、state、version promotion 和 rollback。
+- Host 仍然拥有 provider calls、tool dispatch、approvals、state、Git revision promotion 和 rollback。

@@ -5,34 +5,37 @@ description: Stable rules for the host-managed evolver core.
 
 # Evolver-Safe Edit Contract
 
-The `evolver` core edits a candidate copy of another Agent Core after the
-active core requests evolution. The host creates the candidate workspace and
-performs gating and promotion.
+The `evolver` core edits an isolated agents-tree worktree after the active core
+requests evolution. The host creates the worktree and performs gating and
+promotion.
 
 This contract defines safe edit scope for candidate work.
 
 ## Candidate Scope
 
-The editable target is a candidate concrete core, not the global fallback
-config and not the source checkout.
+The editable target is an isolated candidate agents tree worktree, not the
+source checkout and not host runtime state. The evolver usually edits one
+target concrete core, but it may also edit helper cores when the goal requires
+cross-core behavior.
 
 Safe candidate shape:
 
 ```text
-candidate/
+agents/
   agent.yaml
-  agent/
-    SOUL.md
-    pipelines.yaml
-    bootstrap/
-    input/
-    output/
-    tools/
-    skills/
-    schedules/
-    mcp/
-    lib/
-    tests/
+  <core>/
+    agent.yaml
+    agent/
+      SOUL.md
+      pipelines.yaml
+      bootstrap/
+      input/
+      output/
+      tools/
+      skills/
+      schedules/
+      mcp/
+      lib/
 ```
 
 ## Preferred Edit Paths
@@ -55,7 +58,6 @@ agent/SOUL.md
 agent/schedules/
 agent/mcp/
 agent/lib/
-agent/tests/
 agent.yaml
 ```
 
@@ -70,7 +72,6 @@ Do not edit:
 - source checkout files
 - host config
 - `agents/agent.yaml` global fallback config
-- registry files
 - session records
 - runtime SQLite files
 - scheduler/runtime task state
@@ -87,7 +88,7 @@ Do not edit:
 Do not:
 
 - promote a candidate manually
-- roll back the active pointer manually
+- roll back the live Git ref manually
 - install dependencies
 - change the host lock file
 - run broad destructive cleanup
@@ -137,4 +138,4 @@ At the end of an evolution run, summarize:
 - verification performed
 - limitations or follow-up needed
 
-The host performs manifest checks and promotion.
+The host performs gates and promotion through `CoreRepository`.

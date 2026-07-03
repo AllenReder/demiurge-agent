@@ -60,7 +60,7 @@ uv run demiurge --provider fake
 
 ## Agent Slots 如何工作
 
-Agent Slot 是 Agent Core 的可演化交互边界：它让 Core 定义的行为逻辑在受治理的位置介入 agent loop，并组合 tools、skills、MCP、state 或其他 agents，而不需要修改 Host harness。
+Agent Slot 是 Agent Core 的可演化交互边界：它让 Core 定义的行为逻辑在受治理的位置介入 agent loop，并组合 tools、skills、MCP、state 或其他 agents，而不需要修改 Host harness。Host 仍然控制 provider access、approvals、delivery、Git revision promotion 和 rollback。
 
 <p>
   <strong>Basic Memory System</strong><br>
@@ -92,13 +92,14 @@ assistant/
     ├── skills/
     ├── schedules/
     ├── mcp/
-    ├── lib/
-    └── tests/
+    └── lib/
 ```
 
-runtime 会把 source templates 复制到 `~/.demiurge/agents`。runtime core
-的改动是文件化、可 diff、可 gate 的。Package recipes 会把可复用组件安装进
-runtime cores，不修改 source templates。
+runtime 会从 source `agents/` tree 初始化 `~/.demiurge/.core.git`，并把
+live agents tree checkout 到 `~/.demiurge/agents`。runtime core edits、
+evolve runs、package install/uninstall、promotion 和 rollback 都是这个 Git
+repository 里的 revisions。Package recipes 会把可复用组件安装进 runtime
+cores，不修改 source templates 或 host lock file。
 
 ## 手册入口
 

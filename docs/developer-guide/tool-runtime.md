@@ -38,9 +38,13 @@ live worker for active work:
   stdout/stderr into `task_logs`.
 - `run_terminal(...)` is a model-facing alias that defaults terminal execution
   to `background=true`.
-- `evolve_core(background=true)` creates an `evolver.run` task and runs with
-  `auto_promote=false`; it produces a candidate and report but does not switch
-  the active core.
+- `evolve_core(action="start", background=true)` creates an `evolver.run` task
+  that edits an isolated agents-tree worktree. It returns a run id and does not
+  switch the live core.
+- `evolve_core(action="review")`, `evolve_core(action="promote")`, and
+  `evolve_core(action="discard")` operate on that run id through the host-owned
+  evolution runtime. Promotion advances Git refs only after gates pass and the
+  high-risk tool call is approved.
 - `ctx.agents.spawn(...)` is routed by the runner into an `agent.spawn` task.
 - `delegate_task(...)` is executed by the active runner context and creates an
   `agent.spawn` task with child output returned as parent evidence.

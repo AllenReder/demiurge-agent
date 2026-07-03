@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import yaml
 import pytest
@@ -78,7 +79,7 @@ def _turn(core):
         session_id="session_test",
         turn_id="turn_test",
         core_id=core.core_id,
-        core_version=core.version,
+        core_revision=core.revision,
         user_input=AgentInput(content="test"),
         state={},
     )
@@ -649,11 +650,11 @@ def test_skill_manage_schema_exposes_file_level_actions():
 async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    before = app.version_store.active_pointer("assistant").active_version
+    before = app.version_store.active_pointer("assistant").active_revision
 
     class EditingEvolver:
-        async def run(self, *, candidate_path, **kwargs):
-            soul = candidate_path / "agent" / "SOUL.md"
+        async def run(self, *, target_core_path, **kwargs):
+            soul = target_core_path / "agent" / "SOUL.md"
             soul.write_text(soul.read_text(encoding="utf-8") + "\n\nBackground evolve edit.\n", encoding="utf-8")
             return EvolverRunResult(summary="edited candidate", session_id="child_session", turn_id="child_turn")
 
@@ -667,10 +668,10 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
     assert set(started.data) == {"task_id"}
     assert waited.status == "succeeded"
     assert waited_payload["metadata"]["promoted"] is False
-    assert waited_payload["metadata"]["new_version"] is None
+    assert waited_payload["metadata"]["new_revision"] is None
     assert "ready for review" in waited_payload["summary"]
-    assert app.version_store.active_pointer("assistant").active_version == before
-    candidate_soul = tmp_path / waited_payload["metadata"]["candidate_path"] / "agent" / "SOUL.md"
+    assert app.version_store.active_pointer("assistant").active_revision == before
+    candidate_soul = Path(waited_payload["metadata"]["agents_root"]) / "assistant" / "agent" / "SOUL.md"
     assert "Background evolve edit." in candidate_soul.read_text(encoding="utf-8")
     task = app.control_plane.read(task_id, view="debug")
     assert task["kind"] == "evolver.run"

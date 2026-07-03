@@ -5,31 +5,32 @@ description: Host-managed evolver core 的稳定规则。
 
 # Evolver-Safe Edit 合约
 
-`evolver` core 会在 active core 请求 evolution 之后，编辑另一个 Agent Core 的 candidate copy。Host 创建 candidate workspace，并执行 gating 和 promotion。
+`evolver` core 会在 active core 请求 evolution 之后，编辑 runtime agents tree 的隔离 Git worktree。Host 创建 worktree，并执行 gating 和 promotion。
 
 这个 contract 定义 candidate work 的 safe edit scope。
 
 ## Candidate Scope
 
-可编辑目标是 candidate concrete core，不是 global fallback config，也不是 source checkout。
+可编辑目标是隔离的 candidate agents tree worktree，不是 source checkout，也不是 host runtime state。Evolver 通常编辑一个 target concrete core；当目标需要跨 core 行为时，也可以编辑 helper cores。
 
 安全的 candidate shape：
 
 ```text
-candidate/
+agents/
   agent.yaml
-  agent/
-    SOUL.md
-    pipelines.yaml
-    bootstrap/
-    input/
-    output/
-    tools/
-    skills/
-    schedules/
-    mcp/
-    lib/
-    tests/
+  <core>/
+    agent.yaml
+    agent/
+      SOUL.md
+      pipelines.yaml
+      bootstrap/
+      input/
+      output/
+      tools/
+      skills/
+      schedules/
+      mcp/
+      lib/
 ```
 
 ## Preferred Edit Paths
@@ -52,7 +53,6 @@ agent/SOUL.md
 agent/schedules/
 agent/mcp/
 agent/lib/
-agent/tests/
 agent.yaml
 ```
 
@@ -65,7 +65,6 @@ agent.yaml
 - source checkout files
 - host config
 - `agents/agent.yaml` global fallback config
-- registry files
 - session records
 - runtime SQLite files
 - scheduler/runtime task state
@@ -82,7 +81,7 @@ agent.yaml
 不要：
 
 - promote a candidate manually
-- roll back the active pointer manually
+- roll back the live Git ref manually
 - install dependencies
 - change the host lock file
 - run broad destructive cleanup
@@ -130,4 +129,4 @@ Evolution run 结束时，总结：
 - verification performed
 - limitations or follow-up needed
 
-Host 会执行 manifest checks 和 promotion。
+Host 会通过 `CoreRepository` 执行 gates 和 promotion。

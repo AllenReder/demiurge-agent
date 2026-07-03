@@ -14,7 +14,7 @@ import type {
 export const initialStatus: StatusState = {
   workspace: "",
   core_id: "assistant",
-  core_version: "",
+  core_revision: "",
   session_id: "",
   provider: "",
   model: "",
@@ -255,7 +255,7 @@ function statusFromPayload(payload: Record<string, unknown>): Partial<StatusStat
   return {
     workspace: stringValue(payload.workspace),
     core_id: stringValue(payload.core_id),
-    core_version: stringValue(payload.core_version),
+    core_revision: stringValue(payload.core_revision),
     session_id: stringValue(payload.session_id),
     provider: stringValue(payload.provider),
     model: stringValue(payload.model),

@@ -11,12 +11,12 @@ Demiurge is an Alpha-stage agent framework built around **Agent Slots**:
 governed extension boundaries that let an Agent Core expand capability and
 logic design without changing the Host harness. A file-backed Agent Core can
 compose agents, state, tools, skills, and MCP declarations, then evolve through
-Host-controlled candidate changes.
+Host-controlled Git change sets.
 
 The Host owns sessions, turns, provider calls, tools, approvals, state,
-delivery, promotion, and rollback. Agent Cores own authored files such as
+delivery, Git revision promotion, and rollback. Agent Cores own authored files such as
 `agent.yaml`, `SOUL.md`, Agent Slots, skills, tools, schedules, MCP
-declarations, tests, and local libraries.
+declarations, and local libraries.
 
 Start with [Agent Slots](explanation/agent-slots.md) if you want to understand
 how custom behavior enters the agent loop under Host governance.
@@ -71,8 +71,8 @@ uv run demiurge --provider fake
 ```
 
 The TUI requires Node.js 20 or newer. Running `demiurge` without a subcommand
-starts the TUI. The main subcommands are `init`, `doctor`, `package`, `update`,
-`setup`, and `gateway`.
+starts the TUI. The main subcommands are `init`, `doctor`, `core`, `package`,
+`update`, `setup`, and `gateway`.
 
 ## Configuration Order
 
@@ -97,8 +97,10 @@ Workspace resolution uses this order:
 - Latest release notes: [0.6.0](releases/0.6.0.md).
 - Python dependencies are host-owned and locked by the source checkout.
 - Agent Slot code runs in the host-shared Python environment.
-- Candidate Agent Core evolution cannot add dependencies automatically.
-- Package recipes install files into runtime cores; they do not modify the host
-  lock file.
+- Runtime Agent Core revisions are Git commits in `~/.demiurge/.core.git`.
+- Candidate evolution works in `.evolve/runs/<run_id>/agents` and cannot add
+  dependencies automatically.
+- Package install and uninstall are user-triggered Git transactions against the
+  live agents tree; package recipes do not modify the host lock file.
 - Runtime layout, authoring contracts, package behavior, and troubleshooting
   steps may still change before `1.0.0`.

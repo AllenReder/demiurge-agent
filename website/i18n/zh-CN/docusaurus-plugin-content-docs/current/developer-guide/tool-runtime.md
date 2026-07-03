@@ -28,24 +28,28 @@ Tools 可以来自：
 5. 执行 built-in、authored 或 MCP tool
 6. 将结果转换为 model history 和 user display 所需格式
 
-## Background Jobs
+## Background Tasks
 
 `ToolRuntime` 不负责每个 tool 的 background state。支持后台的 tools 会把工作提交给
-共享的 `JobRuntime`：
+host runtime，并使用共享的 `RuntimeTaskWorker` 作为 active work 的 live worker：
 
-- `terminal(background=true)` 会创建一个 `terminal` backend job，并把 stdout/stderr
-  捕获到 job log 中。
-- `evolve_core(background=true)` 会创建一个 `evolve` backend job，并以
-  `auto_promote=false` 运行；它会产出 candidate 和 report，但不会切换 active core。
-- `ctx.agents.spawn(...)` 会由 runner 路由到一个 `agent` backend job。
+- `terminal(background=true)` 会创建一个 `terminal.exec` task，并把 stdout/stderr
+  捕获到 `task_logs` 中。
+- `run_terminal(...)` 是 model-facing alias，默认使用 `background=true`。
+- `evolve_core(action="start", background=true)` 会创建一个 `evolver.run` task，编辑
+  隔离 agents-tree worktree。它返回 run id，不会切换 live core。
+- `evolve_core(action="review")`、`evolve_core(action="promote")` 和
+  `evolve_core(action="discard")` 通过 host-owned evolution runtime 操作该 run id。
+  Promotion 只有在 gates 通过且 high-risk tool call 被批准后才会推进 Git refs。
+- `ctx.agents.spawn(...)` 会由 runner 路由到一个 `agent.spawn` task。
+- `delegate_task(...)` 由 active runner context 执行，并创建一个 `agent.spawn` task。
 
-`job` 是用于 `list`、`poll`、`log`、`wait` 和 `cancel` 的通用控制 tool。
-`process` 仅作为 terminal jobs 的 compatibility view。Jobs 只存在于内存中，进程重启后
-不会恢复。
+`task_list`、`task_status`、`task_control` 和 `yield_until` 是 model-facing
+runtime-task controls。`task_control` 目前只支持 `command="cancel"`。
 
-每个 job 都会记录 `backend`、owner session/turn、`source_tool`、status、summary、
-bounded log tail、result reference，以及可选的 `write_scope`。具有相同非空
-`write_scope` 的新的 active background job 会被拒绝。
+每个 background task 都会记录 `kind`、owner session/turn、`source_tool`、status、
+summary、bounded log tail、result reference，以及可选的 `write_scope`。具有相同非空
+`write_scope` 的新的 active background task 会被拒绝。
 
 ## Authored Tools
 

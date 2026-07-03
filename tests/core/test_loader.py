@@ -42,7 +42,7 @@ def test_loader_discovers_source_agent_slots():
     core = CoreLoader().load(source_agents_root() / "assistant")
 
     assert core.core_id == "assistant"
-    assert core.version == "0001"
+    assert core.revision == "untracked"
     assert core.manifest.model.provider == "auto"
     assert core.manifest.model.model_name is None
     assert core.manifest.model.model_options == {}
@@ -84,7 +84,7 @@ def test_loader_discovers_evolver_source_agent():
     core = CoreLoader().load(source_agents_root() / "evolver")
 
     assert core.core_id == "evolver"
-    assert core.version == "0001"
+    assert core.revision == "untracked"
     assert core.manifest.runtime.max_model_steps == 90
     assert core.manifest.runtime.workspace is None
     assert core.manifest.model.model_name is None

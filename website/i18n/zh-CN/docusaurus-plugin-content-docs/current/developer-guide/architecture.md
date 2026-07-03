@@ -21,8 +21,11 @@ SessionTurnStepRunner
         +--> ContextAssembler
         +--> Provider
         +--> ToolRuntime
-        +--> JobRuntime
-        +--> Delivery/session stores
+        +--> CoreRepository / EvolutionRuntime / GateRunner
+        +--> RuntimeControlPlane / RuntimeStore
+        +--> RuntimeTaskWorker
+        +--> DeliveryRuntime
+        +--> SessionRuntime
         +--> SchedulerService
 ```
 
@@ -36,9 +39,14 @@ SessionTurnStepRunner
 | Runner | 负责 session、turn、step、bootstrap、input、model/tool loop、output 和 delivery flow。 |
 | Context assembler | 根据 soul、skills、bootstrap、input、history 和 current turn 构建 provider messages。 |
 | Tool runtime | 构建可见 registry，并执行 built-in、authored 和 MCP tools。 |
-| Job runtime | 跟踪内存中的 background jobs、logs、write scopes 和 completion events。 |
-| Delivery runtime | 将 authored delivery requests 转换为 session records、events、artifacts 和 channel output。 |
-| Scheduler | 领取到期 schedules 并运行新的 sessions。 |
+| Core repository | 拥有 Git-backed runtime agents tree、refs、change sets、package transactions 和 rollback commits。 |
+| Evolution runtime | 通过 core repository 和 gates 管理 isolated agents-tree change sets 的 start、review、promote 和 discard。 |
+| Gate runner | 运行 host-owned checks：path safety、artifacts、dependency files、core loading、package provenance、drift warnings 和 cross-core references。 |
+| Runtime control plane | 提交 actions，投影 tasks/events，并从 SQLite 暴露 task/session/scheduler/outbox state。 |
+| Runtime task worker | 持有 active process handles 和 live completion subscribers；pending completions 从 SQLite events 恢复。 |
+| Delivery runtime | Dispatch authored delivery intents 并更新 outbox status。 |
+| Session runtime | 读写 session、turn、message、bootstrap 和 compaction projections。 |
+| Scheduler | 通过 SQLite scheduler projections 领取到期 schedules 并运行新的 sessions。 |
 | Package manager | 预览、安装、卸载并记录 package repository components。 |
 
 ## 入口点
@@ -46,8 +54,14 @@ SessionTurnStepRunner
 - `demiurge/cli.py`
 - `demiurge/app/__init__.py`
 - `demiurge/runtime/runner.py`
+- `demiurge/core_repository.py`
+- `demiurge/evolution/__init__.py`
+- `demiurge/gates/__init__.py`
+- `demiurge/runtime/control.py`
+- `demiurge/runtime/store.py`
+- `demiurge/runtime/tasks.py`
+- `demiurge/runtime/outbox.py`
 - `demiurge/tools/runtime.py`
-- `demiurge/jobs.py`
 - `demiurge/channels/gateway.py`
 - `demiurge/packages.py`
 - `demiurge/scheduler/__init__.py`

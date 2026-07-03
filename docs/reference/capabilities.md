@@ -82,8 +82,8 @@ This grants capabilities such as `mcp.call:docs`.
 | `state.propose` | Submit legacy state proposal effects. |
 | `agents.run:<core>` | Run a child agent synchronously. |
 | `agents.spawn:<core>` | Spawn a child agent task. |
-| `tool.call:evolve_core` | Create and promote a candidate core through the host. |
-| `tool.call:rollback_core` | Roll back the active core pointer through the host. |
+| `tool.call:evolve_core` | Start, review, promote, or discard a host-owned evolve run. |
+| `tool.call:rollback_core` | Create a rollback commit for the live Agent Core tree. |
 
 ## Approval Policy
 

@@ -50,12 +50,10 @@ demiurge-agent/
 | --- | --- |
 | `config.yaml` | Host config，包括 default core、timezone、UI、providers 和 package repositories。 |
 | `.env` | Host 加载的 local environment file。 |
+| `.core.git/` | Runtime agents tree 的 bare Git repository。 |
 | `agents/agent.yaml` | Runtime global fallback config。 |
-| `agents/<core>/` | 具体 Agent Core 的 active runtime copy。 |
-| `registry/<core>.json` | 每个 core 的 active pointer。 |
-| `history/<core>/` | 之前 active core versions 的 backups。 |
-| `history/_global/` | Global fallback config 的 backups。 |
-| `runs/<core>/<run_id>/candidate/` | Evolution 创建的 candidate core workspaces。 |
+| `agents/<core>/` | 具体 Agent Core 的 active live checkout。 |
+| `.evolve/runs/<run_id>/agents/` | 针对整个 agents tree 的隔离 evolve worktree。 |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store 和 projections。 |
 | `runtime/artifacts/` | Runtime records 引用的 host-owned artifacts。 |
 | `runtime/session-events/` | Per-session diagnostic event logs。 |
@@ -81,12 +79,11 @@ Active runtime core：
     schedules/
     mcp/
     lib/
-    tests/
 ```
 
 Loader 会读取 `agent.yaml`，解析 `runtime.surface_root`，然后当 surface root 是 `agent` 时要求 `agent/pipelines.yaml`。
 
-`packages.yaml` 是 package install state。除非你在明确指示下修复 package state，否则不要手动编辑它。
+`packages.yaml` 是 package provenance state。它记录 installed package targets 和 hashes，但不是 runtime truth。除非你在明确指示下修复 package state，否则不要手动编辑它。
 
 ## Authored Surface Defaults
 
@@ -104,7 +101,6 @@ Loader 会读取 `agent.yaml`，解析 `runtime.surface_root`，然后当 surfac
 | Schedules | `agent/schedules/` |
 | MCP servers | `agent/mcp/` |
 | Shared authored helpers | `agent/lib/` |
-| Core-local tests | `agent/tests/` |
 
 Skills、schedules 和 MCP roots 会从 `runtime.surface_root` 推断，除非另有配置。Bootstrap、input 和 output 始终从 `runtime.surface_root` 解析。
 
@@ -117,3 +113,15 @@ Managed installs 可能把 checkout 放在：
 ```
 
 Runtime cores 仍位于 `~/.demiurge/agents/` 下；managed checkout 不是 active runtime core。
+
+## Core Git Refs
+
+Runtime core revisions 是 `~/.demiurge/.core.git` 中的 Git commits。
+
+| Ref | Meaning |
+| --- | --- |
+| `refs/demiurge/live` | checkout 到 `~/.demiurge/agents/` 的 commit。 |
+| `refs/demiurge/previous` | 默认 rollback target。 |
+| `refs/demiurge/runs/<run_id>` | 已 review 的 evolve proposal commit。 |
+
+`demiurge init` 会在 fresh runtime home 上从 source `agents/` tree 创建 repository。它不会迁移旧的 `registry/`、`history/` 或 `runs/` layouts。

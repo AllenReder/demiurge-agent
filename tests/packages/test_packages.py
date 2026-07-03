@@ -710,6 +710,7 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert registry["installed"][0]["repository_type"] == "builtin"
     assert registry["installed"][0]["options"]["api_key"] is None
     assert "config" not in registry["installed"][0]["components"][0]
+    assert all(component.get("installed_hash") for component in registry["installed"][0]["components"])
 
     removed = manager.uninstall(core_id="assistant", package_id="tts_minimax")
 
@@ -719,6 +720,28 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert _pipeline(core_path, "output")["serial"] == ["base_output"]
     assert _pipeline(core_path, "output")["parallel"] == []
     assert not (core_path / "packages.yaml").exists()
+
+
+def test_package_list_reports_drift_and_uninstall_requires_force(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+    manager.install(core_id="assistant", package_id="tts_minimax")
+    core_path = app.version_store.active_core_path("assistant")
+    module = core_path / "agent" / "output" / "tts_minimax" / "module.py"
+    module.write_text(module.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8")
+
+    listed = manager.list(core_id="assistant")
+    installed = next(item for item in listed.installed if item.package_id == "tts_minimax")
+    assert installed.drift
+    preview = manager.preview_uninstall(core_id="assistant", package_id="tts_minimax")
+    assert preview.warnings
+    with pytest.raises(PackageOperationError, match="drifted files"):
+        manager.uninstall(core_id="assistant", package_id="tts_minimax")
+
+    removed = manager.uninstall(core_id="assistant", package_id="tts_minimax", destructive=True)
+
+    assert removed.warnings
+    assert not (core_path / "agent" / "output" / "tts_minimax").exists()
 
 
 @pytest.mark.parametrize(
@@ -1578,6 +1601,7 @@ def test_wizard_uninstalls_installed_package(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="tts_minimax")
+    app.version_store.core_repository.commit_live(reason="test setup", summary="package install test setup")
     prompt = _FakePrompt(
         selections=["packages", "assistant", "builtin/tts_minimax", "uninstall", "__back__", "exit"],
     )

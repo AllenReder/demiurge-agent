@@ -80,8 +80,8 @@ capabilities:
 | `state.propose` | 提交 legacy state proposal effects。 |
 | `agents.run:<core>` | 同步运行 child agent。 |
 | `agents.spawn:<core>` | 生成 child agent task。 |
-| `tool.call:evolve_core` | 通过 host 创建并 promote candidate core。 |
-| `tool.call:rollback_core` | 通过 host 回滚 active core pointer。 |
+| `tool.call:evolve_core` | Start、review、promote 或 discard host-owned evolve run。 |
+| `tool.call:rollback_core` | 为 live Agent Core tree 创建 rollback commit。 |
 
 ## Approval Policy
 

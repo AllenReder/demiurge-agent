@@ -11,7 +11,7 @@ from demiurge.util import ensure_dir, utc_id
 from demiurge.storage import utc_now
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)

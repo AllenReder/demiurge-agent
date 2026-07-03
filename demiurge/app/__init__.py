@@ -309,9 +309,9 @@ class DemiurgeApp:
             "has_compaction_summary": self.session_runtime.latest_compaction_summary(self.runner.session_id)
             is not None,
             "core_id": pointer.core_id,
-            "active_version": pointer.active_version,
-            "previous_stable_version": pointer.previous_stable_version,
-            "versions": self.version_store.list_versions(pointer.core_id),
+            "active_revision": pointer.active_revision,
+            "previous_revision": pointer.previous_revision,
+            "revisions": self.version_store.list_versions(pointer.core_id),
         }
 
 
@@ -347,8 +347,9 @@ class HostEvolverRunner:
         run_id: str,
         goal: str,
         target_core_id: str,
-        candidate_path: Path,
-        reference_core_path: Path,
+        agents_root: Path,
+        target_core_path: Path,
+        reference_agents_root: Path,
         run_root: Path,
     ) -> EvolverRunResult:
         evolver_core_path = self.version_store.active_core_path("evolver")
@@ -361,13 +362,13 @@ class HostEvolverRunner:
         )
         provider, provider_name = create_provider(
             provider_config=provider_config,
-            fake_script=self._fake_script(evolver_core_path, evolver_core.manifest.tests.smoke.fake_llm_script),
+            fake_script=None,
         )
         workspace = WorkspaceScope(
-            candidate_path,
-            write_root=candidate_path,
+            agents_root,
+            write_root=agents_root,
             read_roots=[
-                reference_core_path,
+                reference_agents_root,
                 self.project_root / "README.md",
                 self.project_root / "docs",
             ],
@@ -390,7 +391,7 @@ class HostEvolverRunner:
             tool_runtime=tool_runtime,
             core_id="evolver",
             provider_name=provider_name,
-            workspace=str(candidate_path),
+            workspace=str(agents_root),
             initial_core_path=evolver_core_path,
             model_resolver=lambda core_model: resolve_model_name(core_model, self.fallback.model)[0],
             runtime_timezone=self.runtime_timezone,
@@ -403,8 +404,9 @@ class HostEvolverRunner:
                     run_id=run_id,
                     goal=goal,
                     target_core_id=target_core_id,
-                    candidate_path=candidate_path,
-                    reference_core_path=reference_core_path,
+                    agents_root=agents_root,
+                    target_core_path=target_core_path,
+                    reference_agents_root=reference_agents_root,
                     run_root=run_root,
                 ),
                 core_path=evolver_core_path,
@@ -421,19 +423,15 @@ class HostEvolverRunner:
             needs_user=_turn_result_needs_user(result),
         )
 
-    def _fake_script(self, core_path: Path, script: str | None) -> Path | None:
-        if not script:
-            return None
-        return core_path / script
-
     def _prompt(
         self,
         *,
         run_id: str,
         goal: str,
         target_core_id: str,
-        candidate_path: Path,
-        reference_core_path: Path,
+        agents_root: Path,
+        target_core_path: Path,
+        reference_agents_root: Path,
         run_root: Path,
     ) -> str:
         docs_path = self.project_root / "docs"
@@ -446,19 +444,22 @@ class HostEvolverRunner:
                 "Goal:",
                 goal.strip() or "Make the requested agent-core improvement.",
                 "",
-                "Editable candidate workspace:",
-                str(candidate_path),
+                "Editable Agent Core tree:",
+                str(agents_root),
+                "",
+                "Target core path:",
+                str(target_core_path),
                 "",
                 "Read-only reference paths:",
-                f"- Previous active core: {reference_core_path}",
+                f"- Previous live agents tree: {reference_agents_root}",
                 f"- README: {readme_path}",
                 f"- Docs: {docs_path}",
                 "",
-                "Edit only the candidate core. Focus on agent/skills, agent/tools, agent/input, agent/output, and agent/bootstrap.",
-                "Do not edit host config, registry, sessions, state, source checkout files, .temp, or dependency files.",
-                "Use terminal only with cwd inside the candidate workspace.",
+                "Edit only files inside the editable Agent Core tree. You may update the target core and helper cores when needed.",
+                "Do not commit, promote, roll back, edit host config, sessions, state, source checkout files, .temp, or dependency files.",
+                "Use terminal only with cwd inside the editable agents tree.",
                 f"The host writes reports under this run directory; do not edit it: {run_root}",
-                "When finished, respond with a short summary and the candidate files you changed.",
+                "When finished, respond with a short summary and the agents-tree files you changed.",
             ]
         )
 
@@ -556,8 +557,8 @@ def create_app(
         session_runtime=session_runtime,
     )
     evolution_runtime = EvolutionRuntime(
-        version_store=version_store,
-        core_loader=core_loader,
+        core_repository=version_store.core_repository,
+        gate_runner=gate_runner,
         evolver_runner=HostEvolverRunner(
             home=home,
             project_root=project_root,
@@ -643,13 +644,11 @@ def init_runtime(
     host_config_path = resolved_home / "config.yaml"
     host_config_created = write_default_host_config_if_missing(host_config_path)
     version_store = VersionStore(resolved_home)
-    version_store.init_fallback_from_source(source_agents / "agent.yaml", reason=reason, overwrite=True)
-    pointers = {
-        item: version_store.init_from_source(item, source_agents / item, reason=reason)
-        for item in dict.fromkeys([core_id, "evolver"])
-    }
-    pointer = pointers[core_id]
-    evolver_pointer = pointers["evolver"]
+    pointer = version_store.initialize_repository(source_agents, reason=reason, force=False)
+    version_store.ensure_initialized(core_id, source_agents / core_id)
+    version_store.ensure_initialized("evolver", source_agents / "evolver")
+    core_pointer = version_store.active_pointer(core_id)
+    evolver_pointer = version_store.active_pointer("evolver")
     return {
         "home": str(resolved_home),
         "host_config": str(host_config_path),
@@ -657,11 +656,11 @@ def init_runtime(
         "agents_root": str(source_agents),
         "fallback_config": str(version_store.fallback_config_path),
         "active_path": str(version_store.active_core_path(core_id)),
-        "core_id": pointer.core_id,
-        "active_version": pointer.active_version,
-        "previous_stable_version": pointer.previous_stable_version,
+        "core_id": core_id,
+        "active_revision": core_pointer.active_revision,
+        "previous_revision": core_pointer.previous_revision,
         "evolver_active_path": str(version_store.active_core_path("evolver")),
-        "evolver_version": evolver_pointer.active_version,
+        "evolver_revision": evolver_pointer.active_revision,
     }
 
 
@@ -677,6 +676,7 @@ def refresh_runtime(
     load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     version_store = VersionStore(resolved_home)
+    version_store.initialize_repository(source_agents, reason=reason, force=False)
     refreshed: dict[str, object] = {
         "home": str(resolved_home),
         "source_agents_root": str(source_agents),
@@ -691,20 +691,24 @@ def refresh_runtime(
     else:
         targets = [target]
     items: dict[str, object] = {}
-    for item in dict.fromkeys(targets):
-        if item == "global":
-            prior = version_store.init_fallback_from_source(source_agents / "agent.yaml", reason=reason, overwrite=True)
+    if target == "all":
+        result = version_store.refresh_repository(source_agents, reason=reason)
+        for item in dict.fromkeys(targets):
+            path = version_store.fallback_config_path if item == "global" else version_store.active_core_path(item)
             items[item] = {
-                "path": str(version_store.fallback_config_path),
-                "previous": prior,
+                "path": str(path),
+                "active_revision": result.revision,
+                "previous_revision": result.previous_revision,
             }
-            continue
-        pointer = version_store.init_from_source(item, source_agents / item, reason=reason)
-        items[item] = {
-            "path": str(version_store.active_core_path(item)),
-            "active_version": pointer.active_version,
-            "previous_stable_version": pointer.previous_stable_version,
-        }
+    else:
+        result = version_store.refresh_repository(source_agents, reason=reason)
+        for item in dict.fromkeys(targets):
+            path = version_store.fallback_config_path if item == "global" else version_store.active_core_path(item)
+            items[item] = {
+                "path": str(path),
+                "active_revision": result.revision,
+                "previous_revision": result.previous_revision,
+            }
     refreshed["items"] = items
     return refreshed
 
@@ -722,7 +726,7 @@ def source_agents_root(override: Path | None = None) -> Path:
 
 
 def ensure_runtime_defaults(version_store: VersionStore, source_agents: Path, *, requested_core_id: str) -> None:
-    version_store.ensure_fallback_initialized(source_agents / "agent.yaml")
+    version_store.initialize_repository(source_agents, reason="auto init", force=False)
     for core_id in dict.fromkeys(["assistant", "evolver", requested_core_id]):
         version_store.ensure_initialized(core_id, source_agents / core_id)
 

@@ -141,5 +141,5 @@ uv run demiurge init --check
 - Concrete cores live under `agents/<core>/agent.yaml` plus `agents/<core>/agent/`.
 - Slot directories are loaded from `runtime.surface_root`.
 - `agent/pipelines.yaml` controls the bootstrap, input, and output phase order.
-- The host still owns provider calls, tool dispatch, approvals, state, version
-  promotion, and rollback.
+- The host still owns provider calls, tool dispatch, approvals, state, Git
+  revision promotion, and rollback.

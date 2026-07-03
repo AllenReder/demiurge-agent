@@ -159,13 +159,15 @@ Path repositories 从配置的 path 读取。Git repositories 会同步到：
 
 ## 安装和卸载契约
 
-Install 会写入 package-owned runtime core targets、slot components 的 pipeline entries，并在这里写入 package record：
+Preview 必须是 read-only。Install 会写入 package-owned runtime core targets、slot components 的 pipeline entries，并在这里写入 package provenance record：
 
 ```text
 ~/.demiurge/agents/<core-id>/packages.yaml
 ```
 
-Uninstall 会移除 package-owned targets 和 pipeline entries，除非另一个已安装 package 仍引用相同 shared component。然后它会更新 `packages.yaml`。
+`packages.yaml` 记录 installed targets 和 hashes；它是 provenance，不是 runtime truth。成功 install 会运行 host-owned gates 并提交 live agents tree。
+
+Uninstall 会移除 package-owned targets 和 pipeline entries，除非另一个已安装 package 仍引用相同 shared component。然后它会更新 `packages.yaml` 并提交 live agents tree。若 package-owned files 已 drift，uninstall 会拒绝移除，除非 caller 提供显式 destructive strategy，例如 `--force-drift`。
 
 Package-owned targets 之外的数据不属于 uninstall contract。
 
@@ -187,5 +189,5 @@ uv run demiurge package install <alias>/<package_id> --core assistant --preview
 安装后检查 runtime：
 
 ```bash
-uv run demiurge init --check
+uv run demiurge core check
 ```

@@ -19,20 +19,28 @@ Demiurge 是 local-first 的。Runtime 状态保存在 runtime home 下，通常
 ~/.demiurge/
   config.yaml
   .env
+  .core.git/
+  .core.lock
+  .evolve/
+    runs/
   agents/
     agent.yaml
     assistant/
     evolver/
-  sessions/
-  scheduler/
+  runtime/
+    runtime.sqlite3
+    artifacts/
+    session-events/
   workspace/
   logs/
 ```
 
 `config.yaml` 是 host-owned 的 runtime 配置。`.env` 可以保存本地 provider
-密钥。`agents/` 包含运行中的 Agent Core。`sessions/` 保存持久化的 session 记录。
-`scheduler/` 保存 scheduler 状态和运行记录。`workspace/` 是非本地的 fallback
-workspace。
+密钥。`.core.git/` 是 runtime agents tree 的 bare Git repository，`agents/`
+是该 tree 的 live checkout。`.evolve/` 保存隔离 change-set worktrees。`runtime/`
+包含 SQLite control-plane database、delivery outbox projection、scheduler runtime
+projections、session event logs 和 host-owned artifacts。`workspace/` 是非本地的
+fallback workspace。
 
 ## 源模板与 Runtime Core
 
@@ -42,14 +50,21 @@ workspace。
 agents/
 ```
 
-`demiurge init` 会把这些模板复制或刷新到：
+在 fresh runtime home 上，`demiurge init` 会把这棵 tree commit 到：
+
+```text
+~/.demiurge/.core.git
+```
+
+并把 live agents tree checkout 到：
 
 ```text
 ~/.demiurge/agents/
 ```
 
 如果要修改本地行为，就编辑 runtime cores。只有在你要修改默认打包项目行为时，才编辑
-源模板。
+源模板。此版本不迁移 legacy runtime homes；如果旧版本创建过 `~/.demiurge`，首次运行
+前应删除旧 runtime home。
 
 ## 托管 Checkout
 
@@ -59,8 +74,8 @@ Managed install 会把 checkout 放在：
 ~/.demiurge/demiurge-agent
 ```
 
-Live runtime cores 仍然是分开的，所以更新 managed checkout 不会覆盖已经编辑过的
-Agent Core。
+Live runtime cores 仍然是独立 Git revisions，所以更新 managed checkout 不会覆盖已经
+编辑过的 Agent Core。
 
 ## 漂移
 
@@ -71,8 +86,17 @@ uv run demiurge init --check
 uv run demiurge doctor
 ```
 
-有意刷新时：
+有意刷新时。Refresh 是一个 Git transaction，会从 source templates 创建新的 live
+revision：
 
 ```bash
 uv run demiurge init --refresh assistant
+```
+
+检查 live repository：
+
+```bash
+uv run demiurge core status
+uv run demiurge core versions
+uv run demiurge core check
 ```

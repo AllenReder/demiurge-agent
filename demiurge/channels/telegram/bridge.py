@@ -983,7 +983,7 @@ class TelegramInteractionBridge:
                 session_id=runner.session_id,
                 turn_id="telegram_slash",
                 core_id=core.core_id,
-                core_version=core.version,
+                core_revision=runner.version_store.active_pointer(core.core_id).active_revision,
                 user_input=AgentInput(content=inbound.text, metadata=dict(inbound.metadata)),
                 state={},
                 metadata=dict(inbound.metadata),

@@ -48,9 +48,9 @@ BUILTIN_TOOLSETS: dict[str, list[str]] = {
 
 
 class AgentInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
-    version: str
-    parent: str | None = None
     summary: str = ""
 
 
@@ -272,15 +272,6 @@ class DependencyInfo(BaseModel):
     allow_additional_dependencies: bool = False
 
 
-class SmokeInfo(BaseModel):
-    fake_llm_script: str | None = None
-
-
-class TestsInfo(BaseModel):
-    commands: list[str] = Field(default_factory=list)
-    smoke: SmokeInfo = Field(default_factory=SmokeInfo)
-
-
 class ToolMetadataInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -469,6 +460,8 @@ class McpServerManifestInfo(BaseModel):
 
 
 class CoreManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: int = 1
     agent: AgentInfo
     runtime: RuntimeInfo = Field(default_factory=RuntimeInfo)
@@ -480,7 +473,6 @@ class CoreManifest(BaseModel):
     approval: ApprovalInfo = Field(default_factory=ApprovalInfo)
     capabilities: dict[str, Any] = Field(default_factory=dict)
     dependencies: DependencyInfo = Field(default_factory=DependencyInfo)
-    tests: TestsInfo = Field(default_factory=TestsInfo)
 
     @field_validator("channels", mode="before")
     @classmethod
@@ -617,8 +609,8 @@ class LoadedCore:
         return self.manifest.agent.id
 
     @property
-    def version(self) -> str:
-        return self.manifest.agent.version
+    def revision(self) -> str:
+        return "untracked"
 
     @property
     def builtin_tool_names(self) -> list[str]:

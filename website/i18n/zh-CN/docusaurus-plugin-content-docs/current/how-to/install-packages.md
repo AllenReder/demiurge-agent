@@ -13,7 +13,7 @@ description: 先使用交互式 package manager；需要时再用脚本列出、
 uv run demiurge package
 ```
 
-它可以选择 runtime core、浏览 package、按 repository 或 tag 过滤、预览变更、安装 package、卸载已安装 package，以及管理 package repositories。
+它可以选择 runtime core、浏览 package、按 repository 或 tag 过滤、预览变更、安装 package、卸载已安装 package，以及管理 package repositories。Preview 是 read-only；install 和 uninstall 会作为 Git transaction 提交 live agents tree。
 
 当你需要在脚本、runbook 或 issue comment 中使用可重复执行的命令时，再使用本页的 subcommands。
 
@@ -77,7 +77,7 @@ uv run demiurge package install memory_basic --core assistant
 uv run demiurge package install builtin/memory_basic --core assistant
 ```
 
-Install options 只在安装期间解析一次。Secret option values 可能会写入已安装 component config，但 `packages.yaml` 只保存已脱敏的 option snapshots。
+Install options 只在安装期间解析一次。Secret option values 可能会写入已安装 component config，但 `packages.yaml` 只保存已脱敏的 option snapshots。成功安装会运行 host-owned gates，并创建新的 core revision。
 
 ## 安装会写入什么
 
@@ -109,6 +109,9 @@ agent/lib/
 ```
 
 Packages 不会安装 Python dependencies，也不会编辑 `uv.lock`。`manual_dependencies` 是给人工 dependency review 的 warnings。
+
+`packages.yaml` 是 provenance，不是 runtime truth。它记录 installed targets 和 hashes，
+供 package list/review 报告 drift、供 uninstall 判断是否安全移除。
 
 ## 内置包家族
 
@@ -167,7 +170,13 @@ uv run demiurge package uninstall memory_basic --core assistant --preview
 uv run demiurge package uninstall memory_basic --core assistant
 ```
 
-Uninstall 会移除 package-owned component targets，移除 `bootstrap`、`input` 和 `output` slots 的 package-owned pipeline entries，并更新 `packages.yaml`。
+Uninstall 会移除 package-owned component targets，移除 `bootstrap`、`input` 和 `output` slots 的 package-owned pipeline entries，并更新 `packages.yaml`。成功 uninstall 也会提交 runtime agents tree。
+
+如果 package-owned files 已经 drift，uninstall 会拒绝移除。明确要破坏性移除时使用：
+
+```bash
+uv run demiurge package uninstall memory_basic --core assistant --force-drift
+```
 
 Uninstall 不会移除写在 package-owned targets 之外的数据。例如 memory data、generated audio、context notes、caches 和 provider outbox files 会保留，除非你自行删除。
 
@@ -182,7 +191,7 @@ uv run demiurge package list --core assistant
 检查 runtime core 仍能加载：
 
 ```bash
-uv run demiurge init --check
+uv run demiurge core check
 ```
 
 运行一个 fake-provider turn：

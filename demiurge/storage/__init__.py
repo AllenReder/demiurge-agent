@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from demiurge.core_repository import CommitResult, CorePointer, CoreRepository
 from demiurge.runtime.delivery import ArtifactRef
 from demiurge.sdk import StateProposal
 from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
@@ -55,7 +56,7 @@ def utc_now() -> str:
 class SessionRecord:
     session_id: str
     core_id: str
-    core_version: str
+    core_revision: str
     created_at: str
     updated_at: str
     channel: str | None = None
@@ -245,112 +246,64 @@ class StateStore:
             raise ValueError(f"unsupported state operation: {proposal.operation}")
 
 
-@dataclass(slots=True)
-class ActivePointer:
-    core_id: str
-    active_version: str
-    previous_stable_version: str | None = None
-    reason: str = "bootstrap"
+ActivePointer = CorePointer
 
 
 class VersionStore:
+    """Compatibility facade for runtime core storage.
+
+    Session, artifact, and state storage still live in this module. Core tree
+    revision behavior is delegated to CoreRepository.
+    """
+
     def __init__(self, home: Path):
         self.home = home
-        self.agents_root = home / "agents"
-        self.runs_root = home / "runs"
-        self.history_root = home / "history"
-        self.registry_root = home / "registry"
+        self.core_repository = CoreRepository(home)
+        self.agents_root = self.core_repository.agents_root
+        self.runs_root = self.core_repository.evolve_root
+        self.history_root = home / ".evolve"
+        self.registry_root = self.core_repository.git_dir / "refs" / "demiurge"
 
     @property
     def fallback_config_path(self) -> Path:
-        return self.agents_root / "agent.yaml"
+        return self.core_repository.fallback_config_path
+
+    def initialize_repository(self, source_agents_root: Path, *, reason: str = "init", force: bool = False) -> ActivePointer:
+        return self.core_repository.initialize_from_source(source_agents_root, reason=reason, force=force)
+
+    def refresh_repository(self, source_agents_root: Path, *, reason: str = "refresh") -> CommitResult:
+        return self.core_repository.refresh_from_source(source_agents_root, reason=reason)
 
     def ensure_fallback_initialized(self, source_path: Path) -> None:
-        if self.fallback_config_path.exists():
+        source_agents = source_path.parent
+        if self.core_repository.git_dir.exists():
             return
-        self.init_fallback_from_source(source_path, reason="auto init", overwrite=False)
+        self.core_repository.initialize_from_source(source_agents, reason="auto init", force=False)
 
     def init_fallback_from_source(self, source_path: Path, *, reason: str, overwrite: bool = True) -> str | None:
-        source_path = source_path.resolve()
-        if not source_path.exists():
-            raise FileNotFoundError(f"source fallback agent config not found: {source_path}")
-        if source_path.is_dir():
-            raise IsADirectoryError(f"source fallback agent config is a directory: {source_path}")
-        target = self.fallback_config_path
-        previous: str | None = None
-        if target.exists():
-            if not overwrite:
-                return None
-            previous = self.backup_fallback(reason=reason)
-            target.unlink()
-        ensure_dir(target.parent)
-        shutil.copy2(source_path, target)
-        append_jsonl(
-            self.history_root / "_global" / "history.jsonl",
-            {
-                "type": "fallback_init",
-                "source": str(source_path),
-                "target": str(target),
-                "reason": reason,
-            },
-        )
-        return previous
+        source_agents = source_path.resolve().parent
+        if not self.core_repository.git_dir.exists():
+            pointer = self.core_repository.initialize_from_source(source_agents, reason=reason, force=False)
+            return pointer.previous_revision
+        if not overwrite:
+            return None
+        result = self.core_repository.refresh_from_source(source_agents, reason=reason)
+        return result.previous_revision
 
     def backup_fallback(self, *, reason: str) -> str | None:
-        source = self.fallback_config_path
-        if not source.exists():
-            return None
-        version = utc_id("fallback_")
-        destination = self.history_root / "_global" / version / "agent.yaml"
-        ensure_dir(destination.parent)
-        shutil.copy2(source, destination)
-        append_jsonl(
-            self.history_root / "_global" / "history.jsonl",
-            {
-                "type": "fallback_backup",
-                "version": version,
-                "reason": reason,
-            },
-        )
-        return version
+        return self.core_repository.live_revision() if self.core_repository.git_dir.exists() else None
 
     def ensure_initialized(self, core_id: str, source_core_path: Path) -> ActivePointer:
-        if self.active_core_path(core_id).exists():
-            return self.active_pointer(core_id)
-        return self.init_from_source(core_id, source_core_path, reason="auto init")
+        if not self.core_repository.git_dir.exists():
+            self.core_repository.initialize_from_source(source_core_path.parent, reason="auto init", force=False)
+        return self.core_repository.ensure_core_from_source(core_id, source_core_path, reason="auto init")
 
     def init_from_source(self, core_id: str, source_core_path: Path, *, reason: str = "init") -> ActivePointer:
         source_core_path = source_core_path.resolve()
-        if not source_core_path.exists():
-            raise FileNotFoundError(f"source agent core not found: {source_core_path}")
-        if not (source_core_path / "agent.yaml").exists():
-            raise FileNotFoundError(f"source agent core missing agent.yaml: {source_core_path}")
-
-        active_path = self.active_core_path(core_id)
-        previous = self.backup_active(core_id, reason=reason) if active_path.exists() else None
-        if active_path.exists():
-            shutil.rmtree(active_path)
-        ensure_dir(active_path.parent)
-        shutil.copytree(source_core_path, active_path)
-        active_version = self._manifest_version(active_path) or "0001"
-        pointer = ActivePointer(
-            core_id=core_id,
-            active_version=active_version,
-            previous_stable_version=previous,
-            reason=reason,
-        )
-        self._write_pointer(pointer)
-        append_jsonl(
-            self._history_log(core_id),
-            {
-                "type": "init",
-                "version": active_version,
-                "previous": previous,
-                "source": str(source_core_path),
-                "reason": reason,
-            },
-        )
-        return pointer
+        if not self.core_repository.git_dir.exists():
+            pointer = self.core_repository.initialize_from_source(source_core_path.parent, reason=reason, force=False)
+            return ActivePointer(core_id=core_id, active_revision=pointer.active_revision, previous_revision=pointer.previous_revision, reason=reason)
+        return self.core_repository.ensure_core_from_source(core_id, source_core_path, reason=reason)
 
     def list_core_ids(self) -> list[str]:
         if not self.agents_root.exists():
@@ -358,161 +311,36 @@ class VersionStore:
         return sorted(path.name for path in self.agents_root.iterdir() if path.is_dir())
 
     def list_versions(self, core_id: str) -> list[str]:
-        versions = set()
-        history_root = self.history_root / core_id
-        if history_root.exists():
-            versions.update(path.name for path in history_root.iterdir() if path.is_dir())
-        try:
-            versions.add(self.active_pointer(core_id).active_version)
-        except FileNotFoundError:
-            pass
-        return sorted(versions)
+        return self.core_repository.list_revisions()
 
     def active_pointer(self, core_id: str) -> ActivePointer:
-        data = read_json(self._pointer_path(core_id), None)
-        if not data:
-            active_path = self.active_core_path(core_id)
-            if not active_path.exists():
-                raise FileNotFoundError(f"no active core: {core_id}")
-            data = asdict(
-                ActivePointer(
-                    core_id=core_id,
-                    active_version=self._manifest_version(active_path) or "unknown",
-                    reason="reconstructed",
-                )
-            )
-            write_json(self._pointer_path(core_id), data)
-        return ActivePointer(**data)
+        if not self.active_core_path(core_id).exists():
+            raise FileNotFoundError(f"no active core: {core_id}")
+        return self.core_repository.active_pointer(core_id)
 
     def active_core_path(self, core_id: str) -> Path:
-        return self.agents_root / core_id
+        return self.core_repository.active_core_path(core_id)
 
-    def version_path(self, core_id: str, version: str) -> Path:
+    def revision_path(self, core_id: str, revision: str) -> Path:
         pointer = self.active_pointer(core_id)
-        if version == pointer.active_version:
+        if revision == pointer.active_revision:
             return self.active_core_path(core_id)
-        path = self.history_root / core_id / version
-        if not path.exists():
-            raise FileNotFoundError(f"core version not found: {core_id}@{version}")
-        return path
+        raise FileNotFoundError(f"core revision is not checked out as a path: {core_id}@{revision}")
 
-    def create_candidate(self, core_id: str, run_id: str | None = None) -> Path:
-        run_id = run_id or utc_id("evolve_")
-        candidate = self.runs_root / core_id / run_id / "candidate"
-        if candidate.exists():
-            raise FileExistsError(f"candidate already exists: {candidate}")
-        shutil.copytree(self.active_core_path(core_id), candidate)
-        return candidate
-
-    def promote_candidate(self, core_id: str, candidate_path: Path, *, reason: str) -> str:
-        pointer = self.active_pointer(core_id)
-        new_version = utc_id("v_")
-        previous = self.backup_active(core_id, reason=reason, preferred_version=pointer.active_version)
-        active_path = self.active_core_path(core_id)
-        if active_path.exists():
-            shutil.rmtree(active_path)
-        shutil.copytree(candidate_path, active_path)
-        self._rewrite_version(active_path / "agent.yaml", new_version, pointer.active_version)
-        next_pointer = ActivePointer(
+    def rollback(self, core_id: str, target: str = "previous", reason: str = "") -> ActivePointer:
+        result = self.core_repository.rollback(target=target, reason=reason or "rollback")
+        return ActivePointer(
             core_id=core_id,
-            active_version=new_version,
-            previous_stable_version=previous,
-            reason=reason,
-        )
-        self._write_pointer(next_pointer)
-        append_jsonl(
-            self._history_log(core_id),
-            {
-                "type": "promotion",
-                "version": new_version,
-                "previous": previous,
-                "reason": reason,
-            },
-        )
-        return new_version
-
-    def rollback(self, core_id: str, target: str = "previous_stable", reason: str = "") -> ActivePointer:
-        pointer = self.active_pointer(core_id)
-        if target == "previous_stable":
-            if not pointer.previous_stable_version:
-                raise ValueError("no previous stable version recorded")
-            target_version = pointer.previous_stable_version
-        else:
-            target_version = target
-        if target_version == pointer.active_version:
-            return pointer
-        source = self.version_path(core_id, target_version)
-        backup_version = self.backup_active(core_id, reason=reason or "rollback", preferred_version=pointer.active_version)
-        active_path = self.active_core_path(core_id)
-        if active_path.exists():
-            shutil.rmtree(active_path)
-        shutil.copytree(source, active_path)
-        next_pointer = ActivePointer(
-            core_id=core_id,
-            active_version=target_version,
-            previous_stable_version=backup_version,
+            active_revision=result.revision,
+            previous_revision=result.previous_revision,
             reason=reason or "rollback",
         )
-        self._write_pointer(next_pointer)
-        append_jsonl(
-            self._history_log(core_id),
-            {
-                "type": "rollback",
-                "version": target_version,
-                "previous": backup_version,
-                "reason": reason,
-            },
-        )
-        return next_pointer
-
-    def backup_active(
-        self,
-        core_id: str,
-        *,
-        reason: str,
-        preferred_version: str | None = None,
-    ) -> str | None:
-        active_path = self.active_core_path(core_id)
-        if not active_path.exists():
-            return None
-        version = preferred_version or self._manifest_version(active_path) or utc_id("v_")
-        destination = self.history_root / core_id / version
-        if destination.exists():
-            version = utc_id(f"{version}-")
-            destination = self.history_root / core_id / version
-        ensure_dir(destination.parent)
-        shutil.copytree(active_path, destination)
-        append_jsonl(
-            self._history_log(core_id),
-            {
-                "type": "backup",
-                "version": version,
-                "reason": reason,
-            },
-        )
-        return version
-
-    def _rewrite_version(self, manifest_path: Path, version: str, parent: str) -> None:
-        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-        raw.setdefault("agent", {})
-        raw["agent"]["version"] = version
-        raw["agent"]["parent"] = parent
-        manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    def _manifest_version(self, core_path: Path) -> str | None:
-        manifest_path = core_path / "agent.yaml"
-        if not manifest_path.exists():
-            return None
-        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-        agent = raw.get("agent", {}) or {}
-        value = agent.get("version")
-        return str(value) if value is not None else None
 
     def _pointer_path(self, core_id: str) -> Path:
-        return self.registry_root / f"{core_id}.json"
+        return self.registry_root / core_id
 
     def _write_pointer(self, pointer: ActivePointer) -> None:
-        write_json(self._pointer_path(pointer.core_id), asdict(pointer))
+        return None
 
     def _history_log(self, core_id: str) -> Path:
         return self.history_root / core_id / "history.jsonl"

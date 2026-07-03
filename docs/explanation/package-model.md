@@ -19,8 +19,8 @@ cores, MCP declarations, and schedule declarations. A package lets that
 authored behavior be reused without editing the source template by hand.
 
 The host still owns the runtime harness: sessions, turns, provider calls,
-approvals, capabilities, MCP transport, schedule execution, state, versioning,
-promotion, and rollback.
+approvals, capabilities, MCP transport, schedule execution, state, Git
+revisions, promotion, and rollback.
 
 Package management is a user-controlled CLI workflow. It is not exposed as a
 model-callable tool.
@@ -100,16 +100,18 @@ schedule execution.
 
 ## Install State
 
-Installing a package writes files into the active runtime core and records state
-in:
+Installing a package writes files into the live runtime agents tree under the
+core repository lock, runs host-owned gates, commits the result, and records
+provenance in:
 
 ```text
 ~/.demiurge/agents/<core-id>/packages.yaml
 ```
 
 The install record stores the package id, repository alias, repository metadata,
-tags, installed component targets, warnings, and redacted options. It does not
-store full effective config or secrets.
+tags, installed component targets, installed file/tree hashes, warnings, and
+redacted options. It does not store full effective config or secrets, and it is
+not runtime truth.
 
 Installation rejects target conflicts unless the target is already owned by an
 installed package with the same repository alias, source, target, and effective
@@ -122,8 +124,10 @@ Uninstall removes package-owned targets and removes package-owned pipeline
 entries for `bootstrap`, `input`, and `output` slots. If another installed
 package still references the same shared component, the target is kept.
 
-Uninstall updates `packages.yaml`. If no packages remain, the registry file can
-be removed.
+Uninstall refuses drifted package-owned targets unless the operator supplies an
+explicit destructive strategy such as `--force-drift`. It then updates
+`packages.yaml` and commits the runtime agents tree. If no packages remain, the
+provenance file can be removed.
 
 Uninstall does not remove data written outside package-owned targets. Examples
 include memory files, generated audio, context reseed notes, provider caches,

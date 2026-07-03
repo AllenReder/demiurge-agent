@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, replace
 from pathlib import Path
 import shutil
 from typing import Protocol
@@ -10,6 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from demiurge.app import HostConfig, HostPackageRepositoryConfig, write_host_config
+from demiurge.gates import GateRunner
 from demiurge.packages import PackageInfo, PackageManager, PackageOperationError, PackageOption
 from demiurge.packages import (
     inspect_package_repository_candidate,
@@ -451,11 +453,16 @@ class PackageWizard:
             self.console.print("Install canceled.")
             return
         try:
-            result = self.manager.install(core_id=core_id, package_id=package.ref, option_answers=answers)
+            result = self._commit_package_transaction(
+                f"install {package.ref}",
+                lambda: self.manager.install(core_id=core_id, package_id=package.ref, option_answers=answers),
+            )
         except PackageOperationError as exc:
             self.console.print(f"[red]Install failed:[/red] {exc}")
             return
         self.console.print(f"installed {result.package_ref} for {result.core_id}")
+        if result.revision:
+            self.console.print(f"revision: {result.revision[:12]}")
         for warning in result.warnings:
             self.console.print(f"warning: {warning}")
 
@@ -475,10 +482,34 @@ class PackageWizard:
         if action != "uninstall":
             self.console.print("Uninstall canceled.")
             return
-        result = self.manager.uninstall(core_id=core_id, package_id=package_ref)
+        destructive = False
+        if preview.warnings:
+            destructive = self.prompt.confirm("Package provenance has drifted. Force removal?", default=False)
+            if not destructive:
+                self.console.print("Uninstall canceled.")
+                return
+        result = self._commit_package_transaction(
+            f"uninstall {package_ref}",
+            lambda: self.manager.uninstall(core_id=core_id, package_id=package_ref, destructive=destructive),
+        )
         self.console.print(f"uninstalled {result.package_ref} for {result.core_id}")
+        if result.revision:
+            self.console.print(f"revision: {result.revision[:12]}")
         for warning in result.warnings:
             self.console.print(f"warning: {warning}")
+
+    def _commit_package_transaction(self, action: str, operation):
+        repository = self.version_store.core_repository
+        with repository.live_transaction(reason=f"package {action}"):
+            result = operation()
+            changed_paths = repository.live_changed_paths()
+            gates = asyncio.run(GateRunner(project_root=Path.cwd().resolve()).run(repository.active_agents_root(), changed_paths=changed_paths))
+            if not gates.passed:
+                failures = [phase for phase in gates.phases if not phase.passed]
+                summary = "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
+                raise PackageOperationError("package gates failed: " + summary)
+            commit = repository.commit_live(reason=f"package {action}", summary=f"package {action}")
+            return replace(result, revision=commit.revision, previous_revision=commit.previous_revision)
 
     def _repositories(self) -> None:
         while True:
@@ -701,6 +732,8 @@ class PackageWizard:
                 action = "reuse" if component.get("reused") else "write"
             table.add_row(str(component.get("kind") or ""), target, action)
         self.console.print(table)
+        for warning in preview.warnings:
+            self.console.print(f"warning: {warning}")
 
     def _print_installed_detail(self, core_id: str, package_ref: str) -> None:
         record = next(item for item in self.manager.list(core_id=core_id).installed if self._installed_ref(item) == package_ref)
@@ -714,6 +747,7 @@ class PackageWizard:
         table.add_row("repository commit", record.repository_commit or "(none)")
         table.add_row("tags", ", ".join(record.tags))
         table.add_row("options", "\n".join(f"{key}: {value}" for key, value in record.options.items()) or "(none)")
+        table.add_row("drift", "\n".join(record.drift) or "(none)")
         table.add_row(
             "components",
             "\n".join(
@@ -803,7 +837,7 @@ class PackageWizard:
             home=self.home,
             repository_configs=self.host_config.packages.repositories,
         )
-        self.manager = PackageManager(version_store=self.version_store, repository=repositories)
+        self.manager = PackageManager(agents_root=self.version_store.agents_root, repository=repositories)
 
     def _repository_config_from_location(
         self,

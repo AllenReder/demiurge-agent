@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shutil
 import sys
 import subprocess
+from dataclasses import asdict, replace
 from pathlib import Path
 
+from demiurge.core_repository import CoreRepositoryError
 from .app import (
     HostConfig,
     HostPackageRepositoryConfig,
@@ -21,8 +24,10 @@ from .app import (
 )
 from demiurge.channels.gateway import GatewayConfigError, run_gateway
 from demiurge.diagnostics.doctor import DoctorReport, DoctorRuntime
+from demiurge.gates import GateResult, GateRunner
 from demiurge.packages import (
     PackageManager,
+    PackageOperationError,
     PackageOperationPreview,
     PackageRepositoryError,
     inspect_package_repository_candidate,
@@ -80,6 +85,28 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Check runtime/source template drift")
     doctor_parser.add_argument("--core", dest="doctor_core", default=None, help="Core id to check")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_parser = subparsers.add_parser("core", help="Inspect and mutate the Git-backed Agent Core tree")
+    core_subparsers = core_parser.add_subparsers(dest="core_command")
+    core_status = core_subparsers.add_parser("status", help="Show live core repository status")
+    core_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_versions = core_subparsers.add_parser("versions", help="List live core revisions")
+    core_versions.add_argument("--limit", type=int, default=30, help="Maximum revisions to show")
+    core_versions.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_check = core_subparsers.add_parser("check", help="Run host-owned gates against the live agents tree")
+    core_check.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_evolve = core_subparsers.add_parser("evolve", help="Manage evolve runs")
+    core_evolve_subparsers = core_evolve.add_subparsers(dest="core_evolve_command")
+    core_evolve_start = core_evolve_subparsers.add_parser("start", help="Start an isolated evolve run")
+    core_evolve_start.add_argument("goal", nargs=argparse.REMAINDER, help="Goal text for the evolver core")
+    core_evolve_start.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    for name in ("review", "promote", "discard"):
+        evolve_action = core_evolve_subparsers.add_parser(name, help=f"{name.title()} an evolve run")
+        evolve_action.add_argument("run_id", help="Evolve run id")
+        evolve_action.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_rollback = core_subparsers.add_parser("rollback", help="Create a rollback commit")
+    core_rollback.add_argument("target", nargs="?", default="previous", help="Target revision or 'previous'")
+    core_rollback.add_argument("--reason", default="cli rollback", help="Rollback reason")
+    core_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_parser = subparsers.add_parser("package", help="Interactively manage, list, install, or uninstall agent packages")
     package_subparsers = package_parser.add_subparsers(dest="package_command")
     package_list = package_subparsers.add_parser("list", help="List package repository packages and optionally installed packages")
@@ -104,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     package_uninstall.add_argument("package_id", help="Package id or repo/package ref to uninstall")
     package_uninstall.add_argument("--core", dest="package_core", required=True, help="Target runtime core id")
     package_uninstall.add_argument("--preview", action="store_true", help="Show uninstall plan without writing files")
+    package_uninstall.add_argument(
+        "--force-drift",
+        action="store_true",
+        help="Remove package files even when recorded package provenance has drifted",
+    )
     package_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     package_repo = package_subparsers.add_parser("repo", help="Manage package repositories")
     package_repo_subparsers = package_repo.add_subparsers(dest="package_repo_command")
@@ -157,30 +189,36 @@ def main(argv: list[str] | None = None) -> None:
             _print_doctor_report(report, as_json=args.json)
             return
         if args.refresh:
-            result = refresh_runtime(
-                home=home,
-                core_id=core_id,
-                target=args.refresh,
-                agents_root=agents_root,
-                reason="cli refresh",
-            )
+            try:
+                result = refresh_runtime(
+                    home=home,
+                    core_id=core_id,
+                    target=args.refresh,
+                    agents_root=agents_root,
+                    reason="cli refresh",
+                )
+            except CoreRepositoryError as exc:
+                raise SystemExit(str(exc)) from None
             if args.json:
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:
                 _print_refresh_result(result)
             return
-        result = init_runtime(
-            home=home,
-            core_id=core_id,
-            agents_root=agents_root,
-            reason="cli init",
-        )
+        try:
+            result = init_runtime(
+                home=home,
+                core_id=core_id,
+                agents_root=agents_root,
+                reason="cli init",
+            )
+        except CoreRepositoryError as exc:
+            raise SystemExit(str(exc)) from None
         if args.json:
             print(json.dumps(result, indent=2, ensure_ascii=False))
         else:
-            print(f"initialized {result['core_id']}@{result['active_version']} at {result['active_path']}")
-            if result["previous_stable_version"]:
-                print(f"backed up previous active version: {result['previous_stable_version']}")
+            print(f"initialized {result['core_id']}@{str(result['active_revision'])[:12]} at {result['active_path']}")
+            if result["previous_revision"]:
+                print(f"previous core revision: {str(result['previous_revision'])[:12]}")
         return
 
     if args.command == "doctor":
@@ -193,9 +231,19 @@ def main(argv: list[str] | None = None) -> None:
         _print_doctor_report(report, as_json=args.json)
         return
 
+    if args.command == "core":
+        try:
+            _handle_core_command(args)
+        except CoreRepositoryError as exc:
+            raise SystemExit(str(exc)) from None
+        return
+
     if args.command == "package":
         _apply_host_config_defaults(args)
-        _handle_package_command(args)
+        try:
+            _handle_package_command(args)
+        except CoreRepositoryError as exc:
+            raise SystemExit(str(exc)) from None
         return
 
     if args.command == "update":
@@ -378,7 +426,11 @@ def _print_refresh_result(result: dict[str, object]) -> None:
     items = result.get("items") or {}
     if isinstance(items, dict):
         for name, item in items.items():
-            print(f"- {name}: {item}")
+            if isinstance(item, dict):
+                revision = item.get("active_revision") or item.get("previous_revision")
+                print(f"- {name}: {item.get('path')} -> {str(revision)[:12] if revision else 'none'}")
+            else:
+                print(f"- {name}: {item}")
 
 
 def _handle_package_command(args: argparse.Namespace) -> None:
@@ -396,7 +448,7 @@ def _handle_package_command(args: argparse.Namespace) -> None:
         repository_configs=host_config.packages.repositories,
         repository_alias=getattr(args, "package_repo", None),
     )
-    manager = PackageManager(version_store=version_store, repository=repositories)
+    manager = PackageManager(agents_root=version_store.agents_root, repository=repositories)
     if args.package_command is None:
         ensure_runtime_defaults(
             version_store,
@@ -427,7 +479,11 @@ def _handle_package_command(args: argparse.Namespace) -> None:
         if args.preview:
             result = manager.preview_install(core_id=target_core, package_id=args.package_id, option_answers=package_options)
         else:
-            result = manager.install(core_id=target_core, package_id=args.package_id, option_answers=package_options)
+            result = _commit_package_transaction(
+                version_store=version_store,
+                action=f"install {args.package_id}",
+                operation=lambda: manager.install(core_id=target_core, package_id=args.package_id, option_answers=package_options),
+            )
         if args.json:
             print(json.dumps(_package_operation_to_dict(result), indent=2, ensure_ascii=False))
             return
@@ -437,13 +493,185 @@ def _handle_package_command(args: argparse.Namespace) -> None:
         if args.preview:
             result = manager.preview_uninstall(core_id=target_core, package_id=args.package_id)
         else:
-            result = manager.uninstall(core_id=target_core, package_id=args.package_id)
+            result = _commit_package_transaction(
+                version_store=version_store,
+                action=f"uninstall {args.package_id}",
+                operation=lambda: manager.uninstall(
+                    core_id=target_core,
+                    package_id=args.package_id,
+                    destructive=bool(getattr(args, "force_drift", False)),
+                ),
+            )
         if args.json:
             print(json.dumps(_package_operation_to_dict(result), indent=2, ensure_ascii=False))
             return
         _print_package_operation(result)
         return
     raise SystemExit(f"unknown package command: {args.package_command}")
+
+
+def _handle_core_command(args: argparse.Namespace) -> None:
+    home = (args.home or default_home()).expanduser().resolve()
+    version_store = VersionStore(home)
+    command = args.core_command or "status"
+    if command == "status":
+        status = version_store.core_repository.status()
+        if args.json:
+            print(json.dumps(status, indent=2, ensure_ascii=False))
+            return
+        _print_core_status(status)
+        return
+    if command == "versions":
+        revisions = version_store.core_repository.list_revisions(limit=max(1, int(args.limit or 30)))
+        payload = {
+            "live": version_store.core_repository.live_revision(),
+            "previous": version_store.core_repository.previous_revision(),
+            "revisions": revisions,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        live = payload["live"]
+        previous = payload["previous"]
+        for revision in revisions:
+            markers = []
+            if revision == live:
+                markers.append("live")
+            if revision == previous:
+                markers.append("previous")
+            suffix = f" ({', '.join(markers)})" if markers else ""
+            print(f"{revision}{suffix}")
+        return
+    if command == "check":
+        gates = asyncio.run(
+            GateRunner(project_root=Path.cwd().resolve()).run(
+                version_store.core_repository.active_agents_root(),
+                changed_paths=version_store.core_repository.live_changed_paths(),
+            )
+        )
+        if args.json:
+            print(json.dumps(gates.as_dict(), indent=2, ensure_ascii=False))
+            return
+        for phase in gates.phases:
+            print(f"[{'ok' if phase.passed else 'error'}] {phase.name}: {phase.detail}")
+        if not gates.passed:
+            raise SystemExit(1)
+        return
+    if command == "rollback":
+        pointer = version_store.rollback(args.core or "assistant", target=args.target, reason=args.reason)
+        payload = asdict(pointer)
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        print(f"rollback committed: {pointer.active_revision[:12]}")
+        if pointer.previous_revision:
+            print(f"previous revision: {pointer.previous_revision[:12]}")
+        return
+    if command == "evolve":
+        _handle_core_evolve_command(args, home=home)
+        return
+    raise SystemExit(f"unknown core command: {command}")
+
+
+def _handle_core_evolve_command(args: argparse.Namespace, *, home: Path) -> None:
+    action = args.core_evolve_command or "start"
+    app = create_app(
+        home=home,
+        core_id=args.core,
+        agents_root=args.agents_root,
+        provider_name=args.provider,
+        model=args.model,
+        fake_script=args.fake_script,
+        workspace=args.workspace,
+        tool_display=args.tool_display,
+        timezone=getattr(args, "timezone", None),
+    )
+    try:
+        if action == "start":
+            goal = " ".join(args.goal).strip()
+            if not goal:
+                raise SystemExit("goal is required")
+            result = asyncio.run(
+                app.evolution_runtime.start(
+                    target_core_id=app.runner.core_id,
+                    goal=goal,
+                    source_turn_id=None,
+                )
+            )
+            _print_core_evolve_result(result, as_json=args.json)
+            return
+        if action == "review":
+            result = asyncio.run(app.evolution_runtime.review(args.run_id, target_core_id=app.runner.core_id))
+            payload = asdict(result)
+            if args.json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                return
+            print(f"review {args.run_id}: {'passed' if result.passed else 'failed'}")
+            print(f"proposal revision: {result.proposal_revision or '(none)'}")
+            print(f"report: {result.report_path}")
+            if not result.passed:
+                raise SystemExit(1)
+            return
+        if action == "promote":
+            result = asyncio.run(app.evolution_runtime.promote(args.run_id, target_core_id=app.runner.core_id, reason="cli promote"))
+            _print_core_evolve_result(result, as_json=args.json)
+            if not result.promoted:
+                raise SystemExit(1)
+            return
+        if action == "discard":
+            payload = app.evolution_runtime.discard(args.run_id)
+            if args.json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                return
+            print(f"discarded evolve run {args.run_id}")
+            return
+    finally:
+        asyncio.run(app.close())
+    raise SystemExit(f"unknown core evolve command: {action}")
+
+
+def _print_core_status(status: dict[str, object]) -> None:
+    print(f"agents_root: {status['agents_root']}")
+    print(f"git_dir: {status['git_dir']}")
+    print(f"live: {str(status['live'])[:12]}")
+    print(f"previous: {str(status['previous'])[:12] if status.get('previous') else '(none)'}")
+    print(f"dirty: {status['dirty']}")
+    changed = status.get("changed_paths") or []
+    if changed:
+        print("changed:")
+        for path in changed:
+            print(f"  - {path}")
+
+
+def _print_core_evolve_result(result, *, as_json: bool) -> None:
+    payload = asdict(result)
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    print(result.summary)
+    print(f"run_id: {result.run_id}")
+    if result.proposal_revision:
+        print(f"proposal revision: {result.proposal_revision[:12]}")
+    if result.new_revision:
+        print(f"new revision: {result.new_revision[:12]}")
+    print(f"report: {result.report_path}")
+
+
+def _commit_package_transaction(*, version_store: VersionStore, action: str, operation):
+    repository = version_store.core_repository
+    with repository.live_transaction(reason=f"package {action}"):
+        result = operation()
+        changed_paths = repository.live_changed_paths()
+        gates = asyncio.run(GateRunner(project_root=Path.cwd().resolve()).run(repository.active_agents_root(), changed_paths=changed_paths))
+        if not gates.passed:
+            raise PackageOperationError("package gates failed: " + _gate_failure_summary(gates))
+        commit = repository.commit_live(reason=f"package {action}", summary=f"package {action}")
+        return replace(result, revision=commit.revision, previous_revision=commit.previous_revision)
+
+
+def _gate_failure_summary(gates: GateResult) -> str:
+    failures = [phase for phase in gates.phases if not phase.passed]
+    return "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
 
 
 def _handle_package_repo_command(
@@ -552,6 +780,8 @@ def _print_package_list(result, *, core_id: str | None) -> None:
         for item in result.installed:
             package_ref = f"{item.repository_alias}/{item.package_id}" if item.repository_alias else item.package_id
             print(f"  - {package_ref} ({', '.join(item.tags) or 'no tags'})")
+            for drift in item.drift:
+                print(f"    drift: {drift}")
 
 
 def _print_package_operation(result) -> None:
@@ -559,6 +789,8 @@ def _print_package_operation(result) -> None:
         print(f"preview {result.action} {result.package_ref} for {result.core_id}")
     else:
         print(f"{result.action}ed {result.package_ref} for {result.core_id}")
+    if result.revision:
+        print(f"revision: {result.revision[:12]}")
     print(f"registry: {result.registry_path}")
     for component in result.components:
         if "remove" in component:
@@ -622,6 +854,7 @@ def _package_list_to_dict(result) -> dict[str, object]:
                 "installed_at": item.installed_at,
                 "warnings": item.warnings,
                 "options": item.options,
+                "drift": item.drift,
             }
             for item in result.installed
         ],
@@ -644,6 +877,8 @@ def _package_operation_to_dict(result) -> dict[str, object]:
         "warnings": result.warnings,
         "registry_path": str(result.registry_path),
         "options": result.options,
+        "revision": result.revision,
+        "previous_revision": result.previous_revision,
     }
 
 

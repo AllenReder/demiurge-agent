@@ -302,7 +302,7 @@ describe("Ink TUI components", () => {
           ...initialStatus,
           workspace: "/tmp/work",
           core_id: "assistant",
-          core_version: "0001",
+          core_revision: "0001",
           session_id: "session_abcdef",
           provider: "fake",
           model: "fake-model",

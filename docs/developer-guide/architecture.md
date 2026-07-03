@@ -21,6 +21,7 @@ SessionTurnStepRunner
         +--> ContextAssembler
         +--> Provider
         +--> ToolRuntime
+        +--> CoreRepository / EvolutionRuntime / GateRunner
         +--> RuntimeControlPlane / RuntimeStore
         +--> RuntimeTaskWorker
         +--> DeliveryRuntime
@@ -38,6 +39,9 @@ SessionTurnStepRunner
 | Runner | Own session, turn, step, bootstrap, input, model/tool loop, output, and delivery flow. |
 | Context assembler | Build provider messages from soul, skills, bootstrap, input, history, and current turn. |
 | Tool runtime | Build the visible registry and execute built-in, authored, and MCP tools. |
+| Core repository | Own the Git-backed runtime agents tree, refs, change sets, package transactions, and rollback commits. |
+| Evolution runtime | Start, review, promote, and discard isolated agents-tree change sets through the core repository and gates. |
+| Gate runner | Run host-owned checks for path safety, artifacts, dependency files, core loading, package provenance, drift warnings, and cross-core references. |
 | Runtime control plane | Submit actions, project tasks/events, and expose task/session/scheduler/outbox state from SQLite. |
 | Runtime task worker | Hold active process handles and live completion subscribers; pending completions are recovered from SQLite events. |
 | Delivery runtime | Dispatch authored delivery intents and update outbox status. |
@@ -50,6 +54,9 @@ SessionTurnStepRunner
 - `demiurge/cli.py`
 - `demiurge/app/__init__.py`
 - `demiurge/runtime/runner.py`
+- `demiurge/core_repository.py`
+- `demiurge/evolution/__init__.py`
+- `demiurge/gates/__init__.py`
 - `demiurge/runtime/control.py`
 - `demiurge/runtime/store.py`
 - `demiurge/runtime/tasks.py`

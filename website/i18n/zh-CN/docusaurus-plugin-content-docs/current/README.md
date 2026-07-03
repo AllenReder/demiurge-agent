@@ -10,12 +10,12 @@ description: 用于安装 Demiurge、配置 provider、选择 workspace，以及
 Demiurge 是 Alpha 阶段的智能体框架，围绕 **Agent Slots** 构建：Agent Slots
 是受治理的扩展边界，让 Agent Core 可以拓展能力边界与逻辑设计，而不需要修改
 Host harness。具有文件化设计的 Agent Core 可以组合 agents、state、tools、
-skills 和 MCP declarations，并通过 Host 控制的 candidate changes 实现自我演进。
+skills 和 MCP declarations，并通过 Host 控制的 Git change sets 实现自我演进。
 
 Host 拥有 session、turn、provider call、tool、approval、state、delivery、
-promotion 和 rollback。Agent Core 拥有作者维护的文件，例如 `agent.yaml`、
-`SOUL.md`、Agent Slots、skills、tools、schedules、MCP declarations、tests
-和本地 libraries。
+Git revision promotion 和 rollback。Agent Core 拥有作者维护的文件，例如
+`agent.yaml`、`SOUL.md`、Agent Slots、skills、tools、schedules、MCP
+declarations 和本地 libraries。
 
 如果你想理解自定义行为如何在 Host 治理下进入 agent loop，请先读
 [Agent Slots](explanation/agent-slots.md)。
@@ -70,7 +70,7 @@ uv run demiurge --provider fake
 ```
 
 TUI 要求 Node.js 20 或更新版本。不带 subcommand 运行 `demiurge` 会启动 TUI。
-主要 subcommands 是 `init`、`doctor`、`package`、`update`、`setup` 和
+主要 subcommands 是 `init`、`doctor`、`core`、`package`、`update`、`setup` 和
 `gateway`。
 
 ## 配置解析顺序
@@ -96,7 +96,10 @@ Workspace resolution 使用以下顺序：
 - 最新 release notes：[0.6.0](releases/0.6.0.md)。
 - Python dependencies 由 host 拥有，并由 source checkout 锁定。
 - Agent Slot code 运行在 host-shared Python environment 中。
-- Candidate Agent Core evolution 不能自动添加 dependencies。
-- Package recipes 会把文件安装进 runtime cores；它们不会修改 host lock file。
+- Runtime Agent Core revisions 是 `~/.demiurge/.core.git` 中的 Git commits。
+- Candidate evolution 在 `.evolve/runs/<run_id>/agents` 中运行，不能自动添加
+  dependencies。
+- Package install 和 uninstall 是对 live agents tree 的用户触发 Git transactions；
+  package recipes 不会修改 host lock file。
 - Runtime layout、authoring contracts、package behavior 和 troubleshooting
   steps 在 `1.0.0` 之前仍可能变化。

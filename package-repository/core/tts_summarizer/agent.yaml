@@ -1,8 +1,6 @@
 schema_version: 1
 agent:
   id: tts_summarizer
-  version: "0001"
-  parent: null
   summary: "Summarizes assistant output into short spoken TTS text."
 runtime:
   surface_root: agent
@@ -35,7 +33,3 @@ capabilities:
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
-tests:
-  commands: []
-  smoke:
-    fake_llm_script: null

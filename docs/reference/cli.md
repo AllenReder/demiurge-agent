@@ -53,6 +53,28 @@ uv run demiurge doctor --json
 
 Checks runtime/source template drift.
 
+## `core`
+
+```bash
+uv run demiurge core status
+uv run demiurge core versions
+uv run demiurge core check
+uv run demiurge core evolve start Improve concise replies
+uv run demiurge core evolve review <run_id>
+uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve discard <run_id>
+uv run demiurge core rollback
+uv run demiurge core rollback <revision>
+```
+
+Inspects and mutates the Git-backed runtime agents tree. Revisions are commits
+in `~/.demiurge/.core.git`.
+
+`core check` runs host-owned gates against the live agents tree. `core evolve
+start` creates an isolated worktree under `.evolve/runs/<run_id>/agents`.
+Review records `refs/demiurge/runs/<run_id>`, promote advances
+`refs/demiurge/live`, and rollback creates a new rollback commit.
+
 ## `setup`
 
 ```bash
@@ -84,6 +106,7 @@ uv run demiurge package install <package_id|repo/package_id> --core assistant
 uv run demiurge package install <package_id|repo/package_id> --core assistant --preview
 uv run demiurge package install <package_id|repo/package_id> --core assistant --option key=value
 uv run demiurge package uninstall <package_id|repo/package_id> --core assistant
+uv run demiurge package uninstall <package_id|repo/package_id> --core assistant --force-drift
 uv run demiurge package repo list
 uv run demiurge package repo add ./local-packages --alias local --trust
 uv run demiurge package repo add https://github.com/user/demiurge-packages.git --alias community --ref main --trust
@@ -121,6 +144,7 @@ Use these after documentation or CLI-surface changes:
 ```bash
 uv run demiurge --help
 uv run demiurge init --help
+uv run demiurge core --help
 uv run demiurge setup --help
 uv run demiurge package --help
 uv run demiurge gateway --help

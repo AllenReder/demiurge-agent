@@ -1,23 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import shlex
-import subprocess
-import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from demiurge.core import CoreLoadError, CoreLoader
-from demiurge.runtime.control import RuntimeControlPlane
-from demiurge.runtime.runner import SessionTurnStepRunner
-from demiurge.runtime.session import SessionRuntime
-from demiurge.runtime.store import RuntimeStore
-from demiurge.runtime.tasks import RuntimeTaskWorker
-from demiurge.providers import FakeProvider
-from demiurge.storage import VersionStore
-from demiurge.tools.runtime import ToolRuntime
+from demiurge.core_repository import reject_dependency_files, reject_generated_artifacts
 
 
 @dataclass(slots=True)
@@ -44,123 +35,126 @@ class GateRunner:
         self.project_root = project_root
         self.loader = CoreLoader()
 
-    async def run(self, candidate_path: Path) -> GateResult:
+    async def run(self, agents_root: Path, *, changed_paths: list[str] | None = None) -> GateResult:
         phases: list[GatePhase] = []
-        core = None
-        try:
-            core = self.loader.load(candidate_path)
-            phases.append(GatePhase("manifest", True, f"loaded {core.core_id}@{core.version}"))
-        except CoreLoadError as exc:
-            phases.append(GatePhase("manifest", False, str(exc)))
-            return GateResult(False, phases)
-
-        phases.append(self._dependency_gate(candidate_path, core.raw_manifest))
-        phases.append(self._capability_gate(core.raw_manifest))
-        if all(phase.passed for phase in phases):
-            phases.extend(self._run_candidate_tests(candidate_path, core.manifest.tests.commands))
-        if all(phase.passed for phase in phases):
-            phases.append(await self._fake_smoke(candidate_path))
+        agents_root = agents_root.expanduser().resolve()
+        phases.append(self._path_gate(agents_root))
+        phases.append(self._artifact_gate(agents_root))
+        phases.append(self._dependency_gate(agents_root))
+        phases.extend(self._load_core_gates(agents_root, changed_paths=changed_paths))
+        phases.append(self._package_provenance_gate(agents_root))
+        phases.append(self._cross_core_reference_gate(agents_root))
         return GateResult(all(phase.passed for phase in phases), phases)
 
-    def _dependency_gate(self, candidate_path: Path, raw_manifest: dict[str, Any]) -> GatePhase:
-        forbidden = [
-            path.relative_to(candidate_path).as_posix()
-            for path in candidate_path.rglob("*")
-            if path.name in {"pyproject.toml", "uv.lock", "requirements.txt", "requirements.in"}
-        ]
-        if forbidden:
-            return GatePhase("dependency", False, f"candidate declares dependencies: {forbidden}")
-        dependency_policy = raw_manifest.get("dependencies", {}) or {}
-        if dependency_policy.get("allow_additional_dependencies", False):
-            return GatePhase("dependency", False, "additional dependencies require manual review")
+    def _path_gate(self, agents_root: Path) -> GatePhase:
+        if not agents_root.exists() or not agents_root.is_dir():
+            return GatePhase("path_safety", False, f"agents tree is missing: {agents_root}")
+        for path in agents_root.rglob("*"):
+            if path.is_symlink():
+                return GatePhase("path_safety", False, f"symlink is not allowed in agents tree: {path.relative_to(agents_root)}")
+        return GatePhase("path_safety", True, "agents tree paths accepted")
+
+    def _artifact_gate(self, agents_root: Path) -> GatePhase:
+        rejected = reject_generated_artifacts(agents_root)
+        if rejected:
+            return GatePhase("artifact", False, f"generated/runtime artifacts are not allowed: {rejected[:20]}")
+        return GatePhase("artifact", True, "no generated/runtime artifacts")
+
+    def _dependency_gate(self, agents_root: Path) -> GatePhase:
+        rejected = reject_dependency_files(agents_root)
+        if rejected:
+            return GatePhase("dependency", False, f"agent cores cannot declare host dependencies: {rejected}")
         return GatePhase("dependency", True, "host_shared dependencies only")
 
-    def _capability_gate(self, raw_manifest: dict[str, Any]) -> GatePhase:
-        allowed_prefixes = (
-            "llm.call",
-            "agents.run",
-            "agents.run:",
-            "agents.spawn",
-            "agents.spawn:",
-            "state.read",
-            "state.read:",
-            "state.propose",
-            "state.write",
-            "state.write:",
-            "skill.activate",
-            "skill.activate:",
-            "tool.call",
-            "tool.call:",
-            "fs.read",
-            "fs.write",
-            "fs.delete",
-            "terminal.exec",
-        )
-        caps = raw_manifest.get("capabilities", {}) or {}
-        serialized = str(caps)
-        unknown = []
-        for token in serialized.replace("{", " ").replace("}", " ").replace("'", " ").split():
-            if "." in token and ":" in token and not token.startswith(allowed_prefixes):
-                unknown.append(token)
-        if unknown:
-            return GatePhase("capability", False, f"unknown capability token(s): {unknown[:5]}")
-        return GatePhase("capability", True, "capability declarations accepted")
-
-    def _run_candidate_tests(self, candidate_path: Path, commands: list[str]) -> list[GatePhase]:
-        if not commands:
-            return [GatePhase("candidate_tests", True, "no candidate test commands declared")]
+    def _load_core_gates(self, agents_root: Path, *, changed_paths: list[str] | None) -> list[GatePhase]:
+        core_ids = self._changed_core_ids(agents_root, changed_paths)
+        if not core_ids:
+            core_ids = sorted(path.name for path in agents_root.iterdir() if path.is_dir() and (path / "agent.yaml").exists())
         phases: list[GatePhase] = []
-        for command in commands:
-            args = shlex.split(command)
-            if args[:3] != ["uv", "run", "pytest"]:
-                phases.append(GatePhase("candidate_tests", False, f"unsupported test command: {command}"))
+        for core_id in core_ids:
+            path = agents_root / core_id
+            if not path.exists():
+                phases.append(GatePhase(f"core_load:{core_id}", True, "core removed"))
                 continue
-            env = os.environ.copy()
-            env["DEMIURGE_CANDIDATE"] = str(candidate_path)
-            completed = subprocess.run(
-                args,
-                cwd=self.project_root,
-                env=env,
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-            )
-            detail = (completed.stdout + "\n" + completed.stderr).strip()[-4000:]
-            phases.append(GatePhase("candidate_tests", completed.returncode == 0, detail))
+            try:
+                core = self.loader.load(path)
+            except CoreLoadError as exc:
+                phases.append(GatePhase(f"core_load:{core_id}", False, str(exc)))
+                continue
+            phases.append(GatePhase(f"core_load:{core_id}", True, f"loaded {core.core_id}"))
         return phases
 
-    async def _fake_smoke(self, candidate_path: Path) -> GatePhase:
-        try:
-            core = self.loader.load(candidate_path)
-            script = core.manifest.tests.smoke.fake_llm_script
-            script_path = candidate_path / script if script else None
-            with tempfile.TemporaryDirectory(prefix="demiurge-smoke-") as tmp:
-                home = Path(tmp)
-                version_store = VersionStore(home)
-                control_plane = RuntimeControlPlane(RuntimeStore.default(home))
-                session_runtime = SessionRuntime(control_plane=control_plane)
-                task_worker = RuntimeTaskWorker(control_plane=control_plane)
-                tool_runtime = ToolRuntime(version_store, session_runtime=session_runtime, task_worker=task_worker)
-                runner = SessionTurnStepRunner(
-                    home=home,
-                    version_store=version_store,
-                    core_loader=self.loader,
-                    provider=FakeProvider(script_path),
-                    tool_runtime=tool_runtime,
-                    core_id=core.core_id,
-                    initial_core_path=candidate_path,
-                    session_runtime=session_runtime,
-                    task_worker=task_worker,
-                )
-                result = await runner.run_turn("smoke tools_list", core_path=candidate_path)
-            if not result.deliveries:
-                return GatePhase("fake_llm_smoke", False, "no assistant message produced")
-            return GatePhase("fake_llm_smoke", True, "host loop completed with fake provider")
-        except Exception as exc:
-            return GatePhase("fake_llm_smoke", False, str(exc))
+    def _changed_core_ids(self, agents_root: Path, changed_paths: list[str] | None) -> list[str]:
+        ids: set[str] = set()
+        for rel in changed_paths or []:
+            parts = Path(rel).parts
+            if not parts:
+                continue
+            if parts[0] == "agent.yaml":
+                continue
+            if (agents_root / parts[0]).is_dir() or len(parts) > 1:
+                ids.add(parts[0])
+        return sorted(ids)
+
+    def _package_provenance_gate(self, agents_root: Path) -> GatePhase:
+        errors: list[str] = []
+        for path in sorted(agents_root.glob("*/packages.yaml")):
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError as exc:
+                errors.append(f"{path.relative_to(agents_root)}: {exc}")
+                continue
+            if raw.get("schema_version") != 1:
+                errors.append(f"{path.relative_to(agents_root)}: schema_version must be 1")
+                continue
+            installed = raw.get("installed") or []
+            if not isinstance(installed, list):
+                errors.append(f"{path.relative_to(agents_root)}: installed must be a list")
+                continue
+            for index, item in enumerate(installed):
+                if not isinstance(item, dict):
+                    errors.append(f"{path.relative_to(agents_root)} installed[{index}] must be a mapping")
+                    continue
+                components = item.get("components") or []
+                if not isinstance(components, list):
+                    errors.append(f"{path.relative_to(agents_root)} installed[{index}].components must be a list")
+                    continue
+                for component_index, component in enumerate(components):
+                    if not isinstance(component, dict):
+                        errors.append(
+                            f"{path.relative_to(agents_root)} installed[{index}].components[{component_index}] must be a mapping"
+                        )
+                        continue
+                    if "installed_hash" not in component:
+                        errors.append(
+                            f"{path.relative_to(agents_root)} installed[{index}].components[{component_index}] missing installed_hash"
+                        )
+        if errors:
+            return GatePhase("package_provenance", False, "; ".join(errors[:10]))
+        return GatePhase("package_provenance", True, "package provenance accepted")
+
+    def _cross_core_reference_gate(self, agents_root: Path) -> GatePhase:
+        core_ids = {path.name for path in agents_root.iterdir() if path.is_dir() and (path / "agent.yaml").exists()}
+        errors: list[str] = []
+        for path in sorted(agents_root.glob("*/packages.yaml")):
+            core_id = path.parent.name
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                continue
+            for item in raw.get("installed") or []:
+                if not isinstance(item, dict):
+                    continue
+                for component in item.get("components") or []:
+                    if not isinstance(component, dict) or component.get("kind") != "core":
+                        continue
+                    target_core_id = str(component.get("target_core_id") or "").strip()
+                    if target_core_id and target_core_id not in core_ids:
+                        errors.append(f"{core_id}/packages.yaml references missing core {target_core_id}")
+        if errors:
+            return GatePhase("cross_core_references", False, "; ".join(errors[:10]))
+        return GatePhase("cross_core_references", True, "cross-core references accepted")
 
 
-def run_gate_sync(runner: GateRunner, candidate_path: Path) -> GateResult:
-    return asyncio.run(runner.run(candidate_path))
+def run_gate_sync(runner: GateRunner, agents_root: Path) -> GateResult:
+    return asyncio.run(runner.run(agents_root))

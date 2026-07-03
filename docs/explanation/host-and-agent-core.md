@@ -9,11 +9,11 @@ Demiurge separates the runtime harness from the authored agent surface.
 
 The **host** is stable infrastructure. It owns sessions, turns, provider calls,
 tool execution, approvals, state, delivery, schedules, package installation,
-background runtime tasks, promotion, and rollback.
+background runtime tasks, Git revision promotion, and rollback.
 
 An **Agent Core** is the authored filesystem surface. It owns identity,
-instructions, Agent Slots, skills, tools, schedules, MCP declarations, tests,
-and local libraries.
+instructions, Agent Slots, skills, tools, schedules, MCP declarations, and
+local libraries.
 
 An **Agent Slot** is the core's evolvable interaction boundary. It lets
 Core-defined behavior enter the agent loop at a governed point and compose
@@ -49,7 +49,8 @@ The host owns:
 - external channel bridges
 - scheduler claims and run logs
 - package preview, install, and uninstall
-- version promotion and rollback
+- Git-backed Agent Core revisions
+- revision promotion and rollback
 
 ## Agent-Core Responsibilities
 
@@ -63,18 +64,17 @@ The core owns:
 - schedules
 - MCP server declarations
 - local libraries
-- core-local tests
 - evolution policy expressed as authored files
 
 ## Important Consequence
 
 Agent Core files may describe desired behavior, but they do not own provider
-calls, direct state mutation, dependency installation, production promotion, or
-rollback. Those remain host functions.
+calls, direct state mutation, dependency installation, live revision promotion,
+or rollback. Those remain host functions.
 
-Background `evolve_core` work follows the same boundary: it may create a
-candidate and report, but it does not switch the active core unless a later
-foreground turn asks the host to do so.
+`evolve_core` follows the same boundary: `start` creates an isolated agents-tree
+worktree, `review` records a proposal revision, and `promote` or `rollback`
+advance host-owned Git refs only through approved host operations.
 
 For exact edit rules, read
 [/docs/reference/contracts/authored-surface](/docs/reference/contracts/authored-surface).

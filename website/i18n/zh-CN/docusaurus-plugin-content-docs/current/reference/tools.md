@@ -157,6 +157,20 @@ tools:
 parent traversal、隐藏路径段，以及配置的 skills root 之外的写入。变更会在后续
 turn 生效；当前 turn 不会 hot-reload active core。
 
+## Core Evolution Tools
+
+`evolve_core` 是一个 model-visible tool，包含四个 actions：
+
+| Action | Required fields | Effect |
+| --- | --- | --- |
+| `start` | `goal` | 创建 `.evolve/runs/<run_id>/agents` 并运行 host-managed evolver。 |
+| `review` | `run_id` | 运行 host-owned gates，并写入 `refs/demiurge/runs/<run_id>`。 |
+| `promote` | `run_id` | 重新运行 gates，并推进 `refs/demiurge/previous` 和 `refs/demiurge/live`。 |
+| `discard` | `run_id` | 移除 run worktree 和 metadata。 |
+
+`promote` 是 high-risk operation，需要 approval。`rollback_core` 会为 live Agent Core
+tree 创建新的 rollback commit；新的 revision 会在下一 turn 生效。
+
 ## Background Runtime Tasks
 
 这些 calls 会提交 host-owned background tasks：
@@ -165,7 +179,7 @@ turn 生效；当前 turn 不会 hot-reload active core。
 - `run_terminal(...)`
 - `delegate_task(...)`
 - `ctx.agents.spawn(...)`
-- `evolve_core(background=true)`
+- `evolve_core(action="start", background=true)`
 
 Background task tools 会返回 `task_id`。使用 `task_status`、`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制它们。
 `task_list` 限定当前 session。

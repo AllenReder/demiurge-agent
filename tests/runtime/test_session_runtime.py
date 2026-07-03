@@ -32,7 +32,7 @@ def test_session_runtime_projects_session_turn_and_messages(tmp_path):
     record, created = runtime.ensure_session(
         "session_1",
         core_id="assistant",
-        core_version="0001",
+        core_revision="0001",
         channel="tui",
         conversation_key="local",
     )
@@ -57,7 +57,7 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
     record, _ = runtime.ensure_session(
         "session_1",
         core_id="assistant",
-        core_version="0001",
+        core_revision="0001",
         channel="tui",
         conversation_key="local",
     )
@@ -120,7 +120,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         session_id=result.session_id,
         turn_id=result.turn_id,
         core_id=core.core_id,
-        core_version=core.version,
+        core_revision=core.revision,
         user_input=AgentInput(content="", metadata={}),
         state={},
         metadata={},

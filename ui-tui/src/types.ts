@@ -42,7 +42,7 @@ export type ToolResultView = {
 export type StatusState = {
   workspace: string
   core_id: string
-  core_version: string
+  core_revision: string
   session_id: string
   provider: string
   model: string

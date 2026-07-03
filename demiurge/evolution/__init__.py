@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from demiurge.core import CoreLoadError, CoreLoader
-from demiurge.storage import VersionStore
-from demiurge.util import append_jsonl, ensure_dir, utc_id, write_json
-
-
-PROTECTED_DEPENDENCY_FILES = {"pyproject.toml", "uv.lock", "requirements.txt", "requirements.in"}
+from demiurge.core_repository import CommitResult, CoreRepository, PROTECTED_DEPENDENCY_FILES
+from demiurge.gates import GateResult, GateRunner
+from demiurge.util import write_json
 
 
 @dataclass(slots=True)
@@ -28,8 +24,9 @@ class EvolverRunner(Protocol):
         run_id: str,
         goal: str,
         target_core_id: str,
-        candidate_path: Path,
-        reference_core_path: Path,
+        agents_root: Path,
+        target_core_path: Path,
+        reference_agents_root: Path,
         run_root: Path,
     ) -> EvolverRunResult:
         ...
@@ -40,28 +37,185 @@ class EvolveResult:
     run_id: str
     target_core_id: str
     goal: str
-    candidate_path: str
-    promoted: bool
-    new_version: str | None
+    agents_root: str
     summary: str
     report_path: str
-    manifest_check: dict[str, Any]
     changed_files: list[str] = field(default_factory=list)
     evolver: dict[str, Any] = field(default_factory=dict)
+    proposal_revision: str | None = None
+    promoted: bool = False
+    new_revision: str | None = None
+    gates: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class EvolveReview:
+    run_id: str
+    target_core_id: str
+    changed_files: list[str]
+    proposal_revision: str | None
+    gates: GateResult
+    report_path: str
+
+    @property
+    def passed(self) -> bool:
+        return self.gates.passed
 
 
 class EvolutionRuntime:
     def __init__(
         self,
         *,
-        version_store: VersionStore,
-        core_loader: CoreLoader | None = None,
+        core_repository: CoreRepository,
+        gate_runner: GateRunner,
         evolver_runner: EvolverRunner | None = None,
     ):
-        self.version_store = version_store
-        self.core_loader = core_loader or CoreLoader()
+        self.core_repository = core_repository
+        self.gate_runner = gate_runner
         self.evolver_runner = evolver_runner
         self._active_runs: set[str] = set()
+
+    async def start(
+        self,
+        *,
+        target_core_id: str,
+        goal: str,
+        source_turn_id: str | None = None,
+    ) -> EvolveResult:
+        if target_core_id in self._active_runs:
+            raise RuntimeError(f"evolve already running for core: {target_core_id}")
+        if self.evolver_runner is None:
+            raise RuntimeError("evolver runner is not configured")
+        self._active_runs.add(target_core_id)
+        change_set = self.core_repository.begin_change_set(kind="evolve", reason=goal or f"evolve {target_core_id}")
+        run_id = change_set.run_id
+        try:
+            request = {
+                "run_id": run_id,
+                "target_core_id": target_core_id,
+                "goal": goal,
+                "source_turn_id": source_turn_id,
+                "base_revision": self.core_repository.live_revision(),
+            }
+            write_json(change_set.run_root / "request.json", request)
+            evolver_result = await self.evolver_runner.run(
+                run_id=run_id,
+                goal=goal,
+                target_core_id=target_core_id,
+                agents_root=change_set.agents_root,
+                target_core_path=change_set.agents_root / target_core_id,
+                reference_agents_root=self.core_repository.active_agents_root(),
+                run_root=change_set.run_root,
+            )
+            changed_files = change_set.changed_paths()
+            evolver_payload = {
+                "summary": evolver_result.summary,
+                "session_id": evolver_result.session_id,
+                "turn_id": evolver_result.turn_id,
+                "needs_user": evolver_result.needs_user,
+            }
+            summary = (
+                f"evolve run {run_id} ready for review"
+                if changed_files
+                else f"evolve run {run_id} made no changes"
+            )
+            payload = {
+                "request": request,
+                "changed_files": changed_files,
+                "evolver": evolver_payload,
+                "summary": summary,
+            }
+            write_json(change_set.run_root / "result.json", payload)
+            change_set.write_report("Evolve Start Report", payload)
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=goal,
+                agents_root=str(change_set.agents_root),
+                summary=summary,
+                report_path=str(change_set.report_path),
+                changed_files=changed_files,
+                evolver=evolver_payload,
+            )
+        finally:
+            self._active_runs.discard(target_core_id)
+
+    async def review(self, run_id: str, *, target_core_id: str = "assistant", goal: str = "") -> EvolveReview:
+        change_set = self.core_repository.change_set(run_id)
+        changed_files = change_set.changed_paths()
+        commit: CommitResult | None = None
+        if changed_files:
+            commit = change_set.commit_proposal(
+                reason=goal or f"review evolve run {run_id}",
+                metadata={"target_core_id": target_core_id},
+            )
+        gates = await self.gate_runner.run(change_set.agents_root, changed_paths=changed_files)
+        payload = {
+            "run_id": run_id,
+            "target_core_id": target_core_id,
+            "changed_files": changed_files,
+            "proposal_revision": commit.revision if commit else None,
+            "gates": gates.as_dict(),
+        }
+        write_json(change_set.gates_path, gates.as_dict())
+        write_json(change_set.proposal_path, payload)
+        change_set.write_report("Evolve Review Report", payload)
+        return EvolveReview(
+            run_id=run_id,
+            target_core_id=target_core_id,
+            changed_files=changed_files,
+            proposal_revision=commit.revision if commit else None,
+            gates=gates,
+            report_path=str(change_set.report_path),
+        )
+
+    async def promote(self, run_id: str, *, target_core_id: str = "assistant", reason: str = "evolve promote") -> EvolveResult:
+        review = await self.review(run_id, target_core_id=target_core_id, goal=reason)
+        if not review.passed:
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(self.core_repository.change_set(run_id).agents_root),
+                summary=f"evolve run {run_id} failed gates",
+                report_path=review.report_path,
+                changed_files=review.changed_files,
+                proposal_revision=review.proposal_revision,
+                gates=review.gates.as_dict(),
+                promoted=False,
+            )
+        if not review.proposal_revision:
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(self.core_repository.change_set(run_id).agents_root),
+                summary=f"evolve run {run_id} has no proposal changes",
+                report_path=review.report_path,
+                changed_files=review.changed_files,
+                proposal_revision=None,
+                gates=review.gates.as_dict(),
+                promoted=False,
+            )
+        result = self.core_repository.promote_run(run_id, reason=reason)
+        return EvolveResult(
+            run_id=run_id,
+            target_core_id=target_core_id,
+            goal=reason,
+            agents_root=str(self.core_repository.active_agents_root()),
+            summary=f"evolve promoted {run_id}@{result.revision[:12]}",
+            report_path=review.report_path,
+            changed_files=review.changed_files,
+            proposal_revision=review.proposal_revision,
+            gates=review.gates.as_dict(),
+            promoted=True,
+            new_revision=result.revision,
+        )
+
+    def discard(self, run_id: str) -> dict[str, Any]:
+        change_set = self.core_repository.change_set(run_id)
+        change_set.discard()
+        return {"run_id": run_id, "discarded": True}
 
     async def evolve(
         self,
@@ -69,176 +223,9 @@ class EvolutionRuntime:
         target_core_id: str,
         goal: str,
         source_turn_id: str | None = None,
-        auto_promote: bool = True,
+        auto_promote: bool = False,
     ) -> EvolveResult:
-        if target_core_id in self._active_runs:
-            raise RuntimeError(f"evolve already running for core: {target_core_id}")
-        if self.evolver_runner is None:
-            raise RuntimeError("evolver runner is not configured")
-        self._active_runs.add(target_core_id)
-        run_id = utc_id("evolve_")
-        reference_core_path = self.version_store.active_core_path(target_core_id)
-        baseline = self._file_snapshot(reference_core_path)
-        candidate_path = self.version_store.create_candidate(target_core_id, run_id=run_id)
-        run_root = candidate_path.parent
-        report_path = run_root / "report.md"
-        try:
-            ensure_dir(run_root / "logs")
-            write_json(
-                run_root / "request.json",
-                {"run_id": run_id, "target_core_id": target_core_id, "goal": goal, "source_turn_id": source_turn_id},
-            )
-            evolver_result = await self.evolver_runner.run(
-                run_id=run_id,
-                goal=goal,
-                target_core_id=target_core_id,
-                candidate_path=candidate_path,
-                reference_core_path=reference_core_path,
-                run_root=run_root,
-            )
-            changed_files = self._changed_files(baseline, candidate_path)
-            manifest_check = self._manifest_check(candidate_path)
-            candidate_promotable = bool(changed_files) and bool(manifest_check["passed"])
-            promoted = candidate_promotable and auto_promote
-            if promoted:
-                new_version = self.version_store.promote_candidate(
-                    target_core_id,
-                    candidate_path,
-                    reason=f"evolve:{run_id}",
-                )
-                summary = f"evolve promoted {target_core_id}@{new_version}"
-            else:
-                new_version = None
-                if not changed_files:
-                    summary = f"evolve made no candidate changes for {target_core_id}"
-                elif candidate_promotable and not auto_promote:
-                    summary = f"evolve candidate ready for review for {target_core_id}"
-                else:
-                    summary = f"evolve candidate failed manifest check for {target_core_id}"
-            evolver_payload = {
-                "summary": evolver_result.summary,
-                "session_id": evolver_result.session_id,
-                "turn_id": evolver_result.turn_id,
-                "needs_user": evolver_result.needs_user,
-            }
-            write_json(
-                run_root / "result.json",
-                {
-                    "manifest_check": manifest_check,
-                    "changed_files": changed_files,
-                    "evolver": evolver_payload,
-                    "promoted": promoted,
-                    "auto_promote": auto_promote,
-                    "new_version": new_version,
-                },
-            )
-            self._write_report(
-                report_path,
-                goal=goal,
-                manifest_check=manifest_check,
-                changed_files=changed_files,
-                evolver=evolver_payload,
-                new_version=new_version,
-            )
-            result = EvolveResult(
-                run_id=run_id,
-                target_core_id=target_core_id,
-                goal=goal,
-                candidate_path=str(candidate_path),
-                promoted=promoted,
-                new_version=new_version,
-                summary=summary,
-                report_path=str(report_path),
-                manifest_check=manifest_check,
-                changed_files=changed_files,
-                evolver=evolver_payload,
-            )
-            append_jsonl(
-                self.version_store.history_root / target_core_id / "history.jsonl",
-                {
-                    "type": "evolve",
-                    "run_id": run_id,
-                    "promoted": result.promoted,
-                    "auto_promote": auto_promote,
-                    "new_version": new_version,
-                    "changed_files": changed_files,
-                    "manifest_check": manifest_check,
-                },
-            )
-            return result
-        finally:
-            self._active_runs.discard(target_core_id)
-
-    def _manifest_check(self, candidate_path: Path) -> dict[str, Any]:
-        forbidden = sorted(
-            path.relative_to(candidate_path).as_posix()
-            for path in candidate_path.rglob("*")
-            if path.is_file() and path.name in PROTECTED_DEPENDENCY_FILES
-        )
-        if forbidden:
-            return {
-                "passed": False,
-                "detail": f"candidate declares dependency files: {forbidden}",
-                "core_id": None,
-                "version": None,
-            }
-        try:
-            core = self.core_loader.load(candidate_path)
-        except CoreLoadError as exc:
-            return {"passed": False, "detail": str(exc), "core_id": None, "version": None}
-        return {
-            "passed": True,
-            "detail": f"loaded {core.core_id}@{core.version}",
-            "core_id": core.core_id,
-            "version": core.version,
-        }
-
-    def _file_snapshot(self, root: Path) -> dict[str, str]:
-        snapshot: dict[str, str] = {}
-        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(root).as_posix()
-            snapshot[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-        return snapshot
-
-    def _changed_files(self, baseline: dict[str, str], candidate_path: Path) -> list[str]:
-        current = self._file_snapshot(candidate_path)
-        return sorted(
-            path
-            for path in set(baseline) | set(current)
-            if baseline.get(path) != current.get(path)
-        )
-
-    def _write_report(
-        self,
-        path: Path,
-        *,
-        goal: str,
-        manifest_check: dict[str, Any],
-        changed_files: list[str],
-        evolver: dict[str, Any],
-        new_version: str | None,
-    ) -> None:
-        lines = [
-            "# Evolve Report",
-            "",
-            f"- Goal: {goal}",
-            f"- Promoted: {bool(new_version)}",
-            f"- New version: {new_version or 'none'}",
-            f"- Evolver session: {evolver.get('session_id') or 'none'}",
-            f"- Evolver turn: {evolver.get('turn_id') or 'none'}",
-            "",
-            "## Manifest Check",
-            "",
-            f"- {'PASS' if manifest_check.get('passed') else 'FAIL'}: {manifest_check.get('detail')}",
-            "",
-            "## Changed Files",
-            "",
-        ]
-        if changed_files:
-            lines.extend(f"- {path}" for path in changed_files)
-        else:
-            lines.append("- none")
-        lines.extend(["", "## Evolver Summary", "", evolver.get("summary") or "(none)"])
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = await self.start(target_core_id=target_core_id, goal=goal, source_turn_id=source_turn_id)
+        if auto_promote:
+            return await self.promote(result.run_id, target_core_id=target_core_id, reason=goal)
+        return result

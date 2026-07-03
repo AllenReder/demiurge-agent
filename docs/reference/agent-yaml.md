@@ -57,7 +57,7 @@ approval:
 
 Use the fallback for shared model, UI, and approval defaults. Do not put
 `agent`, `runtime`, `channels`, `slots`, `tools`, `capabilities`,
-`dependencies`, or `tests` in the fallback file.
+or `dependencies` in the fallback file.
 
 ## Concrete Core Shape
 
@@ -67,8 +67,6 @@ Use the fallback for shared model, UI, and approval defaults. Do not put
 schema_version: 1
 agent:
   id: assistant
-  version: "0001"
-  parent: null
   summary: "Initial demiurge assistant core."
 runtime:
   surface_root: agent
@@ -104,10 +102,6 @@ capabilities:
 dependencies:
   mode: host_shared
   allow_additional_dependencies: false
-tests:
-  commands: []
-  smoke:
-    fake_llm_script: agent/tests/fixtures/fake_llm/basic_turn.json
 ```
 
 ## Top-Level Fields
@@ -115,7 +109,7 @@ tests:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `schema_version` | No | Manifest schema version. Current default is `1`. |
-| `agent` | Yes | Core id, version, parent, and summary. |
+| `agent` | Yes | Core id and summary. Git revisions live in the host-owned core repository, not in `agent.yaml`. |
 | `runtime` | No | Host runtime options for this core. |
 | `model` | No | Core-level model/provider defaults. |
 | `ui` | No | Core-level UI preferences such as `tool_display`. |
@@ -125,7 +119,6 @@ tests:
 | `approval` | No | Core-level approval policy overrides. |
 | `capabilities` | No | Capability grants for host-mediated effects. |
 | `dependencies` | No | Runtime dependency mode metadata. |
-| `tests` | No | Candidate validation metadata. |
 
 ## `runtime`
 

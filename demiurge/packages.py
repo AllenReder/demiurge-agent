@@ -3,10 +3,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping
@@ -168,6 +169,7 @@ class InstalledPackage:
     installed_at: str
     warnings: list[str]
     options: dict[str, Any] = field(default_factory=dict)
+    drift: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +195,8 @@ class PackageOperationPreview:
     warnings: list[str]
     registry_path: Path
     options: dict[str, Any] = field(default_factory=dict)
+    revision: str | None = None
+    previous_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +214,8 @@ class PackageOperationResult:
     warnings: list[str]
     registry_path: Path
     options: dict[str, Any] = field(default_factory=dict)
+    revision: str | None = None
+    previous_revision: str | None = None
 
 
 def default_package_repository_root(override: Path | None = None) -> Path:
@@ -909,8 +915,17 @@ def _optional_config_str(value: Any) -> str | None:
 
 
 class PackageManager:
-    def __init__(self, *, version_store: VersionStore, repository: PackageRepository | PackageRepositoryCollection) -> None:
+    def __init__(
+        self,
+        *,
+        repository: PackageRepository | PackageRepositoryCollection,
+        agents_root: Path | None = None,
+        version_store: VersionStore | None = None,
+    ) -> None:
+        if agents_root is None and version_store is None:
+            raise ValueError("PackageManager requires agents_root")
         self.version_store = version_store
+        self.agents_root = (agents_root or version_store.agents_root).expanduser().resolve()  # type: ignore[union-attr]
         if isinstance(repository, PackageRepositoryCollection):
             self.repositories = repository
         else:
@@ -943,7 +958,8 @@ class PackageManager:
     ) -> PackageListResult:
         installed: list[InstalledPackage] = []
         if core_id:
-            installed = self._load_installed(self.version_store.active_core_path(core_id))
+            core_path = self._active_core_path(core_id)
+            installed = self._load_installed_with_drift(core_path)
         if repository_alias and repository_alias not in self.repositories.repositories:
             raise PackageOperationError(f"unknown package repository: {repository_alias}")
         packages = self.repositories.all_packages()
@@ -1008,6 +1024,7 @@ class PackageManager:
         try:
             for operation in planned:
                 installed_components.append(self._install_component(core_path, operation))
+            installed_components = [self._refresh_component_hash(core_path, component) for component in installed_components]
             record = InstalledPackage(
                 package_id=package.package_id,
                 repository_alias=package.repository_alias,
@@ -1045,7 +1062,7 @@ class PackageManager:
 
     def preview_uninstall(self, *, core_id: str, package_id: str) -> PackageOperationPreview:
         core_path = self._require_active_core(core_id)
-        installed = self._load_installed(core_path)
+        installed = self._load_installed_with_drift(core_path)
         record = self._find_installed_record(installed, package_id)
         if record is None:
             raise PackageOperationError(f"package is not installed for {core_id}: {package_id}")
@@ -1062,22 +1079,27 @@ class PackageManager:
             repository_ref=record.repository_ref,
             repository_commit=record.repository_commit,
             components=components,
-            warnings=[],
+            warnings=self._drift_warnings(record),
             registry_path=self._registry_path(core_path),
             options=dict(record.options),
         )
 
-    def uninstall(self, *, core_id: str, package_id: str) -> PackageOperationResult:
+    def uninstall(self, *, core_id: str, package_id: str, destructive: bool = False) -> PackageOperationResult:
         core_path = self._require_active_core(core_id)
-        installed = self._load_installed(core_path)
+        installed = self._load_installed_with_drift(core_path)
         record = self._find_installed_record(installed, package_id)
         if record is None:
             raise PackageOperationError(f"package is not installed for {core_id}: {package_id}")
+        if record.drift and not destructive:
+            raise PackageOperationError(
+                f"package has drifted files and cannot be uninstalled without --force-drift: {', '.join(record.drift)}"
+            )
         remaining = [item for item in installed if item is not record]
         components = [self._uninstall_component_preview(component, remaining=remaining) for component in record.components]
-        warnings: list[str] = []
+        warnings: list[str] = self._drift_warnings(record)
         for component in reversed(record.components):
             warnings.extend(self._remove_component(core_path, component, remaining=remaining, ignore_missing=True))
+        remaining = [self._refresh_installed_hashes(core_path, item) for item in remaining]
         self._write_installed(core_path, remaining)
         return PackageOperationResult(
             action="uninstall",
@@ -1174,7 +1196,7 @@ class PackageManager:
             return operation
         target_core_id = component.target_core_id or component.component_id
         self._validate_core_id(target_core_id)
-        target_path = self.version_store.active_core_path(target_core_id)
+        target_path = self._active_core_path(target_core_id)
         return {
             "kind": "core",
             "component_id": component.component_id,
@@ -1357,7 +1379,7 @@ class PackageManager:
 
     def _install_component(self, core_path: Path, operation: dict[str, Any]) -> dict[str, Any]:
         if operation.get("reused"):
-            return self._component_record(operation)
+            return self._component_record(operation, core_path=core_path)
         source_path = Path(str(operation["source_path"]))
         target_path = Path(str(operation["target_path"]))
         if operation["kind"] in MANIFEST_FILE_KINDS:
@@ -1366,7 +1388,7 @@ class PackageManager:
                 yaml.safe_dump(operation["manifest"], sort_keys=False, allow_unicode=True),
                 encoding="utf-8",
             )
-            return self._component_record(operation)
+            return self._component_record(operation, core_path=core_path)
         if operation["kind"] in CORE_LOCAL_KINDS:
             self._copy_component_source(source_path, target_path)
             config = operation.get("config")
@@ -1379,10 +1401,10 @@ class PackageManager:
                 )
             if operation["kind"] in PIPELINE_KINDS:
                 self._insert_pipeline_slot(core_path, operation)
-            return self._component_record(operation)
+            return self._component_record(operation, core_path=core_path)
         shutil.copytree(source_path, target_path, ignore=_COPYTREE_IGNORE)
         self._rewrite_core_id(target_path / "agent.yaml", str(operation["target_core_id"]))
-        return self._component_record(operation)
+        return self._component_record(operation, core_path=core_path)
 
     def _remove_component(
         self,
@@ -1417,14 +1439,11 @@ class PackageManager:
             target_core_id = str(component.get("target_core_id") or "")
             if target_core_id:
                 self._validate_core_id(target_core_id)
-                target_path = self.version_store.active_core_path(target_core_id)
+                target_path = self._active_core_path(target_core_id)
                 if target_path.exists():
                     shutil.rmtree(target_path)
                 else:
                     warnings.append(f"target core already missing: {target_core_id}")
-                pointer = self.version_store.registry_root / f"{target_core_id}.json"
-                if pointer.exists():
-                    pointer.unlink()
             return warnings
         warnings.append(f"unknown installed component kind: {kind}")
         return warnings
@@ -1441,7 +1460,7 @@ class PackageManager:
         ensure_dir(target_path.parent)
         shutil.copy2(source_path, target_path)
 
-    def _component_record(self, operation: Mapping[str, Any]) -> dict[str, Any]:
+    def _component_record(self, operation: Mapping[str, Any], *, core_path: Path | None = None) -> dict[str, Any]:
         keep = {
             "kind",
             "component_id",
@@ -1458,13 +1477,93 @@ class PackageManager:
             "reused",
             "reused_by",
         }
-        return {key: value for key, value in operation.items() if key in keep and value is not None}
+        record = {key: value for key, value in operation.items() if key in keep and value is not None}
+        if core_path is not None:
+            record["installed_hash"] = self._installed_component_hash(core_path, record)
+        return record
 
     def _operation_preview(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         preview = self._component_record(operation)
         if operation.get("kind") in CORE_LOCAL_KINDS and isinstance(operation.get("config"), dict):
             preview["config_path"] = "config.yaml"
         return preview
+
+    def _load_installed_with_drift(self, core_path: Path) -> list[InstalledPackage]:
+        return [self._with_drift(core_path, item) for item in self._load_installed(core_path)]
+
+    def _with_drift(self, core_path: Path, package: InstalledPackage) -> InstalledPackage:
+        drift: list[str] = []
+        for component in package.components:
+            expected = str(component.get("installed_hash") or "")
+            label = str(component.get("target") or component.get("target_core_id") or component.get("component_id") or "")
+            if not expected:
+                drift.append(f"{label}: missing installed_hash")
+                continue
+            actual = self._installed_component_hash(core_path, component)
+            if actual != expected:
+                drift.append(f"{label}: expected {expected[:12]}, found {actual[:12]}")
+        return replace(package, drift=drift)
+
+    def _drift_warnings(self, package: InstalledPackage) -> list[str]:
+        return [f"package drift: {item}" for item in package.drift]
+
+    def _refresh_component_hash(self, core_path: Path, component: dict[str, Any]) -> dict[str, Any]:
+        refreshed = dict(component)
+        refreshed["installed_hash"] = self._installed_component_hash(core_path, refreshed)
+        return refreshed
+
+    def _refresh_installed_hashes(self, core_path: Path, package: InstalledPackage) -> InstalledPackage:
+        return replace(
+            package,
+            components=[self._refresh_component_hash(core_path, dict(component)) for component in package.components],
+            drift=[],
+        )
+
+    def _installed_component_hash(self, core_path: Path, component: Mapping[str, Any]) -> str:
+        kind = str(component.get("kind") or "")
+        paths: list[Path] = []
+        if kind == "core":
+            target_core_id = str(component.get("target_core_id") or "")
+            if target_core_id:
+                paths.append(self._active_core_path(target_core_id))
+        else:
+            target = str(component.get("target") or "")
+            if target:
+                paths.append(self._relative_target(core_path, target))
+            if kind in PIPELINE_KINDS:
+                paths.append(self._pipelines_yaml_path(core_path))
+        return self._hash_paths(paths)
+
+    def _hash_paths(self, paths: list[Path]) -> str:
+        digest = hashlib.sha256()
+        for path in sorted({item.resolve(strict=False) for item in paths}, key=lambda item: item.as_posix()):
+            self._hash_one_path(digest, path)
+        return digest.hexdigest()
+
+    def _hash_one_path(self, digest: "hashlib._Hash", path: Path) -> None:
+        label = self._hash_label(path)
+        if not path.exists() and not path.is_symlink():
+            digest.update(f"missing\0{label}\0".encode("utf-8"))
+            return
+        if path.is_symlink():
+            digest.update(f"symlink\0{label}\0{os.readlink(path)}\0".encode("utf-8"))
+            return
+        if path.is_file():
+            digest.update(f"file\0{label}\0".encode("utf-8"))
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+            return
+        digest.update(f"dir\0{label}\0".encode("utf-8"))
+        for child in sorted(path.iterdir(), key=lambda item: item.as_posix()):
+            if "__pycache__" in child.parts or child.name.endswith((".pyc", ".pyo")):
+                continue
+            self._hash_one_path(digest, child)
+
+    def _hash_label(self, path: Path) -> str:
+        try:
+            return path.resolve(strict=False).relative_to(self.agents_root).as_posix()
+        except ValueError:
+            return path.resolve(strict=False).as_posix()
 
     def _render_component_config(
         self,
@@ -1769,10 +1868,14 @@ class PackageManager:
 
     def _require_active_core(self, core_id: str) -> Path:
         self._validate_core_id(core_id)
-        core_path = self.version_store.active_core_path(core_id)
+        core_path = self._active_core_path(core_id)
         if not core_path.exists():
             raise PackageOperationError(f"active core not found: {core_id}")
         return core_path
+
+    def _active_core_path(self, core_id: str) -> Path:
+        self._validate_core_id(core_id)
+        return require_relative_path(self.agents_root / core_id, self.agents_root)
 
     def _require_package(self, package_id: str) -> PackageInfo:
         return self.repositories.resolve_package_ref(package_id)

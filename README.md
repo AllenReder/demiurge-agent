@@ -68,7 +68,8 @@ to add a real model profile.
 
 Agent Slots let packages attach bootstrap, input, and output behavior, and let
 custom code control subagent calls and authored logic, while the host keeps
-provider access, approvals, delivery, promotion, and rollback under control.
+provider access, approvals, delivery, Git revision promotion, and rollback
+under control.
 
 <p>
   <strong>Basic Memory System</strong><br>
@@ -101,13 +102,14 @@ assistant/
     ├── skills/
     ├── schedules/
     ├── mcp/
-    ├── lib/
-    └── tests/
+    └── lib/
 ```
 
-The runtime copies source templates into `~/.demiurge/agents`. Edits to runtime
-cores are file-backed, diffable, and gateable. Package recipes install reusable
-components into those runtime cores without modifying the source templates.
+The runtime initializes `~/.demiurge/.core.git` from the source `agents/` tree
+and checks out the live agents tree at `~/.demiurge/agents`. Runtime core edits,
+evolve runs, package installs, package uninstalls, promotions, and rollbacks are
+Git revisions in that repository. Package recipes install reusable components
+into runtime cores without modifying the source templates or host lock file.
 
 
 ## Manual Entry Path

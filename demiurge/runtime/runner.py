@@ -89,7 +89,7 @@ class TurnResult:
     session_id: str
     turn_id: str
     core_id: str
-    core_version: str
+    core_revision: str
     items: list[InteractionItem]
     agent_result: Any = None
     needs_user: bool = False
@@ -1300,7 +1300,7 @@ class SessionTurnStepRunner:
         output_slots_override = self._resolve_phase_slots(core, "output", output_slot_ids)
         capability = CapabilityFacade(core)
         if not self._session_started:
-            self.event_log.emit("session.started", core_id=core.core_id, core_version=core.version, **interaction_metadata)
+            self.event_log.emit("session.started", core_id=core.core_id, core_revision=self._core_revision(core), **interaction_metadata)
             self._session_started_ids.add(self.session_id)
         await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
 
@@ -1317,7 +1317,7 @@ class SessionTurnStepRunner:
             session_id=self.session_id,
             turn_id=turn_id,
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             user_input=user_input,
             state=state,
             metadata=interaction_metadata,
@@ -1327,7 +1327,7 @@ class SessionTurnStepRunner:
             "turn.started",
             turn_id=turn_id,
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             **interaction_metadata,
         )
         turn_task_id = self._submit_turn_task(core=core, turn_id=turn_id, metadata=interaction_metadata)
@@ -1425,7 +1425,7 @@ class SessionTurnStepRunner:
             session_id=self.session_id,
             turn_id=turn_id,
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             items=items,
             agent_result=result_client.value,
             needs_user=needs_user,
@@ -1450,7 +1450,7 @@ class SessionTurnStepRunner:
         self.event_log.emit(
             "bootstrap.started",
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             slots=[slot.slot_id for slot in core.bootstrap_pipeline.serial],
             **interaction_metadata,
         )
@@ -1460,7 +1460,7 @@ class SessionTurnStepRunner:
                 self.event_log.emit(
                     "bootstrap.module.started",
                     core_id=core.core_id,
-                    core_version=core.version,
+                    core_revision=self._core_revision(core),
                     slot=slot.relative_path,
                     kind="bootstrap",
                     **interaction_metadata,
@@ -1469,7 +1469,7 @@ class SessionTurnStepRunner:
                 ctx = BootstrapContext(
                     session_id=self.session_id,
                     core_id=core.core_id,
-                    core_version=core.version,
+                    core_revision=self._core_revision(core),
                     workspace=self.workspace or "",
                     slot_id=slot.slot_id,
                     slot_path=slot.relative_path,
@@ -1482,7 +1482,7 @@ class SessionTurnStepRunner:
                         self.event_log.emit(
                             "bootstrap.module.return_ignored",
                             core_id=core.core_id,
-                            core_version=core.version,
+                            core_revision=self._core_revision(core),
                             slot=slot.relative_path,
                             kind="bootstrap",
                             **interaction_metadata,
@@ -1491,7 +1491,7 @@ class SessionTurnStepRunner:
                     self.event_log.emit(
                         "bootstrap.module.completed",
                         core_id=core.core_id,
-                        core_version=core.version,
+                        core_revision=self._core_revision(core),
                         slot=slot.relative_path,
                         kind="bootstrap",
                         fragments=len(client.fragments),
@@ -1502,7 +1502,7 @@ class SessionTurnStepRunner:
                     self.event_log.emit(
                         "bootstrap.module.failed",
                         core_id=core.core_id,
-                        core_version=core.version,
+                        core_revision=self._core_revision(core),
                         slot=slot.relative_path,
                         kind="bootstrap",
                         error=str(exc),
@@ -1515,7 +1515,7 @@ class SessionTurnStepRunner:
             self.event_log.emit(
                 "bootstrap.completed",
                 core_id=core.core_id,
-                core_version=core.version,
+                core_revision=self._core_revision(core),
                 fragments=len(fragments),
                 chars=len(content),
                 **interaction_metadata,
@@ -1524,7 +1524,7 @@ class SessionTurnStepRunner:
             self.event_log.emit(
                 "bootstrap.failed",
                 core_id=core.core_id,
-                core_version=core.version,
+                core_revision=self._core_revision(core),
                 error=str(exc),
                 **interaction_metadata,
             )
@@ -1673,6 +1673,12 @@ class SessionTurnStepRunner:
     def _build_skill_index(self, core: LoadedCore) -> str:
         return self.context_assembler._build_skill_index(core)
 
+    def _core_revision(self, core: LoadedCore) -> str:
+        try:
+            return self.version_store.active_pointer(core.core_id).active_revision
+        except Exception:
+            return "untracked"
+
     def _resolve_model_name(self, core: LoadedCore) -> str:
         if self.model_resolver:
             return self.model_resolver(core.manifest.model)
@@ -1691,7 +1697,7 @@ class SessionTurnStepRunner:
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
         record = self.session_runtime.create_session(
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             channel=channel,
             conversation_key=conversation_key,
             workspace=self.workspace,
@@ -1703,7 +1709,7 @@ class SessionTurnStepRunner:
         self.event_log.emit(
             "session.created",
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             channel=channel,
             conversation_key=conversation_key,
         )
@@ -1833,7 +1839,7 @@ class SessionTurnStepRunner:
         _, created = self.session_runtime.ensure_session(
             self.session_id,
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
             workspace=self.workspace,
             provider=self.provider_name,
             model=self._resolve_model_name(core),
@@ -1842,7 +1848,7 @@ class SessionTurnStepRunner:
         self.event_log.emit(
             "session.created" if created else "session.resumed",
             core_id=core.core_id,
-            core_version=core.version,
+            core_revision=self._core_revision(core),
         )
         self.history = self._session_history_messages()
 
@@ -1857,7 +1863,7 @@ class SessionTurnStepRunner:
             self.event_log.emit(
                 "session.resumed",
                 core_id=record.core_id,
-                core_version=record.core_version,
+                core_revision=record.core_revision,
                 channel=record.channel,
                 conversation_key=record.conversation_key,
             )
@@ -1891,7 +1897,7 @@ class SessionTurnStepRunner:
                 self.session_runtime.update_session(
                     self.session_id,
                     core_id=core.core_id,
-                    core_version=core.version,
+                    core_revision=self._core_revision(core),
                     channel=str(channel),
                     conversation_key=None,
                     metadata={
@@ -1918,7 +1924,7 @@ class SessionTurnStepRunner:
             self.session_runtime.update_session(
                 self.session_id,
                 core_id=core.core_id,
-                core_version=core.version,
+                core_revision=self._core_revision(core),
                 channel=str(channel),
                 conversation_key=str(conversation_key),
                 metadata={
