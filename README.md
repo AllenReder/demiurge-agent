@@ -117,6 +117,8 @@ components into those runtime cores without modifying the source templates.
 - [Configure a Provider](https://allenreder.github.io/demiurge-agent/docs/how-to/configure-provider)
 - [Choose a Workspace](https://allenreder.github.io/demiurge-agent/docs/how-to/choose-workspace)
 - [Troubleshoot](https://allenreder.github.io/demiurge-agent/docs/how-to/troubleshoot)
+- [Write a Package Recipe](https://allenreder.github.io/demiurge-agent/docs/how-to/write-package-recipe)
+- [Publish a Package Repository](https://allenreder.github.io/demiurge-agent/docs/how-to/publish-package-repository)
 - [Latest Release: 0.5.0](https://allenreder.github.io/demiurge-agent/docs/releases/0.5.0)
 
 ## Contributor Path

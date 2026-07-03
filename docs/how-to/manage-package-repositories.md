@@ -5,9 +5,13 @@ description: Add, list, sync, and remove built-in, local path, and git package r
 
 # Manage Package Repositories
 
-Package repositories are host-level sources for package recipes. The built-in
-repository is available by default. Add external repositories only when you
-trust their code.
+Package repositories are host-level sources for package recipes. This page is
+for users who add, sync, and remove repositories on their own host. If you are
+creating a repository for other users, see
+[Publish a Package Repository](publish-package-repository.md).
+
+The built-in repository is available by default. Add external repositories only
+when you trust their code.
 
 The easiest path is the interactive package manager:
 

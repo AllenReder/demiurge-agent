@@ -230,6 +230,9 @@ uv run demiurge package
 For scripted repository commands, see
 [Manage Package Repositories](manage-package-repositories.md).
 
+If you are creating a repository for other users to install from, see
+[Publish a Package Repository](publish-package-repository.md).
+
 ## Boundaries
 
 Package management is a user-controlled CLI workflow. It is not an

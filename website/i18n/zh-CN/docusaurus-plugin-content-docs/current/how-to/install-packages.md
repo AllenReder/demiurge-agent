@@ -207,6 +207,8 @@ uv run demiurge package
 
 需要脚本化 repository commands 时，参见 [管理 Package Repositories](manage-package-repositories.md)。
 
+如果你正在创建供其他用户安装的 repository，请阅读 [发布 Package Repository](publish-package-repository.md)。
+
 ## 边界
 
 Package management 是用户控制的 CLI workflow。它不是 agent-callable model tool。

@@ -107,6 +107,8 @@ runtime cores，不修改 source templates。
 - [配置 Provider](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/configure-provider)
 - [选择 Workspace](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/choose-workspace)
 - [故障排查](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/troubleshoot)
+- [编写 Package Recipe](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/write-package-recipe)
+- [发布 Package Repository](https://allenreder.github.io/demiurge-agent/zh-CN/docs/how-to/publish-package-repository)
 - [最新发布：0.5.0](https://allenreder.github.io/demiurge-agent/zh-CN/docs/releases/0.5.0)
 
 ## 开发者路径

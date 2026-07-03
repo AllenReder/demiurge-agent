@@ -12,6 +12,9 @@ install, and uninstall it again.
 Package repositories distribute authored-surface files. They do not install
 Python dependencies and do not modify the host `uv.lock`.
 
+This tutorial keeps the recipe minimal. For package YAML design and field
+details, use [Write a Package Recipe](../how-to/write-package-recipe.md).
+
 ## 1. Create the Repository Root
 
 Choose a local path:
@@ -167,6 +170,9 @@ If the package fails to load, compare the repository with
 [Package Repository Contract](../reference/contracts/package-repositories.md)
 and the recipe with
 [Package Recipe Reference](../reference/package-recipes.md).
+
+When this repository is ready to share with other users, continue with
+[Publish a Package Repository](../how-to/publish-package-repository.md).
 
 ## 7. Uninstall
 

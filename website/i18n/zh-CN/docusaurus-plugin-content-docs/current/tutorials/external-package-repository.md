@@ -9,6 +9,8 @@ description: 构建一个小型 trusted package repository，并把一个 input 
 
 Package repositories 分发 authored-surface files。它们不会安装 Python dependencies，也不会修改 host `uv.lock`。
 
+本教程会保持 recipe 最小化。Package YAML 设计和字段细节见 [编写 Package Recipe](../how-to/write-package-recipe.md)。
+
 ## 1. 创建仓库根目录
 
 选择一个本地路径：
@@ -154,7 +156,9 @@ uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-如果 package 加载失败，将 repository 与 [Package Repository Contract](../reference/contracts/package-repositories.md) 对比，并将 recipe 与 [Package Recipe Reference](../reference/package-recipes.md) 对比。
+如果 package 加载失败，将 repository 与 [Package Repository Contract](../reference/contracts/package-repositories.md) 对比，并将 recipe 与 [Package Recipe 参考](../reference/package-recipes.md) 对比。
+
+当这个 repository 准备好共享给其他用户时，继续阅读 [发布 Package Repository](../how-to/publish-package-repository.md)。
 
 ## 7. 卸载
 
