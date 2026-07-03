@@ -89,10 +89,14 @@ def test_prepare_smoke_repository_exports_current_head_to_dedicated_ref(monkeypa
     assert source.ref == "smoke-managed-install"
     assert source.head == "abc123"
     assert commands == [
-        {"command": ["git", "init", "--bare", str(bare_repo)], "cwd": tmp_path, "env": None},
         {
-            "command": ["git", "push", str(bare_repo), "HEAD:refs/heads/smoke-managed-install"],
-            "cwd": repo_root,
+            "command": ["git", "clone", "--bare", "--no-local", str(repo_root), str(bare_repo)],
+            "cwd": tmp_path,
+            "env": None,
+        },
+        {
+            "command": ["git", "update-ref", "refs/heads/smoke-managed-install", "abc123"],
+            "cwd": bare_repo,
             "env": None,
         },
         {

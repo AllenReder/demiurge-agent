@@ -95,8 +95,8 @@ def run_output(command: list[str], *, cwd: Path) -> str:
 def prepare_smoke_repository(repo_root: Path, tmp_root: Path) -> SmokeSource:
     head = run_output(["git", "rev-parse", "HEAD"], cwd=repo_root)
     bare_repo = tmp_root / "source.git"
-    run_checked(["git", "init", "--bare", str(bare_repo)], cwd=tmp_root)
-    run_checked(["git", "push", str(bare_repo), f"HEAD:refs/heads/{SMOKE_REF}"], cwd=repo_root)
+    run_checked(["git", "clone", "--bare", "--no-local", str(repo_root), str(bare_repo)], cwd=tmp_root)
+    run_checked(["git", "update-ref", f"refs/heads/{SMOKE_REF}", head], cwd=bare_repo)
     run_checked(["git", "symbolic-ref", "HEAD", f"refs/heads/{SMOKE_REF}"], cwd=bare_repo)
     return SmokeSource(url=bare_repo.resolve().as_uri(), ref=SMOKE_REF, head=head)
 
