@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from demiurge.runtime.control import ActionSource, ActionSpec, EventCursor, EventFilter, RuntimeControlPlane, TaskFilter
@@ -21,6 +24,25 @@ def test_runtime_store_appends_idempotent_task_event(tmp_path):
     assert len(tasks) == 1
     assert tasks[0]["kind"] == "terminal.exec"
     assert tasks[0]["status"] == "queued"
+
+
+def test_runtime_store_releases_sqlite_handles_before_temp_directory_cleanup():
+    with tempfile.TemporaryDirectory() as directory:
+        store = RuntimeStore(Path(directory) / "runtime.sqlite3")
+        store.append(
+            [
+                RuntimeEvent(
+                    type="task.submitted",
+                    aggregate_type="task",
+                    aggregate_id="task_1",
+                    payload={"kind": "terminal.exec"},
+                )
+            ]
+        )
+
+        rows = store.query(RuntimeQuery(table="tasks", where={"task_id": "task_1"})).rows
+
+        assert rows[0]["task_id"] == "task_1"
 
 
 def test_control_plane_submit_control_read_and_stream(tmp_path):

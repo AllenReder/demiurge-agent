@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar
 
 from demiurge.util import ensure_dir, utc_id
 from demiurge.storage import utc_now
@@ -86,7 +87,7 @@ class RuntimeStore:
         materialized = list(events)
         if not materialized:
             return AppendResult(events=(), first_seq=None, last_seq=None)
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if idempotency_key:
                 existing = self._events_by_idempotency_key(connection, idempotency_key)
@@ -157,12 +158,12 @@ class RuntimeStore:
             sql += f" ORDER BY {query.order_by}"
         sql += " LIMIT ? OFFSET ?"
         values.extend([query.limit, query.offset])
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = [self._decode_row(dict(row)) for row in connection.execute(sql, values).fetchall()]
         return ProjectionPage(rows=tuple(rows), limit=query.limit, offset=query.offset)
 
     def transaction(self, fn: Callable[[sqlite3.Connection], T]) -> T:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 result = fn(connection)
@@ -173,7 +174,7 @@ class RuntimeStore:
             return result
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if current_version not in {0, SCHEMA_VERSION}:
                 raise RuntimeError(
@@ -183,6 +184,12 @@ class RuntimeStore:
             connection.executescript(_SCHEMA_SQL)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection:
+            with connection:
+                yield connection
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
