@@ -111,8 +111,7 @@ The model-facing delegation tools are:
 - `task_list(kind=None)`, scoped to the current session;
 - `task_status(task_id, view="model")`;
 - `task_control(task_id, command="cancel")`;
-- `yield_until(task_id, timeout_seconds=30)`;
-- `run_terminal(command, background=true, workspace=None, risk=None)`.
+- `yield_until(task_id, timeout_seconds=30)`.
 
 `delegate_task` currently supports `isolated` and `fork` context modes, enforces
 the default depth and child-count limits, and applies child `tool_policy`

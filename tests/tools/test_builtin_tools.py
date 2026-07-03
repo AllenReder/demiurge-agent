@@ -1106,6 +1106,7 @@ async def test_removed_tool_names_are_not_aliases(tmp_path):
         "web_search",
         "process",
         "jo" + "b",
+        "run_" + "terminal",
     ]
     results = [await _execute(app, core, name, {}) for name in removed]
 
@@ -1121,11 +1122,12 @@ async def test_tools_list_returns_registry_metadata(tmp_path):
     result = await _execute(app, core, "tools_list", {})
 
     assert result.is_error is False
+    removed_terminal_alias = "run_" + "terminal"
     payload = json.loads(result.content)
     assert payload["success"] is True
     names = {tool["name"] for tool in payload["tools"]}
     assert {"tools_list", "task_list", "skills_list", "read_file", "write_file", "patch", "terminal", "echo"}.issubset(names)
-    assert {"jo" + "b", "process"}.isdisjoint(names)
+    assert {"jo" + "b", "process", removed_terminal_alias}.isdisjoint(names)
     read_file = next(tool for tool in payload["tools"] if tool["name"] == "read_file")
     assert read_file["source"] == "builtin"
     assert read_file["capability"] == "fs.read"
@@ -1134,6 +1136,7 @@ async def test_tools_list_returns_registry_metadata(tmp_path):
     assert terminal["approval_policy"] == "prompt"
     model_payload = json.loads(result.model_output or "")
     model_terminal = next(tool for tool in model_payload["tools"] if tool["name"] == "terminal")
+    assert all(tool["name"] != removed_terminal_alias for tool in model_payload["tools"])
     assert model_terminal == {
         "name": "terminal",
         "description": terminal["description"],

@@ -22,7 +22,6 @@ BUILTIN_TOOLSETS: dict[str, list[str]] = {
         "patch",
         "search_files",
         "terminal",
-        "run_terminal",
         "web_extract",
         "skills_list",
         "skill_view",

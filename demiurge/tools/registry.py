@@ -198,21 +198,6 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             required=["task_id"],
         ),
     ),
-    "run_terminal": ToolDefinition(
-        name="run_terminal",
-        description="Run a terminal command as a runtime task. Defaults to background=true.",
-        input_schema=_schema(
-            {
-                "command": {"type": "string"},
-                "workspace": {"type": "string"},
-                "cwd": {"type": "string", "default": "."},
-                "background": {"type": "boolean", "default": True},
-                "timeout_seconds": {"type": "integer", "default": 30},
-                "risk": {"type": "string"},
-            },
-            required=["command"],
-        ),
-    ),
     "skills_list": ToolDefinition(
         name="skills_list",
         description="List available skills with minimal metadata. Use skill_view(name) to load full content.",
@@ -348,7 +333,6 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "task_status": {"risk": "low", "capability": "task.control", "approval_policy": "auto"},
     "task_control": {"risk": "medium", "capability": "task.control", "approval_policy": "auto"},
     "yield_until": {"risk": "low", "capability": "task.control", "approval_policy": "auto"},
-    "run_terminal": {"risk": "high", "capability": "terminal.exec", "approval_policy": "prompt"},
     "skills_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_view": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
     "skill_manage": {"risk": "medium", "capability": "fs.write", "approval_policy": "prompt"},

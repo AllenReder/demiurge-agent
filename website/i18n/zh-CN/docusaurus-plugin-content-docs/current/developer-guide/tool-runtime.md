@@ -35,7 +35,6 @@ host runtime，并使用共享的 `RuntimeTaskWorker` 作为 active work 的 liv
 
 - `terminal(background=true)` 会创建一个 `terminal.exec` task，并把 stdout/stderr
   捕获到 `task_logs` 中。
-- `run_terminal(...)` 是 model-facing alias，默认使用 `background=true`。
 - `evolve_core(action="start", background=true)` 会创建一个 `evolver.run` task，编辑
   隔离 agents-tree worktree。它返回 run id，不会切换 live core。
 - `evolve_core(action="review")`、`evolve_core(action="promote")` 和

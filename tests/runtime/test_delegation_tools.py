@@ -283,14 +283,14 @@ async def test_delegate_task_allows_two_concurrent_children(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_terminal_defaults_to_background_task(tmp_path):
+async def test_terminal_background_true_returns_runtime_task(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=tmp_path)
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
     result = await app.tool_runtime.execute(
-        ToolCall(name="run_terminal", arguments={"command": "printf ok"}),
+        ToolCall(name="terminal", arguments={"command": "printf ok", "background": True}),
         core=core,
         turn=turn,
         capability=capability,

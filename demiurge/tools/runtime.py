@@ -460,18 +460,6 @@ class ToolRuntime:
             return await self._patch(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "terminal":
             return await self._terminal(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
-        if call.name == "run_terminal":
-            arguments = dict(call.arguments)
-            arguments.setdefault("background", True)
-            if arguments.get("workspace") and not arguments.get("cwd"):
-                arguments["cwd"] = arguments["workspace"]
-            return await self._terminal(
-                ToolCall(id=call.id, name="terminal", arguments=arguments),
-                core=core,
-                turn=turn,
-                capability=capability,
-                emit_event=emit_event,
-            )
         if call.name == "task_list":
             return self._task_list(call, turn=turn, capability=capability)
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
@@ -841,7 +829,7 @@ class ToolRuntime:
         owner_turn_id: str,
         notify_on_complete: bool,
     ) -> ToolResult:
-        async def run_terminal_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+        async def terminal_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             process = await asyncio.create_subprocess_shell(
                 execution_command,
                 cwd=cwd.path,
@@ -884,7 +872,7 @@ class ToolRuntime:
                 owner_session_id=owner_session_id,
                 owner_turn_id=owner_turn_id,
                 source_tool="terminal",
-                task_factory=run_terminal_task,
+                task_factory=terminal_task,
                 write_scope=f"terminal:{cwd.path}",
                 notify_on_complete=notify_on_complete,
                 metadata={"command": command, "cwd": cwd.relative},

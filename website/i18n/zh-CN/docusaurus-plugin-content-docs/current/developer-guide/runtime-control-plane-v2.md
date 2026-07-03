@@ -109,8 +109,7 @@ waits、cancellation results 和 pending completion notifications 都从
 - `task_list(kind=None)`，限定当前 session；
 - `task_status(task_id, view="model")`；
 - `task_control(task_id, command="cancel")`；
-- `yield_until(task_id, timeout_seconds=30)`；
-- `run_terminal(command, background=true, workspace=None, risk=None)`。
+- `yield_until(task_id, timeout_seconds=30)`。
 
 `delegate_task` 当前支持 `isolated` 和 `fork` context modes，执行默认 depth 和
 child-count limits，并在 visible-tool construction 和 dispatch 阶段应用 child

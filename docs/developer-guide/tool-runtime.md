@@ -36,8 +36,6 @@ live worker for active work:
 
 - `terminal(background=true)` creates a `terminal.exec` task and captures
   stdout/stderr into `task_logs`.
-- `run_terminal(...)` is a model-facing alias that defaults terminal execution
-  to `background=true`.
 - `evolve_core(action="start", background=true)` creates an `evolver.run` task
   that edits an isolated agents-tree worktree. It returns a run id and does not
   switch the live core.

@@ -17,7 +17,7 @@ Agent Core 声明 tool surfaces。Host 拥有 selection、dispatch、capability 
 
 | Toolset | Tools |
 | --- | --- |
-| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `run_terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search` |
+| `coding` | `read_file`, `write_file`, `patch`, `search_files`, `terminal`, `web_extract`, `skills_list`, `skill_view`, `skill_manage`, `todo`, `clarify`, `session_search` |
 | `demiurge_control` | `tools_list`, `task_list`, `delegate_task`, `task_status`, `task_control`, `yield_until`, `evolve_core`, `rollback_core` |
 | `schedule` | `schedule_manage` |
 
@@ -176,7 +176,6 @@ tree 创建新的 rollback commit；新的 revision 会在下一 turn 生效。
 这些 calls 会提交 host-owned background tasks：
 
 - `terminal(background=true)`
-- `run_terminal(...)`
 - `delegate_task(...)`
 - `ctx.agents.spawn(...)`
 - `evolve_core(action="start", background=true)`
