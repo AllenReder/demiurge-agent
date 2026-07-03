@@ -297,7 +297,7 @@ describe("Ink TUI components", () => {
   it("renders footer status counters", () => {
     const footer = render(
       <Footer
-        columns={100}
+        columns={120}
         status={{
           ...initialStatus,
           workspace: "/tmp/work",
@@ -316,5 +316,21 @@ describe("Ink TUI components", () => {
     expect(footer.lastFrame()).toContain("assistant@0001")
     expect(footer.lastFrame()).toContain("fake:fake-model")
     expect(footer.lastFrame()).toContain("queued 2")
+  })
+
+  it("renders a useful short session suffix", () => {
+    const footer = render(
+      <Footer
+        columns={100}
+        status={{
+          ...initialStatus,
+          core_id: "assistant",
+          core_revision: "0001",
+          session_id: "session_20260703T122926Z-bf1995d3",
+        }}
+      />,
+    )
+    expect(footer.lastFrame()).toContain("s:bf1995d3")
+    expect(footer.lastFrame()).not.toContain("session_20")
   })
 })

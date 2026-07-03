@@ -419,10 +419,12 @@ class TuiInteractionBridge:
         return pending
 
     async def _emit_ready(self) -> None:
+        pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
         await self.emit(
             "interaction.ready",
             {
-                "core_id": self.app.runner.core_id,
+                "core_id": pointer.core_id,
+                "core_revision": pointer.active_revision,
                 "session_id": self.app.runner.session_id,
                 "workspace": str(self.app.workspace.root),
                 "provider": self.app.provider_name,

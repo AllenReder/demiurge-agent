@@ -137,6 +137,7 @@ async def test_tui_bridge_ready_includes_tui_slash_command_catalog(tmp_path):
     ready = sink.payloads("interaction.ready")[-1]
     commands = ready["slash_commands"]
     names = {command["name"] for command in commands}
+    assert ready["core_revision"] == app.version_store.active_pointer("assistant").active_revision
     assert names == {spec.name for spec in specs_for_surface("tui")}
     assert "tool-display" in names
     assert "busy" in names

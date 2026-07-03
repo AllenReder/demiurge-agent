@@ -41,5 +41,8 @@ function compactJoin(values: string[]): string {
 }
 
 function shortSession(value: string): string {
-  return value.length <= 10 ? value : value.slice(0, 10)
+  const prefix = "session_"
+  if (!value.startsWith(prefix)) return value.length <= 10 ? value : value.slice(-10)
+  const suffix = value.slice(prefix.length)
+  return suffix.length <= 10 ? value : `s:${suffix.slice(-8)}`
 }

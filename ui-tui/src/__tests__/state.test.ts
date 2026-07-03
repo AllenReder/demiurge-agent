@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest"
 import { clearPrompt, createInitialState, reduceGatewayEvent, selectPromptChoice } from "../app/state"
 
 describe("interaction reducer", () => {
+  it("tracks core revision from ready events", () => {
+    const state = reduceGatewayEvent(createInitialState(), {
+      event: "interaction.ready",
+      payload: { core_id: "assistant", core_revision: "0001", session_id: "session_1" },
+    })
+
+    expect(state.status).toMatchObject({ core_id: "assistant", core_revision: "0001", session_id: "session_1" })
+  })
+
   it("renders user and assistant messages as separate transcript blocks", () => {
     let state = createInitialState()
     state = reduceGatewayEvent(state, { event: "interaction.message", payload: { role: "user", text: "hello" } })

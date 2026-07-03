@@ -55,6 +55,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
         ...state.status,
         workspace: stringValue(payload.workspace),
         core_id: stringValue(payload.core_id) || state.status.core_id,
+        core_revision: stringValue(payload.core_revision) || state.status.core_revision,
         session_id: stringValue(payload.session_id),
         provider: stringValue(payload.provider),
         model: stringValue(payload.model),
