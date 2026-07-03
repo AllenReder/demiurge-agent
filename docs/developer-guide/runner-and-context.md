@@ -49,7 +49,9 @@ modeled as a synthetic inbound event for the originating session rather than as
 direct channel output. Channel bridges use live subscription as a wakeup path
 and recover pending completion events from SQLite. If user input and completion
 are both pending, the user input runs first and pending completion summaries are
-merged into that user turn.
+merged into that user turn. A successful `yield_until` call consumes the
+matching pending completion notification at the task-worker seam, so channel
+bridges do not run a second synthetic completion turn for the same task result.
 
 `/stop` and foreground cancellation affect only the active turn. Background
 tasks continue until they finish or a user calls `task_control(command="cancel")`.

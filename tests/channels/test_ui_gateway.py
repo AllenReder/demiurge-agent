@@ -65,6 +65,28 @@ class RecordingEchoProvider:
         return LLMResponse(content=f"[echo] {user_text}")
 
 
+class YieldUntilProvider:
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+        self.requests = []
+        self.first_request = asyncio.Event()
+
+    async def complete(self, request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            self.first_request.set()
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="yield_1",
+                        name="yield_until",
+                        arguments={"task_id": self.task_id, "timeout_seconds": 2},
+                    )
+                ]
+            )
+        return LLMResponse(content="[waited]")
+
+
 async def _wait_for(predicate, *, timeout: float = 2.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -476,6 +498,42 @@ async def test_tui_bridge_runs_background_completion_turn_when_idle(tmp_path):
     assert record.task_id in user_text
     assert "background complete" in user_text
     assert sink.payloads("interaction.message") == []
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_yield_until_consumes_background_completion_turn(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    release = asyncio.Event()
+
+    async def task(ctx):
+        ctx.append_log("waiting")
+        await release.wait()
+        ctx.append_log("done")
+        return "background complete"
+
+    record = app.task_worker.start_task(
+        kind="terminal.exec",
+        owner_session_id=app.runner.session_id,
+        owner_turn_id="turn_origin",
+        source_tool="test",
+        task_factory=task,
+    )
+    provider = YieldUntilProvider(record.task_id)
+    app.runner.provider = provider
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.initialize()
+    await bridge.submit("wait for the task")
+    await provider.first_request.wait()
+    release.set()
+
+    await _wait_for(lambda: len(provider.requests) >= 2 and not bridge.running)
+    await asyncio.sleep(0.05)
+
+    assert len(provider.requests) == 2
+    assert bridge._queued_inputs.empty()
+    assert app.task_worker.pending_events_for_session(app.runner.session_id) == []
 
 
 @pytest.mark.asyncio

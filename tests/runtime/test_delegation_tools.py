@@ -90,6 +90,33 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_task_wait_can_consume_existing_completion_event(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+
+    async def task(ctx):
+        ctx.append_log("finished")
+        return "worker done"
+
+    record = app.task_worker.start_task(
+        kind="terminal.exec",
+        owner_session_id=app.runner.session_id,
+        owner_turn_id="turn_origin",
+        source_tool="test",
+        task_factory=task,
+    )
+
+    await app.task_worker.wait(record.task_id, timeout_seconds=1)
+    assert [event.task_id for event in app.task_worker.pending_events_for_session(app.runner.session_id)] == [
+        record.task_id
+    ]
+
+    waited = await app.task_worker.wait(record.task_id, timeout_seconds=1, consume_completion=True)
+
+    assert waited.status == "succeeded"
+    assert app.task_worker.pending_events_for_session(app.runner.session_id) == []
+
+
+@pytest.mark.asyncio
 async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     provider = BlockingProvider()
@@ -127,6 +154,9 @@ async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp
     assert waited.data["timed_out"] is True
     provider.release.set()
     await app.runner.drain_background_tasks()
+    assert [event.task_id for event in app.task_worker.pending_events_for_session(app.runner.session_id)] == [
+        task_id
+    ]
 
 
 @pytest.mark.asyncio

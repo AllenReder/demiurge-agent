@@ -48,9 +48,12 @@ Runner 会为每个 session 保留一个活跃 turn。Background job completion 
 原始 session 的 synthetic inbound event，而不是直接的 channel output。Channel bridges
 会在 user turn 运行时排队 completion events。如果 user input 和 completion 都在等待，
 会优先运行 user input，并把待处理的 completion summaries 合并进那个 user turn。
+成功的 `yield_until` 调用会在 task-worker seam 消费匹配的 pending completion
+notification，因此 channel bridges 不会为同一个 task result 再运行第二个 synthetic
+completion turn。
 
 `/stop` 和 foreground cancellation 只影响当前活跃 turn。Background jobs 会继续运行，
-直到完成或用户调用 `job(action="cancel")`。
+直到完成或用户调用 `task_control(command="cancel")`。
 
 需要用户输入的 background work 会被标记为 `blocked_needs_user`，并且不会自动批准。
 

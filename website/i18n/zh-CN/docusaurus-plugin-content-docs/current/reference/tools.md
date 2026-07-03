@@ -180,7 +180,11 @@ tree 创建新的 rollback commit；新的 revision 会在下一 turn 生效。
 - `ctx.agents.spawn(...)`
 - `evolve_core(action="start", background=true)`
 
-Background task tools 会返回 `task_id`。使用 `task_status`、`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制它们。
+Background task tools 会返回 `task_id`。使用 `task_status`、`task_control(command="cancel")`、
+`yield_until` 或 `task_list` 检查或控制它们。如果 `yield_until` 返回 terminal 或 blocked
+状态，这个 tool result 会消费该 task 的 pending completion notification，因此同一个结果
+不会再额外触发一次 background-completion turn。如果 `yield_until` 超时但 task 仍在运行，
+它会返回当前 task status 和 `timed_out=true`；timeout 不表示 task 失败。
 `task_list` 限定当前 session。
 
 Foreground `/stop` 只会取消 foreground turn。它不会取消 background tasks。

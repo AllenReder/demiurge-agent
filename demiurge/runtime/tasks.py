@@ -209,6 +209,7 @@ class RuntimeTaskWorker:
         self._cancel_callbacks: dict[str, RuntimeTaskCancelCallback] = {}
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
+        self._completion_consumers: dict[str, int] = {}
 
     def start_task(
         self,
@@ -317,6 +318,14 @@ class RuntimeTaskWorker:
         self.control_plane.clear_completion(event_id)
         return True
 
+    def clear_pending_event_for_task(self, task_id: str) -> bool:
+        cleared = False
+        for event in self._pending_completion_events():
+            if event.task_id != task_id:
+                continue
+            cleared = self.clear_pending_event(event.event_id) or cleared
+        return cleared
+
     def get(self, task_id: str) -> RuntimeTaskRecord:
         try:
             return self._record_from_projection(task_id)
@@ -360,20 +369,43 @@ class RuntimeTaskWorker:
             return log
         return log[-max(0, int(tail)) :]
 
-    async def wait(self, task_id: str, *, timeout_seconds: int | float | None = None) -> RuntimeTaskRecord:
-        self.get(task_id)
-        task = self._active_tasks.get(task_id)
-        if task is None or task.done():
-            return self.get(task_id)
+    async def wait(
+        self,
+        task_id: str,
+        *,
+        timeout_seconds: int | float | None = None,
+        consume_completion: bool = False,
+    ) -> RuntimeTaskRecord:
+        if consume_completion:
+            self._begin_completion_consumer(task_id)
+        completion_consumed = False
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            raise
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-        return self.get(task_id)
+            self.get(task_id)
+            task = self._active_tasks.get(task_id)
+            if task is not None and not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            record = self.get(task_id)
+            if consume_completion and _is_completion_status(record.status):
+                self.clear_pending_event_for_task(task_id)
+                completion_consumed = True
+            return record
+        finally:
+            if consume_completion:
+                self._end_completion_consumer(task_id)
+                if not completion_consumed:
+                    try:
+                        record = self.get(task_id)
+                    except (KeyError, RuntimeTaskKindError):
+                        record = None
+                    if record is not None and _is_completion_status(record.status):
+                        self._emit_completion_once(record)
 
     async def cancel(self, task_id: str) -> RuntimeTaskRecord:
         record = self.get(task_id)
@@ -536,6 +568,8 @@ class RuntimeTaskWorker:
     def _emit_completion_once(self, record: RuntimeTaskRecord) -> None:
         if not record.notify_on_complete or self._completion_ready_event_for_task(record.task_id) is not None:
             return
+        if self._completion_consumers.get(record.task_id, 0) > 0:
+            return
         event = RuntimeTaskCompletionEvent(
             event_id=utc_id("task_event_"),
             task_id=record.task_id,
@@ -571,6 +605,16 @@ class RuntimeTaskWorker:
                 asyncio.create_task(value)
         except RuntimeError:
             return
+
+    def _begin_completion_consumer(self, task_id: str) -> None:
+        self._completion_consumers[task_id] = self._completion_consumers.get(task_id, 0) + 1
+
+    def _end_completion_consumer(self, task_id: str) -> None:
+        count = self._completion_consumers.get(task_id, 0)
+        if count <= 1:
+            self._completion_consumers.pop(task_id, None)
+            return
+        self._completion_consumers[task_id] = count - 1
 
     def _pending_completion_events(self) -> list[RuntimeTaskCompletionEvent]:
         rows = self.control_plane.store.query(
@@ -700,3 +744,7 @@ class RuntimeTaskWorker:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _is_completion_status(status: RuntimeTaskStatus) -> bool:
+    return status in TERMINAL_TASK_STATUSES or status == "blocked_needs_user"

@@ -2461,7 +2461,7 @@ class SessionTurnStepRunner:
         raw_timeout = call.arguments.get("timeout_seconds")
         timeout = float(raw_timeout if raw_timeout is not None else 30)
         try:
-            record = await self.task_worker.wait(task_id, timeout_seconds=timeout)
+            record = await self.task_worker.wait(task_id, timeout_seconds=timeout, consume_completion=True)
         except (KeyError, RuntimeTaskKindError):
             return ToolResult(content=f"background task not found: {task_id}", is_error=True)
         except asyncio.TimeoutError:
