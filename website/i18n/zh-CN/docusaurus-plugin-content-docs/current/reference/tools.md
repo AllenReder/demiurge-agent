@@ -149,6 +149,7 @@ tools:
 - `evolve_core(background=true)`
 
 Background task tools 会返回 `task_id`。使用 `task_status`、`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制它们。
+`task_list` 限定当前 session。
 
 Foreground `/stop` 只会取消 foreground turn。它不会取消 background tasks。
 

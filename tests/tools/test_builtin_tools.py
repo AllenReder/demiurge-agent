@@ -598,6 +598,47 @@ async def test_terminal_background_task_notifies(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_task_list_is_scoped_to_current_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = _load_core_with(app, capabilities={"task.control": {}})
+
+    async def quick_task(ctx):
+        return {"summary": f"done {ctx.task_id}"}
+
+    current = app.task_worker.start_task(
+        kind="terminal.exec",
+        owner_session_id="session_test",
+        owner_turn_id="turn_test",
+        source_tool="terminal",
+        task_factory=quick_task,
+    )
+    other = app.task_worker.start_task(
+        kind="terminal.exec",
+        owner_session_id="other_session",
+        owner_turn_id="other_turn",
+        source_tool="terminal",
+        task_factory=quick_task,
+    )
+    await app.task_worker.wait(current.task_id, timeout_seconds=5)
+    await app.task_worker.wait(other.task_id, timeout_seconds=5)
+
+    listed = await _execute(app, core, "task_list", {"kind": "terminal.exec"})
+
+    assert current.task_id in listed.content
+    assert other.task_id not in listed.content
+
+
+def test_task_list_schema_does_not_expose_owner_session_id(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    task_list = next(tool for tool in app.tool_runtime.definitions_for(core) if tool.name == "task_list")
+
+    assert set(task_list.input_schema["properties"]) == {"kind", "include_completed"}
+    assert "owner_session_id" not in json.dumps(task_list.input_schema)
+
+
+@pytest.mark.asyncio
 async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))

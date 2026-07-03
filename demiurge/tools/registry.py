@@ -132,11 +132,10 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     ),
     "task_list": ToolDefinition(
         name="task_list",
-        description="List controllable background runtime tasks.",
+        description="List controllable background runtime tasks for the current session.",
         input_schema=_schema(
             {
                 "kind": {"type": "string", "enum": ["terminal.exec", "evolver.run", "agent.spawn"]},
-                "owner_session_id": {"type": "string"},
                 "include_completed": {"type": "boolean", "default": True},
             }
         ),

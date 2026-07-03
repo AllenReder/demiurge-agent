@@ -158,6 +158,7 @@ These calls submit host-owned background tasks:
 Background task tools return a `task_id`. Use `task_status`,
 `task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or
 control them.
+`task_list` is scoped to the current session.
 
 Foreground `/stop` cancels only the foreground turn. It does not cancel
 background tasks.

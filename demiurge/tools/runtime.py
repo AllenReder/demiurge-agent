@@ -419,7 +419,7 @@ class ToolRuntime:
                 emit_event=emit_event,
             )
         if call.name == "task_list":
-            return self._task_list(call, capability=capability)
+            return self._task_list(call, turn=turn, capability=capability)
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
             return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
         if call.name == "skills_list":
@@ -899,13 +899,13 @@ class ToolRuntime:
         payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    def _task_list(self, call: ToolCall, *, capability: CapabilityFacade) -> ToolResult:
+    def _task_list(self, call: ToolCall, *, turn: TurnContext, capability: CapabilityFacade) -> ToolResult:
         capability.require("task.control")
         kind = call.arguments.get("kind")
         include_completed = bool(call.arguments.get("include_completed", True))
         try:
             records = self.task_worker.list_tasks(
-                owner_session_id=call.arguments.get("owner_session_id"),
+                owner_session_id=turn.session_id,
                 kind=str(kind) if kind else None,
                 include_completed=include_completed,
             )

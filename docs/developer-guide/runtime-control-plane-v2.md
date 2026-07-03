@@ -108,7 +108,7 @@ The model-facing delegation tools are:
 
 - `delegate_task(goal, core_id=None, context_mode="isolated",
   notify_policy="return_to_parent", tool_policy=None, max_depth=None)`;
-- `task_list(kind=None, owner_session_id=None)`;
+- `task_list(kind=None)`, scoped to the current session;
 - `task_status(task_id, view="model")`;
 - `task_control(task_id, command="cancel")`;
 - `yield_until(task_id, timeout_seconds=30)`;
