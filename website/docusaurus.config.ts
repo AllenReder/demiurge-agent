@@ -153,7 +153,7 @@ const config: Config = {
             },
             {
               label: 'Releases',
-              to: '/docs/releases/0.5.0',
+              to: '/docs/releases/0.6.0',
             },
           ],
         },
