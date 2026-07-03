@@ -93,15 +93,15 @@ def _write_slot(root, rel_path, text=None):
 
 
 def _write_pipeline(root, phase, *, serial, parallel=None, core_id="assistant"):
-    parallel = parallel or []
-    lines = ["serial:"]
-    lines.extend(f"  - {slot_id}" for slot_id in serial)
-    lines.append("parallel:")
-    if parallel:
-        lines.extend(f"  - {slot_id}" for slot_id in parallel)
-    else:
-        lines.append("  []")
-    (root / core_id / "agent" / phase / "pipeline.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    pipelines_path = root / core_id / "agent" / "pipelines.yaml"
+    raw = yaml.safe_load(pipelines_path.read_text(encoding="utf-8")) if pipelines_path.exists() else None
+    pipelines = raw if isinstance(raw, dict) else {}
+    pipelines["schema_version"] = 1
+    pipelines[phase] = {"serial": list(serial)}
+    if phase != "bootstrap":
+        pipelines[phase]["parallel"] = list(parallel or [])
+    pipelines_path.parent.mkdir(parents=True, exist_ok=True)
+    pipelines_path.write_text(yaml.safe_dump(pipelines, sort_keys=False), encoding="utf-8")
 
 
 def _schedule(app, schedule_id="daily"):
@@ -181,8 +181,15 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
         "failure_policy: hard\n"
         "capabilities: []\n",
     )
+    pipelines_path = agents / "assistant" / "agent" / "pipelines.yaml"
     _write_pipeline(agents, "input", serial=["prefix", "base_input"])
+    pipelines = yaml.safe_load(pipelines_path.read_text(encoding="utf-8"))
+    assert pipelines["input"]["serial"] == ["prefix", "base_input"]
+
     _write_pipeline(agents, "output", serial=["base_output", "extra"])
+    pipelines = yaml.safe_load(pipelines_path.read_text(encoding="utf-8"))
+    assert pipelines["input"]["serial"] == ["prefix", "base_input"]
+    assert pipelines["output"]["serial"] == ["base_output", "extra"]
     _write_schedule(
         agents,
         'schedule: "* * * * *"\n'
