@@ -1,7 +1,7 @@
 schema_version: 1
 agent:
   id: evolver
-  summary: "Host-managed evolver core for editing candidate agent-core versions."
+  summary: "Host-managed evolver core for editing isolated agents-tree worktrees."
 runtime:
   surface_root: agent
   max_model_steps: 90

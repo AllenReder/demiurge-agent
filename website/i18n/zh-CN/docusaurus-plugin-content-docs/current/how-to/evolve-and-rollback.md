@@ -16,7 +16,7 @@ worktree。Review 会创建 proposal commit；promote 会推进 live Git ref。
 /evolve Add a concise Telegram reply style input module.
 ```
 
-Host 会创建 `.evolve/runs/<run_id>/agents`，使用 candidate-scoped tools 运行
+Host 会创建 `.evolve/runs/<run_id>/agents`，使用 worktree-scoped tools 运行
 `evolver` core，并返回 `run_id`。Live core 不会改变。
 
 Review 该 run：
@@ -84,5 +84,5 @@ Rollback 会创建一个新的 rollback commit，把 agents tree 恢复到之前
 精确规则见
 [/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits)。
 
-evolver 可以编辑 candidate core 的 authored surface。它不能 promote、roll back、编辑
-host state、修改 dependencies，或者编辑 candidate workspace 之外的文件。
+evolver 可以编辑 isolated agents-tree worktree 内的 authored surface。它不能 promote、
+roll back、编辑 host state、修改 dependencies，或者编辑该 isolated worktree 之外的文件。

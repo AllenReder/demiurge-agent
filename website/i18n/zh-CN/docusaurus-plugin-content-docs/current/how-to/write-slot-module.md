@@ -132,4 +132,4 @@ uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-对于 candidate evolution，请把编辑限制在 authored surface 内，并遵循 [evolver-safe edit contract](../reference/contracts/evolver-safe-edits.md)。
+对于 evolution worktrees，请把编辑限制在 authored surface 内，并遵循 [evolver-safe edit contract](../reference/contracts/evolver-safe-edits.md)。

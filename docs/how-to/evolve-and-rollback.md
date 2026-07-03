@@ -18,7 +18,7 @@ Inside the TUI:
 ```
 
 The host creates `.evolve/runs/<run_id>/agents`, runs the `evolver` core with
-candidate-scoped tools, and reports a `run_id`. The live core is unchanged.
+worktree-scoped tools, and reports a `run_id`. The live core is unchanged.
 
 Review the run:
 
@@ -86,6 +86,6 @@ Use a specific target when needed:
 For exact rules, read
 [/docs/reference/contracts/evolver-safe-edits](/docs/reference/contracts/evolver-safe-edits).
 
-The evolver may edit the authored surface inside the candidate agents tree. It
-must not promote, roll back, edit host state, change dependencies, or edit
-files outside the candidate worktree.
+The evolver may edit the authored surface inside the isolated agents-tree
+worktree. It must not promote, roll back, edit host state, change dependencies,
+or edit files outside that worktree.

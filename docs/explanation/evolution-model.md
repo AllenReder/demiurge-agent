@@ -1,6 +1,6 @@
 ---
 title: Evolution Model
-description: Understand candidate Agent Core evolution, promotion, and rollback.
+description: Understand Git-backed Agent Core evolution, promotion, and rollback.
 ---
 
 # Evolution Model
@@ -11,9 +11,9 @@ Evolution is not arbitrary self-modification of the host runtime. It is a
 host-owned workflow that edits an isolated worktree and promotes it only after
 review gates pass.
 
-Agent Slots are a primary evolution surface. A candidate core can replace,
+Agent Slots are a primary evolution surface. A proposal worktree can replace,
 reorder, or compose slot behavior while the host keeps provider calls, tools,
-approvals, state, promotion, and rollback behind stable contracts.
+approvals, state, Git revision promotion, and rollback behind stable contracts.
 
 ## Current Flow
 
@@ -30,7 +30,7 @@ Rollback is also host-owned.
 
 ## Evolver Scope
 
-The `evolver` core may edit authored files inside the candidate agents tree,
+The `evolver` core may edit authored files inside the isolated agents-tree worktree,
 especially:
 
 - `agent/skills/`
@@ -40,11 +40,11 @@ especially:
 - `agent/bootstrap/`
 
 It may change `agent.yaml` only when that is the minimum needed to keep the
-candidate loadable after an authored-surface edit.
+edited core loadable after an authored-surface edit.
 
 ## What Evolution Must Not Do
 
-Candidate evolution must not edit:
+Evolution proposal worktrees must not edit:
 
 - source checkout files
 - host config
@@ -52,7 +52,7 @@ Candidate evolution must not edit:
 - production state
 - release files
 - dependency files
-- runtime files outside the candidate
+- runtime files outside the isolated worktree
 - `.core.git` refs directly
 - `.temp/` reference checkouts
 

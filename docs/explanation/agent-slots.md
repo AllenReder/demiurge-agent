@@ -29,6 +29,6 @@ compose tools, skills, MCP, state, or other agents through governed interfaces.
 Future slot kinds should represent new governed interaction boundaries, not
 ordinary feature categories.
 
-This makes slots a natural evolution surface. A candidate Agent Core can replace,
+This makes slots a natural evolution surface. A proposal worktree can replace,
 reorder, or compose slot behavior as files, while the host keeps risky effects
 behind stable contracts.

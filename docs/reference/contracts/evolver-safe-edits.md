@@ -9,16 +9,16 @@ The `evolver` core edits an isolated agents-tree worktree after the active core
 requests evolution. The host creates the worktree and performs gating and
 promotion.
 
-This contract defines safe edit scope for candidate work.
+This contract defines safe edit scope for proposal worktrees.
 
-## Candidate Scope
+## Worktree Scope
 
-The editable target is an isolated candidate agents tree worktree, not the
-source checkout and not host runtime state. The evolver usually edits one
-target concrete core, but it may also edit helper cores when the goal requires
+The editable target is an isolated agents-tree worktree, not the source
+checkout and not host runtime state. The evolver usually edits one target
+concrete core, but it may also edit helper cores when the goal requires
 cross-core behavior.
 
-Safe candidate shape:
+Safe worktree shape:
 
 ```text
 agents/
@@ -61,7 +61,7 @@ agent/lib/
 agent.yaml
 ```
 
-Change `agent.yaml` only when it is the minimum needed to keep the candidate
+Change `agent.yaml` only when it is the minimum needed to keep the edited core
 loadable or to declare a required authored-surface capability, tool root, MCP
 root, schedule root, channel config, or metadata override.
 
@@ -78,21 +78,21 @@ Do not edit:
 - production state
 - release files
 - dependency files
-- runtime files outside the candidate workspace
+- runtime files outside the isolated worktree
 - `.temp/` reference checkouts
 - package repository source files unless the explicit goal is package authoring
-  and the candidate workspace contains them
+  and the isolated worktree contains them
 
 ## Forbidden Actions
 
 Do not:
 
-- promote a candidate manually
+- promote a proposal manually
 - roll back the live Git ref manually
 - install dependencies
 - change the host lock file
 - run broad destructive cleanup
-- edit files outside the candidate workspace
+- edit files outside the isolated worktree
 - bypass host file, terminal, network, tool, channel, or state capabilities
 
 ## Pipeline Edit Rule
@@ -134,7 +134,7 @@ unbounded rewrites.
 At the end of an evolution run, summarize:
 
 - changed behavior
-- candidate files edited
+- worktree files edited
 - verification performed
 - limitations or follow-up needed
 

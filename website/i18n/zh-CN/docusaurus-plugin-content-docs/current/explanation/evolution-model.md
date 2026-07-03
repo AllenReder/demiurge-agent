@@ -10,9 +10,9 @@ Demiurge 把 runtime agents tree 视为 Git-versioned filesystem surface。
 Evolution 不是对 host runtime 的任意自修改。它是 host-owned workflow：编辑隔离
 worktree，并且只在 review gates 通过后 promote。
 
-Agent Slots 是主要 evolution surface。Candidate core 可以替换、重排或组合 slot
-behavior，同时 host 仍把 provider calls、tools、approvals、state、Git revision
-promotion 和 rollback 留在稳定 contracts 后面。
+Agent Slots 是主要 evolution surface。Proposal worktree 可以替换、重排或组合
+slot behavior，同时 host 仍把 provider calls、tools、approvals、state、Git
+revision promotion 和 rollback 留在稳定 contracts 后面。
 
 ## 当前流程
 
@@ -26,7 +26,7 @@ Rollback 也由 host 拥有。
 
 ## Evolver 范围
 
-`evolver` core 可以编辑 candidate workspace 内的 authored files，尤其是：
+`evolver` core 可以编辑 isolated agents-tree worktree 内的 authored files，尤其是：
 
 - `agent/skills/`
 - `agent/tools/`
@@ -34,11 +34,11 @@ Rollback 也由 host 拥有。
 - `agent/output/`
 - `agent/bootstrap/`
 
-只有在保持 candidate 可加载所必需时，它才应该修改 `agent.yaml`。
+只有在保持 edited core 可加载所必需时，它才应该修改 `agent.yaml`。
 
 ## Evolution 不能做什么
 
-Candidate evolution 不能编辑：
+Evolution proposal worktrees 不能编辑：
 
 - source checkout files
 - host config
@@ -46,7 +46,7 @@ Candidate evolution 不能编辑：
 - production state
 - release files
 - dependency files
-- candidate 之外的 runtime files
+- isolated worktree 之外的 runtime files
 - `.core.git` refs directly
 - `.temp/` reference checkouts
 

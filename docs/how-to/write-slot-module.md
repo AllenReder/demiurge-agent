@@ -141,5 +141,5 @@ uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-For candidate evolution, keep edits inside the authored surface and follow
+For evolution worktrees, keep edits inside the authored surface and follow
 [the evolver-safe edit contract](../reference/contracts/evolver-safe-edits.md).
