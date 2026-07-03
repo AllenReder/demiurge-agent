@@ -228,12 +228,20 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     ),
     "skill_manage": ToolDefinition(
         name="skill_manage",
-        description="Create, update, or delete skills in the active runtime core's agent/skills directory.",
+        description=(
+            "Create, update, patch, delete, or manage support files for skills in the active runtime core's "
+            "skills directory. Support files must live under references/, templates/, scripts/, or assets/."
+        ),
         input_schema=_schema(
             {
-                "action": {"type": "string", "enum": ["create", "update", "delete"]},
+                "action": {"type": "string", "enum": ["create", "update", "delete", "patch", "write_file", "remove_file"]},
                 "name": {"type": "string"},
                 "content": {"type": "string"},
+                "file_path": {"type": "string"},
+                "file_content": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean", "default": False},
             },
             required=["action", "name"],
         ),

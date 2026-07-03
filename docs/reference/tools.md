@@ -145,6 +145,27 @@ Supported metadata keys are:
 - `display_policy`
 - `enabled`
 
+## Built-In Skill Tools
+
+`skills_list` lists skill metadata. `skill_view(name)` loads a skill's
+`SKILL.md`, and `skill_view(name, file_path)` loads linked files under
+`references/`, `templates/`, `scripts/`, or `assets/`.
+
+`skill_manage` writes skills in the active runtime core's configured skills
+root. It supports:
+
+- `create` and `update` for full `SKILL.md` writes.
+- `patch` for `old_string` / `new_string` replacement in `SKILL.md` or a
+  support file.
+- `write_file` and `remove_file` for support files under `references/`,
+  `templates/`, `scripts/`, or `assets/`.
+- `delete` for removing a skill from the runtime core.
+
+Every `skill_manage` write requires `fs.write` approval. The host rejects
+absolute paths, parent traversal, hidden path segments, and writes outside the
+configured skills root. Changes take effect for later turns; the current turn
+does not hot-reload the active core.
+
 ## Background Runtime Tasks
 
 These calls submit host-owned background tasks:

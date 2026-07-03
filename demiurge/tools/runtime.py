@@ -11,9 +11,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -28,7 +29,7 @@ from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.security.command_guard import CommandGuardDecision, review_command
-from demiurge.core import ApprovalInfo, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
+from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
 from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
@@ -53,6 +54,16 @@ from demiurge.security.workspace import (
 
 
 EventEmitter = Callable[..., dict[str, Any]]
+SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "scripts", "assets"})
+
+
+@dataclass(slots=True)
+class SkillTarget:
+    name: str
+    skill_dir: Path
+    skill_file: Path
+    packaged: bool
+    exists: bool
 
 
 def _terminal_execution_command(command: str) -> str:
@@ -944,53 +955,372 @@ class ToolRuntime:
         capability.require("fs.write")
         action = str(call.arguments.get("action") or "").strip().lower()
         name = str(call.arguments.get("name") or "").strip()
-        if action not in {"create", "update", "delete"}:
+        if action not in {"create", "update", "delete", "patch", "write_file", "remove_file"}:
             return ToolResult(content=f"unsupported skill_manage action: {action}", is_error=True)
         if not name:
             return ToolResult(content="name is required", is_error=True)
-        skill_root = require_relative_path(core.root / "agent" / "skills", core.root)
-        requested = Path(name)
-        if requested.is_absolute() or ".." in requested.parts or len(requested.parts) != 1:
-            return ToolResult(content="name must be a single relative skill id", is_error=True)
-        existing = core.skill_by_id(name)
-        if existing is not None:
-            target = require_relative_path(existing.path, skill_root)
-            delete_target = target.parent if existing.packaged else target
-        else:
-            target = require_relative_path(skill_root / requested.as_posix() / "SKILL.md", skill_root)
-            delete_target = target.parent
+
+        skill_root = self._skill_root(core)
+        target_or_error = self._skill_target(core, name, skill_root)
+        if isinstance(target_or_error, ToolResult):
+            return target_or_error
+        target = target_or_error
+
+        prepared = self._prepare_skill_manage_action(core, action, target, call.arguments)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        approval_target, mutation_root, mutate = prepared
+
         denied = await self._approval_for_skill_manage(
             call,
             core=core,
             turn=turn,
             action=action,
-            target=target.relative_to(core.root).as_posix(),
+            target=approval_target.relative_to(core.root).as_posix(),
             emit_event=emit_event,
         )
         if denied:
             return denied
-        if action in {"create", "update"}:
-            if action == "create" and target.exists():
-                return ToolResult(content=f"skill already exists: {name}", is_error=True)
-            content = str(call.arguments.get("content") or "")
-            if not content:
-                return ToolResult(content="content is required", is_error=True)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            return ToolResult(
-                content=f"skill {action}d: {name}",
-                data={"executionStarted": True, "action": action, "path": target.relative_to(core.root).as_posix()},
+
+        return self._apply_skill_mutation(core=core, action=action, mutation_root=mutation_root, mutate=mutate)
+
+    def _skill_root(self, core: LoadedCore) -> Path:
+        surface_root = require_relative_path(core.root / core.manifest.runtime.surface_root, core.root)
+        configured = core.manifest.slots.get("skills") or (surface_root / "skills").relative_to(core.root).as_posix()
+        return require_relative_path(core.root / configured, core.root)
+
+    def _skill_target(self, core: LoadedCore, name: str, skill_root: Path) -> SkillTarget | ToolResult:
+        requested = Path(name)
+        if (
+            requested.is_absolute()
+            or ".." in requested.parts
+            or len(requested.parts) != 1
+            or any(part.startswith(".") for part in requested.parts)
+        ):
+            return ToolResult(content="name must be a single non-hidden relative skill id", is_error=True)
+
+        existing = core.skill_by_id(name)
+        if existing is not None:
+            skill_file = require_relative_path(existing.path, skill_root)
+            return SkillTarget(
+                name=name,
+                skill_dir=skill_file.parent if existing.packaged else skill_file.parent,
+                skill_file=skill_file,
+                packaged=existing.packaged,
+                exists=True,
             )
-        if existing is None:
-            return ToolResult(content=f"skill not found: {name}", is_error=True)
-        if delete_target.is_dir():
-            shutil.rmtree(delete_target)
-        elif delete_target.exists():
-            delete_target.unlink()
-        return ToolResult(
-            content=f"skill deleted: {name}",
-            data={"executionStarted": True, "action": action, "path": delete_target.relative_to(core.root).as_posix()},
+
+        packaged_file = require_relative_path(skill_root / requested.as_posix() / "SKILL.md", skill_root)
+        if packaged_file.exists():
+            return SkillTarget(
+                name=name,
+                skill_dir=packaged_file.parent,
+                skill_file=packaged_file,
+                packaged=True,
+                exists=True,
+            )
+
+        single_file = require_relative_path(skill_root / f"{requested.as_posix()}.md", skill_root)
+        if single_file.exists():
+            return SkillTarget(
+                name=name,
+                skill_dir=single_file.parent,
+                skill_file=single_file,
+                packaged=False,
+                exists=True,
+            )
+
+        return SkillTarget(
+            name=name,
+            skill_dir=packaged_file.parent,
+            skill_file=packaged_file,
+            packaged=True,
+            exists=False,
         )
+
+    def _prepare_skill_manage_action(
+        self,
+        core: LoadedCore,
+        action: str,
+        target: SkillTarget,
+        arguments: Mapping[str, Any],
+    ) -> tuple[Path, Path, Callable[[], dict[str, Any]]] | ToolResult:
+        if action == "create":
+            if target.exists:
+                return ToolResult(content=f"skill already exists: {target.name}", is_error=True)
+            content_result = self._required_text(arguments, "content")
+            if isinstance(content_result, ToolResult):
+                return content_result
+            content = content_result
+
+            def mutate_create() -> dict[str, Any]:
+                target.skill_file.parent.mkdir(parents=True, exist_ok=True)
+                target.skill_file.write_text(content, encoding="utf-8")
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=target.skill_file,
+                    changed=True,
+                    message=f"skill created: {target.name}",
+                )
+
+            return target.skill_file, target.skill_dir, mutate_create
+
+        if not target.exists:
+            return ToolResult(content=f"skill not found: {target.name}", is_error=True)
+
+        if action == "update":
+            content_result = self._required_text(arguments, "content")
+            if isinstance(content_result, ToolResult):
+                return content_result
+            content = content_result
+
+            def mutate_update() -> dict[str, Any]:
+                previous = target.skill_file.read_text(encoding="utf-8", errors="replace") if target.skill_file.exists() else ""
+                target.skill_file.parent.mkdir(parents=True, exist_ok=True)
+                target.skill_file.write_text(content, encoding="utf-8")
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=target.skill_file,
+                    changed=previous != content,
+                    message=f"skill updated: {target.name}",
+                )
+
+            return target.skill_file, self._skill_mutation_root(target), mutate_update
+
+        if action == "delete":
+            delete_target = self._skill_mutation_root(target)
+
+            def mutate_delete() -> dict[str, Any]:
+                self._remove_path(delete_target)
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=delete_target,
+                    changed=True,
+                    message=f"skill deleted: {target.name}",
+                )
+
+            return delete_target, delete_target, mutate_delete
+
+        if action == "patch":
+            patch_target_result = self._skill_patch_target(target, arguments.get("file_path"))
+            if isinstance(patch_target_result, ToolResult):
+                return patch_target_result
+            patch_target, display_path = patch_target_result
+            old_result = self._required_text(arguments, "old_string")
+            if isinstance(old_result, ToolResult):
+                return old_result
+            if arguments.get("new_string") is None:
+                return ToolResult(content="new_string is required", is_error=True)
+            old = old_result
+            new = str(arguments.get("new_string"))
+            replace_all = bool(arguments.get("replace_all", False))
+
+            def mutate_patch() -> dict[str, Any]:
+                text = patch_target.read_text(encoding="utf-8", errors="replace")
+                match_count = text.count(old)
+                if match_count == 0:
+                    raise ValueError(f"old_string not found in {display_path}")
+                if not replace_all and match_count != 1:
+                    raise ValueError(f"old_string matched {match_count} times in {display_path}; set replace_all=true to replace all")
+                patched = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+                patch_target.write_text(patched, encoding="utf-8")
+                diff = "\n".join(
+                    difflib.unified_diff(
+                        text.splitlines(),
+                        patched.splitlines(),
+                        fromfile=f"a/{display_path}",
+                        tofile=f"b/{display_path}",
+                        lineterm="",
+                    )
+                )
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=patch_target,
+                    changed=text != patched,
+                    message=diff or f"patched {display_path}",
+                    diff=diff,
+                )
+
+            return patch_target, self._skill_mutation_root(target), mutate_patch
+
+        if action == "write_file":
+            support_target_result = self._skill_support_target(target, arguments.get("file_path"))
+            if isinstance(support_target_result, ToolResult):
+                return support_target_result
+            support_target, display_path = support_target_result
+            if arguments.get("file_content") is None:
+                return ToolResult(content="file_content is required", is_error=True)
+            file_content = str(arguments.get("file_content"))
+
+            def mutate_write_file() -> dict[str, Any]:
+                previous = support_target.read_text(encoding="utf-8", errors="replace") if support_target.exists() else None
+                support_target.parent.mkdir(parents=True, exist_ok=True)
+                support_target.write_text(file_content, encoding="utf-8")
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=support_target,
+                    changed=previous != file_content,
+                    message=f"skill file written: {display_path}",
+                )
+
+            return support_target, target.skill_dir, mutate_write_file
+
+        if action == "remove_file":
+            support_target_result = self._skill_support_target(target, arguments.get("file_path"))
+            if isinstance(support_target_result, ToolResult):
+                return support_target_result
+            support_target, display_path = support_target_result
+            if not support_target.exists() or support_target.is_symlink() or not support_target.is_file():
+                return ToolResult(content=f"skill file not found: {display_path}", is_error=True)
+
+            def mutate_remove_file() -> dict[str, Any]:
+                support_target.unlink()
+                self._remove_empty_dirs(support_target.parent, stop=target.skill_dir)
+                return self._skill_manage_payload(
+                    core=core,
+                    action=action,
+                    path=support_target,
+                    changed=True,
+                    message=f"skill file removed: {display_path}",
+                )
+
+            return support_target, target.skill_dir, mutate_remove_file
+
+        return ToolResult(content=f"unsupported skill_manage action: {action}", is_error=True)
+
+    def _required_text(self, arguments: Mapping[str, Any], key: str) -> str | ToolResult:
+        if arguments.get(key) is None or str(arguments.get(key)) == "":
+            return ToolResult(content=f"{key} is required", is_error=True)
+        return str(arguments.get(key))
+
+    def _skill_mutation_root(self, target: SkillTarget) -> Path:
+        return target.skill_dir if target.packaged else target.skill_file
+
+    def _skill_patch_target(self, target: SkillTarget, file_path: Any | None) -> tuple[Path, str] | ToolResult:
+        requested_file = str(file_path or "").strip()
+        if not requested_file:
+            if target.skill_file.is_symlink() or not target.skill_file.is_file():
+                return ToolResult(content=f"skill file not readable: {target.name}", is_error=True)
+            return target.skill_file, target.skill_file.relative_to(target.skill_dir).as_posix() if target.packaged else target.skill_file.name
+        support_target = self._skill_support_target(target, requested_file)
+        if isinstance(support_target, ToolResult):
+            return support_target
+        path, display = support_target
+        if path.is_symlink() or not path.is_file():
+            return ToolResult(content=f"skill file not readable: {display}", is_error=True)
+        return path, display
+
+    def _skill_support_target(self, target: SkillTarget, file_path: Any | None) -> tuple[Path, str] | ToolResult:
+        if not target.packaged:
+            return ToolResult(content=f"support files require a packaged skill: {target.name}", is_error=True)
+        requested = Path(str(file_path or "").strip())
+        if (
+            not requested.parts
+            or requested.is_absolute()
+            or ".." in requested.parts
+            or any(part.startswith(".") for part in requested.parts)
+            or requested.parts[0] not in SKILL_SUPPORT_DIRS
+        ):
+            allowed = ", ".join(sorted(SKILL_SUPPORT_DIRS))
+            return ToolResult(content=f"file_path must be under one of: {allowed}", is_error=True)
+        target_path = require_relative_path(target.skill_dir / requested, target.skill_dir)
+        if target_path.exists() and target_path.is_symlink():
+            return ToolResult(content=f"skill file not writable: {requested.as_posix()}", is_error=True)
+        return target_path, requested.as_posix()
+
+    def _apply_skill_mutation(
+        self,
+        *,
+        core: LoadedCore,
+        action: str,
+        mutation_root: Path,
+        mutate: Callable[[], dict[str, Any]],
+    ) -> ToolResult:
+        with tempfile.TemporaryDirectory(prefix="demiurge-skill-manage-") as tmp:
+            backup = Path(tmp) / "backup"
+            existed = mutation_root.exists() or mutation_root.is_symlink()
+            if existed:
+                if mutation_root.is_symlink():
+                    return ToolResult(content=f"skill target is a symlink: {mutation_root.relative_to(core.root).as_posix()}", is_error=True)
+                if mutation_root.is_dir():
+                    shutil.copytree(mutation_root, backup, symlinks=True)
+                else:
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    backup.write_bytes(mutation_root.read_bytes())
+            try:
+                payload = mutate()
+                CoreLoader().load(core.root)
+            except CoreLoadError as exc:
+                self._restore_path(mutation_root, backup if existed else None)
+                data = {
+                    "success": False,
+                    "executionStarted": False,
+                    "action": action,
+                    "path": mutation_root.relative_to(core.root).as_posix(),
+                    "error": str(exc),
+                }
+                return ToolResult(
+                    content=f"skill {action} rolled back because core load failed: {exc}",
+                    data=data,
+                    is_error=True,
+                )
+            except Exception:
+                self._restore_path(mutation_root, backup if existed else None)
+                raise
+        return ToolResult(content=str(payload.get("message") or f"skill {action} completed"), data=payload)
+
+    def _restore_path(self, path: Path, backup: Path | None) -> None:
+        self._remove_path(path)
+        if backup is None:
+            return
+        if backup.is_dir():
+            shutil.copytree(backup, path, symlinks=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, path)
+
+    def _remove_path(self, path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+
+    def _remove_empty_dirs(self, path: Path, *, stop: Path) -> None:
+        current = path
+        while current != stop and current.exists():
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
+    def _skill_manage_payload(
+        self,
+        *,
+        core: LoadedCore,
+        action: str,
+        path: Path,
+        changed: bool,
+        message: str,
+        diff: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "success": True,
+            "executionStarted": True,
+            "action": action,
+            "path": path.relative_to(core.root).as_posix(),
+            "changed": changed,
+            "effective_next_turn": True,
+            "message": message,
+        }
+        if diff is not None:
+            payload["diff"] = diff
+        return payload
 
     def _skill_view_by_name(self, core: LoadedCore, *, name: str, file_path: Any | None) -> ToolResult:
         if not name:

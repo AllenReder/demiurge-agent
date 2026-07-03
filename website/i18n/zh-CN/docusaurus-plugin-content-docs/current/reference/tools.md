@@ -138,6 +138,25 @@ tools:
 - `display_policy`
 - `enabled`
 
+## Built-In Skill Tools
+
+`skills_list` 会列出 skill metadata。`skill_view(name)` 会加载 skill 的
+`SKILL.md`，`skill_view(name, file_path)` 会加载 `references/`、`templates/`、
+`scripts/` 或 `assets/` 下的 linked files。
+
+`skill_manage` 会写入 active runtime core 配置的 skills root。它支持：
+
+- `create` 和 `update`：完整写入 `SKILL.md`。
+- `patch`：在 `SKILL.md` 或 support file 中做 `old_string` / `new_string`
+  替换。
+- `write_file` 和 `remove_file`：管理 `references/`、`templates/`、
+  `scripts/` 或 `assets/` 下的 support files。
+- `delete`：从 runtime core 中删除 skill。
+
+每次 `skill_manage` 写入都需要 `fs.write` approval。Host 会拒绝绝对路径、
+parent traversal、隐藏路径段，以及配置的 skills root 之外的写入。变更会在后续
+turn 生效；当前 turn 不会 hot-reload active core。
+
 ## Background Runtime Tasks
 
 这些 calls 会提交 host-owned background tasks：

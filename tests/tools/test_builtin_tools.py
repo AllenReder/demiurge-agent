@@ -638,6 +638,13 @@ def test_task_list_schema_does_not_expose_owner_session_id(tmp_path):
     assert "owner_session_id" not in json.dumps(task_list.input_schema)
 
 
+def test_skill_manage_schema_exposes_file_level_actions():
+    schema = BUILTIN_TOOL_DEFINITIONS["skill_manage"].input_schema
+
+    assert set(schema["properties"]["action"]["enum"]) == {"create", "update", "delete", "patch", "write_file", "remove_file"}
+    assert {"file_path", "file_content", "old_string", "new_string", "replace_all"}.issubset(schema["properties"])
+
+
 @pytest.mark.asyncio
 async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -765,6 +772,10 @@ async def test_skill_manage_creates_updates_and_deletes_runtime_skill(tmp_path):
     )
     skill_path = app.version_store.active_core_path("assistant") / "agent/skills/local-note/SKILL.md"
     assert created.is_error is False
+    assert created.data["success"] is True
+    assert created.data["changed"] is True
+    assert created.data["effective_next_turn"] is True
+    assert created.data["path"] == "agent/skills/local-note/SKILL.md"
     assert skill_path.exists()
 
     updated = await _execute(
@@ -781,6 +792,221 @@ async def test_skill_manage_creates_updates_and_deletes_runtime_skill(tmp_path):
 
     assert deleted.is_error is False
     assert not skill_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_patches_skill_and_support_files(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+
+    created = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n\nOriginal step.\n"},
+    )
+    patched = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "patch", "name": "local-note", "old_string": "Original step.", "new_string": "Patched step."},
+    )
+    wrote_reference = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {
+            "action": "write_file",
+            "name": "local-note",
+            "file_path": "references/checklist.md",
+            "file_content": "# Checklist\n\n- Verify patch.\n",
+        },
+    )
+    patched_reference = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {
+            "action": "patch",
+            "name": "local-note",
+            "file_path": "references/checklist.md",
+            "old_string": "Verify patch.",
+            "new_string": "Verify support patch.",
+        },
+    )
+    reloaded = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    viewed_reference = await _execute(
+        app,
+        reloaded,
+        "skill_view",
+        {"name": "local-note", "file_path": "references/checklist.md"},
+    )
+
+    assert created.is_error is False
+    assert patched.is_error is False
+    assert "Patched step." in (app.version_store.active_core_path("assistant") / "agent/skills/local-note/SKILL.md").read_text(encoding="utf-8")
+    assert "---" in patched.data["diff"]
+    assert wrote_reference.is_error is False
+    assert wrote_reference.data["path"] == "agent/skills/local-note/references/checklist.md"
+    assert patched_reference.is_error is False
+    assert "Verify support patch." in viewed_reference.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_removes_support_files(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+
+    await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+    await _execute(
+        app,
+        core,
+        "skill_manage",
+        {
+            "action": "write_file",
+            "name": "local-note",
+            "file_path": "references/checklist.md",
+            "file_content": "# Checklist\n",
+        },
+    )
+    removed = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "remove_file", "name": "local-note", "file_path": "references/checklist.md"},
+    )
+    reloaded = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    assert removed.is_error is False
+    assert removed.data["changed"] is True
+    assert reloaded.skill_by_id("local-note").linked_files == {}
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_rejects_unsafe_support_paths(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+    await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+
+    parent_escape = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "write_file", "name": "local-note", "file_path": "../secret.md", "file_content": "secret"},
+    )
+    absolute = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "write_file", "name": "local-note", "file_path": "/tmp/secret.md", "file_content": "secret"},
+    )
+    unapproved_dir = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "write_file", "name": "local-note", "file_path": "notes/secret.md", "file_content": "secret"},
+    )
+    hidden_path = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "write_file", "name": "local-note", "file_path": "references/.secret.md", "file_content": "secret"},
+    )
+
+    assert parent_escape.is_error is True
+    assert absolute.is_error is True
+    assert unapproved_dir.is_error is True
+    assert hidden_path.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_rejects_symlink_escape(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+    await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+    skill_dir = app.version_store.active_core_path("assistant") / "agent/skills/local-note"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (skill_dir / "references").symlink_to(outside)
+
+    result = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "write_file", "name": "local-note", "file_path": "references/secret.md", "file_content": "secret"},
+    )
+
+    assert result.is_error is True
+    assert not (outside / "secret.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_rolls_back_when_core_load_fails(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"fs.write": {"scope": "workspace"}})
+    await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+    skill_path = app.version_store.active_core_path("assistant") / "agent/skills/local-note/SKILL.md"
+    before = skill_path.read_text(encoding="utf-8")
+
+    result = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "update", "name": "local-note", "content": "---\ndescription: [\n---\n\n# Broken\n"},
+    )
+
+    assert result.is_error is True
+    assert "rolled back" in result.content
+    assert skill_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_uses_configured_skills_root(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw.setdefault("slots", {})["skills"] = "custom/skills"
+    raw.setdefault("capabilities", {}).setdefault("defaults", {})["fs.write"] = {"scope": "workspace"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "skill_manage",
+        {"action": "create", "name": "local-note", "content": "---\ndescription: local\n---\n\n# Local\n"},
+    )
+
+    assert result.is_error is False
+    assert result.data["path"] == "custom/skills/local-note/SKILL.md"
+    assert (app.version_store.active_core_path("assistant") / "custom/skills/local-note/SKILL.md").exists()
+    assert not (app.version_store.active_core_path("assistant") / "agent/skills/local-note/SKILL.md").exists()
 
 
 @pytest.mark.asyncio
