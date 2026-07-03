@@ -53,6 +53,7 @@ demiurge-agent/
 | `.core.git/` | Runtime agents tree 的 bare Git repository。 |
 | `agents/agent.yaml` | Runtime global fallback config。 |
 | `agents/<core>/` | 具体 Agent Core 的 active live checkout。 |
+| `.core-ignore` | Host-owned Git ignore file，用于 `__pycache__/` 等 runtime cache artifacts。 |
 | `.evolve/runs/<run_id>/agents/` | 针对整个 agents tree 的隔离 evolve worktree。 |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store 和 projections。 |
 | `runtime/artifacts/` | Runtime records 引用的 host-owned artifacts。 |
@@ -113,6 +114,18 @@ Managed installs 可能把 checkout 放在：
 ```
 
 Runtime cores 仍位于 `~/.demiurge/agents/` 下；managed checkout 不是 active runtime core。
+
+## Local Agent Edits
+
+直接修改 `~/.demiurge/agents/` 下的文件会产生 local agent edits。Demiurge 会在
+run/edit workflows 加载 live core 前，把这些 edits 保存为 `~/.demiurge/.core.git`
+中的 commits。生成的 commit message 是确定性的，包含 changed scopes、changed paths、
+detected semantic YAML changes 和 gate status。
+
+`demiurge core diff` 是只读命令。`demiurge core save` 会验证并提交当前 edits。
+`demiurge core discard --yes` 会把 checkout 重置到 `refs/demiurge/live`，并移除未跟踪
+edits。Promotion 和 rollback 不会自动保存；它们会拒绝 dirty live tree，避免 revision
+switch 静默覆盖本地文件。
 
 ## Core Git Refs
 

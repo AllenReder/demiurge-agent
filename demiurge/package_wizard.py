@@ -500,6 +500,11 @@ class PackageWizard:
 
     def _commit_package_transaction(self, action: str, operation):
         repository = self.version_store.core_repository
+        repository.prepare_live_for_edit(
+            validate=lambda agents_root, changed_paths: asyncio.run(
+                GateRunner(project_root=Path.cwd().resolve()).run(agents_root, changed_paths=changed_paths)
+            )
+        )
         with repository.live_transaction(reason=f"package {action}"):
             result = operation()
             changed_paths = repository.live_changed_paths()

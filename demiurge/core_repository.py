@@ -6,14 +6,16 @@ import shutil
 import subprocess
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Awaitable, Callable, Iterator
 
 if os.name != "nt":
     import fcntl
 else:  # pragma: no cover - Windows keeps the interface but not flock semantics.
     fcntl = None  # type: ignore[assignment]
+
+import yaml
 
 from demiurge.util import ensure_dir, utc_id, write_json
 
@@ -55,6 +57,22 @@ class DiffSummary:
     changed_paths: list[str] = field(default_factory=list)
     name_status: str = ""
     stat: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LocalEditDescription:
+    changed_paths: list[str] = field(default_factory=list)
+    changed_scopes: list[str] = field(default_factory=list)
+    detected_changes: list[str] = field(default_factory=list)
+    summary: str = "no local agent edits"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalEditSaveResult:
+    saved: bool
+    commit: CommitResult | None
+    description: LocalEditDescription
+    gates: Any | None = None
 
 
 class CoreRepository:
@@ -210,13 +228,17 @@ class CoreRepository:
 
     def status(self) -> dict[str, Any]:
         self.require_initialized()
+        description = self.describe_local_edits()
         return {
             "agents_root": str(self.agents_root),
             "git_dir": str(self.git_dir),
             "live": self.live_revision(),
             "previous": self.previous_revision(),
-            "dirty": bool(self.live_changed_paths()),
-            "changed_paths": self.live_changed_paths(),
+            "dirty": bool(description.changed_paths),
+            "changed_paths": description.changed_paths,
+            "changed_scopes": description.changed_scopes,
+            "detected_changes": description.detected_changes,
+            "summary": description.summary,
         }
 
     def live_changed_paths(self) -> list[str]:
@@ -224,10 +246,109 @@ class CoreRepository:
         result = self._run_git(["status", "--porcelain"], work_tree=self.agents_root)
         return _paths_from_porcelain(result.stdout)
 
+    def clean_ignored_artifacts(self) -> None:
+        self.require_initialized()
+        self._run_git(["clean", "-fdX"], work_tree=self.agents_root)
+
     def require_live_clean(self) -> None:
         changed = self.live_changed_paths()
         if changed:
             raise CoreRepositoryError(f"live agents tree has uncommitted changes: {changed}")
+
+    def describe_local_edits(self) -> LocalEditDescription:
+        changed_paths = self.live_changed_paths()
+        if not changed_paths:
+            return LocalEditDescription()
+        scopes = _changed_scopes(changed_paths)
+        detected = self._detected_local_changes(changed_paths)
+        summary = _local_edit_summary(changed_paths, scopes, detected)
+        return LocalEditDescription(
+            changed_paths=changed_paths,
+            changed_scopes=scopes,
+            detected_changes=detected,
+            summary=summary,
+        )
+
+    def local_diff(self) -> str:
+        self.require_initialized()
+        diff = self._run_git(["diff", LIVE_REF], work_tree=self.agents_root).stdout
+        untracked = [
+            path
+            for path in self.live_changed_paths()
+            if self._run_git(["ls-files", "--error-unmatch", path], work_tree=self.agents_root, check=False).returncode != 0
+        ]
+        if not untracked:
+            return diff
+        lines = [diff.rstrip(), "", "Untracked paths:", *[f"- {path}" for path in untracked]]
+        return "\n".join(line for line in lines if line != "") + "\n"
+
+    def prepare_live_for_edit(
+        self,
+        *,
+        validate: Callable[[Path, list[str]], Any] | None = None,
+        gates: Any | None = None,
+    ) -> LocalEditSaveResult:
+        return self.save_local_edits(validate=validate, gates=gates)
+
+    async def prepare_live_for_edit_async(
+        self,
+        *,
+        validate: Callable[[Path, list[str]], Awaitable[Any]] | None = None,
+        gates: Any | None = None,
+    ) -> LocalEditSaveResult:
+        return await self.save_local_edits_async(validate=validate, gates=gates)
+
+    def prepare_live_for_switch(self) -> None:
+        changed = self.live_changed_paths()
+        if changed:
+            raise CoreRepositoryError(
+                "local agent edits must be saved or discarded before switching core revisions: "
+                f"{changed}; run `demiurge core save` or `demiurge core discard --yes`"
+            )
+
+    def save_local_edits(
+        self,
+        *,
+        validate: Callable[[Path, list[str]], Any] | None = None,
+        gates: Any | None = None,
+    ) -> LocalEditSaveResult:
+        with self.locked():
+            self.clean_ignored_artifacts()
+            description = self.describe_local_edits()
+            if not description.changed_paths:
+                return LocalEditSaveResult(saved=False, commit=None, description=description, gates=gates)
+            resolved_gates = gates if gates is not None else validate(self.agents_root, description.changed_paths) if validate else None
+            self._require_gates_passed(resolved_gates)
+            commit = self._commit_local_edits(description, gates=resolved_gates)
+            return LocalEditSaveResult(saved=True, commit=commit, description=description, gates=resolved_gates)
+
+    async def save_local_edits_async(
+        self,
+        *,
+        validate: Callable[[Path, list[str]], Awaitable[Any]] | None = None,
+        gates: Any | None = None,
+    ) -> LocalEditSaveResult:
+        with self.locked():
+            self.clean_ignored_artifacts()
+            description = self.describe_local_edits()
+            if not description.changed_paths:
+                return LocalEditSaveResult(saved=False, commit=None, description=description, gates=gates)
+            resolved_gates = gates
+            if resolved_gates is None and validate is not None:
+                resolved_gates = await validate(self.agents_root, description.changed_paths)
+            self._require_gates_passed(resolved_gates)
+            commit = self._commit_local_edits(description, gates=resolved_gates)
+            return LocalEditSaveResult(saved=True, commit=commit, description=description, gates=resolved_gates)
+
+    def discard_local_edits(self) -> LocalEditDescription:
+        with self.locked():
+            description = self.describe_local_edits()
+            if not description.changed_paths:
+                return description
+            self.reset_live()
+            self._run_git(["clean", "-fd"], work_tree=self.agents_root)
+            self.clean_ignored_artifacts()
+            return description
 
     def begin_change_set(self, *, kind: str, reason: str, run_id: str | None = None) -> "CoreChangeSet":
         self.require_initialized()
@@ -262,7 +383,7 @@ class CoreRepository:
     def promote_run(self, run_id: str, *, reason: str) -> CommitResult:
         self.require_initialized()
         with self.locked():
-            self.require_live_clean()
+            self.prepare_live_for_switch()
             ref = self.run_ref(run_id)
             proposal = self._run_git(["rev-parse", "--verify", ref]).stdout.strip()
             previous = self.live_revision()
@@ -286,7 +407,7 @@ class CoreRepository:
     def rollback(self, target: str = "previous", *, reason: str = "rollback") -> CommitResult:
         self.require_initialized()
         with self.locked():
-            self.require_live_clean()
+            self.prepare_live_for_switch()
             current = self.live_revision()
             if target == "previous":
                 target_revision = self.previous_revision()
@@ -330,6 +451,68 @@ class CoreRepository:
     def reset_live(self) -> None:
         self.require_initialized()
         self._run_git(["reset", "--hard", LIVE_REF], work_tree=self.agents_root)
+
+    def _commit_local_edits(self, description: LocalEditDescription, *, gates: Any | None) -> CommitResult:
+        previous = self.live_revision()
+        self._run_git(["add", "-A"], work_tree=self.agents_root)
+        if not self.live_changed_paths():
+            return CommitResult(revision=previous, previous_revision=self.previous_revision(), summary="no live changes to commit")
+        self._run_git(
+            ["commit", "-m", self._local_edit_commit_message(description, gates=gates)],
+            work_tree=self.agents_root,
+        )
+        revision = self._run_git(["rev-parse", "HEAD"], work_tree=self.agents_root).stdout.strip()
+        self._run_git(["update-ref", PREVIOUS_REF, previous])
+        self._run_git(["update-ref", LIVE_REF, revision])
+        return CommitResult(revision=revision, previous_revision=previous, summary=description.summary)
+
+    def _local_edit_commit_message(self, description: LocalEditDescription, *, gates: Any | None) -> str:
+        lines = [
+            description.summary,
+            "",
+            "Source: external edit of runtime agents tree",
+            "Changed scopes:",
+            *[f"- {scope}" for scope in description.changed_scopes],
+            "Changed paths:",
+            *[f"- {path}" for path in description.changed_paths],
+        ]
+        if description.detected_changes:
+            lines.extend(["Detected changes:", *[f"- {change}" for change in description.detected_changes]])
+        gate_label = "passed" if gates is not None else "not run"
+        lines.append(f"Gates: {gate_label}")
+        return "\n".join(lines)
+
+    def _require_gates_passed(self, gates: Any | None) -> None:
+        if gates is None:
+            return
+        if bool(getattr(gates, "passed", False)):
+            return
+        detail = _gate_failure_summary(gates)
+        raise CoreRepositoryError(f"local agent edits failed gates: {detail}")
+
+    def _detected_local_changes(self, changed_paths: list[str]) -> list[str]:
+        detected: list[str] = []
+        for rel in changed_paths:
+            if Path(rel).name != "agent.yaml":
+                continue
+            old = self._read_yaml_from_live(rel)
+            new = self._read_yaml_from_worktree(rel)
+            prefix = f"{rel}: "
+            for change in _semantic_yaml_changes(old, new):
+                detected.append(prefix + change)
+        return sorted(detected)
+
+    def _read_yaml_from_live(self, rel: str) -> dict[str, Any]:
+        result = self._run_git(["show", f"{LIVE_REF}:{rel}"], check=False)
+        if result.returncode != 0:
+            return {}
+        return _yaml_mapping(result.stdout)
+
+    def _read_yaml_from_worktree(self, rel: str) -> dict[str, Any]:
+        path = self.agents_root / rel
+        if not path.exists() or not path.is_file():
+            return {}
+        return _yaml_mapping(path.read_text(encoding="utf-8"))
 
     def _commit_message(self, summary: str, reason: str) -> str:
         lines = [summary.strip() or "update core tree"]
@@ -459,6 +642,88 @@ def _paths_from_porcelain(output: str) -> list[str]:
             path = path.split(" -> ", 1)[1]
         paths.append(path.strip())
     return sorted(paths)
+
+
+def _changed_scopes(changed_paths: list[str]) -> list[str]:
+    scopes: set[str] = set()
+    for rel in changed_paths:
+        parts = Path(rel).parts
+        if not parts:
+            continue
+        if parts[0] == "agent.yaml":
+            scopes.add("global fallback")
+        else:
+            scopes.add(parts[0])
+    return sorted(scopes)
+
+
+def _local_edit_summary(changed_paths: list[str], scopes: list[str], detected: list[str]) -> str:
+    if not changed_paths:
+        return "no local agent edits"
+    if scopes == ["global fallback"]:
+        return "update global fallback config"
+    core_scopes = [scope for scope in scopes if scope != "global fallback"]
+    if len(core_scopes) != 1 or "global fallback" in scopes:
+        return "save local agent edits"
+    core_id = core_scopes[0]
+    if changed_paths == [f"{core_id}/agent.yaml"]:
+        semantic = [change.split(": ", 1)[1] if ": " in change else change for change in detected]
+        if semantic and all(change.startswith("model.") for change in semantic):
+            return f"update {core_id} model config"
+        return f"update {core_id} config"
+    if changed_paths == [f"{core_id}/agent/SOUL.md"]:
+        return f"save {core_id} authored prompt edits"
+    if all(path.startswith(f"{core_id}/agent/tools/") for path in changed_paths):
+        return f"save {core_id} tool edits"
+    if all(path.startswith(f"{core_id}/agent/skills/") for path in changed_paths):
+        return f"save {core_id} skill edits"
+    if all(path.startswith(f"{core_id}/agent/bootstrap/") for path in changed_paths):
+        return f"save {core_id} bootstrap edits"
+    if all(path.startswith(f"{core_id}/agent/schedules/") for path in changed_paths):
+        return f"save {core_id} schedule edits"
+    return f"save {core_id} agent edits"
+
+
+def _yaml_mapping(content: str) -> dict[str, Any]:
+    try:
+        raw = yaml.safe_load(content) or {}
+    except yaml.YAMLError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _semantic_yaml_changes(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    changes: list[str] = []
+    keys = sorted(set(_flatten_yaml(old)) | set(_flatten_yaml(new)))
+    old_flat = _flatten_yaml(old)
+    new_flat = _flatten_yaml(new)
+    for key in keys:
+        if old_flat.get(key) != new_flat.get(key):
+            changes.append(f"{key} changed")
+    return changes
+
+
+def _flatten_yaml(value: Any, *, prefix: str = "") -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+    flattened: dict[str, Any] = {}
+    for key, child in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(child, dict):
+            flattened.update(_flatten_yaml(child, prefix=path))
+        elif isinstance(child, list):
+            flattened[path] = json.dumps(child, sort_keys=True, ensure_ascii=False)
+        else:
+            flattened[path] = child
+    return flattened
+
+
+def _gate_failure_summary(gates: Any) -> str:
+    phases = getattr(gates, "phases", None)
+    if not phases:
+        return "unknown gate failure"
+    failures = [phase for phase in phases if not bool(getattr(phase, "passed", False))]
+    return "; ".join(f"{getattr(phase, 'name', 'gate')}: {getattr(phase, 'detail', '')}" for phase in failures[:5]) or "unknown gate failure"
 
 
 def reject_generated_artifacts(root: Path) -> list[str]:

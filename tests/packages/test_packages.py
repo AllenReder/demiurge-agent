@@ -9,6 +9,7 @@ from rich.console import Console
 
 from demiurge.app import HostPackageRepositoryConfig, create_app, load_host_config
 from demiurge.cli import main
+from demiurge.core_repository import CoreRepositoryError
 from demiurge.package_wizard import PackageWizard
 from demiurge.packages import (
     REDACTED_SECRET,
@@ -1428,6 +1429,21 @@ def test_cli_package_list_and_install(tmp_path, capsys):
     assert (home / "agents" / "assistant" / "agent" / "output" / "tts_minimax").exists()
 
 
+def test_package_install_saves_local_agent_edits_before_package_commit(tmp_path, capsys):
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake")
+    soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nManual package pre-edit.\n", encoding="utf-8")
+
+    main(["--home", str(home), "package", "install", "memory_basic", "--core", "assistant", "--json"])
+
+    installed = json.loads(capsys.readouterr().out)
+    assert installed["package_id"] == "memory_basic"
+    assert app.version_store.core_repository.live_changed_paths() == []
+    subjects = app.version_store.core_repository._run_git(["log", "--format=%s", "-2"]).stdout.splitlines()
+    assert subjects == ["package install memory_basic", "save assistant authored prompt edits"]
+
+
 def test_cli_package_install_preview_accepts_relative_home(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     relative_home = Path("relative-home")
@@ -1881,15 +1897,10 @@ async def test_context_reseed_rejects_symlink_storage_escape(tmp_path):
     (core_path / "context").symlink_to(escaped, target_is_directory=True)
     app.runner.provider = _RecordingProvider(default="blocked")
 
-    await app.runner.run_turn("attempt reseed escape")
+    with pytest.raises(CoreRepositoryError, match="symlink is not allowed"):
+        await app.runner.run_turn("attempt reseed escape")
 
     assert not (escaped / "reseed.md").exists()
-    assert any(
-            event["type"] == "module.failed"
-            and event["slot"] == "agent/output/context_reseed_output"
-            and "must resolve inside the core root" in event["error"]
-            for event in app.runner.event_log.tail(30)
-        )
 
 
 @pytest.mark.asyncio

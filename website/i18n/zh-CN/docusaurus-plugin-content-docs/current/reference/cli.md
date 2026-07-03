@@ -57,6 +57,9 @@ uv run demiurge doctor --json
 uv run demiurge core status
 uv run demiurge core versions
 uv run demiurge core check
+uv run demiurge core save
+uv run demiurge core diff
+uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
 uv run demiurge core evolve promote <run_id>
@@ -72,6 +75,14 @@ uv run demiurge core rollback <revision>
 会在 `.evolve/runs/<run_id>/agents` 下创建隔离 worktree。Review 会记录
 `refs/demiurge/runs/<run_id>`，promote 会推进 `refs/demiurge/live`，rollback
 会创建新的 rollback commit。
+
+`core diff` 会显示 `~/.demiurge/agents` 中的 local agent edits，不写入文件。
+`core save` 会验证这些 edits，并提交为新的 `core_revision`。`core discard --yes`
+会把 live checkout 重置到 `refs/demiurge/live`，并移除未跟踪的 local agent edits。
+
+run/edit workflows 会在加载 live core 前自动保存 local agent edits。只读命令不会创建
+commit。`core evolve promote` 和 `core rollback` 这类 revision switch workflow 如果仍
+发现未保存的 local agent edits，会拒绝继续；先 save 或 discard。
 
 ## `setup`
 
@@ -141,6 +152,7 @@ uv run demiurge gateway --core assistant --timezone Asia/Shanghai
 ```bash
 uv run demiurge --help
 uv run demiurge init --help
+uv run demiurge core --help
 uv run demiurge setup --help
 uv run demiurge package --help
 uv run demiurge gateway --help

@@ -108,8 +108,10 @@ assistant/
 The runtime initializes `~/.demiurge/.core.git` from the source `agents/` tree
 and checks out the live agents tree at `~/.demiurge/agents`. Runtime core edits,
 evolve runs, package installs, package uninstalls, promotions, and rollbacks are
-Git revisions in that repository. Package recipes install reusable components
-into runtime cores without modifying the source templates or host lock file.
+Git revisions in that repository. Direct edits under `~/.demiurge/agents` are
+saved as core revisions before run/edit workflows load the live core. Package
+recipes install reusable components into runtime cores without modifying the
+source templates or host lock file.
 
 
 ## Manual Entry Path

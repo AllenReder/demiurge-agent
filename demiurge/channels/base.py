@@ -355,6 +355,7 @@ class TextChannelBridgeBase:
         if not hasattr(runner, "start_new_session"):
             await self._send_text(inbound.source, "Session reset is not available.", reply_to=inbound.reply_to, metadata=inbound.metadata)
             return
+        await runner.prepare_live_core()
         session_id = runner.start_new_session(
             channel=self.channel_name,
             conversation_key=inbound.conversation_key,
@@ -440,7 +441,7 @@ class TextChannelBridgeBase:
 
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         runner = state.runtime.runner
-        core = runner.core_loader.load(runner.version_store.active_core_path(runner.core_id))
+        core = await runner.load_active_core()
         lines = ["# Tools"]
         for entry in runner.tool_runtime.registry_for(core):
             lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
@@ -448,7 +449,7 @@ class TextChannelBridgeBase:
 
     async def _command_skills(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         runner = state.runtime.runner
-        core = runner.core_loader.load(runner.version_store.active_core_path(runner.core_id))
+        core = await runner.load_active_core()
         category = args.strip() or None
         skills = [skill for skill in core.skills if category is None or skill.category == category]
         lines = ["# Skills"]
@@ -462,7 +463,7 @@ class TextChannelBridgeBase:
             await self._send_text(inbound.source, "Usage: `/skill <name>`", reply_to=inbound.reply_to, metadata=inbound.metadata)
             return
         runner = state.runtime.runner
-        core = runner.core_loader.load(runner.version_store.active_core_path(runner.core_id))
+        core = await runner.load_active_core()
         result = await runner.tool_runtime.execute(
             ToolCall(name="skill_view", arguments={"name": parts[0]}, id=f"{self.channel_name}_skill_view"),
             core=core,
@@ -715,6 +716,7 @@ def runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
             runtime_timezone=app.runtime_timezone,
             task_worker=app.task_worker,
             session_runtime=app.session_runtime,
+            prepare_live_core=app.prepare_live_core,
         )
         return InteractionRuntime(runner)
 

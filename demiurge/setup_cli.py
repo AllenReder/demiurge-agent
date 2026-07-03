@@ -31,6 +31,7 @@ from demiurge.app import (
 )
 from demiurge.core import CoreLoader, ModelInfo
 from demiurge.env_file import load_runtime_env, runtime_env_path, upsert_env_value
+from demiurge.gates import GateResult, GateRunner
 from demiurge.package_wizard import PromptToolkitPackagePrompt, SelectChoice
 from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, ProviderPreset, get_provider_preset
 from demiurge.providers import LLMMessage, LLMRequest
@@ -374,19 +375,42 @@ def set_core_model(context: SetupContext, *, core_id: str, provider_id: str, mod
     if provider_id != "fake":
         resolve_host_provider_profile(load_host_config(context.host_config_path)[0], provider_id)
     ensure_runtime_defaults(context.version_store, context.agents_root, requested_core_id=core_id)
-    core_path = context.version_store.active_core_path(core_id)
-    manifest_path = core_path / "agent.yaml"
-    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-    model = raw.setdefault("model", {})
-    if not isinstance(model, dict):
-        raise SystemExit(f"invalid model block in {manifest_path}")
-    for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
-        model.pop(key, None)
-    model["provider"] = provider_id
-    model["model_name"] = model_name
-    model.setdefault("model_options", {})
-    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    return {"core": core_id, "path": str(manifest_path), "provider": provider_id, "model": model_name}
+    repository = context.version_store.core_repository
+    gate_runner = GateRunner(project_root=Path.cwd().resolve())
+    repository.prepare_live_for_edit(
+        validate=lambda agents_root, changed_paths: asyncio.run(gate_runner.run(agents_root, changed_paths=changed_paths))
+    )
+    with repository.live_transaction(reason="setup model set"):
+        core_path = context.version_store.active_core_path(core_id)
+        manifest_path = core_path / "agent.yaml"
+        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        model = raw.setdefault("model", {})
+        if not isinstance(model, dict):
+            raise SystemExit(f"invalid model block in {manifest_path}")
+        for key in ("model_name_env", "base_url", "base_url_env", "api_key", "api_key_env"):
+            model.pop(key, None)
+        model["provider"] = provider_id
+        model["model_name"] = model_name
+        model.setdefault("model_options", {})
+        manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        changed_paths = repository.live_changed_paths()
+        gates = asyncio.run(gate_runner.run(repository.active_agents_root(), changed_paths=changed_paths))
+        if not gates.passed:
+            raise SystemExit("setup model gates failed: " + _gate_failure_summary(gates))
+        commit = repository.commit_live(reason="setup model set", summary=f"update {core_id} model config")
+    return {
+        "core": core_id,
+        "path": str(manifest_path),
+        "provider": provider_id,
+        "model": model_name,
+        "revision": commit.revision,
+        "previous_revision": commit.previous_revision,
+    }
+
+
+def _gate_failure_summary(gates: GateResult) -> str:
+    failures = [phase for phase in gates.phases if not phase.passed]
+    return "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
 
 
 def provider_profile_from_args(args: argparse.Namespace, *, existing: HostProviderProfile | None = None) -> HostProviderProfile:

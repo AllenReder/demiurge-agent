@@ -17,7 +17,7 @@ uv run demiurge package
 
 It lets you select a runtime core, browse packages, filter by repository or tag,
 preview changes, install packages, uninstall installed packages, and manage
-package repositories.
+package repositories. Preview and list views are read-only.
 
 Use the subcommands on this page when you want a repeatable command for a
 script, runbook, or issue comment.
@@ -49,6 +49,11 @@ If two repositories contain the same package id, use a repository-qualified ref:
 ```bash
 builtin/memory_basic
 ```
+
+If you have edited `~/.demiurge/agents` directly, package install and uninstall
+save those local agent edits first as a separate core revision. The package
+operation then runs in its own Git transaction. Use `uv run demiurge core diff`
+to inspect unsaved edits before installing.
 
 ## Preview an Install
 
@@ -88,7 +93,9 @@ uv run demiurge package install builtin/memory_basic --core assistant
 Install options are resolved once during installation. Secret option values may
 be written into the installed component config, but `packages.yaml` stores only
 redacted option snapshots. A successful install is committed to the runtime
-core Git repository and reports the new core revision.
+core Git repository and reports the new core revision. If local agent edits
+were present before installation, Demiurge reports a package revision after
+first saving those edits in a separate revision.
 
 ## What Installation Writes
 
@@ -194,6 +201,9 @@ Uninstall removes package-owned component targets, removes package-owned
 pipeline entries for `bootstrap`, `input`, and `output` slots, and updates
 `packages.yaml`. A successful uninstall is also committed to the runtime core
 Git repository.
+
+Like install, uninstall first saves unrelated local agent edits as their own
+revision. It does not mix manual edits into the package uninstall commit.
 
 If package-owned files have drifted since installation, uninstall refuses by
 default:

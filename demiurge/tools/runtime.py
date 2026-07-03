@@ -30,6 +30,7 @@ from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.security.command_guard import CommandGuardDecision, review_command
 from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
+from demiurge.core_repository import CoreRepositoryError
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
 from demiurge.schedule_management import ScheduleManagementError, ScheduleManager
@@ -381,11 +382,19 @@ class ToolRuntime:
     ) -> ToolResult:
         if call.name == "rollback_core":
             capability.require("tool.call:rollback_core")
-            pointer = self.version_store.rollback(
-                core.core_id,
-                target=str(call.arguments.get("target") or "previous"),
-                reason=str(call.arguments.get("reason") or "rollback_core"),
-            )
+            try:
+                pointer = self.version_store.rollback(
+                    core.core_id,
+                    target=str(call.arguments.get("target") or "previous"),
+                    reason=str(call.arguments.get("reason") or "rollback_core"),
+                )
+            except CoreRepositoryError as exc:
+                return ToolResult(
+                    content=str(exc),
+                    data={"error": str(exc)},
+                    is_error=True,
+                    model_output=str(exc),
+                )
             payload = asdict(pointer)
             return ToolResult(
                 content=f"rollback committed: {pointer.active_revision[:12]} (takes effect next turn)",
@@ -429,7 +438,10 @@ class ToolRuntime:
             if action == "promote":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core promote", is_error=True)
-                result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
+                try:
+                    result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
+                except CoreRepositoryError as exc:
+                    return ToolResult(content=str(exc), data={"error": str(exc)}, is_error=True, model_output=str(exc))
                 payload = asdict(result)
                 return ToolResult(content=result.summary, data=payload, is_error=not result.promoted, model_output=json.dumps(payload, ensure_ascii=False))
             if action == "discard":

@@ -186,6 +186,34 @@ def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
     assert "CLI rollback setup." not in soul.read_text(encoding="utf-8")
 
 
+def test_core_cli_save_diff_and_discard_local_edits(tmp_path, capsys):
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+    store = VersionStore(home)
+    soul = store.active_core_path("assistant") / "agent" / "SOUL.md"
+    original = soul.read_text(encoding="utf-8")
+    soul.write_text(original + "\n\nCLI local edit.\n", encoding="utf-8")
+
+    cli.main(["--home", str(home), "core", "diff"])
+    diff_output = capsys.readouterr().out
+    assert "CLI local edit." in diff_output
+
+    cli.main(["--home", str(home), "core", "save"])
+    save_output = capsys.readouterr().out
+    assert "saved local agent edits:" in save_output
+    assert "save assistant authored prompt edits" in save_output
+    assert store.core_repository.live_changed_paths() == []
+
+    soul.write_text(soul.read_text(encoding="utf-8") + "\nDiscard me.\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="discard requires --yes"):
+        cli.main(["--home", str(home), "core", "discard"])
+
+    cli.main(["--home", str(home), "core", "discard", "--yes"])
+    discard_output = capsys.readouterr().out
+    assert "discarded local agent edits:" in discard_output
+    assert "Discard me." not in soul.read_text(encoding="utf-8")
+
+
 def test_cli_help_does_not_expose_channel_flag():
     removed_flag = "--" + "channel"
     assert removed_flag not in cli.build_parser().format_help()
@@ -222,6 +250,22 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
     assert raw["providers"]["default"] == "deepseek"
     assert raw["providers"]["profiles"]["deepseek"]["base_url"] == "https://api.deepseek.com"
     assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_setup_model_set_commits_core_revision_and_leaves_live_clean(tmp_path):
+    home = tmp_path / "home"
+    context = setup_cli.load_setup_context(home)
+
+    result = setup_cli.set_core_model(context, core_id="assistant", provider_id="fake", model_name="fake/custom")
+
+    assert result["revision"]
+    store = VersionStore(home)
+    assert store.core_repository.live_changed_paths() == []
+    raw = yaml.safe_load((store.active_core_path("assistant") / "agent.yaml").read_text(encoding="utf-8"))
+    assert raw["model"]["provider"] == "fake"
+    assert raw["model"]["model_name"] == "fake/custom"
+    subject = store.core_repository._run_git(["log", "-1", "--format=%s"]).stdout.strip()
+    assert subject == "update assistant model config"
 
 
 def test_setup_timezone_set_and_clear_writes_host_config(tmp_path, capsys):

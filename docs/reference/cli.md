@@ -59,6 +59,9 @@ Checks runtime/source template drift.
 uv run demiurge core status
 uv run demiurge core versions
 uv run demiurge core check
+uv run demiurge core save
+uv run demiurge core diff
+uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
 uv run demiurge core evolve promote <run_id>
@@ -74,6 +77,16 @@ in `~/.demiurge/.core.git`.
 start` creates an isolated worktree under `.evolve/runs/<run_id>/agents`.
 Review records `refs/demiurge/runs/<run_id>`, promote advances
 `refs/demiurge/live`, and rollback creates a new rollback commit.
+
+`core diff` shows local agent edits in `~/.demiurge/agents` without writing
+files. `core save` validates those edits and commits them as a new
+`core_revision`. `core discard --yes` resets the live checkout to
+`refs/demiurge/live` and removes untracked local agent edits.
+
+Run/edit workflows save local agent edits automatically before loading the live
+core. Read-only commands do not create commits. Switching workflows such as
+`core evolve promote` and `core rollback` refuse to continue when unsaved local
+agent edits remain; save or discard them first.
 
 ## `setup`
 

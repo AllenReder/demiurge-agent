@@ -585,7 +585,7 @@ class TuiInteractionBridge:
         return True
 
     async def _tools(self, _: str) -> bool:
-        core = self._active_core()
+        core = await self._active_core()
         rows = [
             (
                 entry.name,
@@ -602,7 +602,7 @@ class TuiInteractionBridge:
 
     async def _skills(self, args: str) -> bool:
         category = args.strip() or None
-        core = self._active_core()
+        core = await self._active_core()
         rows = [
             (skill.name, skill.category, skill.description, str(sum(len(files) for files in skill.linked_files.values())))
             for skill in core.skills
@@ -618,7 +618,7 @@ class TuiInteractionBridge:
             return True
         name = parts[0]
         file_path = parts[1] if len(parts) > 1 else None
-        core = self._active_core()
+        core = await self._active_core()
         result = await self.app.tool_runtime.execute(
             ToolCall(
                 name="skill_view",
@@ -740,6 +740,9 @@ class TuiInteractionBridge:
 
     async def _commit_package_transaction(self, action: str, operation):
         repository = self.app.version_store.core_repository
+        await repository.prepare_live_for_edit_async(
+            validate=lambda agents_root, changed_paths: self.app.gate_runner.run(agents_root, changed_paths=changed_paths)
+        )
         with repository.live_transaction(reason=f"package {action}"):
             result = operation()
             changed_paths = repository.live_changed_paths()
@@ -811,6 +814,7 @@ class TuiInteractionBridge:
         await self._emit_status()
 
     async def _new(self, _: str) -> bool:
+        await self.app.runner.prepare_live_core()
         session_id = self.app.runner.start_new_session(channel="tui", source="local")
         self.runtime = InteractionRuntime(self.app.runner)
         await self._emit_history_snapshot(session_id)
@@ -954,8 +958,8 @@ class TuiInteractionBridge:
             return None
         return value
 
-    def _active_core(self):
-        return self.app.core_loader.load(self.app.version_store.active_core_path(self.app.runner.core_id))
+    async def _active_core(self):
+        return await self.app.load_active_core()
 
     def _tui_turn(self, core):
         return TurnContext(

@@ -54,6 +54,7 @@ Common children:
 | `.core.git/` | Bare Git repository for the runtime agents tree. |
 | `agents/agent.yaml` | Runtime global fallback config. |
 | `agents/<core>/` | Active live checkout of a concrete Agent Core. |
+| `.core-ignore` | Host-owned Git ignore file for runtime cache artifacts such as `__pycache__/`. |
 | `.evolve/runs/<run_id>/agents/` | Isolated evolve worktree over the whole agents tree. |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
 | `runtime/artifacts/` | Host-owned artifacts referenced by runtime records. |
@@ -119,6 +120,19 @@ Managed installs may keep a checkout under:
 
 Runtime cores still live under `~/.demiurge/agents/`; the managed checkout is
 not the active runtime core.
+
+## Local Agent Edits
+
+Direct changes under `~/.demiurge/agents/` are local agent edits. Demiurge saves
+them as commits in `~/.demiurge/.core.git` before run/edit workflows load the
+live core. The generated commit message is deterministic and includes changed
+scopes, changed paths, detected semantic YAML changes, and gate status.
+
+`demiurge core diff` is read-only. `demiurge core save` validates and commits
+the current edits. `demiurge core discard --yes` resets the checkout to
+`refs/demiurge/live` and removes untracked edits. Promotion and rollback do not
+auto-save; they reject dirty live trees so a revision switch cannot silently
+overwrite local files.
 
 ## Core Git Refs
 

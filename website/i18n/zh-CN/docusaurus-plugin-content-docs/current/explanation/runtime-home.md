@@ -66,6 +66,27 @@ agents/
 源模板。此版本不迁移 legacy runtime homes；如果旧版本创建过 `~/.demiurge`，首次运行
 前应删除旧 runtime home。
 
+## Local Agent Edits
+
+你可以直接编辑 `~/.demiurge/agents/` 下的文件。Demiurge 会把这些 changes 当作
+local agent edits，并在明确的 workflow 边界保存为 Git-backed core revisions。
+
+run/edit workflows、package install/uninstall、`setup model set` 和 `evolve start`
+会先验证并保存 local agent edits，然后继续执行。这个保存会成为独立 commit，不会和
+package、setup 或 evolve transaction 混在同一个 revision 里。
+
+`core status`、`core diff`、package preview 和 package list 这类只读命令不会保存或丢弃
+任何内容。`evolve promote` 和 rollback 这类 revision switch 命令如果发现仍有 local
+agent edits，会拒绝切换，因为切换可能覆盖或遗留这些文件。
+
+需要手动管理 edits 时使用：
+
+```bash
+uv run demiurge core diff
+uv run demiurge core save
+uv run demiurge core discard --yes
+```
+
 ## 托管 Checkout
 
 Managed install 会把 checkout 放在：

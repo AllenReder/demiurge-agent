@@ -302,7 +302,7 @@ class SchedulerService:
                 await task
 
     async def run_due_once(self, *, now: datetime | None = None) -> list[ScheduleRunResult]:
-        core = self._load_core()
+        core = await self._load_core()
         results: list[ScheduleRunResult] = []
         for schedule in core.schedules:
             if not schedule.enabled:
@@ -321,8 +321,8 @@ class SchedulerService:
                 pass
             await asyncio.sleep(self.poll_interval_seconds)
 
-    def _load_core(self) -> LoadedCore:
-        return self.app.core_loader.load(self.app.version_store.active_core_path(self.app.runner.core_id))
+    async def _load_core(self) -> LoadedCore:
+        return await self.app.load_active_core()
 
     async def _run_claim(
         self,
@@ -422,6 +422,7 @@ class SchedulerService:
             runtime_timezone=self.app.runtime_timezone,
             task_worker=self.app.task_worker,
             session_runtime=self.app.session_runtime,
+            prepare_live_core=self.app.prepare_live_core,
         )
 
     def _record_claim_task(

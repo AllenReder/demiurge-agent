@@ -18,7 +18,10 @@ Inside the TUI:
 ```
 
 The host creates `.evolve/runs/<run_id>/agents`, runs the `evolver` core with
-worktree-scoped tools, and reports a `run_id`. The live core is unchanged.
+worktree-scoped tools, and reports a `run_id`. If `~/.demiurge/agents` has
+local agent edits, Demiurge validates and saves them first, then creates the
+evolve worktree from that new live revision. The live core is otherwise
+unchanged by start.
 
 Review the run:
 
@@ -37,6 +40,10 @@ Promote the reviewed run:
 
 Promote reruns gates, advances `refs/demiurge/previous` and
 `refs/demiurge/live`, and takes effect on the next turn.
+
+Promote does not auto-save local agent edits. If the live agents tree is dirty,
+save those edits with `uv run demiurge core save` or discard them with
+`uv run demiurge core discard --yes`, then promote again.
 
 Discard an unwanted run:
 
@@ -74,6 +81,10 @@ Inside the TUI:
 
 Rollback returns the agents tree to a previous Git revision by creating a new
 rollback commit. It takes effect on the next turn.
+
+Rollback also refuses to run while local agent edits remain. Use
+`uv run demiurge core diff` to inspect them, then save or discard before
+rolling back.
 
 Use a specific target when needed:
 

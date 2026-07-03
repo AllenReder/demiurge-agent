@@ -95,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
     core_versions.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     core_check = core_subparsers.add_parser("check", help="Run host-owned gates against the live agents tree")
     core_check.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_save = core_subparsers.add_parser("save", help="Save local agent edits as a core revision")
+    core_save.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_diff = core_subparsers.add_parser("diff", help="Show local agent edits without writing files")
+    core_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    core_discard = core_subparsers.add_parser("discard", help="Discard local agent edits")
+    core_discard.add_argument("--yes", action="store_true", help="Confirm destructive discard")
+    core_discard.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     core_evolve = core_subparsers.add_parser("evolve", help="Manage evolve runs")
     core_evolve_subparsers = core_evolve.add_subparsers(dest="core_evolve_command")
     core_evolve_start = core_evolve_subparsers.add_parser("start", help="Start an isolated evolve run")
@@ -559,6 +566,48 @@ def _handle_core_command(args: argparse.Namespace) -> None:
         if not gates.passed:
             raise SystemExit(1)
         return
+    if command == "save":
+        result = version_store.core_repository.save_local_edits(
+            validate=lambda agents_root, changed_paths: asyncio.run(
+                GateRunner(project_root=Path.cwd().resolve()).run(agents_root, changed_paths=changed_paths)
+            )
+        )
+        payload = _local_edit_save_to_dict(result)
+        if as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        if not result.saved:
+            print("no local agent edits")
+            return
+        assert result.commit is not None
+        print(f"saved local agent edits: {result.commit.revision[:12]}")
+        print(f"summary: {result.description.summary}")
+        return
+    if command == "diff":
+        description = version_store.core_repository.describe_local_edits()
+        diff = version_store.core_repository.local_diff()
+        if as_json:
+            print(json.dumps({"description": asdict(description), "diff": diff}, indent=2, ensure_ascii=False))
+            return
+        if not description.changed_paths:
+            print("no local agent edits")
+            return
+        print(diff, end="" if diff.endswith("\n") else "\n")
+        return
+    if command == "discard":
+        if not getattr(args, "yes", False):
+            raise SystemExit("discard requires --yes")
+        description = version_store.core_repository.discard_local_edits()
+        if as_json:
+            print(json.dumps(asdict(description), indent=2, ensure_ascii=False))
+            return
+        if description.changed_paths:
+            print("discarded local agent edits:")
+            for path in description.changed_paths:
+                print(f"  - {path}")
+        else:
+            print("no local agent edits")
+        return
     if command == "rollback":
         pointer = version_store.rollback(args.core or "assistant", target=args.target, reason=args.reason)
         payload = asdict(pointer)
@@ -638,11 +687,18 @@ def _print_core_status(status: dict[str, object]) -> None:
     print(f"live: {str(status['live'])[:12]}")
     print(f"previous: {str(status['previous'])[:12] if status.get('previous') else '(none)'}")
     print(f"dirty: {status['dirty']}")
+    if status.get("dirty") and status.get("summary"):
+        print(f"summary: {status['summary']}")
     changed = status.get("changed_paths") or []
     if changed:
         print("changed:")
         for path in changed:
             print(f"  - {path}")
+    detected = status.get("detected_changes") or []
+    if detected:
+        print("detected:")
+        for change in detected:
+            print(f"  - {change}")
 
 
 def _print_core_evolve_result(result, *, as_json: bool) -> None:
@@ -659,8 +715,22 @@ def _print_core_evolve_result(result, *, as_json: bool) -> None:
     print(f"report: {result.report_path}")
 
 
+def _local_edit_save_to_dict(result) -> dict[str, object]:
+    return {
+        "saved": result.saved,
+        "commit": asdict(result.commit) if result.commit else None,
+        "description": asdict(result.description),
+        "gates": result.gates.as_dict() if hasattr(result.gates, "as_dict") else result.gates,
+    }
+
+
 def _commit_package_transaction(*, version_store: VersionStore, action: str, operation):
     repository = version_store.core_repository
+    repository.prepare_live_for_edit(
+        validate=lambda agents_root, changed_paths: asyncio.run(
+            GateRunner(project_root=Path.cwd().resolve()).run(agents_root, changed_paths=changed_paths)
+        )
+    )
     with repository.live_transaction(reason=f"package {action}"):
         result = operation()
         changed_paths = repository.live_changed_paths()

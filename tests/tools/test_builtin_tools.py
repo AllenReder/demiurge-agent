@@ -680,6 +680,23 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_rollback_core_returns_error_when_live_tree_has_local_edits(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nCommitted setup edit.\n", encoding="utf-8")
+    app.version_store.core_repository.commit_live(reason="test setup", summary="test setup")
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nDirty rollback edit.\n", encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    before = app.version_store.core_repository.live_revision()
+
+    result = await _execute(app, core, "rollback_core", {})
+
+    assert result.is_error is True
+    assert "local agent edits must be saved or discarded" in result.content
+    assert app.version_store.core_repository.live_revision() == before
+
+
+@pytest.mark.asyncio
 async def test_terminal_dangerous_session_approval_caches_by_rule(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

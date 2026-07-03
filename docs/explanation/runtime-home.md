@@ -68,6 +68,30 @@ you are changing the default packaged project behavior. This release does not
 migrate legacy runtime homes; delete an old `~/.demiurge` before first run if it
 was created by an older layout.
 
+## Local Agent Edits
+
+You can edit files directly under `~/.demiurge/agents/`. Demiurge treats those
+changes as local agent edits and saves them as Git-backed core revisions at
+clear workflow boundaries.
+
+Run/edit workflows, package install/uninstall, `setup model set`, and
+`evolve start` validate and save local agent edits before they continue. The
+save is a separate commit from the package, setup, or evolve transaction, so
+the source of each revision remains visible.
+
+Read-only commands such as `core status`, `core diff`, package previews, and
+package lists do not save or discard anything. Revision-switching commands such
+as `evolve promote` and rollback refuse to switch while local agent edits
+remain, because switching would overwrite or strand those files.
+
+Use these commands when you want to manage the edits yourself:
+
+```bash
+uv run demiurge core diff
+uv run demiurge core save
+uv run demiurge core discard --yes
+```
+
 ## Managed Checkout
 
 Managed install places the checkout at:

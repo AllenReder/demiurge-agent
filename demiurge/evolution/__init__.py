@@ -86,6 +86,9 @@ class EvolutionRuntime:
             raise RuntimeError(f"evolve already running for core: {target_core_id}")
         if self.evolver_runner is None:
             raise RuntimeError("evolver runner is not configured")
+        await self.core_repository.prepare_live_for_edit_async(
+            validate=lambda agents_root, changed_paths: self.gate_runner.run(agents_root, changed_paths=changed_paths)
+        )
         self._active_runs.add(target_core_id)
         change_set = self.core_repository.begin_change_set(kind="evolve", reason=goal or f"evolve {target_core_id}")
         run_id = change_set.run_id
@@ -170,6 +173,7 @@ class EvolutionRuntime:
         )
 
     async def promote(self, run_id: str, *, target_core_id: str = "assistant", reason: str = "evolve promote") -> EvolveResult:
+        self.core_repository.prepare_live_for_switch()
         review = await self.review(run_id, target_core_id=target_core_id, goal=reason)
         if not review.passed:
             return EvolveResult(

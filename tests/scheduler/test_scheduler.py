@@ -248,6 +248,27 @@ async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_deliv
 
 
 @pytest.mark.asyncio
+async def test_scheduler_saves_local_agent_edits_before_due_run(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_schedule(agents, 'schedule: "* * * * *"\n' 'prompt: "scheduled prompt"\n')
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="UTC")
+    provider = RecordingProvider(default="model result")
+    app.runner.provider = provider
+    service = SchedulerService(app)
+    schedule = _schedule(app)
+    service.store.set_next_run(schedule, datetime(2026, 6, 28, 10, 0, tzinfo=UTC))
+    original_revision = app.version_store.core_repository.live_revision()
+    soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nManual scheduled pre-edit.\n", encoding="utf-8")
+
+    results = await service.run_due_once(now=datetime(2026, 6, 28, 10, 1, tzinfo=UTC))
+
+    assert results[0].status == "completed"
+    assert app.version_store.core_repository.live_revision() != original_revision
+    assert app.version_store.core_repository.live_changed_paths() == []
+
+
+@pytest.mark.asyncio
 async def test_scheduler_marks_needs_user_as_error(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_schedule(agents, 'schedule: "* * * * *"\nprompt: "Ask"\n')

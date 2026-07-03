@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from demiurge.app import source_agents_root
-from demiurge.core_repository import CoreRepository
+from demiurge.core_repository import CoreRepository, CoreRepositoryError
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult
 from demiurge.gates import GateRunner
 
@@ -64,3 +64,41 @@ async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
     assert run_root.exists()
     assert runtime.discard(discard.run_id) == {"run_id": discard.run_id, "discarded": True}
     assert not run_root.exists()
+
+
+@pytest.mark.asyncio
+async def test_evolution_start_saves_local_agent_edits_before_worktree(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nManual evolve pre-edit.\n", encoding="utf-8")
+    runtime = EvolutionRuntime(
+        core_repository=repo,
+        gate_runner=GateRunner(project_root=tmp_path),
+        evolver_runner=EditingRunner(),
+    )
+
+    started = await runtime.start(target_core_id="assistant", goal="make a test edit")
+
+    request = (repo.evolve_root / started.run_id / "request.json").read_text(encoding="utf-8")
+    assert repo.live_changed_paths() == []
+    assert repo.live_revision() in request
+    assert "Manual evolve pre-edit." in (Path(started.agents_root) / "assistant" / "agent" / "SOUL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_evolution_promote_rejects_dirty_live_tree(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    runtime = EvolutionRuntime(
+        core_repository=repo,
+        gate_runner=GateRunner(project_root=tmp_path),
+        evolver_runner=EditingRunner(),
+    )
+    started = await runtime.start(target_core_id="assistant", goal="make a test edit")
+    await runtime.review(started.run_id, target_core_id="assistant")
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nDirty before promote.\n", encoding="utf-8")
+
+    with pytest.raises(CoreRepositoryError, match="local agent edits must be saved"):
+        await runtime.promote(started.run_id, target_core_id="assistant")

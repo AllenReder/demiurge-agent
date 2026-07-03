@@ -17,7 +17,9 @@ worktree。Review 会创建 proposal commit；promote 会推进 live Git ref。
 ```
 
 Host 会创建 `.evolve/runs/<run_id>/agents`，使用 worktree-scoped tools 运行
-`evolver` core，并返回 `run_id`。Live core 不会改变。
+`evolver` core，并返回 `run_id`。如果 `~/.demiurge/agents` 中有 local agent edits，
+Demiurge 会先验证并保存这些 edits，然后从新的 live revision 创建 evolve worktree。
+除此之外，start 不会改变 live core。
 
 Review 该 run：
 
@@ -35,6 +37,10 @@ Promote 已 review 的 run：
 
 Promote 会重新运行 gates，推进 `refs/demiurge/previous` 和
 `refs/demiurge/live`，并在下一 turn 生效。
+
+Promote 不会自动保存 local agent edits。如果 live agents tree 是 dirty 的，先用
+`uv run demiurge core save` 保存，或用 `uv run demiurge core discard --yes` 丢弃，
+然后再 promote。
 
 丢弃不需要的 run：
 
@@ -72,6 +78,9 @@ files 或 `.temp/` 的 goals。
 
 Rollback 会创建一个新的 rollback commit，把 agents tree 恢复到之前的 Git revision。
 它会在下一 turn 生效。
+
+Rollback 也会在存在 local agent edits 时拒绝执行。先用 `uv run demiurge core diff`
+检查 edits，然后 save 或 discard，再 rollback。
 
 需要指定 target 时：
 

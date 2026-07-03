@@ -147,6 +147,23 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runner_saves_local_agent_edits_before_turn(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = StaticProvider()
+    original_revision = app.version_store.core_repository.live_revision()
+    soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nManual turn pre-edit.\n", encoding="utf-8")
+
+    result = await app.runner.run_turn("hello")
+
+    new_revision = app.version_store.core_repository.live_revision()
+    assert new_revision != original_revision
+    assert app.version_store.core_repository.live_changed_paths() == []
+    session_rows = app.runtime_store.query(RuntimeQuery(table="sessions", where={"session_id": result.session_id}, limit=1)).rows
+    assert session_rows[0]["target"]["core_revision"] == new_revision
+
+
+@pytest.mark.asyncio
 async def test_runner_tool_loop_projects_tool_calls_to_runtime_store(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     app.runner.provider = ToolThenAnswerProvider()

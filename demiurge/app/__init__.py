@@ -258,6 +258,15 @@ class DemiurgeApp:
     def agents_root(self) -> Path:
         return self.version_store.agents_root
 
+    async def prepare_live_core(self) -> None:
+        await self.version_store.core_repository.prepare_live_for_edit_async(
+            validate=lambda agents_root, changed_paths: self.gate_runner.run(agents_root, changed_paths=changed_paths)
+        )
+
+    async def load_active_core(self):
+        await self.prepare_live_core()
+        return self.core_loader.load(self.version_store.active_core_path(self.runner.core_id))
+
     async def close(self) -> None:
         await self.tool_runtime.close()
 
@@ -589,6 +598,9 @@ def create_app(
         runtime_timezone=runtime_timezone,
         task_worker=task_worker,
         session_runtime=session_runtime,
+        prepare_live_core=lambda: version_store.core_repository.prepare_live_for_edit_async(
+            validate=lambda agents_root, changed_paths: gate_runner.run(agents_root, changed_paths=changed_paths)
+        ),
     )
     return DemiurgeApp(
         home=home,

@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 from demiurge.runtime.tasks import (
     RuntimeTaskConflictError,
@@ -1249,6 +1249,7 @@ class SessionTurnStepRunner:
         session_runtime: SessionRuntime | None = None,
         slot_runtime: SlotRuntime | None = None,
         turn_engine: TurnEngine | None = None,
+        prepare_live_core: Callable[[], Awaitable[Any]] | None = None,
     ):
         self.home = home
         self.version_store = version_store
@@ -1273,6 +1274,7 @@ class SessionTurnStepRunner:
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
         self.turn_engine = turn_engine or TurnEngine(self)
+        self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
         self.delivery_runtime = DeliveryRuntime(store=self.session_runtime.store, event_log=self.event_log)
@@ -1293,9 +1295,18 @@ class SessionTurnStepRunner:
         input_slot_ids: list[str] | tuple[str, ...] | None = None,
         output_slot_ids: list[str] | tuple[str, ...] | None = None,
     ) -> TurnResult:
-        core = self.core_loader.load(core_path or self.version_store.active_core_path(self.core_id))
+        core = self.core_loader.load(core_path) if core_path is not None else await self.load_active_core()
         interaction_metadata = self._interaction_metadata(interaction)
         self._resolve_session_for_interaction(core, interaction_metadata)
+        if core_path is None:
+            self.session_runtime.update_session(
+                self.session_id,
+                core_id=core.core_id,
+                core_revision=self._core_revision(core),
+                provider=self.provider_name,
+                model=self._resolve_model_name(core),
+                touch=False,
+            )
         input_slots_override = self._resolve_phase_slots(core, "input", input_slot_ids)
         output_slots_override = self._resolve_phase_slots(core, "output", output_slot_ids)
         capability = CapabilityFacade(core)
@@ -1686,6 +1697,14 @@ class SessionTurnStepRunner:
             return self.model_override
         return core.manifest.model.model_name or "fake/demo"
 
+    async def prepare_live_core(self) -> None:
+        if self.prepare_live_core_callback is not None:
+            await self.prepare_live_core_callback()
+
+    async def load_active_core(self) -> LoadedCore:
+        await self.prepare_live_core()
+        return self.core_loader.load(self.version_store.active_core_path(self.core_id))
+
     def start_new_session(
         self,
         *,
@@ -1719,7 +1738,7 @@ class SessionTurnStepRunner:
         self._switch_session(session_id, emit_resumed=True)
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
-        core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
+        core = await self.load_active_core()
         turn_id = utc_id("compact_")
         self.event_log.emit("session.compaction.started", turn_id=turn_id, focus=focus)
         try:
@@ -2133,6 +2152,7 @@ class SessionTurnStepRunner:
             task_worker=self.task_worker,
             session_runtime=self.session_runtime,
             slot_runtime=self.slot_runtime,
+            prepare_live_core=self.prepare_live_core_callback,
         )
         child_metadata = {
             "delegation_depth": int(parent_turn.metadata.get("delegation_depth") or 0) + 1,

@@ -98,7 +98,8 @@ assistant/
 runtime 会从 source `agents/` tree 初始化 `~/.demiurge/.core.git`，并把
 live agents tree checkout 到 `~/.demiurge/agents`。runtime core edits、
 evolve runs、package install/uninstall、promotion 和 rollback 都是这个 Git
-repository 里的 revisions。Package recipes 会把可复用组件安装进 runtime
+repository 里的 revisions。直接修改 `~/.demiurge/agents` 会在 run/edit workflows
+加载 live core 前保存为 core revision。Package recipes 会把可复用组件安装进 runtime
 cores，不修改 source templates 或 host lock file。
 
 ## 手册入口
