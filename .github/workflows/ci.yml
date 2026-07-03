@@ -8,8 +8,13 @@ on:
 
 jobs:
   python:
-    name: Python 3.11
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Check out repository
@@ -18,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -26,7 +31,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked --group dev --python "3.11"
+        run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
 
       - name: Compile Python sources
         run: uv run python -m compileall demiurge tests
@@ -42,9 +47,18 @@ jobs:
       - name: Build package
         run: uv build
 
+      - name: Smoke-test managed install
+        if: matrix.python-version == '3.11'
+        run: uv run python scripts/smoke_managed_install.py
+
   tui:
-    name: TUI
-    runs-on: ubuntu-latest
+    name: TUI Node ${{ matrix.node-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [20, 24]
 
     steps:
       - name: Check out repository
@@ -53,7 +67,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: ui-tui/package-lock.json
 
@@ -67,14 +81,17 @@ jobs:
 
       - name: Test TUI
         working-directory: ui-tui
-        run: npm test -- --run
+        run: npm test
 
       - name: Build TUI
         working-directory: ui-tui
         run: npm run build
 
+      - name: Check built TUI syntax
+        run: node --check ui-tui/dist/entry.js
+
       - name: Check packaged TUI asset
-        run: cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+        run: node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) { console.error('packaged TUI asset is out of date'); process.exit(1); }"
 
   hygiene:
     name: Hygiene

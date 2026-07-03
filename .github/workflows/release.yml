@@ -162,8 +162,8 @@ jobs:
             fi
           fi
 
-  validate:
-    name: Validate
+  validate_metadata:
+    name: Validate Release Metadata
     runs-on: ubuntu-latest
     needs: preflight
     env:
@@ -186,15 +186,6 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: |
-            ui-tui/package-lock.json
-            website/package-lock.json
 
       - name: Install Python dependencies
         run: uv sync --locked --group dev --python "3.11"
@@ -225,6 +216,35 @@ jobs:
             website/i18n/zh-CN/docusaurus-theme-classic/footer.json
           grep -nE "releases/${escaped_version}(\\.md)?" docs/README.md
 
+  validate_python:
+    name: Validate Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
+
       - name: Compile Python sources
         run: uv run python -m compileall demiurge tests
 
@@ -236,6 +256,33 @@ jobs:
           uv run demiurge --help
           uv run demiurge init --help
 
+      - name: Smoke-test managed install
+        if: matrix.python-version == '3.11'
+        run: uv run python scripts/smoke_managed_install.py
+
+  validate_tui:
+    name: Validate TUI Node ${{ matrix.node-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [20, 24]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: ui-tui/package-lock.json
+
       - name: Install TUI dependencies
         working-directory: ui-tui
         run: npm ci
@@ -246,14 +293,35 @@ jobs:
 
       - name: Test TUI
         working-directory: ui-tui
-        run: npm test -- --run
+        run: npm test
 
       - name: Build TUI
         working-directory: ui-tui
         run: npm run build
 
+      - name: Check built TUI syntax
+        run: node --check ui-tui/dist/entry.js
+
       - name: Check packaged TUI asset
-        run: cmp ui-tui/dist/entry.js demiurge/ui/tui_dist/entry.js
+        run: node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) { console.error('packaged TUI asset is out of date'); process.exit(1); }"
+
+  validate_website:
+    name: Validate Website
+    runs-on: ubuntu-latest
+    needs: preflight
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
 
       - name: Install website dependencies
         working-directory: website
@@ -263,8 +331,47 @@ jobs:
         working-directory: website
         run: npm run build
 
+  validate_hygiene:
+    name: Validate Hygiene
+    runs-on: ubuntu-latest
+    needs: preflight
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Check whitespace
         run: git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    needs:
+      - validate_metadata
+      - validate_python
+      - validate_tui
+      - validate_website
+      - validate_hygiene
+    if: always()
+
+    steps:
+      - name: Check validation results
+        env:
+          METADATA_RESULT: ${{ needs.validate_metadata.result }}
+          PYTHON_RESULT: ${{ needs.validate_python.result }}
+          TUI_RESULT: ${{ needs.validate_tui.result }}
+          WEBSITE_RESULT: ${{ needs.validate_website.result }}
+          HYGIENE_RESULT: ${{ needs.validate_hygiene.result }}
+        run: |
+          set -euo pipefail
+          for result in "$METADATA_RESULT" "$PYTHON_RESULT" "$TUI_RESULT" "$WEBSITE_RESULT" "$HYGIENE_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "validation dependency did not succeed: $result" >&2
+              exit 1
+            fi
+          done
 
   optional_artifacts:
     name: Optional Artifacts
