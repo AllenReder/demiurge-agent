@@ -471,7 +471,6 @@ class SchedulerService:
         control_plane = getattr(self.app, "control_plane", None)
         if control_plane is None:
             return
-        scheduler_event = "scheduler.completed" if status == "completed" else "scheduler.error"
         if status == "completed":
             control_plane.succeed(
                 task_id,
@@ -484,22 +483,6 @@ class SchedulerService:
                 error=error or "scheduled task failed",
                 source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
             )
-        control_plane.store.append(
-            [
-                RuntimeEvent(
-                    type=scheduler_event,
-                    aggregate_type="scheduler_instance",
-                    aggregate_id=task_id,
-                    payload={
-                        "core_id": core.core_id,
-                        "schedule_id": schedule.schedule_id,
-                        "due_at": format_instant(claim.due_at),
-                        "task_id": task_id,
-                        "claim_status": status,
-                    },
-                ),
-            ]
-        )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:
         metadata = self._schedule_metadata(schedule, claim)
