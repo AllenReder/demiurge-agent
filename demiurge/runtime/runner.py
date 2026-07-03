@@ -2458,7 +2458,8 @@ class SessionTurnStepRunner:
         task_id = str(call.arguments.get("task_id") or "").strip()
         if not task_id:
             return ToolResult(content="task_id is required", is_error=True)
-        timeout = int(call.arguments.get("timeout_seconds") or 30)
+        raw_timeout = call.arguments.get("timeout_seconds")
+        timeout = float(raw_timeout if raw_timeout is not None else 30)
         try:
             record = await self.task_worker.wait(task_id, timeout_seconds=timeout)
         except (KeyError, RuntimeTaskKindError):
@@ -2466,9 +2467,9 @@ class SessionTurnStepRunner:
         except asyncio.TimeoutError:
             payload = self._task_view(task_id, include_log=False) or {"task_id": task_id, "status": "unknown"}
             payload["timed_out"] = True
-            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=True)
+            return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
         payload = record.to_payload(include_log=True, log=self.task_worker.log(task_id))
-        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, is_error=record.running)
+        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
     def _task_view(self, task_id: str, *, include_log: bool) -> dict[str, Any] | None:
         try:

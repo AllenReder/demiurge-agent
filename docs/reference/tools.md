@@ -193,7 +193,9 @@ These calls submit host-owned background tasks:
 
 Background task tools return a `task_id`. Use `task_status`,
 `task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or
-control them.
+control them. If `yield_until` reaches its timeout while the task is still
+running, it returns the current task status with `timed_out=true`; the timeout
+does not mean the task failed.
 `task_list` is scoped to the current session.
 
 Foreground `/stop` cancels only the foreground turn. It does not cancel

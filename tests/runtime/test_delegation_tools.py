@@ -90,6 +90,46 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = BlockingProvider()
+    app.runner.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    delegated = await app.runner.execute_tool(
+        ToolCall(name="delegate_task", arguments={"goal": "do slow child work", "core_id": "evolver"}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    task_id = delegated.data["task_id"]
+    for _ in range(50):
+        if provider.started and provider.release is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert provider.release is not None
+
+    waited = await app.runner.execute_tool(
+        ToolCall(name="yield_until", arguments={"task_id": task_id, "timeout_seconds": 0.01}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert waited.is_error is False
+    assert waited.data["task_id"] == task_id
+    assert waited.data["status"] == "running"
+    assert waited.data["running"] is True
+    assert waited.data["timed_out"] is True
+    provider.release.set()
+    await app.runner.drain_background_tasks()
+
+
+@pytest.mark.asyncio
 async def test_delegation_tools_require_capabilities(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
