@@ -313,7 +313,8 @@ describe("Ink TUI components", () => {
         }}
       />,
     )
-    expect(footer.lastFrame()).toContain("assistant@0001")
+    expect(footer.lastFrame()).toContain("assistant")
+    expect(footer.lastFrame()).not.toContain("assistant@0001")
     expect(footer.lastFrame()).toContain("fake:fake-model")
     expect(footer.lastFrame()).toContain("queued 2")
   })
