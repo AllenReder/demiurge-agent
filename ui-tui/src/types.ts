@@ -109,6 +109,11 @@ export type SlashCommandSpec = {
   usage?: string | null
 }
 
+export type HistoryPayload = {
+  session_id: string
+  items: TranscriptItem[]
+}
+
 export type AppState = {
   ready: boolean
   transcript: TranscriptItem[]

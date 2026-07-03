@@ -72,6 +72,9 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
   if (event === "interaction.status") {
     return { ...state, status: { ...state.status, ...statusFromPayload(payload) } }
   }
+  if (event === "interaction.history") {
+    return { ...state, transcript: transcriptItemsFromPayload(payload.items) }
+  }
   if (event === "interaction.message") {
     const role = stringValue(payload.role) === "user" ? "user" : "system"
     return appendItem(state, {
@@ -188,6 +191,60 @@ export function toggleApprovalCommand(state: AppState): AppState {
 
 function appendItem(state: AppState, item: TranscriptItem): AppState {
   return { ...state, transcript: [...state.transcript, item].slice(-500) }
+}
+
+function transcriptItemsFromPayload(value: unknown): TranscriptItem[] {
+  return arrayValue(value)
+    .map(recordValue)
+    .filter((record): record is Record<string, unknown> => Boolean(record))
+    .map(transcriptItemFromRecord)
+    .filter((item): item is TranscriptItem => Boolean(item))
+    .slice(-500)
+}
+
+function transcriptItemFromRecord(record: Record<string, unknown>): TranscriptItem | undefined {
+  const type = stringValue(record.type)
+  if (type === "message") {
+    const role = stringValue(record.role)
+    if (role !== "user" && role !== "assistant" && role !== "system") return undefined
+    return {
+      id: stringValue(record.id) || "history_message",
+      type: "message",
+      role,
+      text: stringValue(record.text),
+      metadata: recordValue(record.metadata),
+    }
+  }
+  if (type === "tool") {
+    const display = toolDisplayValue(record.display)
+    if (display === "quiet") return undefined
+    const tools = arrayValue(record.tools)
+      .map(recordValue)
+      .filter((tool): tool is Record<string, unknown> => Boolean(tool))
+      .map(toolResultFromRecord)
+    if (!tools.length) return undefined
+    return {
+      id: stringValue(record.id) || "history_tool",
+      type: "tool",
+      display,
+      tools,
+    }
+  }
+  return undefined
+}
+
+function toolResultFromRecord(record: Record<string, unknown>): ToolResultView {
+  const status = stringValue(record.status) === "error" ? "error" : "ok"
+  return {
+    index: numberValue(record.index) || 1,
+    name: stringValue(record.name),
+    id: stringValue(record.id),
+    status,
+    summary: stringValue(record.summary),
+    arguments: record.arguments,
+    result: record.result === undefined ? undefined : stringValue(record.result),
+    model_output: record.model_output == null ? null : stringValue(record.model_output),
+  }
 }
 
 function nextId(state: AppState, prefix: string): string {

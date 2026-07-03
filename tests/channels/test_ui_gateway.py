@@ -347,6 +347,7 @@ async def test_tui_bridge_session_resume_prompt(tmp_path):
     await bridge.wait_for_idle()
     await bridge.command("/new")
     assert app.runner.session_id != original_session
+    assert sink.payloads("interaction.history")[-1]["items"] == []
     await bridge.command("/resume")
     prompt = sink.payloads("interaction.prompt.request")[-1]
     assert prompt["kind"] == "resume"
@@ -355,7 +356,70 @@ async def test_tui_bridge_session_resume_prompt(tmp_path):
     await bridge.reply_prompt(prompt["prompt_id"], str(original_index))
 
     assert app.runner.session_id == original_session
+    history = sink.payloads("interaction.history")[-1]
+    assert history["session_id"] == original_session
+    assert {"type": "message", "role": "user", "text": "hello"}.items() <= history["items"][0].items()
+    assert any(item["type"] == "message" and item["role"] == "assistant" and "[fake] hello" in item["text"] for item in history["items"])
     assert f"resumed session: {original_session}" in sink.texts()
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_initialize_emits_existing_session_history(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.submit("hello")
+    await bridge.wait_for_idle()
+
+    fresh_sink = EventSink()
+    fresh_bridge = TuiInteractionBridge(app, emit=fresh_sink)
+    await fresh_bridge.initialize()
+
+    history = fresh_sink.payloads("interaction.history")[-1]
+    assert history["session_id"] == app.runner.session_id
+    assert any(item["type"] == "message" and item["role"] == "user" and item["text"] == "hello" for item in history["items"])
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_resume_history_includes_tool_cards(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink, tool_display="full")
+    original_session = app.runner.session_id
+
+    await bridge.submit("please use tools_list")
+    await bridge.wait_for_idle()
+    await bridge.command("/new")
+    await bridge.command(f"/resume {original_session}")
+
+    history = sink.payloads("interaction.history")[-1]
+    tool_items = [item for item in history["items"] if item["type"] == "tool"]
+    assert tool_items
+    tool = tool_items[0]["tools"][0]
+    assert tool["name"] == "tools_list"
+    assert tool["id"]
+    assert tool["status"] == "ok"
+    assert tool["arguments"] == {}
+    assert "tools" in tool["summary"].lower()
+    assert not any(item.get("role") == "tool" for item in history["items"])
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_resume_history_respects_quiet_tool_display(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink, tool_display="quiet")
+    original_session = app.runner.session_id
+
+    await bridge.submit("please use tools_list")
+    await bridge.wait_for_idle()
+    await bridge.command("/new")
+    await bridge.command(f"/resume {original_session}")
+
+    history = sink.payloads("interaction.history")[-1]
+    assert any(item["type"] == "message" and item["role"] == "user" for item in history["items"])
+    assert not any(item["type"] == "tool" for item in history["items"])
 
 
 @pytest.mark.asyncio

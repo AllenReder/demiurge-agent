@@ -39,6 +39,46 @@ describe("interaction reducer", () => {
     expect(state.transcript[0]).toMatchObject({ type: "progress", text: "Running tests", metadata: { step: "test" } })
   })
 
+  it("replaces transcript from history snapshots", () => {
+    let state = reduceGatewayEvent(createInitialState(), {
+      event: "interaction.message",
+      payload: { role: "user", text: "new session text" },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.history",
+      payload: {
+        session_id: "session_1",
+        items: [
+          { id: "history_1", type: "message", role: "user", text: "old question" },
+          {
+            id: "history_tool_1",
+            type: "tool",
+            display: "full",
+            tools: [
+              {
+                index: 1,
+                name: "tools_list",
+                id: "call_1",
+                status: "ok",
+                summary: "listed tools",
+                arguments: {},
+                result: "listed tools",
+              },
+            ],
+          },
+          { id: "history_2", type: "message", role: "assistant", text: "old answer" },
+        ],
+      },
+    })
+
+    expect(state.transcript).toMatchObject([
+      { type: "message", role: "user", text: "old question" },
+      { type: "tool", display: "full", tools: [{ name: "tools_list", status: "ok" }] },
+      { type: "message", role: "assistant", text: "old answer" },
+    ])
+    expect(state.transcript).not.toContainEqual(expect.objectContaining({ text: "new session text" }))
+  })
+
   it("tracks prompt selection", () => {
     let state = reduceGatewayEvent(createInitialState(), {
       event: "interaction.prompt.request",

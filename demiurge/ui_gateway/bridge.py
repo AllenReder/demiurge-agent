@@ -18,7 +18,7 @@ from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.slash import SLASH_COMMANDS, SlashCommand, SlashCommandSpec, parse_slash_command, specs_for_surface
-from demiurge.storage import SessionRecord
+from demiurge.storage import EventLog, SessionRecord
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.ui_gateway.protocol import JsonEventSink
 
@@ -101,6 +101,8 @@ class TuiInteractionBridge:
     async def initialize(self) -> dict[str, Any]:
         self._start_scheduler()
         await self._emit_ready()
+        if self.app.session_runtime.message_count(self.app.runner.session_id):
+            await self._emit_history_snapshot(self.app.runner.session_id)
         await self._emit_status()
         return self._status_payload()
 
@@ -437,6 +439,44 @@ class TuiInteractionBridge:
     async def _emit_status(self) -> None:
         await self.emit("interaction.status", self._status_payload())
 
+    async def _emit_history_snapshot(self, session_id: str) -> None:
+        await self.emit(
+            "interaction.history",
+            {
+                "session_id": session_id,
+                "items": self._history_items(session_id),
+            },
+        )
+
+    def _history_items(self, session_id: str) -> list[dict[str, Any]]:
+        tool_events = _tool_history_events(EventLog(self.app.home, session_id).read_all())
+        items: list[dict[str, Any]] = []
+        for message in self.app.session_runtime.read_messages(session_id):
+            if message.visible and message.role in {"user", "assistant", "system"}:
+                if message.content:
+                    items.append(
+                        {
+                            "id": f"history_message_{message.id}",
+                            "type": "message",
+                            "role": message.role,
+                            "text": message.content,
+                            "metadata": _json_safe(
+                                {
+                                    **(message.metadata or {}),
+                                    "message_id": message.id,
+                                    "turn_id": message.turn_id,
+                                    "historical": True,
+                                }
+                            ),
+                        }
+                    )
+                continue
+            if message.role == "tool" and self.tool_display != "quiet":
+                tool = _historical_tool_item(message, tool_events, full=self.tool_display == "full")
+                if tool is not None:
+                    items.append(tool)
+        return items[-500:]
+
     def _status_payload(self) -> dict[str, Any]:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
         return {
@@ -684,12 +724,14 @@ class TuiInteractionBridge:
             await self._emit_notice(str(exc), level="error")
             return
         self.runtime = InteractionRuntime(self.app.runner)
+        await self._emit_history_snapshot(session_id)
         await self._emit_notice(f"resumed session: {session_id}")
         await self._emit_status()
 
     async def _new(self, _: str) -> bool:
         session_id = self.app.runner.start_new_session(channel="tui", source="local")
         self.runtime = InteractionRuntime(self.app.runner)
+        await self._emit_history_snapshot(session_id)
         await self._emit_notice(f"new session: {session_id}")
         await self._emit_status()
         return True
@@ -875,6 +917,74 @@ def _delivery_dict(delivery: Any) -> dict[str, Any]:
         "visible": delivery.visible,
         "history_policy": delivery.history_policy,
         "metadata": _json_safe(delivery.metadata),
+    }
+
+
+def _tool_history_events(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("type") == "actions.requested":
+            for action in event.get("actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                call_id = str(action.get("id") or "")
+                if not call_id:
+                    continue
+                by_id.setdefault(call_id, {}).update(
+                    {
+                        "id": call_id,
+                        "name": str(action.get("name") or ""),
+                        "arguments": action.get("arguments") if isinstance(action.get("arguments"), dict) else {},
+                    }
+                )
+            continue
+        if event.get("type") != "action.result":
+            continue
+        call_id = str(event.get("tool_call_id") or "")
+        if not call_id:
+            continue
+        by_id.setdefault(call_id, {}).update(
+            {
+                "id": call_id,
+                "name": str(event.get("tool_name") or ""),
+                "content": str(event.get("content") or ""),
+                "display_output": str(event.get("display_output") or ""),
+                "model_output": event.get("model_output"),
+                "is_error": bool(event.get("is_error")),
+                "data": event.get("data"),
+            }
+        )
+    return by_id
+
+
+def _historical_tool_item(message: Any, events: dict[str, dict[str, Any]], *, full: bool) -> dict[str, Any] | None:
+    metadata = message.metadata or {}
+    call_id = str(metadata.get("tool_call_id") or "")
+    event = events.get(call_id, {}) if call_id else {}
+    name = str(event.get("name") or metadata.get("tool_name") or "")
+    if not name and not message.content:
+        return None
+    result_text = str(event.get("display_output") or event.get("content") or message.content or "")
+    tool = {
+        "index": 1,
+        "name": name or "tool",
+        "id": call_id or message.id,
+        "status": "error" if bool(event.get("is_error") or metadata.get("is_error")) else "ok",
+        "summary": shorten_text(result_text),
+    }
+    if full:
+        tool.update(
+            {
+                "arguments": _json_safe(event.get("arguments") if isinstance(event.get("arguments"), dict) else {}),
+                "result": result_text,
+                "model_output": event.get("model_output"),
+            }
+        )
+    return {
+        "id": f"history_tool_{call_id or message.id}",
+        "type": "tool",
+        "display": "full" if full else "summary",
+        "tools": [tool],
     }
 
 
