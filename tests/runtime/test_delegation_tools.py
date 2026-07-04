@@ -1,8 +1,10 @@
 import asyncio
+import shutil
 
 import pytest
+import yaml
 
-from demiurge.app import create_app
+from demiurge.app import create_app, source_agents_root
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.sdk import AgentInput, TurnContext
@@ -49,6 +51,46 @@ def _without_default_capability(core, name: str):
     return core
 
 
+def _copy_agents(tmp_path):
+    target = tmp_path / "agents"
+    shutil.copytree(source_agents_root(), target)
+    return target
+
+
+def _write_module(root, rel_path, code):
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(code, encoding="utf-8")
+
+
+def _write_slot(root, rel_path, text=None):
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        text
+        or "\n".join(
+            [
+                "entrypoint: module:process",
+                "description: test slot",
+                "failure_policy: soft",
+                "capabilities:",
+                "  []",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_pipeline(root, phase, *, serial=None, parallel=None, core_id="assistant"):
+    path = root / core_id / "agent" / "pipelines.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw[phase] = {"serial": list(serial or [])}
+    if phase != "bootstrap":
+        raw[phase]["parallel"] = list(parallel or [])
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+
 @pytest.mark.asyncio
 async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -93,6 +135,104 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     detail = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args=task_id)
     assert task_id in listing
     assert "Subagent" in detail
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_defaults_to_base_slots_and_records_metadata(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = StaticProvider()
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    delegated = await app.runner.execute_tool(
+        ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=CHILD_AGENT_COMPLETION_TIMEOUT)
+
+    record = app.task_worker.get(delegated.data["task_id"])
+    assert record.metadata["requested_child_agent_slots"] == {
+        "input_slots": ["base_input"],
+        "output_slots": ["base_output"],
+        "use_bootstrap": False,
+    }
+    assert record.metadata["resolved_child_agent_slots"] == {
+        "input_slots": {"serial": ["base_input"], "parallel": []},
+        "output_slots": {"serial": ["base_output"], "parallel": []},
+        "use_bootstrap": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_all_slots_preserves_child_pipeline_metadata(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/output/child_extra/module.py",
+        "def process(ctx):\n"
+        "    ctx.output.send_text('child-extra')\n",
+    )
+    _write_slot(agents, "evolver/agent/output/child_extra/slot.yaml")
+    _write_pipeline(agents, "output", serial=["base_output", "child_extra"], core_id="evolver")
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = StaticProvider()
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    delegated = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={
+                "goal": "do child work",
+                "core_id": "evolver",
+                "input_slots": "all",
+                "output_slots": "all",
+            },
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=CHILD_AGENT_COMPLETION_TIMEOUT)
+
+    record = app.task_worker.get(delegated.data["task_id"])
+    assert record.metadata["requested_child_agent_slots"] == {
+        "input_slots": "all",
+        "output_slots": "all",
+        "use_bootstrap": False,
+    }
+    assert record.metadata["resolved_child_agent_slots"]["output_slots"] == {
+        "serial": ["base_output", "child_extra"],
+        "parallel": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_returns_tool_error_for_invalid_child_slot_selection(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    result = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do child work", "core_id": "evolver", "input_slots": ["missing"]},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert "unknown input slot id: missing" in result.content
 
 
 @pytest.mark.asyncio

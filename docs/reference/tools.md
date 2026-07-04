@@ -187,6 +187,67 @@ does not hot-reload the active core.
 creates a new rollback commit for the live Agent Core tree; the new revision
 takes effect on the next turn.
 
+## Child Agent Slot Controls
+
+Authored slots can call child agents synchronously or in the background:
+
+```python
+result = await ctx.agents.run(
+    "evolver",
+    "child prompt",
+    input_slots=["base_input"],
+    output_slots=["base_output"],
+    use_bootstrap=False,
+)
+
+handle = ctx.agents.spawn(
+    "evolver",
+    "child prompt",
+    input_slots="all",
+    output_slots="all",
+    use_bootstrap=True,
+)
+```
+
+`ctx.agents.run(...)` waits for the child turn and returns an
+`AgentRunResult`. `ctx.agents.spawn(...)` returns an `AgentSpawnHandle` for an
+`agent.spawn` background task.
+
+`input_slots` and `output_slots` accept:
+
+| Value | Meaning |
+| --- | --- |
+| omitted, `None`, or `[]` | Run only `base_input` or `base_output`. |
+| `"all"` | Run the child core's full configured pipeline, including parallel slots. |
+| non-empty list | Filter the child core's active pipeline by slot id, preserving pipeline order and serial/parallel grouping. |
+
+Slot ids must exist and must already be present in the child core's active
+pipeline. Invalid ids raise `ValueError` from authored `ctx.agents` calls.
+
+`use_bootstrap` defaults to `False`. When false, the child turn does not run
+bootstrap slots, create a bootstrap snapshot, or inject an existing bootstrap
+snapshot into the provider request. Set `use_bootstrap=True` to use the child
+core's normal bootstrap pipeline.
+
+`delegate_task(...)` exposes the same child slot controls to the model:
+
+```text
+delegate_task(
+  goal,
+  core_id=None,
+  context_mode="isolated",
+  notify_policy="return_to_parent",
+  tool_policy=None,
+  max_depth=None,
+  input_slots=["base_input"],
+  output_slots=["base_output"],
+  use_bootstrap=False,
+)
+```
+
+For `delegate_task`, invalid child slot selection returns a tool error result
+instead of raising into authored slot code.
+
 ## Background Runtime Tasks
 
 These calls submit host-owned background tasks:
@@ -207,6 +268,10 @@ status with `timed_out=true`; the timeout does not mean the task failed.
 
 Foreground `/stop` cancels only the foreground turn. It does not cancel
 background tasks.
+
+`agent.spawn` task metadata includes both the requested child slot controls and
+the resolved child pipeline slots after the child turn runs. Use `task_status`
+or `yield_until` to inspect those fields.
 
 ## Package-Provided Web Search
 

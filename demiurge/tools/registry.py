@@ -158,6 +158,21 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "notify_policy": {"type": "string", "enum": ["return_to_parent", "silent"], "default": "return_to_parent"},
                 "tool_policy": {"type": "object"},
                 "max_depth": {"type": "integer"},
+                "input_slots": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["all"]},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "default": ["base_input"],
+                },
+                "output_slots": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["all"]},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "default": ["base_output"],
+                },
+                "use_bootstrap": {"type": "boolean", "default": False},
             },
             required=["goal"],
         ),

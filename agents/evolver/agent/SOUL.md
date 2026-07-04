@@ -114,10 +114,14 @@ Tools and child agents:
 
 - `ctx.tools.call("tool_name", args)` calls a host-visible tool and requires
   `tool.call:<tool_name>`.
-- `ctx.agents.run(core_id, raw_input)` runs a child core synchronously and
-  requires `agents.run:<core_id>`.
-- `ctx.agents.spawn(core_id, raw_input)` starts a child-agent task and requires
+- `ctx.agents.run(core_id, raw_input, input_slots=None, output_slots=None,
+  use_bootstrap=False)` runs a child core synchronously and requires
+  `agents.run:<core_id>`.
+- `ctx.agents.spawn(core_id, raw_input, input_slots=None, output_slots=None,
+  use_bootstrap=False)` starts a child-agent task and requires
   `agents.spawn:<core_id>`.
+- Child-agent slot defaults are `base_input` and `base_output`; pass `"all"`
+  to use the child core's full configured pipeline.
 - `ctx.agents.spawn("evolver", ...)` is not the host evolution workflow. Real
   evolution goes through `evolve_core`.
 

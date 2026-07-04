@@ -24,7 +24,7 @@ async def process(ctx):
     text = str(ctx.output.response_text or "").strip()
     summarizer_core = config.get("summarizer_core")
     if summarizer_core:
-        summary = await ctx.agents.run(str(summarizer_core), text)
+        summary = await ctx.agents.run(str(summarizer_core), text, output_slots=["result_output"])
         result = summary.result
         if isinstance(result, dict) and result.get("text"):
             text = str(result["text"]).strip()

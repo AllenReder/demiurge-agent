@@ -117,7 +117,9 @@ must not rewrite the original history body.
 The model-facing delegation tools are:
 
 - `delegate_task(goal, core_id=None, context_mode="isolated",
-  notify_policy="return_to_parent", tool_policy=None, max_depth=None)`;
+  notify_policy="return_to_parent", tool_policy=None, max_depth=None,
+  input_slots=["base_input"], output_slots=["base_output"],
+  use_bootstrap=False)`;
 - `task_list(kind=None)`, scoped to the current session;
 - `task_status(task_id, view="model")`;
 - `task_control(task_id, command="cancel")`;
@@ -128,6 +130,10 @@ the default depth and child-count limits, and applies child `tool_policy`
 filters during visible-tool construction and dispatch. `notify_policy` accepts
 only `return_to_parent` and `silent`; the former emits a completion event and
 the latter suppresses it. Child output is evidence for the parent by default.
+Child input/output selection defaults to `base_input` and `base_output`;
+`"all"` runs the child core's full configured pipeline, and a list filters the
+active pipeline while preserving order and serial/parallel groups. Bootstrap is
+off by default for delegated child turns.
 
 Foreground `agent.turn` rows remain readable through the control-plane
 projection for tracing, but model-facing task tools only operate on detached

@@ -1219,6 +1219,39 @@ async def test_agents_run_returns_child_result_without_auto_mirroring_delivery(t
 
 
 @pytest.mark.asyncio
+async def test_agents_run_prepares_child_core_once(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    ctx.output.send_text('child-session:' + result.session_id, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent", "child"])
+    prepare_calls = 0
+
+    async def prepare_live_core():
+        nonlocal prepare_calls
+        prepare_calls += 1
+
+    app.runner.prepare_live_core_callback = prepare_live_core
+
+    result = await app.runner.run_turn("hello")
+
+    assert prepare_calls == 2
+    child_session_id = _delivery_texts(result)[1].removeprefix("child-session:")
+    assert app.session_runtime.get_session(child_session_id).core_id == "evolver"
+
+
+@pytest.mark.asyncio
 async def test_agents_run_returns_explicit_child_result_to_parent_module(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
@@ -1233,7 +1266,7 @@ async def test_agents_run_returns_explicit_child_result_to_parent_module(tmp_pat
         agents,
         "assistant/agent/output/agent_probe/module.py",
         "async def process(ctx):\n"
-        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', output_slots=['result_only'])\n"
         "    ctx.output.send_text('child-result:' + result.result['answer'], history_policy='model_hidden')\n",
     )
     _write_slot(
@@ -1248,6 +1281,246 @@ async def test_agents_run_returns_explicit_child_result_to_parent_module(tmp_pat
     result = await app.runner.run_turn("hello")
 
     assert _delivery_texts(result) == ["parent", "child-result:structured"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_defaults_to_base_slots_and_skips_child_bootstrap(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/bootstrap/child_boot/module.py",
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('CHILD_BOOT')\n",
+    )
+    _write_slot(agents, "evolver/agent/bootstrap/child_boot/slot.yaml", _slot_text())
+    _write_pipeline(agents, "bootstrap", serial=["child_boot"], core_id="evolver")
+    _write_module(
+        agents,
+        "evolver/agent/input/child_prefix/module.py",
+        "def process(ctx):\n"
+        "    ctx.input.add_context('CHILD_PREFIX', role='system')\n",
+    )
+    _write_slot(agents, "evolver/agent/input/child_prefix/slot.yaml", _slot_text())
+    _write_pipeline(agents, "input", serial=["child_prefix", "base_input"], core_id="evolver")
+    _write_module(
+        agents,
+        "evolver/agent/output/child_extra/module.py",
+        "def process(ctx):\n"
+        "    ctx.output.send_text('child-extra')\n",
+    )
+    _write_slot(agents, "evolver/agent/output/child_extra/slot.yaml", _slot_text())
+    _write_pipeline(agents, "output", serial=["base_output", "child_extra"], core_id="evolver")
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    ctx.output.send_text('child-result:' + result.content + ':' + result.session_id, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert _delivery_texts(result)[0] == "parent"
+    assert _delivery_texts(result)[1].startswith("child-result:child:session_child_")
+    child_session_id = _delivery_texts(result)[1].rsplit(":", 1)[1]
+    assert not app.session_runtime.bootstrap_context_exists(child_session_id)
+    child_request_text = "\n".join(message.content for message in provider.requests[1].messages)
+    assert "CHILD_BOOT" not in child_request_text
+    assert "CHILD_PREFIX" not in child_request_text
+
+
+@pytest.mark.asyncio
+async def test_agents_run_all_slots_preserves_serial_and_parallel_child_pipeline(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/input/child_prefix/module.py",
+        "def process(ctx):\n"
+        "    ctx.input.add_context('CHILD_PREFIX', role='system')\n",
+    )
+    _write_slot(agents, "evolver/agent/input/child_prefix/slot.yaml", _slot_text())
+    _write_pipeline(agents, "input", serial=["child_prefix", "base_input"], core_id="evolver")
+    _write_module(
+        agents,
+        "evolver/agent/output/child_serial/module.py",
+        "def process(ctx):\n"
+        "    ctx.output.send_text('child-serial')\n",
+    )
+    _write_slot(agents, "evolver/agent/output/child_serial/slot.yaml", _slot_text())
+    _write_module(
+        agents,
+        "evolver/agent/output/child_parallel/module.py",
+        "def process(ctx):\n"
+        "    ctx.output.send_text('child-parallel')\n",
+    )
+    _write_slot(agents, "evolver/agent/output/child_parallel/slot.yaml", _slot_text())
+    _write_pipeline(
+        agents,
+        "output",
+        serial=["base_output", "child_serial"],
+        parallel=["child_parallel"],
+        core_id="evolver",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', input_slots='all', output_slots='all')\n"
+        "    parallel = ','.join(result.metadata['child_agent_slots']['output_slots']['parallel'])\n"
+        "    ctx.output.send_text('|'.join(delivery.text for delivery in result.deliveries) + ':' + parallel, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert _delivery_texts(result) == ["parent", "child|child-serial:child_parallel"]
+    child_request_text = "\n".join(message.content for message in provider.requests[1].messages)
+    assert "CHILD_PREFIX" in child_request_text
+
+
+@pytest.mark.asyncio
+async def test_agents_run_filters_child_slots_in_pipeline_order(tmp_path):
+    agents = _copy_agents(tmp_path)
+    for slot_id, text in [("child_one", "one"), ("child_two", "two")]:
+        _write_module(
+            agents,
+            f"evolver/agent/output/{slot_id}/module.py",
+            "def process(ctx):\n"
+            f"    ctx.output.send_text('{text}')\n",
+        )
+        _write_slot(agents, f"evolver/agent/output/{slot_id}/slot.yaml", _slot_text())
+    _write_pipeline(agents, "output", serial=["base_output", "child_one", "child_two"], core_id="evolver")
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', output_slots=['child_two', 'base_output'])\n"
+        "    ctx.output.send_text('|'.join(delivery.text for delivery in result.deliveries), history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent", "child"])
+
+    result = await app.runner.run_turn("hello")
+
+    assert _delivery_texts(result) == ["parent", "child|two"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_can_enable_child_bootstrap(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/bootstrap/child_boot/module.py",
+        "def process(ctx):\n"
+        "    ctx.bootstrap.add('CHILD_BOOT')\n",
+    )
+    _write_slot(agents, "evolver/agent/bootstrap/child_boot/slot.yaml", _slot_text())
+    _write_pipeline(agents, "bootstrap", serial=["child_boot"], core_id="evolver")
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', use_bootstrap=True)\n"
+        "    ctx.output.send_text('child-result:' + result.content + ':' + result.session_id, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    child_request_text = "\n".join(message.content for message in provider.requests[1].messages)
+    assert "CHILD_BOOT" in child_request_text
+    child_session_id = _delivery_texts(result)[1].rsplit(":", 1)[1]
+    assert app.session_runtime.read_bootstrap_context(child_session_id) == "CHILD_BOOT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ("input_slots=['missing']", "unknown input slot id: missing"),
+        ("input_slots=['base_input', 'base_input']", "duplicate input slot id: base_input"),
+        ("input_slots=['detached']", "input slot id is not in the active pipeline: detached"),
+    ],
+)
+async def test_agents_run_rejects_invalid_child_slot_selection(tmp_path, argument, message):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/input/detached/module.py",
+        "def process(ctx):\n"
+        "    ctx.input.add_context('DETACHED', role='system')\n",
+    )
+    _write_slot(agents, "evolver/agent/input/detached/slot.yaml", _slot_text())
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        f"    await ctx.agents.run('evolver', 'child raw', {argument})\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(failure_policy="hard", capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent"])
+
+    with pytest.raises(ValueError, match=message):
+        await app.runner.run_turn("hello")
+
+
+@pytest.mark.asyncio
+async def test_agents_spawn_rejects_invalid_child_slot_selection(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/spawn_probe/module.py",
+        "def process(ctx):\n"
+        "    ctx.agents.spawn('evolver', 'spawn raw', output_slots=['missing'])\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/spawn_probe/slot.yaml",
+        _slot_text(failure_policy="hard", capabilities=["agents.spawn:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "spawn_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent"])
+
+    with pytest.raises(ValueError, match="unknown output slot id: missing"):
+        await app.runner.run_turn("hello")
 
 
 @pytest.mark.asyncio
@@ -1295,6 +1568,16 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert len(agent_tasks) == 1
     assert agent_tasks[0].status == "succeeded"
+    assert agent_tasks[0].metadata["requested_child_agent_slots"] == {
+        "input_slots": ["base_input"],
+        "output_slots": ["base_output"],
+        "use_bootstrap": False,
+    }
+    assert agent_tasks[0].metadata["resolved_child_agent_slots"] == {
+        "input_slots": {"serial": ["base_input"], "parallel": []},
+        "output_slots": {"serial": ["base_output"], "parallel": []},
+        "use_bootstrap": False,
+    }
     assert app.task_worker.pending_events_for_session(app.runner.session_id)[0].task_id == agent_tasks[0].task_id
     messages = app.session_runtime.read_messages(app.runner.session_id)
     assert [message.content for message in messages if message.role == "assistant"] == [
@@ -1369,7 +1652,7 @@ async def test_child_result_artifact_can_be_sent_by_parent(tmp_path):
         agents,
         "assistant/agent/output/tts_parent/module.py",
         "async def process(ctx):\n"
-        "    result = await ctx.agents.run('evolver', 'make voice')\n"
+        "    result = await ctx.agents.run('evolver', 'make voice', output_slots=['tts_result'])\n"
         "    audio = result.result['audio']\n"
         "    ctx.output.send_audio(\n"
         "        audio['path'],\n"
