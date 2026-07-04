@@ -18,7 +18,7 @@
   <a href="https://allenreder.github.io/demiurge-agent/docs/">Docs</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/quick-start">Quick Start</a> ·
   <a href="https://allenreder.github.io/demiurge-agent/docs/tutorials/customize-agent-core">Customize a Core</a> ·
-  <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.6.1">Latest Release</a>
+  <a href="https://allenreder.github.io/demiurge-agent/docs/releases/0.7.0">Latest Release</a>
 </p>
 
 Demiurge is an Alpha-stage agent framework that uses the distinctive
@@ -123,7 +123,7 @@ source templates or host lock file.
 - [Troubleshoot](https://allenreder.github.io/demiurge-agent/docs/how-to/troubleshoot)
 - [Write a Package Recipe](https://allenreder.github.io/demiurge-agent/docs/how-to/write-package-recipe)
 - [Publish a Package Repository](https://allenreder.github.io/demiurge-agent/docs/how-to/publish-package-repository)
-- [Latest Release: 0.6.1](https://allenreder.github.io/demiurge-agent/docs/releases/0.6.1)
+- [Latest Release: 0.7.0](https://allenreder.github.io/demiurge-agent/docs/releases/0.7.0)
 
 ## Contributor Path
 
