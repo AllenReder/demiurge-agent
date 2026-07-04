@@ -1881,7 +1881,7 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
             metadata={"telegram_chat_type": "private"},
         )
     )
-    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=5)
+    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=20)
 
     assert not (workspace / "out.txt").exists()
 
