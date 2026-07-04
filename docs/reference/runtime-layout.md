@@ -134,6 +134,9 @@ the current edits. `demiurge core discard --yes` resets the checkout to
 auto-save; they reject dirty live trees so a revision switch cannot silently
 overwrite local files.
 
+Failed live transactions reset the checkout to `refs/demiurge/live` and remove
+untracked and ignored runtime artifacts created during the failed operation.
+
 ## Core Git Refs
 
 Runtime core revisions are Git commits in `~/.demiurge/.core.git`.
@@ -143,6 +146,16 @@ Runtime core revisions are Git commits in `~/.demiurge/.core.git`.
 | `refs/demiurge/live` | Commit checked out at `~/.demiurge/agents/`. |
 | `refs/demiurge/previous` | Default rollback target. |
 | `refs/demiurge/runs/<run_id>` | Reviewed evolve proposal commit. |
+
+Evolve change sets record the live revision they started from. Promotion
+rejects a proposal when that base revision differs from the current live ref, so
+an older evolve run cannot overwrite a newer package install, manual save,
+rollback, or promoted run.
+
+`demiurge core status` and `demiurge doctor` report consistency issues for the
+core repository, including missing or invalid refs and a checkout HEAD that does
+not match `refs/demiurge/live`. They report repair guidance but do not
+automatically rewrite refs or reset the checkout.
 
 `demiurge init` creates the repository from the source `agents/` tree on a
 fresh runtime home. It does not migrate the old `registry/`, `history/`, or

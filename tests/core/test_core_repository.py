@@ -1,8 +1,10 @@
+import shutil
+
 import pytest
 import yaml
 
 from demiurge.app import source_agents_root
-from demiurge.core_repository import CoreRepository, CoreRepositoryError, reject_dependency_files, reject_generated_artifacts
+from demiurge.core_repository import LIVE_REF, PREVIOUS_REF, CoreRepository, CoreRepositoryError, reject_dependency_files, reject_generated_artifacts
 from demiurge.gates import GatePhase, GateResult
 
 
@@ -63,6 +65,50 @@ def test_core_repository_change_set_proposal_promote_discard_and_rollback(tmp_pa
     run_root = disposable.run_root
     disposable.discard()
     assert not run_root.exists()
+
+
+def test_core_repository_rejects_stale_change_set_promotion(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    original = repo.live_revision()
+
+    change_set = repo.begin_change_set(kind="evolve", reason="edit soul", run_id="run_stale")
+    candidate_soul = change_set.agents_root / "assistant" / "agent" / "SOUL.md"
+    candidate_soul.write_text(candidate_soul.read_text(encoding="utf-8") + "\n\nStale proposal edit.\n", encoding="utf-8")
+    proposal = change_set.commit_proposal(reason="review")
+
+    live_soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    live_soul.write_text(live_soul.read_text(encoding="utf-8") + "\n\nNewer live edit.\n", encoding="utf-8")
+    newer = repo.commit_live(reason="newer", summary="newer live edit")
+
+    with pytest.raises(CoreRepositoryError, match="stale core proposal.*run_stale"):
+        repo.promote_run("run_stale", reason="promote stale")
+
+    assert repo.live_revision() == newer.revision
+    assert repo.previous_revision() == original
+    assert "Newer live edit." in live_soul.read_text(encoding="utf-8")
+    assert "Stale proposal edit." not in live_soul.read_text(encoding="utf-8")
+    assert proposal.revision != newer.revision
+
+
+def test_core_repository_proposal_keeps_begin_base_revision(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    base = repo.live_revision()
+
+    change_set = repo.begin_change_set(kind="evolve", reason="edit soul", run_id="run_base")
+    live_soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    live_soul.write_text(live_soul.read_text(encoding="utf-8") + "\n\nAdvance live while proposal is open.\n", encoding="utf-8")
+    advanced = repo.commit_live(reason="advance", summary="advance live")
+
+    candidate_soul = change_set.agents_root / "assistant" / "agent" / "SOUL.md"
+    candidate_soul.write_text(candidate_soul.read_text(encoding="utf-8") + "\n\nProposal after live advanced.\n", encoding="utf-8")
+    proposal = change_set.commit_proposal(reason="review")
+    raw = yaml.safe_load(change_set.proposal_path.read_text(encoding="utf-8"))
+
+    assert raw["base_revision"] == base
+    assert proposal.previous_revision == base
+    assert repo.live_revision() == advanced.revision
 
 
 def test_core_repository_lock_rejects_concurrent_mutation(tmp_path):
@@ -188,6 +234,86 @@ def test_core_repository_save_local_edits_fails_closed_when_gates_fail(tmp_path)
 
     assert repo.live_revision() == original
     assert repo.live_changed_paths() == ["assistant/agent/SOUL.md"]
+
+
+def test_core_repository_live_transaction_failure_cleans_untracked_and_ignored_files(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    original = repo.live_revision()
+    untracked = repo.agents_root / "assistant" / "agent" / "scratch.md"
+    cache_dir = repo.agents_root / "assistant" / "agent" / "__pycache__"
+    ignored = cache_dir / "module.cpython-311.pyc"
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with repo.live_transaction(reason="test failure"):
+            untracked.write_text("scratch\n", encoding="utf-8")
+            cache_dir.mkdir()
+            ignored.write_bytes(b"cache")
+            raise RuntimeError("boom")
+
+    assert repo.live_revision() == original
+    assert repo.live_changed_paths() == []
+    assert not untracked.exists()
+    assert not ignored.exists()
+
+
+def test_core_repository_consistency_report_ok_and_failures(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+
+    ok = repo.check_consistency()
+    assert ok.ok is True
+    assert ok.issues == []
+
+    repo._run_git(["update-ref", "-d", LIVE_REF])
+    missing_live = repo.check_consistency()
+    assert missing_live.ok is False
+    assert any(issue.code == "core.live_ref.missing" for issue in missing_live.issues)
+
+    repo._run_git(["update-ref", LIVE_REF, ok.live_revision])
+    previous_ref_path = repo.git_dir / PREVIOUS_REF
+    previous_ref_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_ref_path.write_text("not-a-revision\n", encoding="utf-8")
+    bad_previous = repo.check_consistency()
+    assert any(issue.code == "core.previous_ref.invalid" for issue in bad_previous.issues)
+
+    repo._run_git(["update-ref", "-d", PREVIOUS_REF], check=False)
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nDetached mismatch.\n", encoding="utf-8")
+    repo._run_git(["add", "-A"], work_tree=repo.agents_root)
+    repo._run_git(["commit", "-m", "detached mismatch"], work_tree=repo.agents_root)
+    mismatch = repo.check_consistency()
+    assert any(issue.code == "core.checkout_head_mismatch" for issue in mismatch.issues)
+
+
+def test_core_repository_status_reports_missing_checkout(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    shutil.rmtree(repo.agents_root)
+
+    status = repo.status()
+
+    assert status["dirty"] is False
+    assert status["consistency"]["ok"] is False
+    assert status["consistency"]["issues"][0]["code"] == "core.checkout_missing"
+
+
+def test_core_repository_mutations_fail_closed_when_refs_are_inconsistent(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    live = repo.live_revision()
+    repo._run_git(["update-ref", PREVIOUS_REF, live])
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nBlocked mutation.\n", encoding="utf-8")
+
+    with pytest.raises(CoreRepositoryError, match="core.previous_ref_matches_live"):
+        repo.commit_live(reason="blocked", summary="blocked")
+    with pytest.raises(CoreRepositoryError, match="core.previous_ref_matches_live"):
+        repo.save_local_edits()
+    with pytest.raises(CoreRepositoryError, match="core.previous_ref_matches_live"):
+        repo.begin_change_set(kind="evolve", reason="blocked", run_id="blocked_run")
+
+    assert repo.live_revision() == live
 
 
 def test_core_repository_discard_local_edits_resets_live_checkout(tmp_path):

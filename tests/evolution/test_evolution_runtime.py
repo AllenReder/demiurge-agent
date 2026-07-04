@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,29 @@ async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_evolution_review_preserves_change_set_base_revision(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    base = repo.live_revision()
+    runtime = EvolutionRuntime(
+        core_repository=repo,
+        gate_runner=GateRunner(project_root=tmp_path),
+        evolver_runner=EditingRunner(),
+    )
+
+    started = await runtime.start(target_core_id="assistant", goal="make a test edit")
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nLive advanced before review.\n", encoding="utf-8")
+    advanced = repo.commit_live(reason="advance", summary="advance live")
+
+    await runtime.review(started.run_id, target_core_id="assistant")
+
+    proposal = json.loads((repo.evolve_root / started.run_id / "proposal.json").read_text(encoding="utf-8"))
+    assert proposal["base_revision"] == base
+    assert proposal["base_revision"] != advanced.revision
+
+
+@pytest.mark.asyncio
 async def test_evolution_start_saves_local_agent_edits_before_worktree(tmp_path):
     repo = CoreRepository(tmp_path / "home")
     repo.initialize_from_source(source_agents_root(), reason="test init")
@@ -102,3 +126,25 @@ async def test_evolution_promote_rejects_dirty_live_tree(tmp_path):
 
     with pytest.raises(CoreRepositoryError, match="local agent edits must be saved"):
         await runtime.promote(started.run_id, target_core_id="assistant")
+
+
+@pytest.mark.asyncio
+async def test_evolution_promote_rejects_stale_base_after_live_advances(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    original = repo.live_revision()
+    runtime = EvolutionRuntime(
+        core_repository=repo,
+        gate_runner=GateRunner(project_root=tmp_path),
+        evolver_runner=EditingRunner(),
+    )
+    started = await runtime.start(target_core_id="assistant", goal="make a test edit")
+    soul = repo.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nLive advanced before promote.\n", encoding="utf-8")
+    advanced = repo.commit_live(reason="advance", summary="advance live")
+
+    with pytest.raises(CoreRepositoryError, match=f"base={original}.*current={advanced.revision}"):
+        await runtime.promote(started.run_id, target_core_id="assistant")
+
+    assert repo.live_revision() == advanced.revision
+    assert "Live advanced before promote." in soul.read_text(encoding="utf-8")

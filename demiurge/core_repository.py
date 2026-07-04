@@ -39,6 +39,23 @@ class CoreRepositoryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class CoreConsistencyIssue:
+    code: str
+    message: str
+    remediation: str
+    severity: str = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class CoreConsistencyReport:
+    ok: bool
+    issues: list[CoreConsistencyIssue] = field(default_factory=list)
+    live_revision: str | None = None
+    previous_revision: str | None = None
+    checkout_head: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CorePointer:
     core_id: str
     active_revision: str
@@ -229,18 +246,94 @@ class CoreRepository:
 
     def status(self) -> dict[str, Any]:
         self.require_initialized()
-        description = self.describe_local_edits()
+        consistency = self.check_consistency()
+        description = self.describe_local_edits() if self.agents_root.exists() else LocalEditDescription(summary="live agents checkout is missing")
         return {
             "agents_root": str(self.agents_root),
             "git_dir": str(self.git_dir),
-            "live": self.live_revision(),
-            "previous": self.previous_revision(),
+            "live": consistency.live_revision,
+            "previous": consistency.previous_revision,
             "dirty": bool(description.changed_paths),
             "changed_paths": description.changed_paths,
             "changed_scopes": description.changed_scopes,
             "detected_changes": description.detected_changes,
             "summary": description.summary,
+            "consistency": _consistency_report_to_dict(consistency),
         }
+
+    def check_consistency(self) -> CoreConsistencyReport:
+        if not self.git_dir.exists():
+            return CoreConsistencyReport(
+                ok=False,
+                issues=[
+                    CoreConsistencyIssue(
+                        code="core.repository.missing",
+                        message=f"core repository is not initialized: {self.git_dir}",
+                        remediation="Run `demiurge init` to initialize the runtime core repository.",
+                    )
+                ],
+            )
+        self.ensure_private_excludes()
+        issues: list[CoreConsistencyIssue] = []
+        live_revision = self._resolve_ref(LIVE_REF)
+        if live_revision is None:
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.live_ref.missing",
+                    message=f"{LIVE_REF} is missing or does not resolve to a commit",
+                    remediation="Inspect `demiurge core status`; restore from backup or re-run `demiurge init --refresh all` after review.",
+                )
+            )
+        checkout_head = self._resolve_checkout_head() if self.agents_root.exists() else None
+        if live_revision and not self.agents_root.exists():
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.checkout_missing",
+                    message=f"live checkout is missing: {self.agents_root}",
+                    remediation="Run `demiurge init --refresh all` after reviewing the runtime home, or restore the agents checkout from backup.",
+                )
+            )
+        elif live_revision and checkout_head is None:
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.checkout_head_missing",
+                    message=f"live checkout HEAD could not be resolved: {self.agents_root}",
+                    remediation="Inspect `demiurge core status`; restore or reset the runtime agents checkout before mutating the core.",
+                )
+            )
+        if live_revision and checkout_head and checkout_head != live_revision:
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.checkout_head_mismatch",
+                    message=f"live checkout HEAD {checkout_head} does not match {LIVE_REF} {live_revision}",
+                    remediation="Inspect `demiurge core status`; save or discard local edits, then reset the runtime agents tree to the live ref.",
+                )
+            )
+        previous_revision = self._resolve_ref(PREVIOUS_REF, missing_ok=True)
+        if previous_revision == "":
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.previous_ref.invalid",
+                    message=f"{PREVIOUS_REF} exists but does not resolve to a commit",
+                    remediation="Inspect `demiurge core status`; delete or restore the previous ref before rollback.",
+                )
+            )
+            previous_revision = None
+        if live_revision and previous_revision and previous_revision == live_revision:
+            issues.append(
+                CoreConsistencyIssue(
+                    code="core.previous_ref_matches_live",
+                    message=f"{PREVIOUS_REF} points at the same revision as {LIVE_REF}",
+                    remediation="Inspect `demiurge core status`; rollback history may need manual repair before using rollback.",
+                )
+            )
+        return CoreConsistencyReport(
+            ok=not issues,
+            issues=issues,
+            live_revision=live_revision,
+            previous_revision=previous_revision,
+            checkout_head=checkout_head,
+        )
 
     def live_changed_paths(self) -> list[str]:
         self.require_initialized()
@@ -252,6 +345,7 @@ class CoreRepository:
         self._run_git(["clean", "-fdX"], work_tree=self.agents_root)
 
     def require_live_clean(self) -> None:
+        self._require_consistent_for_mutation()
         changed = self.live_changed_paths()
         if changed:
             raise CoreRepositoryError(f"live agents tree has uncommitted changes: {changed}")
@@ -300,6 +394,7 @@ class CoreRepository:
         return await self.save_local_edits_async(validate=validate, gates=gates)
 
     def prepare_live_for_switch(self) -> None:
+        self._require_consistent_for_mutation()
         changed = self.live_changed_paths()
         if changed:
             raise CoreRepositoryError(
@@ -314,6 +409,7 @@ class CoreRepository:
         gates: Any | None = None,
     ) -> LocalEditSaveResult:
         with self.locked():
+            self._require_consistent_for_mutation()
             self.clean_ignored_artifacts()
             description = self.describe_local_edits()
             if not description.changed_paths:
@@ -330,6 +426,7 @@ class CoreRepository:
         gates: Any | None = None,
     ) -> LocalEditSaveResult:
         with self.locked():
+            self._require_consistent_for_mutation()
             self.clean_ignored_artifacts()
             description = self.describe_local_edits()
             if not description.changed_paths:
@@ -353,6 +450,7 @@ class CoreRepository:
 
     def begin_change_set(self, *, kind: str, reason: str, run_id: str | None = None) -> "CoreChangeSet":
         self.require_initialized()
+        self._require_consistent_for_mutation()
         run_id = run_id or utc_id(f"{kind}_")
         run_root = self.evolve_root / run_id
         agents_root = run_root / "agents"
@@ -388,26 +486,32 @@ class CoreRepository:
             ref = self.run_ref(run_id)
             proposal = self._run_git(["rev-parse", "--verify", ref]).stdout.strip()
             previous = self.live_revision()
-            self._run_git(["update-ref", PREVIOUS_REF, previous])
-            self._run_git(["update-ref", LIVE_REF, proposal])
+            base_revision = self._change_set_base_revision(run_id)
+            if base_revision != previous:
+                raise CoreRepositoryError(
+                    f"stale core proposal: run_id={run_id} base={base_revision} current={previous}; "
+                    "review or rebase the evolve run before promoting"
+                )
+            self._update_core_refs(previous=previous, new_live=proposal, expected_live=previous)
             self._run_git(["reset", "--hard", LIVE_REF], work_tree=self.agents_root)
             return CommitResult(revision=proposal, previous_revision=previous, summary=f"promoted {run_id} to live")
 
     def commit_live(self, *, reason: str, summary: str) -> CommitResult:
         self.require_initialized()
+        self._require_consistent_for_mutation()
         previous = self.live_revision()
         self._run_git(["add", "-A"], work_tree=self.agents_root)
         if not self.live_changed_paths():
             return CommitResult(revision=previous, previous_revision=self.previous_revision(), summary="no live changes to commit")
         self._run_git(["commit", "-m", self._commit_message(summary, reason)], work_tree=self.agents_root)
         revision = self._run_git(["rev-parse", "HEAD"], work_tree=self.agents_root).stdout.strip()
-        self._run_git(["update-ref", PREVIOUS_REF, previous])
-        self._run_git(["update-ref", LIVE_REF, revision])
+        self._update_core_refs(previous=previous, new_live=revision, expected_live=previous)
         return CommitResult(revision=revision, previous_revision=previous, summary=summary)
 
     def rollback(self, target: str = "previous", *, reason: str = "rollback") -> CommitResult:
         self.require_initialized()
         with self.locked():
+            self._require_consistent_for_mutation()
             self.prepare_live_for_switch()
             current = self.live_revision()
             if target == "previous":
@@ -419,8 +523,7 @@ class CoreRepository:
             tree = self._run_git(["rev-parse", f"{target_revision}^{{tree}}"]).stdout.strip()
             message = self._commit_message(f"rollback core tree to {target_revision[:12]}", reason)
             commit = self._run_git(["commit-tree", tree, "-p", current, "-m", message]).stdout.strip()
-            self._run_git(["update-ref", PREVIOUS_REF, current])
-            self._run_git(["update-ref", LIVE_REF, commit])
+            self._update_core_refs(previous=current, new_live=commit, expected_live=current)
             self._run_git(["reset", "--hard", LIVE_REF], work_tree=self.agents_root)
             return CommitResult(revision=commit, previous_revision=current, summary=f"rolled back to {target_revision}")
 
@@ -458,8 +561,13 @@ class CoreRepository:
             self.require_live_clean()
             try:
                 yield self.agents_root
-            except BaseException:
-                self.reset_live()
+            except BaseException as transaction_exc:
+                try:
+                    self._cleanup_failed_live_transaction()
+                except BaseException as cleanup_exc:
+                    raise CoreRepositoryError(
+                        f"live transaction failed ({transaction_exc}) and cleanup also failed: {cleanup_exc}"
+                    ) from transaction_exc
                 raise
 
     def reset_live(self) -> None:
@@ -467,6 +575,7 @@ class CoreRepository:
         self._run_git(["reset", "--hard", LIVE_REF], work_tree=self.agents_root)
 
     def _commit_local_edits(self, description: LocalEditDescription, *, gates: Any | None) -> CommitResult:
+        self._require_consistent_for_mutation()
         previous = self.live_revision()
         self._run_git(["add", "-A"], work_tree=self.agents_root)
         if not self.live_changed_paths():
@@ -476,9 +585,64 @@ class CoreRepository:
             work_tree=self.agents_root,
         )
         revision = self._run_git(["rev-parse", "HEAD"], work_tree=self.agents_root).stdout.strip()
-        self._run_git(["update-ref", PREVIOUS_REF, previous])
-        self._run_git(["update-ref", LIVE_REF, revision])
+        self._update_core_refs(previous=previous, new_live=revision, expected_live=previous)
         return CommitResult(revision=revision, previous_revision=previous, summary=description.summary)
+
+    def _cleanup_failed_live_transaction(self) -> None:
+        self.reset_live()
+        self._run_git(["clean", "-fd"], work_tree=self.agents_root)
+        self.clean_ignored_artifacts()
+
+    def _require_consistent_for_mutation(self) -> None:
+        report = self.check_consistency()
+        blocking = [issue for issue in report.issues if issue.severity == "error"]
+        if blocking:
+            detail = "; ".join(f"{issue.code}: {issue.message}" for issue in blocking)
+            raise CoreRepositoryError(f"core repository consistency check failed: {detail}")
+
+    def _update_core_refs(self, *, previous: str, new_live: str, expected_live: str) -> None:
+        commands = "\n".join(
+            [
+                "start",
+                f"update {PREVIOUS_REF} {previous}",
+                f"update {LIVE_REF} {new_live} {expected_live}",
+                "prepare",
+                "commit",
+                "",
+            ]
+        )
+        self._run_git(["update-ref", "--stdin"], input=commands)
+
+    def _change_set_base_revision(self, run_id: str) -> str:
+        run_root = self.evolve_root / run_id
+        request_path = run_root / "request.json"
+        if not request_path.exists():
+            raise CoreRepositoryError(f"core change set is missing request metadata: {request_path}")
+        try:
+            raw = json.loads(request_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CoreRepositoryError(f"core change set request metadata is invalid: {request_path}: {exc}") from exc
+        base_revision = raw.get("base_revision")
+        if not isinstance(base_revision, str) or not base_revision:
+            raise CoreRepositoryError(f"core change set request metadata missing base_revision: {request_path}")
+        resolved = self._run_git(["rev-parse", "--verify", base_revision], check=False)
+        if resolved.returncode != 0:
+            raise CoreRepositoryError(f"core change set base_revision does not resolve: run_id={run_id} base={base_revision}")
+        return resolved.stdout.strip()
+
+    def _resolve_ref(self, ref: str, *, missing_ok: bool = False) -> str | None:
+        result = self._run_git(["rev-parse", "--verify", ref], check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        if missing_ok and (self.git_dir / ref).exists():
+            return ""
+        return None if missing_ok or "Needed a single revision" in result.stderr else None
+
+    def _resolve_checkout_head(self) -> str | None:
+        result = self._run_git(["rev-parse", "HEAD"], work_tree=self.agents_root, check=False)
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
 
     def _local_edit_commit_message(self, description: LocalEditDescription, *, gates: Any | None) -> str:
         lines = [
@@ -540,9 +704,10 @@ class CoreRepository:
         *,
         work_tree: Path | None = None,
         check: bool = True,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = ["git", f"--git-dir={self.git_dir}", *([f"--work-tree={work_tree}"] if work_tree else []), *args]
-        return self._run(command[1:], cwd=None, check=check, prefix=["git"])
+        return self._run(command[1:], cwd=None, check=check, prefix=["git"], input=input)
 
     def _run(
         self,
@@ -551,6 +716,7 @@ class CoreRepository:
         cwd: Path | None,
         check: bool = True,
         prefix: list[str] | None = None,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [*(prefix or []), *args]
         try:
@@ -559,6 +725,7 @@ class CoreRepository:
                 cwd=cwd,
                 check=False,
                 text=True,
+                input=input,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -603,6 +770,7 @@ class CoreChangeSet:
         )
 
     def commit_proposal(self, *, reason: str, metadata: dict[str, Any] | None = None) -> CommitResult:
+        base_revision = self.repository._change_set_base_revision(self.run_id)
         self._git(["add", "-A"])
         worktree_paths = [line.strip() for line in self._git(["diff", "--cached", "--name-only"]).stdout.splitlines() if line.strip()]
         if worktree_paths:
@@ -613,12 +781,12 @@ class CoreChangeSet:
         payload = {
             "run_id": self.run_id,
             "revision": revision,
-            "base_revision": self.repository.live_revision(),
+            "base_revision": base_revision,
             "changed_paths": paths,
             "metadata": metadata or {},
         }
         write_json(self.proposal_path, payload)
-        return CommitResult(revision=revision, previous_revision=self.repository.live_revision(), summary=f"proposal {self.run_id}")
+        return CommitResult(revision=revision, previous_revision=base_revision, summary=f"proposal {self.run_id}")
 
     def discard(self) -> None:
         self.repository._run_git(["worktree", "remove", "--force", str(self.agents_root)], check=False)
@@ -738,6 +906,24 @@ def _gate_failure_summary(gates: Any) -> str:
         return "unknown gate failure"
     failures = [phase for phase in phases if not bool(getattr(phase, "passed", False))]
     return "; ".join(f"{getattr(phase, 'name', 'gate')}: {getattr(phase, 'detail', '')}" for phase in failures[:5]) or "unknown gate failure"
+
+
+def _consistency_report_to_dict(report: CoreConsistencyReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "live_revision": report.live_revision,
+        "previous_revision": report.previous_revision,
+        "checkout_head": report.checkout_head,
+        "issues": [
+            {
+                "code": issue.code,
+                "severity": issue.severity,
+                "message": issue.message,
+                "remediation": issue.remediation,
+            }
+            for issue in report.issues
+        ],
+    }
 
 
 def reject_generated_artifacts(root: Path) -> list[str]:

@@ -684,7 +684,7 @@ def _handle_core_evolve_command(args: argparse.Namespace, *, home: Path) -> None
 def _print_core_status(status: dict[str, object]) -> None:
     print(f"agents_root: {status['agents_root']}")
     print(f"git_dir: {status['git_dir']}")
-    print(f"live: {str(status['live'])[:12]}")
+    print(f"live: {str(status['live'])[:12] if status.get('live') else '(missing)'}")
     print(f"previous: {str(status['previous'])[:12] if status.get('previous') else '(none)'}")
     print(f"dirty: {status['dirty']}")
     if status.get("dirty") and status.get("summary"):
@@ -699,6 +699,16 @@ def _print_core_status(status: dict[str, object]) -> None:
         print("detected:")
         for change in detected:
             print(f"  - {change}")
+    consistency = status.get("consistency")
+    if isinstance(consistency, dict) and not consistency.get("ok", True):
+        print("consistency:")
+        for issue in consistency.get("issues", []):
+            if not isinstance(issue, dict):
+                continue
+            print(f"  - [{issue.get('severity', 'error')}] {issue.get('code')}: {issue.get('message')}")
+            remediation = issue.get("remediation")
+            if remediation:
+                print(f"    remediation: {remediation}")
 
 
 def _print_core_evolve_result(result, *, as_json: bool) -> None:

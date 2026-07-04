@@ -77,6 +77,7 @@ class DoctorRuntime:
         )
         load_runtime_env(self.home)
         self._check_source_root(report)
+        self._check_core_repository_consistency(report)
         self._check_provider_envs(report)
         self._check_fallback(report)
         for core_id in dict.fromkeys([self.core_id, "assistant", "evolver"]):
@@ -109,6 +110,26 @@ class DoctorRuntime:
                     message=f"source agents root is not a directory: {self.source_agents_root}",
                 )
             )
+
+    def _check_core_repository_consistency(self, report: DoctorReport) -> None:
+        consistency = self.version_store.core_repository.check_consistency()
+        if consistency.ok:
+            return
+        severity = "error" if any(issue.severity == "error" for issue in consistency.issues) else "warning"
+        report.findings.append(
+            DoctorFinding(
+                severity=severity,
+                code="core.repository.inconsistent",
+                message="runtime core repository refs or checkout are inconsistent",
+                details={
+                    "issues": [issue.code for issue in consistency.issues],
+                    "live_revision": consistency.live_revision,
+                    "previous_revision": consistency.previous_revision,
+                    "checkout_head": consistency.checkout_head,
+                },
+                remediation="Run `demiurge core status` and repair the Git refs or runtime checkout after reviewing the listed issue codes.",
+            )
+        )
 
     def _check_fallback(self, report: DoctorReport) -> None:
         source_path = self.source_agents_root / "agent.yaml"

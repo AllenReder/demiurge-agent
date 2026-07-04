@@ -5,6 +5,7 @@ import yaml
 
 from demiurge.app import init_runtime, source_agents_root
 from demiurge.cli import main
+from demiurge.core_repository import LIVE_REF
 from demiurge.diagnostics.doctor import DoctorRuntime
 from demiurge.storage import VersionStore
 
@@ -70,6 +71,20 @@ def test_cli_init_check_is_read_only(tmp_path, capsys):
     output = capsys.readouterr().out
     assert '"findings"' in output
     assert not (home / "agents").exists()
+
+
+def test_doctor_reports_core_repository_consistency_errors(tmp_path):
+    home = tmp_path / "home"
+    init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
+    store = VersionStore(home)
+    store.core_repository._run_git(["update-ref", "-d", LIVE_REF])
+
+    report = DoctorRuntime(home=home, source_agents_root=source_agents_root(), core_id="assistant").run()
+
+    finding = next(item for item in report.findings if item.code == "core.repository.inconsistent")
+    assert finding.severity == "error"
+    assert "core.live_ref.missing" in finding.details["issues"]
+    assert "demiurge core status" in finding.remediation
 
 
 def test_cli_init_refresh_refuses_dirty_runtime_core(tmp_path, capsys):

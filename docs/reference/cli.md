@@ -51,7 +51,9 @@ uv run demiurge doctor --core assistant
 uv run demiurge doctor --json
 ```
 
-Checks runtime/source template drift.
+Checks runtime/source template drift. It also reports runtime core repository
+consistency problems, such as a missing live ref, a live checkout that no
+longer matches `refs/demiurge/live`, or a rollback ref that needs repair.
 
 ## `core`
 
@@ -71,12 +73,15 @@ uv run demiurge core rollback <revision>
 ```
 
 Inspects and mutates the Git-backed runtime agents tree. Revisions are commits
-in `~/.demiurge/.core.git`.
+in `~/.demiurge/.core.git`. `core status` includes a repository consistency
+section when the live ref, previous ref, or checkout state needs manual repair.
 
 `core check` runs host-owned gates against the live agents tree. `core evolve
 start` creates an isolated worktree under `.evolve/runs/<run_id>/agents`.
 Review records `refs/demiurge/runs/<run_id>`, promote advances
-`refs/demiurge/live`, and rollback creates a new rollback commit.
+`refs/demiurge/live`, and rollback creates a new rollback commit. Promotion
+rejects stale evolve proposals whose recorded base revision no longer matches
+the current live revision.
 
 `core diff` shows local agent edits in `~/.demiurge/agents` without writing
 files. `core save` validates those edits and commits them as a new

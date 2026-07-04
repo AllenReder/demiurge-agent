@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -152,8 +153,15 @@ class EvolutionRuntime:
                 reason=goal or f"review evolve run {run_id}",
                 metadata={"target_core_id": target_core_id},
             )
+        proposal_metadata: dict[str, Any] = {}
+        if change_set.proposal_path.exists():
+            try:
+                proposal_metadata = json.loads(change_set.proposal_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                proposal_metadata = {}
         gates = await self.gate_runner.run(change_set.agents_root, changed_paths=changed_files)
         payload = {
+            **proposal_metadata,
             "run_id": run_id,
             "target_core_id": target_core_id,
             "changed_files": changed_files,

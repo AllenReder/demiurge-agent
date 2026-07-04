@@ -186,6 +186,21 @@ def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
     assert "CLI rollback setup." not in soul.read_text(encoding="utf-8")
 
 
+def test_core_cli_status_shows_repository_consistency_issues(tmp_path, capsys):
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+    store = VersionStore(home)
+    live = store.core_repository.live_revision()
+    store.core_repository._run_git(["update-ref", "refs/demiurge/previous", live])
+
+    cli.main(["--home", str(home), "core", "status"])
+
+    output = capsys.readouterr().out
+    assert "consistency:" in output
+    assert "core.previous_ref_matches_live" in output
+    assert "demiurge core status" in output
+
+
 def test_core_cli_save_diff_and_discard_local_edits(tmp_path, capsys):
     home = tmp_path / "home"
     init_runtime(home=home, agents_root=source_agents_root())
