@@ -1219,6 +1219,39 @@ async def test_agents_run_returns_child_result_without_auto_mirroring_delivery(t
 
 
 @pytest.mark.asyncio
+async def test_agents_run_prepares_child_core_once(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    ctx.output.send_text('child-session:' + result.session_id, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent", "child"])
+    prepare_calls = 0
+
+    async def prepare_live_core():
+        nonlocal prepare_calls
+        prepare_calls += 1
+
+    app.runner.prepare_live_core_callback = prepare_live_core
+
+    result = await app.runner.run_turn("hello")
+
+    assert prepare_calls == 2
+    child_session_id = _delivery_texts(result)[1].removeprefix("child-session:")
+    assert app.session_runtime.get_session(child_session_id).core_id == "evolver"
+
+
+@pytest.mark.asyncio
 async def test_agents_run_returns_explicit_child_result_to_parent_module(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(

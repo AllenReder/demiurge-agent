@@ -2469,12 +2469,21 @@ class SessionTurnStepRunner:
             prepare_live_core=self.prepare_live_core_callback,
         )
         await child_runner.prepare_live_core()
-        child_core = child_runner.core_loader.load(child_runner.version_store.active_core_path(child_runner.core_id))
+        child_core_path = child_runner.version_store.active_core_path(child_runner.core_id)
+        child_core = child_runner.core_loader.load(child_core_path)
         child_slots = child_runner._resolve_child_agent_slots(
             child_core,
             input_slots=input_slots,
             output_slots=output_slots,
             use_bootstrap=use_bootstrap,
+        )
+        child_runner.session_runtime.update_session(
+            child_runner.session_id,
+            core_id=child_core.core_id,
+            core_revision=child_runner._core_revision(child_core),
+            provider=child_runner.provider_name,
+            model=child_runner._resolve_model_name(child_core),
+            touch=False,
         )
         child_slot_metadata = child_slots.to_metadata()
         child_metadata = {
@@ -2488,6 +2497,7 @@ class SessionTurnStepRunner:
             child_metadata["tool_policy"] = dict(tool_policy)
         result = await child_runner.run_turn(
             raw_input,
+            core_path=child_core_path,
             interaction=InteractionInbound(
                 channel="agent",
                 text=raw_input,
