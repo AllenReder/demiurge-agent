@@ -32,7 +32,7 @@ example:
 
 | Tool | Capability | Default approval |
 | --- | --- | --- |
-| `read_file` | `fs.read` | `auto` for non-sensitive workspace reads |
+| `read_file` | `fs.read` | `auto` for non-sensitive workspace reads; `prompt` outside workspace or for sensitive paths |
 | `write_file` | `fs.write` | `prompt` |
 | `patch` | `fs.write` | `prompt` |
 | `terminal` | `terminal.exec` | `prompt` |

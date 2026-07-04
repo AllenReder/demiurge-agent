@@ -8,6 +8,12 @@ description: 理解 host-owned capabilities、approvals、secrets 和 workspace 
 Demiurge 把 capabilities 视为 host-owned。Agent Core code 可以请求效果，但是否执行由
 host 决定。
 
+## Workspace Scope
+
+File writes、patches 和 terminal working directories scoped 到 resolved workspace。Workspace 可以来自 process override、environment variable、core manifest、local run context，或 fallback `~/.demiurge/workspace`。
+
+Built-in file reads 可以指向 workspace 外的 host-visible paths。Workspace 外 reads，以及所有 sensitive reads，都会在打开文件前要求 approval。
+
 ## Capability 边界
 
 这些效果必须经过 host-owned interfaces：

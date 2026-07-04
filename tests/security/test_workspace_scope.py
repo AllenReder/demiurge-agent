@@ -27,6 +27,60 @@ def test_workspace_scope_rejects_parent_escape(tmp_path):
         scope.resolve_path("../outside.txt")
 
 
+def test_workspace_scope_allows_explicit_outside_read(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    workspace.mkdir()
+    outside.write_text("outside", encoding="utf-8")
+    scope = WorkspaceScope(workspace)
+
+    resolved = scope.resolve_path(outside, allow_outside_read=True)
+
+    assert resolved.path == outside.resolve()
+    assert resolved.relative == str(outside.resolve())
+    assert resolved.outside is True
+    assert resolved.sensitive is False
+
+
+def test_workspace_scope_marks_outside_secret_reads_sensitive(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    private_key = outside / "id_ed25519"
+    private_key.write_text("secret", encoding="utf-8")
+    scope = WorkspaceScope(workspace)
+
+    resolved = scope.resolve_path(private_key, allow_outside_read=True)
+
+    assert resolved.outside is True
+    assert resolved.sensitive is True
+
+
+def test_workspace_scope_expands_home_before_outside_read_check(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    home.mkdir()
+    (home / "note.txt").write_text("home note", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    scope = WorkspaceScope(workspace)
+
+    resolved = scope.resolve_path("~/note.txt", allow_outside_read=True)
+
+    assert resolved.path == (home / "note.txt").resolve()
+    assert resolved.outside is True
+
+
+def test_workspace_scope_still_rejects_outside_writes(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scope = WorkspaceScope(workspace)
+
+    with pytest.raises(WorkspaceScopeError):
+        scope.resolve_path(tmp_path / "outside.txt", operation="write")
+
+
 def test_workspace_scope_rejects_symlink_escape(tmp_path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"

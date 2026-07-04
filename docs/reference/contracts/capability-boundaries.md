@@ -61,9 +61,11 @@ run without asking only after capability and workspace checks pass.
 
 ## Workspace Rule
 
-File and terminal operations must stay inside the resolved workspace unless the
-host explicitly permits another root. Authored code should not hard-code private
-local paths.
+File writes, patches, and terminal working directories must stay inside the
+resolved workspace unless the host explicitly permits another root. Built-in
+file reads may target host-visible paths outside the workspace, but
+outside-workspace and sensitive reads require approval. Authored code should
+not hard-code private local paths.
 
 ## Secrets Rule
 

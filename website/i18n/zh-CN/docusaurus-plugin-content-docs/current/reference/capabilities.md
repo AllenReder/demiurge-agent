@@ -65,7 +65,7 @@ capabilities:
 
 | Capability | Meaning |
 | --- | --- |
-| `fs.read` | 通过 host checks 或需要它的 authored component 读取 workspace files。 |
+| `fs.read` | 通过 host checks 或需要它的 authored component 读取 host-visible files。workspace 外和 sensitive reads 需要 approval。 |
 | `fs.write` | 写入 workspace files。 |
 | `terminal.exec` | 在 workspace scope 中运行 terminal commands。 |
 | `network.fetch` | 获取 network content。 |

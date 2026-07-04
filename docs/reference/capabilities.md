@@ -67,7 +67,7 @@ This grants capabilities such as `mcp.call:docs`.
 
 | Capability | Meaning |
 | --- | --- |
-| `fs.read` | Read workspace files through host checks or an authored component that requires it. |
+| `fs.read` | Read host-visible files through host checks or an authored component that requires it. Outside-workspace and sensitive reads require approval. |
 | `fs.write` | Write workspace files. |
 | `terminal.exec` | Run terminal commands in workspace scope. |
 | `network.fetch` | Fetch network content. |

@@ -523,7 +523,12 @@ class ToolRuntime:
         emit_event: EventEmitter | None,
     ) -> ToolResult:
         capability.require("fs.read")
-        target = self.workspace.resolve_path(str(call.arguments.get("path") or ""), operation="read")
+        target = self.workspace.resolve_path(
+            str(call.arguments.get("path") or ""),
+            operation="read",
+            allow_outside_read=True,
+        )
+        needs_prompt = target.outside or target.sensitive
         denied = await self._approval_for_path(
             call,
             core=core,
@@ -531,9 +536,9 @@ class ToolRuntime:
             capability_name="fs.read",
             action="read",
             target=target.relative,
-            risk="low" if not target.sensitive else "high",
+            risk="low" if not needs_prompt else "high",
             summary=f"Read file {target.relative}",
-            auto_approve=not target.sensitive,
+            auto_approve=not needs_prompt,
             emit_event=emit_event,
         )
         if denied:
@@ -574,9 +579,13 @@ class ToolRuntime:
             return ToolResult(content=f"unsupported search target: {target_kind}", is_error=True)
         if not query and target_kind in {"content", "both"}:
             return ToolResult(content="query is required for content search", is_error=True)
-        target = self.workspace.resolve_path(call.arguments.get("path") or ".", operation="read")
+        target = self.workspace.resolve_path(
+            call.arguments.get("path") or ".",
+            operation="read",
+            allow_outside_read=True,
+        )
         include_sensitive = bool(call.arguments.get("include_sensitive", False))
-        needs_prompt = target.sensitive or (
+        needs_prompt = target.outside or target.sensitive or (
             include_sensitive and self.workspace.contains_sensitive_children(target.path, operation="read")
         )
         denied = await self._approval_for_path(
@@ -611,7 +620,12 @@ class ToolRuntime:
             try:
                 self.workspace.require_within_workspace(resolved)
             except WorkspaceScopeError:
-                continue
+                if not target.outside:
+                    continue
+                try:
+                    resolved.relative_to(target.path)
+                except ValueError:
+                    continue
             if not resolved.is_file():
                 continue
             if self.workspace.is_sensitive_path(resolved, operation="read") and not include_sensitive:

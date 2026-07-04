@@ -10,9 +10,13 @@ only through controlled interfaces.
 
 ## Workspace Scope
 
-File and terminal tools are scoped to a resolved workspace. The workspace can
-come from a process override, environment variable, core manifest, local run
-context, or the fallback `~/.demiurge/workspace`.
+File writes, patches, and terminal working directories are scoped to a resolved
+workspace. The workspace can come from a process override, environment variable,
+core manifest, local run context, or the fallback `~/.demiurge/workspace`.
+
+Built-in file reads can target host-visible paths outside the workspace. Those
+outside-workspace reads, and all sensitive reads, require approval before the
+file is opened.
 
 Workspace scope is not the only guard. Sensitive paths and dangerous operations
 can still require approval or be rejected.

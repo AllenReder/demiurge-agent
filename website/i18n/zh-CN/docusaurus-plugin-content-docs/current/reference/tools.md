@@ -29,7 +29,7 @@ Built-in tools 有 host-defined risk、capability 和 approval defaults。例如
 
 | Tool | Capability | Default approval |
 | --- | --- | --- |
-| `read_file` | `fs.read` | non-sensitive workspace reads 为 `auto` |
+| `read_file` | `fs.read` | non-sensitive workspace reads 为 `auto`；workspace 外或 sensitive paths 为 `prompt` |
 | `write_file` | `fs.write` | `prompt` |
 | `patch` | `fs.write` | `prompt` |
 | `terminal` | `terminal.exec` | `prompt` |

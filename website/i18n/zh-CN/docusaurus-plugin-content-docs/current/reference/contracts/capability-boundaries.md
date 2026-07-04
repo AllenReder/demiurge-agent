@@ -57,7 +57,7 @@ Approval policy 可以来自：
 
 ## Workspace Rule
 
-File 和 terminal operations 必须留在 resolved workspace 内，除非 host 显式允许另一个 root。Authored code 不应硬编码私有本地路径。
+File writes、patches 和 terminal working directories 必须留在 resolved workspace 内，除非 host 显式允许另一个 root。Built-in file reads 可以指向 workspace 外的 host-visible paths，但 workspace 外和 sensitive reads 需要 approval。Authored code 不应硬编码私有本地路径。
 
 ## Secrets Rule
 

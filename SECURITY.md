@@ -37,8 +37,8 @@ effects explicit and reviewable. It is not a container sandbox.
 
 Current controls include:
 
-- file and terminal tools are scoped to the configured workspace;
-- paths outside the workspace are rejected before tool execution;
+- file writes, patches, and terminal working directories are scoped to the configured workspace;
+- built-in file reads can target host-visible paths outside the workspace, but outside-workspace reads require approval before execution;
 - sensitive reads require approval;
 - writes, deletion, terminal commands, network access, and state-changing
   actions require approval by default;

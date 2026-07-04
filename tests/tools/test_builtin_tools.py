@@ -362,6 +362,118 @@ async def test_sensitive_read_requires_approval_and_can_be_denied(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_read_file_outside_workspace_requires_approval_and_can_be_allowed(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    report = outside / "report.md"
+    report.write_text("external report", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    approval_provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = approval_provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "read_file", {"path": str(report)})
+
+    assert result.is_error is False
+    assert result.content == "external report"
+    assert result.data["path"] == str(report.resolve())
+    assert len(approval_provider.requests) == 1
+    assert approval_provider.requests[0].risk == "high"
+    assert approval_provider.requests[0].target == str(report.resolve())
+    events = [event["type"] for event in app.runner.event_log.tail(20)]
+    assert "approval.requested" in events
+
+
+@pytest.mark.asyncio
+async def test_read_file_outside_workspace_denial_does_not_read_file(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    report = outside / "report.md"
+    report.write_text("external report", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "read_file", {"path": str(report)})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "external report" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_read_file_expands_home_for_outside_workspace_approval(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home-dir"
+    workspace.mkdir()
+    home.mkdir()
+    note = home / "note.txt"
+    note.write_text("home note", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    app = create_app(home=tmp_path / "runtime", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "read_file", {"path": "~/note.txt"})
+
+    assert result.is_error is False
+    assert result.content == "home note"
+    assert result.data["path"] == str(note.resolve())
+
+
+@pytest.mark.asyncio
+async def test_search_files_outside_workspace_requires_approval_and_skips_sensitive_by_default(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "alpha.txt").write_text("needle\n", encoding="utf-8")
+    (outside / ".env").write_text("needle secret\n", encoding="utf-8")
+    (outside / "id_ed25519").write_text("needle private key\n", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    approval_provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = approval_provider
+    core = _load_core_with(app, capabilities={"fs.read": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "search_files",
+        {"query": "needle", "path": str(outside), "pattern": "*.*"},
+    )
+
+    assert result.is_error is False
+    assert "alpha.txt:1" in result.content
+    assert ".env" not in result.content
+    assert "id_ed25519" not in result.content
+    assert len(approval_provider.requests) == 1
+    assert approval_provider.requests[0].risk == "high"
+    assert approval_provider.requests[0].target == str(outside.resolve())
+
+
+@pytest.mark.asyncio
+async def test_search_files_outside_workspace_denial_does_not_search(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "alpha.txt").write_text("needle\n", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"fs.read": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "search_files", {"query": "needle", "path": str(outside)})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "alpha.txt" not in result.content
+
+
+@pytest.mark.asyncio
 async def test_write_and_patch_tools_with_approval(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -394,16 +506,32 @@ async def test_write_tool_denial_does_not_create_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_workspace_escape_is_rejected_before_execution(tmp_path):
+async def test_mutating_tools_and_terminal_cwd_reject_workspace_escape_before_execution(tmp_path):
     workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
     workspace.mkdir()
+    outside.write_text("outside", encoding="utf-8")
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
-    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "fs.write": {"scope": "workspace"},
+            "terminal.exec": {"scope": "workspace"},
+        },
+    )
 
-    result = await _execute(app, core, "read_file", {"path": "../outside.txt"})
+    write = await _execute(app, core, "write_file", {"path": str(outside), "content": "changed"})
+    patch = await _execute(app, core, "patch", {"path": str(outside), "old": "outside", "new": "changed"})
+    terminal = await _execute(app, core, "terminal", {"command": "pwd", "cwd": str(tmp_path)})
 
-    assert result.is_error is True
-    assert result.data["executionStarted"] is False
+    assert write.is_error is True
+    assert write.data["executionStarted"] is False
+    assert patch.is_error is True
+    assert patch.data["executionStarted"] is False
+    assert terminal.is_error is True
+    assert terminal.data["executionStarted"] is False
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 @pytest.mark.asyncio

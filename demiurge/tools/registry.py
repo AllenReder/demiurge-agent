@@ -54,8 +54,8 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "read_file": ToolDefinition(
         name="read_file",
         description=(
-            "Read a text file inside the configured workspace. Use this instead of terminal cat/head/tail. "
-            "Use offset and limit for large files."
+            "Read a host-visible text file. Workspace reads are auto-approved when non-sensitive; "
+            "outside-workspace or sensitive reads require approval. Use offset and limit for large files."
         ),
         input_schema=_schema(
             {
@@ -69,8 +69,9 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "search_files": ToolDefinition(
         name="search_files",
         description=(
-            "Search workspace files by content or filename. Use target='content' for text matches, "
-            "target='name' for file discovery, or target='both' when either is useful."
+            "Search host-visible files by content or filename. Workspace searches are auto-approved when "
+            "non-sensitive; outside-workspace or sensitive searches require approval. Use target='content' "
+            "for text matches, target='name' for file discovery, or target='both' when either is useful."
         ),
         input_schema=_schema(
             {

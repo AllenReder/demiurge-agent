@@ -18,6 +18,7 @@ class ResolvedPath:
     path: Path
     relative: str
     sensitive: bool
+    outside: bool = False
 
 
 class WorkspaceScope:
@@ -40,19 +41,25 @@ class WorkspaceScope:
         *,
         base: Path | None = None,
         operation: str = "read",
+        allow_outside_read: bool = False,
     ) -> ResolvedPath:
-        raw = Path(value or ".")
+        raw = Path(value or ".").expanduser()
         base_path = (base or self.root).expanduser().resolve()
         if not raw.is_absolute():
             raw = base_path / raw
         resolved = raw.expanduser().resolve(strict=False)
-        self.require_within_workspace(resolved, operation=operation)
+        outside = operation == "read" and self._containing_read_root(resolved) is None
+        if outside and not allow_outside_read:
+            self.require_within_workspace(resolved, operation=operation)
+        elif operation != "read":
+            self.require_within_workspace(resolved, operation=operation)
         if operation != "read" and resolved.name.lower() in self.blocked_write_names:
             raise WorkspaceScopeError(f"write blocked for protected file: {resolved.name}")
         return ResolvedPath(
             path=resolved,
             relative=self.relative_display(resolved),
             sensitive=self.is_sensitive_path(resolved, operation=operation),
+            outside=outside,
         )
 
     def require_within_workspace(self, path: Path, *, operation: str = "read") -> None:
@@ -75,13 +82,14 @@ class WorkspaceScope:
         resolved = path.resolve(strict=False)
         root = self.write_root if operation != "read" else self._containing_read_root(resolved)
         if root is None:
-            return True
-        try:
-            relative = resolved.relative_to(root)
-        except ValueError:
-            return True
-        names = list(relative.parts)
-        lowered = [name.lower() for name in names]
+            lowered = [name.lower() for name in resolved.parts]
+        else:
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                lowered = [name.lower() for name in resolved.parts]
+            else:
+                lowered = [name.lower() for name in relative.parts]
         if any(name in {".git", ".ssh", ".venv", ".demiurge"} for name in lowered):
             return True
         if any(name.startswith(".env") for name in lowered):
