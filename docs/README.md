@@ -94,7 +94,7 @@ Workspace resolution uses this order:
 
 ## Current Alpha Boundaries
 
-- Latest release notes: [0.6.0](releases/0.6.0.md).
+- Latest release notes: [0.6.1](releases/0.6.1.md).
 - Python dependencies are host-owned and locked by the source checkout.
 - Agent Slot code runs in the host-shared Python environment.
 - Runtime Agent Core revisions are Git commits in `~/.demiurge/.core.git`.
