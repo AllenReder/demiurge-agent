@@ -981,7 +981,6 @@ class TuiInteractionBridge:
             core_id=core.core_id,
             core_revision=self.app.version_store.active_pointer(core.core_id).active_revision,
             user_input=AgentInput(content=""),
-            state={},
             metadata={"channel": "tui", "source": "local", "target": "local"},
         )
 

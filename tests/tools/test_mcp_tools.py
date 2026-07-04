@@ -59,7 +59,6 @@ def _turn(core):
         core_id=core.core_id,
         core_revision=core.revision,
         user_input=AgentInput(content="test"),
-        state={},
     )
 
 

@@ -133,8 +133,10 @@ effects, including:
 - `tool.call:<tool>`
 - `agents.run:<core>`
 - `agents.spawn:<core>`
-- `state.read`
-- `state.write`
+- `state.core.read`
+- `state.core.write`
+- `state.session.read`
+- `state.session.write`
 - `network.fetch`
 
 Do not bypass host-owned tools, workspace scope, state APIs, delivery APIs, or

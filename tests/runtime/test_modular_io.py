@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shutil
 
 import pytest
@@ -8,6 +9,8 @@ from demiurge.app import create_app, source_agents_root
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.security.approval import ApprovalDecision
+from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.sdk import AgentInput, OutputContext, TurnContext
 from demiurge.storage import StateStore
 
 
@@ -990,22 +993,261 @@ async def test_parallel_output_bridge_failure_writes_delivery_failed_event(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_scoped_module_state_client_writes_runtime_state(tmp_path):
+async def test_scoped_module_core_state_client_writes_runtime_state(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
         agents,
         "assistant/agent/output/mood/module.py",
         "def process(ctx):\n"
-        "    ctx.state.set('module_state.mood', 'happy')\n",
+        "    ctx.state.core.set('module_state.mood', 'happy')\n"
+        "    mood = ctx.state.core.snapshot()['module_state']['mood']\n"
+        "    ctx.output.send_text(f'core-snapshot:{mood}', history_policy='model_hidden')\n",
     )
-    _write_slot(agents, "assistant/agent/output/mood/slot.yaml", _slot_text(capabilities=["state.write:module_state.mood"]))
+    _write_slot(
+        agents,
+        "assistant/agent/output/mood/slot.yaml",
+        _slot_text(capabilities=["state.core.read", "state.core.write:module_state.mood"]),
+    )
     _write_pipeline(agents, "output", serial=["base_output", "mood"])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     app.runner.provider = RecordingProvider(default="main")
 
-    await app.runner.run_turn("hello")
+    result = await app.runner.run_turn("hello")
 
-    assert StateStore(app.home, "assistant").read()["module_state"]["mood"] == "happy"
+    assert _delivery_texts(result) == ["main", "core-snapshot:happy"]
+    assert StateStore.core(app.home, "assistant").read()["module_state"]["mood"] == "happy"
+    proposal = json.loads((app.home / "state" / "proposals.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert proposal["scope"] == "core"
+    assert proposal["core_id"] == "assistant"
+    assert proposal["session_id"] is None
+    assert proposal["target"] == "module_state.mood"
+    assert proposal["operation"] == "set"
+    assert proposal["patch"] == "happy"
+
+
+@pytest.mark.asyncio
+async def test_scoped_module_session_state_persists_across_turns(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/session_counter/module.py",
+        "def process(ctx):\n"
+        "    count = int(ctx.state.session.get('counter.count', 0)) + 1\n"
+        "    ctx.state.session.set('counter.count', count)\n"
+        "    snapshot_count = ctx.state.session.snapshot()['counter']['count']\n"
+        "    ctx.output.send_text(f'session-count:{snapshot_count}', history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/session_counter/slot.yaml",
+        _slot_text(capabilities=["state.session.read", "state.session.write:counter.count"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "session_counter"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+
+    first = await app.runner.run_turn("hello")
+    second = await app.runner.run_turn("again")
+
+    assert _delivery_texts(first) == ["main", "session-count:1"]
+    assert _delivery_texts(second) == ["main", "session-count:2"]
+    session_store = StateStore.session(app.home, core_id="assistant", session_id=app.runner.session_id)
+    assert session_store.read()["counter"]["count"] == 2
+    proposal = json.loads((app.home / "state" / "proposals.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert proposal["scope"] == "session"
+    assert proposal["session_id"] == app.runner.session_id
+    assert proposal["target"] == "counter.count"
+
+
+@pytest.mark.asyncio
+async def test_scoped_module_session_state_isolated_across_sessions(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/session_counter/module.py",
+        "def process(ctx):\n"
+        "    count = int(ctx.state.session.get('counter.count', 0)) + 1\n"
+        "    ctx.state.session.set('counter.count', count)\n"
+        "    ctx.output.send_text(f'session-count:{count}', history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/session_counter/slot.yaml",
+        _slot_text(capabilities=["state.session.read:counter.count", "state.session.write:counter.count"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "session_counter"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+
+    first = await app.runner.run_turn("hello")
+    first_session_id = app.runner.session_id
+    second_session_id = app.runner.start_new_session()
+    second = await app.runner.run_turn("fresh")
+
+    assert first_session_id != second_session_id
+    assert _delivery_texts(first) == ["main", "session-count:1"]
+    assert _delivery_texts(second) == ["main", "session-count:1"]
+    assert StateStore.session(app.home, core_id="assistant", session_id=first_session_id).read()["counter"]["count"] == 1
+    assert StateStore.session(app.home, core_id="assistant", session_id=second_session_id).read()["counter"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_child_agent_session_state_isolated_from_parent_session(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/output/session_writer/module.py",
+        "def process(ctx):\n"
+        "    ctx.state.session.set('marker.value', 'child')\n"
+        "    ctx.result.set({'child_marker': ctx.state.session.get('marker.value'), 'child_session': ctx.turn.session_id})\n",
+    )
+    _write_slot(
+        agents,
+        "evolver/agent/output/session_writer/slot.yaml",
+        _slot_text(capabilities=["state.session.read:marker.value", "state.session.write:marker.value"]),
+    )
+    _write_pipeline(agents, "output", serial=["session_writer"], core_id="evolver")
+    _write_module(
+        agents,
+        "assistant/agent/output/parent_probe/module.py",
+        "async def process(ctx):\n"
+        "    ctx.state.session.set('marker.value', 'parent')\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', output_slots=['session_writer'])\n"
+        "    parent_marker = ctx.state.session.get('marker.value')\n"
+        "    ctx.output.send_text(f\"markers:{parent_marker}:{result.result['child_marker']}:{result.session_id}\", history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/parent_probe/slot.yaml",
+        _slot_text(
+            capabilities=[
+                "agents.run:evolver",
+                "state.session.read:marker.value",
+                "state.session.write:marker.value",
+            ]
+        ),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "parent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent", "child"])
+
+    result = await app.runner.run_turn("hello")
+
+    text = _delivery_texts(result)[1]
+    assert text.startswith("markers:parent:child:session_child_")
+    child_session_id = text.rsplit(":", 1)[1]
+    assert StateStore.session(app.home, core_id="assistant", session_id=app.runner.session_id).read()["marker"]["value"] == "parent"
+    assert StateStore.session(app.home, core_id="evolver", session_id=child_session_id).read()["marker"]["value"] == "child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("ctx.state.core.set('secret.value', 'x')", "state.core.write"),
+        ("ctx.state.session.set('secret.value', 'x')", "state.session.write"),
+    ],
+)
+async def test_scoped_state_requires_scope_specific_capability(tmp_path, expression, message):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/state_probe/module.py",
+        "def process(ctx):\n"
+        f"    {expression}\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/state_probe/slot.yaml",
+        _slot_text(failure_policy="hard"),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "state_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+
+    with pytest.raises(CapabilityDenied, match=message):
+        await app.runner.run_turn("hello")
+
+
+@pytest.mark.asyncio
+async def test_ctx_state_direct_legacy_methods_are_not_supported(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/legacy_state/module.py",
+        "def process(ctx):\n"
+        "    ctx.state.set('legacy.value', 'bad')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/legacy_state/slot.yaml",
+        _slot_text(failure_policy="hard", capabilities=["state.core.write:legacy.value"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "legacy_state"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+
+    with pytest.raises(AttributeError, match="set"):
+        await app.runner.run_turn("hello")
+    assert StateStore.core(app.home, "assistant").read_target("legacy.value") is None
+
+
+@pytest.mark.asyncio
+async def test_output_context_state_slice_is_not_supported(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/legacy_slice/module.py",
+        "def process(ctx):\n"
+        "    ctx.output.send_text(str(ctx.state_slice))\n",
+    )
+    _write_slot(agents, "assistant/agent/output/legacy_slice/slot.yaml", _slot_text(failure_policy="hard"))
+    _write_pipeline(agents, "output", serial=["base_output", "legacy_slice"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(default="main")
+
+    with pytest.raises(AttributeError, match="state_slice"):
+        await app.runner.run_turn("hello")
+
+
+def test_turn_and_output_context_remove_legacy_state_snapshot_fields():
+    assert "state" not in TurnContext.__dataclass_fields__
+    assert "state_slice" not in OutputContext.__dataclass_fields__
+
+
+@pytest.mark.asyncio
+async def test_legacy_state_proposal_effect_is_ignored(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = TurnContext(
+        session_id=app.runner.session_id,
+        turn_id="turn_legacy_effect",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="legacy", metadata={}),
+        metadata={},
+    )
+
+    deliveries = await app.runner._handle_effects(
+        [
+            {
+                "type": "state_proposal",
+                "proposal": {"target": "legacy.value", "operation": "set", "patch": "bad"},
+            }
+        ],
+        core=core,
+        turn=turn,
+        capability=CapabilityFacade(core),
+        slot=core.output_slots[0],
+        interaction_metadata={},
+    )
+
+    assert deliveries == []
+    assert StateStore.core(app.home, "assistant").read_target("legacy.value") is None
+    assert any(
+        event["type"] == "effect.ignored" and event.get("effect_type") == "state_proposal"
+        for event in app.runner.event_log.tail(20)
+    )
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,9 @@ Common children:
 | `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
 | `runtime/artifacts/` | Host-owned artifacts referenced by runtime records. |
 | `runtime/session-events/` | Per-session diagnostic event logs. |
+| `state/<core_id>.json` | Core-scoped JSON state read and written through `ctx.state.core`. |
+| `state/sessions/<session_id>.json` | Session-scoped JSON state read and written through `ctx.state.session`. |
+| `state/proposals.jsonl` | Audit log for accepted core and session state writes. |
 | `workspace/` | Default workspace when no CLI/env/core workspace is selected. |
 | `logs/` | Runtime logs such as `mcp-stderr.log`. |
 
