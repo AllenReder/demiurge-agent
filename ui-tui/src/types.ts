@@ -32,7 +32,8 @@ export type ToolResultView = {
   index: number
   name: string
   id: string
-  status: "ok" | "error"
+  phase?: "start" | "finish" | string
+  status: "running" | "ok" | "error"
   summary: string
   arguments?: unknown
   result?: string

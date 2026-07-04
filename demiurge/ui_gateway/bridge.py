@@ -12,14 +12,13 @@ from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
 from demiurge.runtime.delegation import subagents_command_text
-from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
+from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, ToolInteractionRecord, UserPromptRequest
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.slash import SLASH_COMMANDS, SlashCommand, SlashCommandSpec, parse_slash_command, specs_for_surface
 from demiurge.storage import EventLog, SessionRecord
-from demiurge.tools.records import ToolExecutionRecord
 from demiurge.ui_gateway.protocol import JsonEventSink
 
 
@@ -133,22 +132,28 @@ class TuiInteractionBridge:
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
         try:
-            pending_tool_results = []
+            pending_tool_calls = []
             pending_deliveries = []
             for item in outbound.items:
+                if item.kind == "tool_call" and item.tool_call is not None:
+                    if pending_deliveries:
+                        await self._emit_deliveries(outbound, pending_deliveries)
+                        pending_deliveries = []
+                    pending_tool_calls.append(item.tool_call)
+                    continue
                 if item.kind == "tool_result" and item.tool_result is not None:
                     if pending_deliveries:
                         await self._emit_deliveries(outbound, pending_deliveries)
                         pending_deliveries = []
-                    pending_tool_results.append(item.tool_result)
+                    pending_tool_calls.append(ToolInteractionRecord.finished(item.tool_result))
                     continue
                 if item.kind == "delivery" and item.delivery is not None:
-                    if pending_tool_results:
-                        await self._emit_tool_results(pending_tool_results)
-                        pending_tool_results = []
+                    if pending_tool_calls:
+                        await self._emit_tool_calls(pending_tool_calls)
+                        pending_tool_calls = []
                     pending_deliveries.append(item.delivery)
-            if pending_tool_results:
-                await self._emit_tool_results(pending_tool_results)
+            if pending_tool_calls:
+                await self._emit_tool_calls(pending_tool_calls)
             if pending_deliveries:
                 await self._emit_deliveries(outbound, pending_deliveries)
             if outbound.prompt is not None:
@@ -530,7 +535,7 @@ class TuiInteractionBridge:
             },
         )
 
-    async def _emit_tool_results(self, records: list[ToolExecutionRecord]) -> None:
+    async def _emit_tool_calls(self, records: list[ToolInteractionRecord]) -> None:
         if self.tool_display == "quiet":
             return
         await self.emit(
@@ -538,7 +543,7 @@ class TuiInteractionBridge:
             {
                 "channel": "tui",
                 "deliveries": [],
-                "tool_results": [_tool_record_dict(index, record, full=self.tool_display == "full") for index, record in enumerate(records, start=1)],
+                "tool_calls": [_tool_call_record_dict(index, record, full=self.tool_display == "full") for index, record in enumerate(records, start=1)],
                 "tool_display": self.tool_display,
             },
         )
@@ -1139,24 +1144,39 @@ def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: li
     )
 
 
-def _tool_record_dict(index: int, record: ToolExecutionRecord, *, full: bool) -> dict[str, Any]:
-    result_text = record.result.display_output or record.result.content or ""
+def _tool_call_record_dict(index: int, record: ToolInteractionRecord, *, full: bool) -> dict[str, Any]:
+    result_text = ""
+    if record.result is not None:
+        result_text = record.result.display_output or record.result.content or ""
     item = {
         "index": index,
         "name": record.call.name,
         "id": record.call.id,
-        "status": "error" if record.result.is_error else "ok",
-        "summary": shorten_text(result_text),
+        "phase": record.phase,
+        "status": record.status,
+        "summary": shorten_text(result_text) if result_text else _tool_call_start_summary(record.call),
     }
     if full:
         item.update(
             {
                 "arguments": _json_safe(record.call.arguments),
                 "result": result_text,
-                "model_output": record.result.model_output,
+                "model_output": record.result.model_output if record.result is not None else None,
             }
         )
     return item
+
+
+def _tool_call_start_summary(call: ToolCall) -> str:
+    if call.name == "terminal":
+        command = str(call.arguments.get("command") or "").strip()
+        return f"$ {command}" if command else "running terminal"
+    if call.name in {"read_file", "write_file", "patch"}:
+        path = call.arguments.get("path") or call.arguments.get("file_path")
+        return f"{call.name}: {path}" if path else call.name
+    if call.arguments:
+        return shorten_text(json.dumps(call.arguments, ensure_ascii=False, sort_keys=True))
+    return "running"
 
 
 def _session_record_dict(record: SessionRecord) -> dict[str, Any]:

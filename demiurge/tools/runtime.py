@@ -759,17 +759,30 @@ class ToolRuntime:
         capability.require("terminal.exec")
         command = str(call.arguments.get("command") or "").strip()
         if not command:
-            return ToolResult(content="command is required", is_error=True)
+            content = "command is required"
+            cwd_display = str(call.arguments.get("cwd") or ".")
+            return ToolResult(
+                content=content,
+                is_error=True,
+                display_output=self._format_command_display(command, cwd_display, content),
+            )
         cwd = self.workspace.resolve_path(call.arguments.get("cwd") or ".", operation="write")
         env_overlay = call.arguments.get("env") or {}
         if not isinstance(env_overlay, Mapping):
-            return ToolResult(content="env must be an object", is_error=True)
+            content = "env must be an object"
+            return ToolResult(
+                content=content,
+                is_error=True,
+                display_output=self._format_command_display(command, cwd.relative, content),
+            )
         command_guard = review_command(command)
         if command_guard.action == "block":
+            content = f"terminal command blocked: {command_guard.reason}"
             return ToolResult(
-                content=f"terminal command blocked: {command_guard.reason}",
+                content=content,
                 data={"executionStarted": False, "command_guard": asdict(command_guard)},
                 is_error=True,
+                display_output=self._format_command_display(command, cwd.relative, content),
             )
         denied = await self._approval_for_command(
             call,
@@ -821,6 +834,7 @@ class ToolRuntime:
                     "cwd": cwd.relative,
                     "timed_out": False,
                 },
+                display_output=self._format_command_display(command, cwd.relative, content),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
@@ -830,6 +844,7 @@ class ToolRuntime:
                 content=content,
                 is_error=True,
                 data={"executionStarted": True, "exit_code": 124, "cwd": cwd.relative, "timed_out": True},
+                display_output=self._format_command_display(command, cwd.relative, content),
             )
 
     def _start_background_task(
@@ -892,9 +907,20 @@ class ToolRuntime:
                 metadata={"command": command, "cwd": cwd.relative},
             )
         except RuntimeTaskConflictError as exc:
-            return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
+            content = str(exc)
+            return ToolResult(
+                content=content,
+                data={"executionStarted": False},
+                is_error=True,
+                display_output=self._format_command_display(command, cwd.relative, content),
+            )
         payload = {"task_id": record.task_id}
-        return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
+        content = json.dumps(payload, ensure_ascii=False)
+        return ToolResult(
+            content=content,
+            data=payload,
+            display_output=self._format_command_display(command, cwd.relative, content),
+        )
 
     async def _capture_process_output(
         self,
@@ -1834,10 +1860,12 @@ class ToolRuntime:
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
             return None
+        content = f"approval denied: terminal command in {cwd}"
         return ToolResult(
-            content=f"approval denied: terminal command in {cwd}",
+            content=content,
             data={"executionStarted": False, "approval": asdict(decision)},
             is_error=True,
+            display_output=self._format_command_display(command, cwd, content),
         )
 
     async def _approval_for_url(
@@ -2163,6 +2191,12 @@ class ToolRuntime:
 
     def _format_command_result(self, completed: subprocess.CompletedProcess[str]) -> str:
         return self._format_command_output(completed.returncode, completed.stdout, completed.stderr, timed_out=False)
+
+    def _format_command_display(self, command: str, cwd: str, content: str) -> str:
+        parts = [f"$ {command}", f"cwd: {cwd}"]
+        if content:
+            parts.append(content)
+        return "\n".join(parts)
 
     def _format_command_output(self, exit_code: int, stdout: str, stderr: str, *, timed_out: bool) -> str:
         parts = [f"exit_code: {exit_code}"]

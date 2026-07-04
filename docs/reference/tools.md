@@ -103,6 +103,12 @@ The host passes a `ToolContext` with:
 Return `demiurge.sdk.ToolResult`, a compatible dict, or any value that can be
 converted to text.
 
+`ToolResult.content` is the default model-visible result. `model_output`
+overrides what the model sees, and `display_output` overrides what operator UIs
+and channels show in tool cards. For `terminal`, display output includes the
+executed command and cwd before the exit code, stdout, and stderr; the
+model-visible result keeps the existing exit/output shape.
+
 ## MCP Tools
 
 MCP servers live under the configured MCP root, usually:

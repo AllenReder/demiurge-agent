@@ -97,6 +97,12 @@ Host 传入一个 `ToolContext`，包含：
 
 返回 `demiurge.sdk.ToolResult`、兼容的 dict，或任何可转换为 text 的值。
 
+`ToolResult.content` 是默认的 model-visible result。`model_output` 会覆盖
+model 看到的内容，`display_output` 会覆盖 operator UI 和 channels 在 tool
+cards 中展示的内容。对于 `terminal`，display output 会在 exit code、stdout
+和 stderr 前包含实际执行的 command 和 cwd；model-visible result 仍保持既有的
+exit/output 形状。
+
 ## MCP Tools
 
 MCP servers 位于配置的 MCP root 下，通常是：

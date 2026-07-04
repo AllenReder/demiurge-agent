@@ -25,7 +25,14 @@ from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
-from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
+from demiurge.runtime.interactions import (
+    InteractionDelivery,
+    InteractionInbound,
+    InteractionOutbound,
+    InteractionRuntime,
+    ToolInteractionRecord,
+    UserPromptRequest,
+)
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
@@ -78,6 +85,18 @@ TELEGRAM_POLL_CONFLICT_MAX_RETRIES = 5
 def _normalize_tool_display(value: str | None) -> str:
     normalized = (value or "summary").strip().lower()
     return normalized if normalized in {"quiet", "summary", "full"} else "summary"
+
+
+def _tool_call_start_summary(call: ToolCall) -> str:
+    if call.name == "terminal":
+        command = str(call.arguments.get("command") or "").strip()
+        return f"$ {command}" if command else "running terminal"
+    if call.name in {"read_file", "write_file", "patch"}:
+        path = call.arguments.get("path") or call.arguments.get("file_path")
+        return f"{call.name}: {path}" if path else call.name
+    if call.arguments:
+        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+    return "running"
 
 
 
@@ -159,6 +178,7 @@ class TelegramInteractionBridge:
             default=None,
         )
         self._conversations: dict[str, TelegramConversationState] = {}
+        self._tool_message_ids: dict[tuple[str, str], tuple[str, int]] = {}
         self._task_worker: RuntimeTaskWorker | None = None
         self._task_unsubscribe: Callable[[], None] | None = None
 
@@ -468,6 +488,12 @@ class TelegramInteractionBridge:
         try:
             pending_tool_results = []
             for item in outbound.items:
+                if item.kind == "tool_call" and item.tool_call is not None:
+                    if pending_tool_results:
+                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
+                        pending_tool_results = []
+                    await self._deliver_tool_call(item.tool_call, outbound=outbound)
+                    continue
                 if item.kind == "tool_result" and item.tool_result is not None:
                     pending_tool_results.append(item.tool_result)
                     continue
@@ -565,6 +591,85 @@ class TelegramInteractionBridge:
         text = self._tool_results_text(records)
         if text:
             await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+
+    async def _deliver_tool_call(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
+        if self.tool_display == "quiet":
+            return
+        source = outbound.metadata.get("source")
+        if source is None:
+            return
+        reply_to = outbound.metadata.get("reply_to")
+        text = self._tool_call_text(record)
+        if not text:
+            return
+        key = self._tool_message_key(record, outbound)
+        if record.phase == "finish":
+            target = self._tool_message_ids.pop(key, None)
+            if target is not None and await self._edit_tool_call_message(target[0], target[1], text):
+                return
+        sent = await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+        message_id = _telegram_message_id(sent)
+        if record.phase == "start" and message_id is not None:
+            self._tool_message_ids[key] = (str(source), message_id)
+
+    async def _edit_tool_call_message(self, chat_id: str, message_id: int, text: str) -> bool:
+        if not hasattr(self.api, "edit_message_text"):
+            return False
+        try:
+            if self.message_format == "plain":
+                await asyncio.to_thread(
+                    self.api.edit_message_text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=None,
+                    reply_markup=None,
+                )
+                return True
+            await asyncio.to_thread(
+                self.api.edit_message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=format_telegram_markdown_v2(text),
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("telegram tool message edit failed, sending final tool message: %s", exc)
+            return False
+
+    def _tool_message_key(self, record: ToolInteractionRecord, outbound: InteractionOutbound) -> tuple[str, str]:
+        conversation = str(outbound.metadata.get("conversation_key") or outbound.metadata.get("source") or "")
+        return (conversation, record.call.id)
+
+    def _tool_call_text(self, record: ToolInteractionRecord) -> str:
+        status = record.status
+        if record.phase == "start":
+            return f"## Tool call\n`{record.call.name}` - `running` - {self._shorten(_tool_call_start_summary(record.call), limit=220)}"
+        result = ""
+        if record.result is not None:
+            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
+        if self.tool_display == "full" and record.result is not None:
+            sections = [
+                "## Tool call",
+                "",
+                f"### `{record.call.name}` - `{status}`",
+                "",
+                "**Arguments**",
+                "```json",
+                self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
+                "```",
+                "",
+                "**Result**",
+                "```",
+                self._shorten(record.result.display_output or record.result.content or "", limit=1800),
+                "```",
+            ]
+            if record.result.model_output and record.result.model_output != record.result.content:
+                sections.extend(["", "**Model output**", "```", self._shorten(record.result.model_output, limit=1200), "```"])
+            return "\n".join(sections)
+        return f"## Tool call\n`{record.call.name}` - `{status}` - {result}"
 
     def _tool_results_text(self, records) -> str:
         if self.tool_display == "full":

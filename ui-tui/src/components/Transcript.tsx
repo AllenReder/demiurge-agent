@@ -97,8 +97,8 @@ export function ToolBlock(props: { colors?: ThemeColors; columns?: number; displ
       <Box backgroundColor={theme.assistantBlockBg} flexDirection="column" paddingX={1} width={columns}>
         {props.tools.map((tool) => (
           <Box key={`${tool.index}-${tool.id}`} flexDirection="column">
-            <Text color={tool.status === "ok" ? theme.success : theme.error}>
-              {tool.status === "ok" ? "✓" : "✕"} {tool.name}
+            <Text color={toolStatusColor(tool.status, theme)}>
+              {toolStatusIcon(tool.status)} {tool.name}
               <Text color={theme.muted}> · {truncateEnd(tool.summary || tool.status, Math.max(16, columns - displayWidth(tool.name) - 8))}</Text>
             </Text>
             {props.display === "full" ? <FullToolDetails columns={columns - 2} tool={tool} /> : null}
@@ -107,6 +107,16 @@ export function ToolBlock(props: { colors?: ThemeColors; columns?: number; displ
       </Box>
     </Box>
   )
+}
+
+function toolStatusIcon(status: ToolResultView["status"]): string {
+  if (status === "running") return "…"
+  return status === "ok" ? "✓" : "✕"
+}
+
+function toolStatusColor(status: ToolResultView["status"], theme: ThemeColors): string {
+  if (status === "running") return theme.notice
+  return status === "ok" ? theme.success : theme.error
 }
 
 export function ProgressBlock(props: { colors?: ThemeColors; columns?: number; text: string }) {

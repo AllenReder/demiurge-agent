@@ -30,6 +30,7 @@ from demiurge.runtime.interactions import (
     InteractionItem,
     InteractionOutbound,
     InteractionRuntime,
+    ToolInteractionRecord,
     UserPromptRequest,
 )
 from demiurge.providers import ToolCall
@@ -1943,6 +1944,31 @@ async def test_telegram_tool_display_summary_sends_before_assistant_delivery():
     assert "terminal" in api.sent[0]["text"]
     assert "alice" in api.sent[0]["text"]
     assert api.sent[1]["text"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_telegram_tool_lifecycle_edits_started_message():
+    api = FakeApi()
+    bridge = TelegramInteractionBridge(runtime=InteractionRuntime(FakeRunner()), api=api, bot_username="demiurge_bot")
+    call = ToolCall(name="terminal", arguments={"command": "whoami"}, id="call_1")
+    result = ToolResult(content="exit_code: 0\nstdout:\nalice\n", display_output="$ whoami\ncwd: .\nexit_code: 0\nstdout:\nalice\n")
+
+    await bridge.deliver(
+        _outbound(
+            channel="telegram",
+            items=[
+                InteractionItem.tool_call_item(ToolInteractionRecord.started(call)),
+                InteractionItem.tool_call_item(ToolInteractionRecord.finished(ToolExecutionRecord(call=call, result=result))),
+            ],
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+        )
+    )
+
+    assert len(api.sent) == 1
+    assert "running" in api.sent[0]["text"]
+    assert len(api.edits) == 1
+    assert api.edits[0]["message_id"] == 1000
+    assert "alice" in api.edits[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,9 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from demiurge.providers import ToolCall
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
+from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
 
@@ -35,10 +37,39 @@ class InteractionDelivery:
 
 
 @dataclass(slots=True)
+class ToolInteractionRecord:
+    call: ToolCall
+    phase: str
+    status: str
+    result: ToolResult | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def started(cls, call: ToolCall, *, metadata: dict[str, Any] | None = None) -> "ToolInteractionRecord":
+        return cls(call=call, phase="start", status="running", metadata=dict(metadata or {}))
+
+    @classmethod
+    def finished(cls, record: ToolExecutionRecord, *, metadata: dict[str, Any] | None = None) -> "ToolInteractionRecord":
+        return cls(
+            call=record.call,
+            phase="finish",
+            status="error" if record.result.is_error else "ok",
+            result=record.result,
+            metadata=dict(metadata or {}),
+        )
+
+    def execution_record(self) -> ToolExecutionRecord | None:
+        if self.result is None:
+            return None
+        return ToolExecutionRecord(call=self.call, result=self.result)
+
+
+@dataclass(slots=True)
 class InteractionItem:
     kind: str
     delivery: InteractionDelivery | None = None
     tool_result: ToolExecutionRecord | None = None
+    tool_call: ToolInteractionRecord | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     dispatch_status: str = "pending"
 
@@ -55,6 +86,14 @@ class InteractionItem:
         status = str(item_metadata.get("dispatch_status") or "pending")
         item_metadata["dispatch_status"] = status
         return cls(kind="tool_result", tool_result=record, metadata=item_metadata, dispatch_status=status)
+
+    @classmethod
+    def tool_call_item(cls, record: ToolInteractionRecord, *, metadata: dict[str, Any] | None = None) -> "InteractionItem":
+        item_metadata = dict(record.metadata)
+        item_metadata.update(dict(metadata or {}))
+        status = str(item_metadata.get("dispatch_status") or "pending")
+        item_metadata["dispatch_status"] = status
+        return cls(kind="tool_call", tool_call=record, metadata=item_metadata, dispatch_status=status)
 
     def set_dispatch_status(self, status: str) -> None:
         self.dispatch_status = status
@@ -110,7 +149,20 @@ class InteractionOutbound:
 
     @property
     def tool_results(self) -> list[ToolExecutionRecord]:
-        return [item.tool_result for item in self.items if item.kind == "tool_result" and item.tool_result is not None]
+        results: list[ToolExecutionRecord] = []
+        for item in self.items:
+            if item.kind == "tool_result" and item.tool_result is not None:
+                results.append(item.tool_result)
+                continue
+            if item.kind == "tool_call" and item.tool_call is not None:
+                record = item.tool_call.execution_record()
+                if record is not None:
+                    results.append(record)
+        return results
+
+    @property
+    def tool_calls(self) -> list[ToolInteractionRecord]:
+        return [item.tool_call for item in self.items if item.kind == "tool_call" and item.tool_call is not None]
 
     def mark_delivered(self) -> None:
         for item in self.items:

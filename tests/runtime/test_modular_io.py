@@ -1067,15 +1067,56 @@ async def test_tool_result_dispatches_before_slow_output_delivery(tmp_path):
     ordered = [
         (
             item.kind,
-            item.tool_result.call.name if item.tool_result is not None else item.delivery.text,
+            item.tool_call.status
+            if item.tool_call is not None
+            else item.tool_result.call.name
+            if item.tool_result is not None
+            else item.delivery.text,
         )
         for outbound in bridge.outbounds
         for item in outbound.items
     ]
     assert ordered == [
-        ("tool_result", "tools_list"),
+        ("tool_call", "running"),
+        ("tool_call", "ok"),
         ("delivery", "tool done"),
         ("delivery", "slow artifact"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_all_requested_tool_calls_start_before_execution_finishes(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = RecordingProvider(
+        responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="tools_1", name="tools_list", arguments={}),
+                    ToolCall(id="tools_2", name="tools_list", arguments={}),
+                ]
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    bridge = RecordingBridge()
+    runtime = InteractionRuntime(app.runner)
+
+    await runtime.handle(
+        InteractionInbound(channel="tui", text="tools_list", source="local", conversation_key="local:test"),
+        bridge=bridge,
+    )
+
+    tool_events = [
+        (item.tool_call.call.id, item.tool_call.status)
+        for outbound in bridge.outbounds
+        for item in outbound.items
+        if item.kind == "tool_call" and item.tool_call is not None
+    ]
+    assert tool_events == [
+        ("tools_1", "running"),
+        ("tools_2", "running"),
+        ("tools_1", "ok"),
+        ("tools_2", "ok"),
     ]
 
 

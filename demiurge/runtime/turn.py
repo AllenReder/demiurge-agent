@@ -100,9 +100,16 @@ class TurnEngine:
                     actions=[asdict(call) for call in response.tool_calls],
                     **request.interaction_metadata,
                 )
-                terminated = False
                 for call in response.tool_calls:
-                    tool_items: list[InteractionItem] = []
+                    items.append(
+                        await self.host.runtime_io.send_tool_call_started(
+                            turn=request.turn,
+                            step_id=step_id,
+                            call=call,
+                            interaction_metadata=request.interaction_metadata,
+                            interaction_bridge=request.interaction_bridge or get_current_bridge(),
+                        )
+                    )
                     self._append_runtime_event(
                         RuntimeEvent(
                             type="tool.call.started",
@@ -116,6 +123,9 @@ class TurnEngine:
                             },
                         )
                     )
+                terminated = False
+                for call in response.tool_calls:
+                    tool_items: list[InteractionItem] = []
                     result: ToolResult = await self.host.execute_tool(
                         call,
                         core=request.core,
@@ -176,7 +186,7 @@ class TurnEngine:
                         **request.interaction_metadata,
                     )
                     items.append(
-                        self.host.runtime_io.send_tool_result(
+                        await self.host.runtime_io.send_tool_call_finished(
                             turn=request.turn,
                             step_id=step_id,
                             record=record,

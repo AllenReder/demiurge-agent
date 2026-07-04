@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
-from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionOutbound, InteractionRuntime, UserPromptRequest
+from demiurge.runtime.interactions import (
+    InteractionDelivery,
+    InteractionInbound,
+    InteractionOutbound,
+    InteractionRuntime,
+    ToolInteractionRecord,
+    UserPromptRequest,
+)
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.slash import SlashCommand, parse_slash_command
@@ -109,6 +116,12 @@ class TextChannelBridgeBase:
         try:
             pending_tool_results = []
             for item in outbound.items:
+                if item.kind == "tool_call" and item.tool_call is not None:
+                    if pending_tool_results:
+                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
+                        pending_tool_results = []
+                    await self._deliver_tool_call(item.tool_call, outbound=outbound)
+                    continue
                 if item.kind == "tool_result" and item.tool_result is not None:
                     pending_tool_results.append(item.tool_result)
                     continue
@@ -200,6 +213,31 @@ class TextChannelBridgeBase:
                 reply_to=str(reply_to) if reply_to is not None else None,
                 metadata=outbound.metadata,
             )
+
+    async def _deliver_tool_call(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
+        if self.tool_display == "quiet":
+            return
+        source = outbound.metadata.get("source")
+        if source is None:
+            return
+        reply_to = outbound.metadata.get("reply_to")
+        text = self._tool_call_text(record)
+        if text:
+            await self._send_text(
+                str(source),
+                text,
+                reply_to=str(reply_to) if reply_to is not None else None,
+                metadata=outbound.metadata,
+            )
+
+    def _tool_call_text(self, record: ToolInteractionRecord) -> str:
+        status = record.status
+        if record.phase == "start":
+            return f"## Tool call\n`{record.call.name}` - `running` - {self._shorten(_tool_call_start_summary(record.call), limit=220)}"
+        result = ""
+        if record.result is not None:
+            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
+        return f"## Tool call\n`{record.call.name}` - `{status}` - {result}"
 
     def _tool_results_text(self, records: list[Any]) -> str:
         if self.tool_display == "full":
@@ -671,6 +709,18 @@ class TextChannelBridgeBase:
         if len(compact) <= limit:
             return compact
         return compact[: max(0, limit - 3)] + "..."
+
+
+def _tool_call_start_summary(call: ToolCall) -> str:
+    if call.name == "terminal":
+        command = str(call.arguments.get("command") or "").strip()
+        return f"$ {command}" if command else "running terminal"
+    if call.name in {"read_file", "write_file", "patch"}:
+        path = call.arguments.get("path") or call.arguments.get("file_path")
+        return f"{call.name}: {path}" if path else call.name
+    if call.arguments:
+        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+    return "running"
 
 
 class ChannelRouterBridge:

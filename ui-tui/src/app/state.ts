@@ -87,14 +87,10 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
   }
   if (event === "interaction.deliver") {
     let next = state
-    const tools = arrayValue(payload.tool_results) as ToolResultView[]
+    const rawTools = arrayValue(payload.tool_calls)
+    const tools = (rawTools.length ? rawTools : arrayValue(payload.tool_results)).map(toolRecordFromPayload)
     if (tools.length) {
-      next = appendItem(next, {
-        id: nextId(next, "tool"),
-        type: "tool",
-        display: toolDisplayValue(payload.tool_display),
-        tools,
-      })
+      next = upsertToolCalls(next, toolDisplayValue(payload.tool_display), tools)
     }
     for (const delivery of arrayValue(payload.deliveries)) {
       if (!recordValue(delivery)?.visible && recordValue(delivery)?.visible !== undefined) continue
@@ -194,6 +190,33 @@ function appendItem(state: AppState, item: TranscriptItem): AppState {
   return { ...state, transcript: [...state.transcript, item].slice(-500) }
 }
 
+function upsertToolCalls(state: AppState, display: "quiet" | "summary" | "full", tools: ToolResultView[]): AppState {
+  if (display === "quiet") return state
+  let next = state
+  for (const tool of tools) {
+    const index = next.transcript.findIndex((item) => item.type === "tool" && item.tools.some((existing) => existing.id === tool.id))
+    if (index === -1) {
+      next = appendItem(next, {
+        id: nextId(next, "tool"),
+        type: "tool",
+        display,
+        tools: [tool],
+      })
+      continue
+    }
+    const transcript = next.transcript.map((item, itemIndex) => {
+      if (itemIndex !== index || item.type !== "tool") return item
+      return {
+        ...item,
+        display,
+        tools: item.tools.map((existing) => (existing.id === tool.id ? { ...existing, ...tool } : existing)),
+      }
+    })
+    next = { ...next, transcript }
+  }
+  return next
+}
+
 function transcriptItemsFromPayload(value: unknown): TranscriptItem[] {
   return arrayValue(value)
     .map(recordValue)
@@ -235,11 +258,18 @@ function transcriptItemFromRecord(record: Record<string, unknown>): TranscriptIt
 }
 
 function toolResultFromRecord(record: Record<string, unknown>): ToolResultView {
-  const status = stringValue(record.status) === "error" ? "error" : "ok"
+  return toolRecordFromPayload(record)
+}
+
+function toolRecordFromPayload(value: unknown): ToolResultView {
+  const record = recordValue(value) ?? {}
+  const rawStatus = stringValue(record.status)
+  const status = rawStatus === "running" ? "running" : rawStatus === "error" ? "error" : "ok"
   return {
     index: numberValue(record.index) || 1,
     name: stringValue(record.name),
     id: stringValue(record.id),
+    phase: stringValue(record.phase),
     status,
     summary: stringValue(record.summary),
     arguments: record.arguments,

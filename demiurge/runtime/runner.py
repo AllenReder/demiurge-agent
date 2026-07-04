@@ -37,6 +37,7 @@ from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionItem,
     InteractionOutbound,
+    ToolInteractionRecord,
     get_current_bridge,
 )
 from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
@@ -101,7 +102,16 @@ class TurnResult:
 
     @property
     def tool_results(self) -> list[ToolExecutionRecord]:
-        return [item.tool_result for item in self.items if item.kind == "tool_result" and item.tool_result is not None]
+        results: list[ToolExecutionRecord] = []
+        for item in self.items:
+            if item.kind == "tool_result" and item.tool_result is not None:
+                results.append(item.tool_result)
+                continue
+            if item.kind == "tool_call" and item.tool_call is not None:
+                record = item.tool_call.execution_record()
+                if record is not None:
+                    results.append(record)
+        return results
 
 
 @dataclass(slots=True)
@@ -1036,6 +1046,103 @@ class RuntimeIO:
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
     ) -> InteractionItem:
+        message = self._persist_tool_result_message(
+            turn=turn,
+            step_id=step_id,
+            record=record,
+            interaction_metadata=interaction_metadata,
+        )
+        item = InteractionItem.tool_result_item(
+            record,
+            metadata={
+                "phase": "model_step",
+                "step_id": step_id,
+                "message_id": message.id,
+                "tool_name": record.call.name,
+                "tool_call_id": record.call.id,
+                "is_error": record.result.is_error,
+            },
+        )
+        self.runner._schedule_interaction_item(
+            item,
+            turn=turn,
+            interaction_metadata=interaction_metadata,
+            interaction_bridge=interaction_bridge,
+        )
+        return item
+
+    async def send_tool_call_started(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        call: ToolCall,
+        interaction_metadata: dict[str, Any],
+        interaction_bridge: InteractionBridge | None,
+    ) -> InteractionItem:
+        record = ToolInteractionRecord.started(
+            call,
+            metadata={
+                "phase": "model_step",
+                "step_id": step_id,
+                "tool_name": call.name,
+                "tool_call_id": call.id,
+                "tool_phase": "start",
+            },
+        )
+        item = InteractionItem.tool_call_item(record)
+        await self.runner._dispatch_interaction_item_now(
+            item,
+            turn=turn,
+            interaction_metadata=interaction_metadata,
+            interaction_bridge=interaction_bridge,
+        )
+        return item
+
+    async def send_tool_call_finished(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        record: ToolExecutionRecord,
+        interaction_metadata: dict[str, Any],
+        interaction_bridge: InteractionBridge | None,
+    ) -> InteractionItem:
+        message = self._persist_tool_result_message(
+            turn=turn,
+            step_id=step_id,
+            record=record,
+            interaction_metadata=interaction_metadata,
+        )
+        tool_record = ToolInteractionRecord.finished(
+            record,
+            metadata={
+                "phase": "model_step",
+                "step_id": step_id,
+                "message_id": message.id,
+                "tool_name": record.call.name,
+                "tool_call_id": record.call.id,
+                "tool_phase": "finish",
+                "is_error": record.result.is_error,
+            },
+        )
+        item = InteractionItem.tool_call_item(tool_record)
+        await self.runner._dispatch_interaction_item_now(
+            item,
+            turn=turn,
+            interaction_metadata=interaction_metadata,
+            interaction_bridge=interaction_bridge,
+        )
+        return item
+
+    def _persist_tool_result_message(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        record: ToolExecutionRecord,
+        interaction_metadata: dict[str, Any],
+    ) -> SessionMessage:
         content = self.runner._truncate_model_content(self.runner._tool_result_model_content(record.result))
         message = self.runner.session_runtime.append_message(
             self.runner.session_id,
@@ -1063,24 +1170,7 @@ class RuntimeIO:
             tool_name=record.call.name,
             **interaction_metadata,
         )
-        item = InteractionItem.tool_result_item(
-            record,
-            metadata={
-                "phase": "model_step",
-                "step_id": step_id,
-                "message_id": message.id,
-                "tool_name": record.call.name,
-                "tool_call_id": record.call.id,
-                "is_error": record.result.is_error,
-            },
-        )
-        self.runner._schedule_interaction_item(
-            item,
-            turn=turn,
-            interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
-        )
-        return item
+        return message
 
     def send_module_output(
         self,
@@ -2123,6 +2213,32 @@ class SessionTurnStepRunner:
             metadata=metadata,
             interaction_bridge=bridge,
             channel=str(channel),
+        )
+
+    async def _dispatch_interaction_item_now(
+        self,
+        item: InteractionItem,
+        *,
+        turn: TurnContext,
+        interaction_metadata: dict[str, Any],
+        interaction_bridge: InteractionBridge | None,
+    ) -> None:
+        if item.dispatch_status != "pending":
+            return
+        metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
+        bridge = interaction_bridge or get_current_bridge()
+        channel = metadata.get("channel") or interaction_metadata.get("channel")
+        if bridge is None or not channel:
+            return
+        item.set_dispatch_status("scheduled")
+        await self.delivery_runtime.dispatch_item(
+            item,
+            session_id=self.session_id,
+            turn_id=turn.turn_id,
+            channel=str(channel),
+            metadata=metadata,
+            interaction_bridge=bridge,
+            event_metadata=self._delivery_event_metadata(metadata),
         )
 
     def _schedule_slot_end_delivery_items(

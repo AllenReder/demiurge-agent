@@ -30,11 +30,31 @@ describe("interaction reducer", () => {
       event: "interaction.deliver",
       payload: {
         tool_display: "full",
-        tool_results: [{ index: 1, name: "tools_list", id: "call_1", status: "ok", summary: "done", arguments: {} }],
+        tool_calls: [{ index: 1, name: "tools_list", id: "call_1", phase: "finish", status: "ok", summary: "done", arguments: {} }],
       },
     })
 
     expect(state.transcript[0]).toMatchObject({ type: "tool", display: "full" })
+  })
+
+  it("updates an existing tool block when a finish event arrives", () => {
+    let state = reduceGatewayEvent(createInitialState(), {
+      event: "interaction.deliver",
+      payload: {
+        tool_display: "summary",
+        tool_calls: [{ index: 1, name: "terminal", id: "call_1", phase: "start", status: "running", summary: "$ whoami" }],
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "interaction.deliver",
+      payload: {
+        tool_display: "summary",
+        tool_calls: [{ index: 1, name: "terminal", id: "call_1", phase: "finish", status: "ok", summary: "$ whoami cwd: . exit_code: 0" }],
+      },
+    })
+
+    expect(state.transcript).toHaveLength(1)
+    expect(state.transcript[0]).toMatchObject({ type: "tool", tools: [{ id: "call_1", status: "ok", summary: "$ whoami cwd: . exit_code: 0" }] })
   })
 
   it("keeps progress deliveries separate from assistant messages", () => {

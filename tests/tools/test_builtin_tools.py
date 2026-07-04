@@ -546,18 +546,36 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     success = await _execute(app, core, "terminal", {"command": "printf hello", "cwd": "."})
     timeout = await _execute(app, core, "terminal", {"command": "sleep 2", "timeout_seconds": 1})
     escape = await _execute(app, core, "terminal", {"command": "pwd", "cwd": ".."})
+    missing_command = await _execute(app, core, "terminal", {"cwd": "."})
+    bad_env = await _execute(app, core, "terminal", {"command": "printf hello", "env": ["BAD"]})
 
     app.approval_runtime.provider = StaticApprovalProvider("deny")
     denied = await _execute(app, core, "terminal", {"command": "rm denied.txt"})
 
     assert success.is_error is False
     assert "hello" in success.content
+    assert success.display_output is not None
+    assert "$ printf hello" in success.display_output
+    assert "cwd: ." in success.display_output
+    assert success.content.startswith("exit_code:")
     assert timeout.is_error is True
     assert timeout.data["timed_out"] is True
+    assert timeout.display_output is not None
+    assert "$ sleep 2" in timeout.display_output
     assert escape.is_error is True
     assert escape.data["executionStarted"] is False
+    assert missing_command.is_error is True
+    assert missing_command.content == "command is required"
+    assert missing_command.display_output is not None
+    assert "cwd: ." in missing_command.display_output
+    assert bad_env.is_error is True
+    assert bad_env.content == "env must be an object"
+    assert bad_env.display_output is not None
+    assert "$ printf hello" in bad_env.display_output
     assert denied.is_error is True
     assert denied.data["executionStarted"] is False
+    assert denied.display_output is not None
+    assert "$ rm denied.txt" in denied.display_output
     assert (workspace / "denied.txt").exists()
 
 
@@ -689,6 +707,8 @@ async def test_terminal_background_task_can_be_listed_and_waited(tmp_path):
 
     assert started.is_error is False
     assert set(started.data) == {"task_id"}
+    assert started.display_output is not None
+    assert "$ printf ready" in started.display_output
     assert waited.running is False
     assert any("ready" in line for line in log)
     assert task_id in listed.content

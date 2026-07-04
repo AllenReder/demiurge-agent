@@ -5,7 +5,7 @@ import pytest
 
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
-from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, UserPromptRequest
+from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, ToolInteractionRecord, UserPromptRequest
 from demiurge.security.approval import ApprovalRequest
 from demiurge.sdk import ToolResult
 from demiurge.slash import specs_for_surface
@@ -29,6 +29,8 @@ class EventSink:
         for payload in self.payloads("interaction.deliver"):
             for delivery in payload.get("deliveries", []):
                 values.append(delivery.get("text") or delivery.get("fallback_text") or "")
+            for tool in payload.get("tool_calls", []):
+                values.append(str(tool))
             for tool in payload.get("tool_results", []):
                 values.append(str(tool))
         return "\n".join(values)
@@ -229,7 +231,7 @@ async def test_tui_bridge_tool_display_quiet_summary_full(tmp_path):
     quiet = TuiInteractionBridge(quiet_app, emit=quiet_sink, tool_display="quiet")
     await quiet.submit("please use tools_list")
     await quiet.wait_for_idle()
-    assert not any(payload.get("tool_results") for payload in quiet_sink.payloads("interaction.deliver"))
+    assert not any(payload.get("tool_calls") or payload.get("tool_results") for payload in quiet_sink.payloads("interaction.deliver"))
     assert "[fake] tool result received" in quiet_sink.texts()
 
     full_sink = EventSink()
@@ -237,11 +239,13 @@ async def test_tui_bridge_tool_display_quiet_summary_full(tmp_path):
     full = TuiInteractionBridge(full_app, emit=full_sink, tool_display="full")
     await full.submit("please use tools_list")
     await full.wait_for_idle()
-    tool_payloads = [payload for payload in full_sink.payloads("interaction.deliver") if payload.get("tool_results")]
+    tool_payloads = [payload for payload in full_sink.payloads("interaction.deliver") if payload.get("tool_calls")]
     assert tool_payloads
     assert tool_payloads[0]["tool_display"] == "full"
-    assert tool_payloads[0]["tool_results"][0]["name"] == "tools_list"
-    assert tool_payloads[0]["tool_results"][0]["arguments"] == {}
+    assert tool_payloads[0]["tool_calls"][0]["name"] == "tools_list"
+    assert tool_payloads[0]["tool_calls"][0]["status"] == "running"
+    assert tool_payloads[-1]["tool_calls"][0]["status"] == "ok"
+    assert tool_payloads[-1]["tool_calls"][0]["arguments"] == {}
 
 
 @pytest.mark.asyncio
@@ -266,9 +270,33 @@ async def test_tui_bridge_preserves_item_order_between_delivery_and_tool_result(
 
     payloads = sink.payloads("interaction.deliver")
     assert [bool(payload.get("deliveries")) for payload in payloads] == [True, False]
-    assert [bool(payload.get("tool_results")) for payload in payloads] == [False, True]
+    assert [bool(payload.get("tool_calls")) for payload in payloads] == [False, True]
     assert payloads[0]["deliveries"][0]["text"] == "first"
-    assert payloads[1]["tool_results"][0]["name"] == "tools_list"
+    assert payloads[1]["tool_calls"][0]["name"] == "tools_list"
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_emits_tool_lifecycle_payloads(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink, tool_display="summary")
+    call = ToolCall(name="terminal", arguments={"command": "whoami"}, id="call_1")
+    result = ToolResult(content="exit_code: 0\nstdout:\nalice\n", display_output="$ whoami\ncwd: .\nexit_code: 0\nstdout:\nalice\n")
+
+    await bridge.deliver(
+        InteractionOutbound(
+            channel="tui",
+            items=[
+                InteractionItem.tool_call_item(ToolInteractionRecord.started(call)),
+                InteractionItem.tool_call_item(ToolInteractionRecord.finished(ToolExecutionRecord(call=call, result=result))),
+            ],
+        )
+    )
+
+    payloads = [payload for payload in sink.payloads("interaction.deliver") if payload.get("tool_calls")]
+    assert [tool["status"] for payload in payloads for tool in payload["tool_calls"]] == ["running", "ok"]
+    assert payloads[0]["tool_calls"][0]["summary"] == "$ whoami"
+    assert "$ whoami" in payloads[-1]["tool_calls"][-1]["summary"]
 
 
 @pytest.mark.asyncio
