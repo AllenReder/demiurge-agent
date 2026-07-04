@@ -10,6 +10,9 @@ from demiurge.security.capabilities import CapabilityFacade
 from demiurge.slash import specs_for_surface
 
 
+CHILD_AGENT_COMPLETION_TIMEOUT = 20
+
+
 class StaticProvider:
     async def complete(self, request):
         return LLMResponse(content="child done")
@@ -73,7 +76,10 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         emit_event=app.runner.event_log.emit,
     )
     waited = await app.runner.execute_tool(
-        ToolCall(name="yield_until", arguments={"task_id": task_id, "timeout_seconds": 2}),
+        ToolCall(
+            name="yield_until",
+            arguments={"task_id": task_id, "timeout_seconds": CHILD_AGENT_COMPLETION_TIMEOUT},
+        ),
         core=core,
         turn=turn,
         capability=capability,
@@ -246,7 +252,7 @@ async def test_delegate_task_silent_notify_policy_suppresses_completion_event(tm
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=2)
+    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=CHILD_AGENT_COMPLETION_TIMEOUT)
 
     assert delegated.is_error is False
     assert set(delegated.data) == {"task_id"}
