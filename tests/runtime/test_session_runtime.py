@@ -1,17 +1,28 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.durable_work import DurableWorkRuntime
 from demiurge.runtime.session import SessionQuery, SessionRuntime
 from demiurge.runtime.store import RuntimeQuery, RuntimeStore
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
 
 
+UTC = timezone.utc
+
+
 class StaticProvider:
     async def complete(self, request):
         return LLMResponse(content="assistant reply")
+
+
+class RaisingProvider:
+    async def complete(self, request):
+        raise RuntimeError("provider exploded")
 
 
 class ToolThenAnswerProvider:
@@ -79,10 +90,91 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
         RuntimeQuery(table="runtime_events", where={"idempotency_key": "delivery:delivery_1:message_outbox"}, order_by="seq")
     ).rows
     outbox = store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
+    work = store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": "delivery_1"}, limit=1)).rows[0]
 
-    assert [event["type"] for event in events] == ["message.persisted", "delivery.queued"]
+    assert [event["type"] for event in events] == ["message.persisted", "delivery.queued", "work.enqueued"]
     assert events[0]["aggregate_id"] == message.id
     assert outbox["payload"]["message_id"] == message.id
+    assert work["kind"] == "delivery.send"
+    assert work["status"] == "queued"
+    assert work["owner_turn_id"] == "turn_1"
+    assert work["payload"]["message_id"] == message.id
+
+
+def test_session_runtime_uses_unique_conversation_binding(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime.sqlite3")
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
+
+    first, first_created = runtime.ensure_session(
+        "",
+        core_id="assistant",
+        core_revision="0001",
+        channel="telegram",
+        conversation_key="chat_1",
+    )
+    second, second_created = runtime.ensure_session(
+        "",
+        core_id="assistant",
+        core_revision="0001",
+        channel="telegram",
+        conversation_key="chat_1",
+    )
+
+    assert first_created is True
+    assert second_created is False
+    assert second.session_id == first.session_id
+    assert len(runtime.list_sessions(core_id="assistant", limit=10)) == 1
+    assert runtime.resolve_interaction_session(
+        core_id="assistant",
+        channel="telegram",
+        conversation_key="chat_1",
+    ) == first.session_id
+
+
+def test_create_app_recovers_stale_delivery_work_once(tmp_path):
+    home = tmp_path / "home"
+    store = RuntimeStore.default(home)
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
+    record, _ = runtime.ensure_session(
+        "session_1",
+        core_id="assistant",
+        core_revision="0001",
+        channel="tui",
+        conversation_key="local",
+    )
+    runtime.append_delivery_message(
+        record.session_id,
+        role="assistant",
+        content="hello",
+        turn_id="turn_1",
+        delivery_id="delivery_1",
+        task_id="turn_1",
+        channel="tui",
+        target={"conversation_key": "local"},
+        delivery_payload={"fallback_text": "hello"},
+        delivery_idempotency_key="delivery_1",
+    )
+    old_now = datetime(2000, 1, 1, tzinfo=UTC)
+    work = DurableWorkRuntime(store)
+    claim = work.claim("delivery_1", owner_id="delivery_worker", now=old_now, lease_seconds=1)
+    assert claim is not None
+    work.mark_sending(claim, now=old_now)
+
+    app = create_app(home=home, provider_name="fake")
+    create_app(home=home, provider_name="fake")
+
+    work_row = app.runtime_store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": "delivery_1"})).rows[0]
+    outbox_row = app.runtime_store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
+    unknown_events = app.runtime_store.query(
+        RuntimeQuery(table="runtime_events", where={"type": "delivery.unknown", "aggregate_id": "delivery_1"})
+    ).rows
+
+    assert work_row["status"] == "unknown"
+    assert work_row["claim_id"] is None
+    assert outbox_row["status"] == "unknown"
+    assert len(unknown_events) == 1
+    assert app.runtime_recovery_summary["unknown"] == 1
+    assert app.status()["runtime_recovery"]["unknown"] == 1
 
 
 @pytest.mark.asyncio
@@ -144,6 +236,23 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     assert "background task not found" in status.content
     assert "background task not found" in control.content
     assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = RaisingProvider()
+
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        await app.runner.run_turn("hello")
+
+    turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
+    failed_turn = turns[-1]
+    task = app.control_plane.read(failed_turn["turn_id"])
+
+    assert failed_turn["status"] == "failed"
+    assert task["status"] == "failed"
+    assert task["error"]["message"] == "RuntimeError: provider exploded"
 
 
 @pytest.mark.asyncio

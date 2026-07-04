@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 from demiurge.util import utc_id
 
@@ -242,23 +243,34 @@ class RuntimeControlPlane:
                     aggregate_id=event_id,
                     actor=self._source_actor(source) if source is not None else None,
                     payload={"task_id": task_id, **payload},
-                )
+                ),
+                durable_work_enqueued_event(
+                    DurableWorkSpec(
+                        work_id=event_id,
+                        kind="task.completion",
+                        owner_session_id=payload.get("owner_session_id"),
+                        owner_turn_id=payload.get("owner_turn_id"),
+                        parent_work_id=task_id,
+                        payload={"task_id": task_id, **payload},
+                    ),
+                    actor=self._source_actor(source) if source is not None else None,
+                ),
             ],
             idempotency_key=idempotency_key,
         )
-        return dict(result.events[-1])
+        return dict(result.events[0])
 
-    def clear_completion(self, event_id: str) -> None:
+    def ack_completion(self, event_id: str) -> None:
         self.store.append(
             [
                 RuntimeEvent(
-                    type="task.completion_cleared",
+                    type="task.completion_acknowledged",
                     aggregate_type="task_completion",
                     aggregate_id=event_id,
-                    payload={"event_id": event_id, "status": "cleared"},
+                    payload={"event_id": event_id, "status": "acknowledged"},
                 )
             ],
-            idempotency_key=f"task_completion:{event_id}:cleared",
+            idempotency_key=f"task_completion:{event_id}:acknowledged",
         )
 
     def query(self, filter: TaskFilter) -> list[TaskRecord]:
@@ -301,8 +313,8 @@ class RuntimeControlPlane:
             where["aggregate_id"] = filter.aggregate_id
         if filter.event_type:
             where["type"] = filter.event_type
-        page = self.store.query(RuntimeQuery(table="runtime_events", where=where, order_by="seq", limit=filter.limit))
-        events = tuple(event for event in page.rows if int(event["seq"]) > cursor.seq)
+        page = self.store.query_events_after(cursor.seq, where=where, limit=filter.limit)
+        events = tuple(page.rows)
         next_seq = max((int(event["seq"]) for event in events), default=cursor.seq)
         return EventBatch(events=events, next_cursor=EventCursor(seq=next_seq))
 

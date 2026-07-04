@@ -9,10 +9,11 @@ Delivery runtime converts output requests into durable session records, live
 events, artifacts, and channel items.
 
 Every output `send_*` call also writes a delivery intent into the SQLite
-runtime `outbox` projection. `DeliveryRuntime` owns dispatch through the active
-channel bridge and records `sent` or `failed` status back to the outbox.
-Channel bridges adapt payloads to platform APIs; they do not own durable
-delivery state.
+runtime `outbox` projection and a matching `delivery.send` durable work item.
+`DeliveryRuntime` owns dispatch through the active channel bridge and records
+`sending`, `sent`, `failed`, or `unknown` status back to the outbox. Channel
+bridges adapt payloads to platform APIs; they do not own durable delivery
+state.
 
 ## Sources
 
@@ -43,6 +44,12 @@ durable. Non-text delivery with `write_history=True` must provide explicit
 `history_text`; the host does not invent artifact placeholder text. Optional
 `failure_history_text` can replace the history row on first failure. Later retry
 status updates must not rewrite that body.
+
+The host claims a delivery before platform I/O starts. If the process crashes
+after `sending` and before a platform result is durably recorded, recovery marks
+that delivery `unknown` instead of replaying it automatically. A channel that
+can reconcile platform state may resolve `unknown`; otherwise it remains
+operator-visible state.
 
 ## Boundary
 

@@ -11,6 +11,7 @@ from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
+from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
 from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
@@ -27,6 +28,10 @@ class ScheduleRunClaim:
     schedule_id: str
     due_at: datetime
     scheduled_at: datetime
+    work_id: str
+    claim_id: str
+    owner_id: str
+    lease_expires_at: str
 
 
 @dataclass(slots=True)
@@ -98,8 +103,23 @@ class SchedulerRuntime:
         self.control_plane = control_plane
         self.core_id = core_id
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
+        self.work = DurableWorkRuntime(control_plane.store)
 
     def set_next_run(self, schedule: ScheduleDefinition, next_run_at: datetime) -> None:
+        work_id = self._work_id(schedule, next_run_at.astimezone(UTC))
+        self.work.enqueue(
+            DurableWorkSpec(
+                work_id=work_id,
+                kind="schedule.fire",
+                payload={
+                    "core_id": self.core_id,
+                    "schedule_id": schedule.schedule_id,
+                    "due_at": format_instant(next_run_at),
+                },
+                next_attempt_at=format_instant(next_run_at),
+                idempotency_key=f"scheduler:{work_id}:work",
+            )
+        )
         self._record_instance(
             schedule,
             due_at=next_run_at.astimezone(UTC),
@@ -115,7 +135,12 @@ class SchedulerRuntime:
         signature = self._signature(schedule)
         rows = [row for row in self._rows(schedule.schedule_id) if row.get("idempotency_key") == signature]
         scheduled = sorted(
-            [row for row in rows if row.get("claim_status") == "scheduled"],
+            [
+                row
+                for row in rows
+                if row.get("claim_status") == "scheduled"
+                or (row.get("claim_status") == "claimed" and row.get("lease_expires_at") and str(row["lease_expires_at"]) <= format_instant(now))
+            ],
             key=lambda row: row["due_at"],
         )
         if not scheduled:
@@ -126,6 +151,10 @@ class SchedulerRuntime:
             return None
         row = due_rows[0]
         due_at = parse_instant(str(row["due_at"]))
+        work_id = self._work_id(schedule, due_at)
+        durable_claim = self.work.claim(work_id, owner_id="host.scheduler", now=now, lease_seconds=60)
+        if durable_claim is None:
+            return None
         run_id = utc_id("schedule_run_")
         scheduled_at = now
         aggregate_id = self._instance_aggregate_id(schedule, due_at)
@@ -140,6 +169,8 @@ class SchedulerRuntime:
                 claim_status="claimed",
                 event_type="scheduler.claimed",
                 idempotency_key=f"scheduler:{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}:claim:{run_id}",
+                claim_id=durable_claim.claim_id,
+                lease_expires_at=durable_claim.lease_expires_at,
                 expected={
                     "aggregate_type": "scheduler_instance",
                     "aggregate_id": aggregate_id,
@@ -156,6 +187,10 @@ class SchedulerRuntime:
             schedule_id=schedule.schedule_id,
             due_at=due_at,
             scheduled_at=scheduled_at,
+            work_id=work_id,
+            claim_id=durable_claim.claim_id,
+            owner_id=durable_claim.owner_id,
+            lease_expires_at=durable_claim.lease_expires_at,
         )
 
     def record_completed(
@@ -168,6 +203,21 @@ class SchedulerRuntime:
         deliveries: int = 0,
         error: str | None = None,
     ) -> None:
+        durable_claim = DurableClaim(
+            work_id=claim.work_id,
+            kind="schedule.fire",
+            claim_id=claim.claim_id,
+            owner_id=claim.owner_id,
+            lease_expires_at=claim.lease_expires_at,
+            attempt=0,
+        )
+        try:
+            if status == "completed":
+                self.work.succeed(durable_claim)
+            else:
+                self.work.fail(durable_claim, error=error or "scheduled task failed")
+        except DurableClaimConflict as exc:
+            raise RuntimeError(f"stale scheduler claim: {claim.run_id}") from exc
         self.control_plane.store.append(
             [
                 RuntimeEvent(
@@ -180,6 +230,8 @@ class SchedulerRuntime:
                         "due_at": format_instant(claim.due_at),
                         "task_id": claim.run_id,
                         "claim_status": status,
+                        "claim_id": claim.claim_id,
+                        "lease_expires_at": claim.lease_expires_at,
                         "session_id": session_id,
                         "turn_id": turn_id,
                         "deliveries": deliveries,
@@ -231,6 +283,8 @@ class SchedulerRuntime:
         event_type: str,
         idempotency_key: str | None = None,
         expected: dict[str, Any] | None = None,
+        claim_id: str | None = None,
+        lease_expires_at: str | None = None,
     ) -> None:
         self.control_plane.store.append(
             [
@@ -245,6 +299,8 @@ class SchedulerRuntime:
                         "task_id": task_id,
                         "claim_status": claim_status,
                         "idempotency_key": self._signature(schedule),
+                        "claim_id": claim_id,
+                        "lease_expires_at": lease_expires_at,
                     },
                 )
             ],
@@ -255,6 +311,9 @@ class SchedulerRuntime:
 
     def _instance_aggregate_id(self, schedule: ScheduleDefinition, due_at: datetime) -> str:
         return f"{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}"
+
+    def _work_id(self, schedule: ScheduleDefinition, due_at: datetime) -> str:
+        return f"schedule:{self.core_id}:{schedule.schedule_id}:{format_instant(due_at)}"
 
     def _last_instance_seq(self, aggregate_id: str) -> int | None:
         rows = self.control_plane.store.query(

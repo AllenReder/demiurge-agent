@@ -39,6 +39,7 @@ from demiurge.runtime.interactions import (
     InteractionOutbound,
     get_current_bridge,
 )
+from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slots import SlotInvocation, SlotRuntime
@@ -1345,17 +1346,29 @@ class SessionTurnStepRunner:
         self.session_runtime.start_turn(session_id=self.session_id, turn_id=turn_id, task_id=turn_task_id)
         self.event_log.emit("message.inbound", turn_id=turn_id, content=text, **interaction_metadata)
 
-        user_text, persisted_user_text, context, input_items = await self._run_input_slots(
-            core,
-            turn,
-            capability,
-            input_envelope,
-            state_store,
-            interaction_metadata=interaction_metadata,
-            interaction_bridge=get_current_bridge(),
-            injected_system_context=injected_system_context or [],
-            serial_slots=input_slots_override,
-        )
+        try:
+            user_text, persisted_user_text, context, input_items = await self._run_input_slots(
+                core,
+                turn,
+                capability,
+                input_envelope,
+                state_store,
+                interaction_metadata=interaction_metadata,
+                interaction_bridge=get_current_bridge(),
+                injected_system_context=injected_system_context or [],
+                serial_slots=input_slots_override,
+            )
+        except asyncio.CancelledError:
+            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            raise
+        except Exception as exc:
+            self._finalize_interrupted_turn(
+                turn_id,
+                status="failed",
+                error=self._sanitize_runtime_error(exc),
+                metadata=interaction_metadata,
+            )
+            raise
         turn.user_input = AgentInput(content=user_text, metadata=interaction_metadata)
         self.event_log.emit("message.received", turn_id=turn_id, content=user_text, **interaction_metadata)
         if persisted_user_text:
@@ -1367,17 +1380,29 @@ class SessionTurnStepRunner:
         items: list[InteractionItem] = list(input_items)
         await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
         available_tools = self.tool_runtime.definitions_for(core, turn=turn)
-        engine_result = await self.turn_engine.run(
-            TurnEngineRequest(
-                core=core,
-                turn=turn,
-                capability=capability,
-                context=context,
-                available_tools=available_tools,
-                interaction_metadata=interaction_metadata,
-                interaction_bridge=get_current_bridge(),
+        try:
+            engine_result = await self.turn_engine.run(
+                TurnEngineRequest(
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    context=context,
+                    available_tools=available_tools,
+                    interaction_metadata=interaction_metadata,
+                    interaction_bridge=get_current_bridge(),
+                )
             )
-        )
+        except asyncio.CancelledError:
+            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            raise
+        except Exception as exc:
+            self._finalize_interrupted_turn(
+                turn_id,
+                status="failed",
+                error=self._sanitize_runtime_error(exc),
+                metadata=interaction_metadata,
+            )
+            raise
         final_output = engine_result.final_output
         needs_user = engine_result.needs_user
         tool_records = engine_result.tool_records
@@ -1385,18 +1410,30 @@ class SessionTurnStepRunner:
         items.extend(engine_result.items)
 
         result_client = self._module_result_client(writable=True)
-        output_items = await self._run_output_slots(
-            core,
-            turn,
-            capability,
-            current_output=final_output,
-            tool_records=tool_records,
-            state_store=state_store,
-            interaction_metadata=interaction_metadata,
-            interaction_bridge=get_current_bridge(),
-            result_client=result_client,
-            serial_slots=output_slots_override,
-        )
+        try:
+            output_items = await self._run_output_slots(
+                core,
+                turn,
+                capability,
+                current_output=final_output,
+                tool_records=tool_records,
+                state_store=state_store,
+                interaction_metadata=interaction_metadata,
+                interaction_bridge=get_current_bridge(),
+                result_client=result_client,
+                serial_slots=output_slots_override,
+            )
+        except asyncio.CancelledError:
+            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            raise
+        except Exception as exc:
+            self._finalize_interrupted_turn(
+                turn_id,
+                status="failed",
+                error=self._sanitize_runtime_error(exc),
+                metadata=interaction_metadata,
+            )
+            raise
         items.extend(output_items)
         delivered_texts = [
             item.delivery.text
@@ -1432,6 +1469,7 @@ class SessionTurnStepRunner:
         )
         self._complete_turn_task(turn_id, result_ref=turn_id)
         self.session_runtime.complete_turn(session_id=self.session_id, turn_id=turn_id, result_ref=turn_id)
+        self._ack_background_completion_claims(interaction_metadata)
         return TurnResult(
             session_id=self.session_id,
             turn_id=turn_id,
@@ -2506,6 +2544,7 @@ class SessionTurnStepRunner:
         activated: set[str] = set()
         parallel_slots = [] if serial_slots is not None else core.input_pipeline.parallel
         current_serial_slots = serial_slots or core.input_pipeline.serial
+        parallel_tasks: list[asyncio.Task[Any]] = []
         for slot in parallel_slots:
             parallel_envelope = InputEnvelope(
                 raw_text=envelope.raw_text,
@@ -2526,6 +2565,7 @@ class SessionTurnStepRunner:
                     interaction_bridge=interaction_bridge,
                 )
             )
+            parallel_tasks.append(task)
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             self.event_log.emit("module.async_scheduled", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
@@ -2546,6 +2586,11 @@ class SessionTurnStepRunner:
                     activated=activated,
                     contributions=contributions,
                 )
+            )
+        if parallel_tasks:
+            await asyncio.gather(
+                *parallel_tasks,
+                return_exceptions=False,
             )
         system_text = builder.section_text("system")
         if system_text:
@@ -2727,6 +2772,7 @@ class SessionTurnStepRunner:
         envelope = OutputEnvelope(content=current_output, metadata=interaction_metadata)
         parallel_slots = [] if serial_slots is not None else core.output_pipeline.parallel
         current_serial_slots = serial_slots or core.output_pipeline.serial
+        parallel_tasks: list[asyncio.Task[Any]] = []
         for slot in parallel_slots:
             task = asyncio.create_task(
                 self._run_async_output_slot(
@@ -2743,6 +2789,7 @@ class SessionTurnStepRunner:
                     result_client=result_client.fork(writable=False),
                 )
             )
+            parallel_tasks.append(task)
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             self.event_log.emit(
@@ -2766,6 +2813,11 @@ class SessionTurnStepRunner:
                     interaction_bridge=interaction_bridge,
                     result_client=result_client,
                 )
+            )
+        if parallel_tasks:
+            await asyncio.gather(
+                *parallel_tasks,
+                return_exceptions=False,
             )
         return items
 
@@ -3231,20 +3283,38 @@ class SessionTurnStepRunner:
                 **interaction_metadata,
             )
         else:
-            self._append_runtime_event(
-                RuntimeEvent(
-                    type="delivery.queued",
-                    aggregate_type="delivery",
-                    aggregate_id=request.delivery_id,
-                    payload={
-                        "task_id": turn.turn_id,
-                        "channel": interaction_metadata.get("channel"),
-                        "target": delivery_target,
-                        "status": "queued",
-                        "idempotency_key": request.delivery_id,
-                        "payload": delivery_payload,
-                    },
-                )
+            self._append_runtime_events(
+                [
+                    RuntimeEvent(
+                        type="delivery.queued",
+                        aggregate_type="delivery",
+                        aggregate_id=request.delivery_id,
+                        payload={
+                            "task_id": turn.turn_id,
+                            "channel": interaction_metadata.get("channel"),
+                            "target": delivery_target,
+                            "status": "queued",
+                            "idempotency_key": request.delivery_id,
+                            "payload": delivery_payload,
+                        },
+                    ),
+                    durable_work_enqueued_event(
+                        DurableWorkSpec(
+                            work_id=request.delivery_id,
+                            kind="delivery.send",
+                            owner_session_id=self.session_id,
+                            owner_turn_id=turn.turn_id,
+                            parent_work_id=turn.turn_id,
+                            payload={
+                                "task_id": turn.turn_id,
+                                "channel": interaction_metadata.get("channel"),
+                                "target": delivery_target,
+                                "idempotency_key": request.delivery_id,
+                                **delivery_payload,
+                            },
+                        )
+                    ),
+                ]
             )
         self.event_log.emit(
             "delivery.completed",
@@ -3408,10 +3478,51 @@ class SessionTurnStepRunner:
         if control_plane is not None:
             control_plane.succeed(turn_id, result_ref=result_ref)
 
+    def _finalize_interrupted_turn(
+        self,
+        turn_id: str,
+        *,
+        status: str,
+        error: str,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        self.event_log.emit(f"turn.{status}", turn_id=turn_id, error=error, **dict(metadata))
+        self.session_runtime.complete_turn(session_id=self.session_id, turn_id=turn_id, status=status, result_ref=turn_id)
+        control_plane = getattr(self.session_runtime, "control_plane", None)
+        if control_plane is None:
+            return
+        source = ActionSource(actor="host.session_runtime", session_id=self.session_id, turn_id=turn_id, metadata=dict(metadata))
+        if status == "cancelled":
+            control_plane.cancel(turn_id, summary=error, source=source)
+        else:
+            control_plane.fail(turn_id, error=error, summary=error, source=source)
+
     def _append_runtime_event(self, event: RuntimeEvent) -> None:
+        self._append_runtime_events([event])
+
+    def _append_runtime_events(self, events: list[RuntimeEvent]) -> None:
         control_plane = getattr(self.session_runtime, "control_plane", None)
         if control_plane is not None:
-            control_plane.store.append([event])
+            control_plane.store.append(events)
+
+    def _ack_background_completion_claims(self, metadata: Mapping[str, Any]) -> None:
+        claims = []
+        raw_claims = metadata.get("completion_claims")
+        if isinstance(raw_claims, list):
+            claims.extend(item for item in raw_claims if isinstance(item, Mapping))
+        if metadata.get("event_id") and metadata.get("completion_claim_id"):
+            claims.append({"event_id": metadata.get("event_id"), "claim_id": metadata.get("completion_claim_id")})
+        for item in claims:
+            event_id = item.get("event_id")
+            claim_id = item.get("claim_id")
+            if event_id and claim_id:
+                self.task_worker.ack_pending_event_id(str(event_id), claim_id=str(claim_id))
+
+    def _sanitize_runtime_error(self, exc: Exception) -> str:
+        message = str(exc).replace("\n", " ").strip()
+        if len(message) > 500:
+            message = f"{message[:500]}... [truncated]"
+        return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
 
     def _interaction_item_outbound_metadata(
         self,

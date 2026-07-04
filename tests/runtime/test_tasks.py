@@ -40,7 +40,9 @@ async def test_task_worker_lifecycle_default_notify_and_log_tail(tmp_path):
     recovered = RuntimeTaskWorker(log_tail_lines=2, log_tail_chars=80, control_plane=control)
     recovered_event = recovered.pending_events_for_session("session_1")[0]
     assert recovered_event.task_id == record.task_id
-    assert recovered.clear_pending_event(recovered_event.event_id) is True
+    claim = recovered.claim_pending_event(recovered_event.event_id, owner_id="test")
+    assert claim is not None
+    assert recovered.ack_pending_event(claim) is True
     assert recovered.pending_events_for_session("session_1") == []
     task = control.read(record.task_id, view="debug")
     assert task["kind"] == "terminal.exec"
@@ -138,3 +140,28 @@ def test_task_worker_lists_background_tasks_only_and_fails_unknown_kind(tmp_path
             source_tool="test_tool",
             task_factory=lambda ctx: asyncio.sleep(0),
         )
+
+
+@pytest.mark.asyncio
+async def test_task_completion_ack_requires_inflight_claim(tmp_path):
+    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
+    runtime = RuntimeTaskWorker(control_plane=control)
+
+    async def task(ctx):
+        return "done"
+
+    record = runtime.start_task(
+        kind="terminal.exec",
+        owner_session_id="session_1",
+        owner_turn_id="turn_1",
+        source_tool="test_tool",
+        task_factory=task,
+    )
+    await runtime.wait(record.task_id, timeout_seconds=1)
+    event = runtime.pending_events_for_session("session_1")[0]
+
+    inflight = runtime.claim_pending_event(event.event_id, owner_id="bridge:text")
+    assert inflight is not None
+    assert runtime.pending_events_for_session("session_1") == []
+    assert runtime.ack_pending_event(inflight) is True
+    assert runtime.pending_events_for_session("session_1") == []

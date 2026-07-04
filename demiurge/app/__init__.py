@@ -251,6 +251,7 @@ class DemiurgeApp:
     debug_show_system_prompt: bool
     debug_show_system_prompt_source: str
     runtime_timezone: RuntimeTimezone
+    runtime_recovery_summary: dict[str, int]
     host_config_path: Path
     fallback_config_path: Path
 
@@ -300,6 +301,7 @@ class DemiurgeApp:
             "runtime_timezone_explicit": self.runtime_timezone.explicit,
             "runtime_local_now": self.runtime_timezone.local_now().isoformat(),
             "runtime_store": str(self.runtime_store.path),
+            "runtime_recovery": dict(self.runtime_recovery_summary),
             "channel_busy_mode": self.channel_busy_mode,
             "channel_busy_mode_source": self.channel_busy_mode_source,
             "user_message_align": self.user_message_align,
@@ -602,6 +604,7 @@ def create_app(
             validate=lambda agents_root, changed_paths: gate_runner.run(agents_root, changed_paths=changed_paths)
         ),
     )
+    runtime_recovery_summary = runner.delivery_runtime.recover()
     return DemiurgeApp(
         home=home,
         project_root=project_root,
@@ -638,6 +641,7 @@ def create_app(
         debug_show_system_prompt=host_config.debug.show_system_prompt,
         debug_show_system_prompt_source=host_sources.get("debug.show_system_prompt", "default"),
         runtime_timezone=runtime_timezone,
+        runtime_recovery_summary=runtime_recovery_summary,
         host_config_path=host_config_path,
         fallback_config_path=version_store.fallback_config_path,
     )

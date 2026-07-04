@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
+import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +13,7 @@ from demiurge.util import ensure_dir, utc_id
 from demiurge.storage import utc_now
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,8 @@ class RuntimeQuery:
         "tool_calls",
         "artifacts",
         "scheduler_instances",
+        "runtime_work_items",
+        "session_bindings",
     ] = "runtime_events"
     where: dict[str, Any] | None = None
     order_by: str | None = None
@@ -87,8 +91,7 @@ class RuntimeStore:
         materialized = list(events)
         if not materialized:
             return AppendResult(events=(), first_seq=None, last_seq=None)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        def write(connection: sqlite3.Connection) -> AppendResult:
             if idempotency_key:
                 existing = self._events_by_idempotency_key(connection, idempotency_key)
                 if existing:
@@ -135,8 +138,9 @@ class RuntimeStore:
                 }
                 rows.append(row)
                 self._apply_projection(connection, row)
-            connection.commit()
             return AppendResult(events=tuple(rows), first_seq=rows[0]["seq"], last_seq=rows[-1]["seq"])
+
+        return self._write(write)
 
     def query(self, query: RuntimeQuery) -> ProjectionPage:
         if query.table not in _QUERY_TABLES:
@@ -162,16 +166,29 @@ class RuntimeStore:
             rows = [self._decode_row(dict(row)) for row in connection.execute(sql, values).fetchall()]
         return ProjectionPage(rows=tuple(rows), limit=query.limit, offset=query.offset)
 
-    def transaction(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+    def query_events_after(
+        self,
+        after_seq: int,
+        *,
+        where: dict[str, Any] | None = None,
+        limit: int = 100,
+    ) -> ProjectionPage:
+        filters = dict(where or {})
+        clauses = ["seq > ?"]
+        values: list[Any] = [int(after_seq)]
+        for key, value in filters.items():
+            if not key.replace("_", "").isalnum():
+                raise ValueError(f"invalid runtime query field: {key}")
+            clauses.append(f"{key} = ?")
+            values.append(value)
+        sql = "SELECT * FROM runtime_events WHERE " + " AND ".join(clauses) + " ORDER BY seq LIMIT ?"
+        values.append(limit)
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                result = fn(connection)
-            except Exception:
-                connection.rollback()
-                raise
-            connection.commit()
-            return result
+            rows = [self._decode_row(dict(row)) for row in connection.execute(sql, values).fetchall()]
+        return ProjectionPage(rows=tuple(rows), limit=limit, offset=0)
+
+    def transaction(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        return self._write(fn)
 
     def _initialize(self) -> None:
         with self._connection() as connection:
@@ -192,11 +209,27 @@ class RuntimeStore:
                 yield connection
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=0.1)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+    def _write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        attempts = 6
+        for attempt in range(attempts):
+            with self._connection() as connection:
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    result = fn(connection)
+                    connection.commit()
+                    return result
+                except sqlite3.OperationalError as exc:
+                    connection.rollback()
+                    if not _is_sqlite_busy(exc) or attempt == attempts - 1:
+                        raise
+            time.sleep(0.025 * (2**attempt) + random.uniform(0, 0.01))
+        raise RuntimeError("sqlite write retry loop exhausted")
 
     def _events_by_idempotency_key(self, connection: sqlite3.Connection, key: str) -> list[dict[str, Any]]:
         rows = connection.execute(
@@ -312,7 +345,7 @@ class RuntimeStore:
                     None,
                 ),
             )
-        elif event_type in {"delivery.sent", "delivery.failed", "delivery.retry_scheduled"}:
+        elif event_type in {"delivery.sent", "delivery.failed", "delivery.retry_scheduled", "delivery.sending", "delivery.unknown"}:
             status = payload.get("status") or event_type.split(".", 1)[1]
             connection.execute(
                 """
@@ -330,6 +363,30 @@ class RuntimeStore:
                     payload.get("sent_at") or (event["created_at"] if event_type == "delivery.sent" else None),
                     event["aggregate_id"],
                 ),
+            )
+        elif event_type == "work.enqueued":
+            self._project_work_enqueued(connection, event)
+        elif event_type in {
+            "work.claimed",
+            "work.running",
+            "work.sending",
+            "work.heartbeat",
+            "work.succeeded",
+            "work.failed",
+            "work.cancelled",
+            "work.unknown",
+            "work.acknowledged",
+            "work.corrupt",
+        }:
+            self._project_work_updated(connection, event)
+        elif event_type == "session.binding_conflict":
+            connection.execute(
+                """
+                DELETE FROM sessions
+                WHERE session_id = ?
+                  AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.session_id)
+                """,
+                (payload.get("loser_session_id") or event["aggregate_id"],),
             )
         elif event_type == "session.created":
             connection.execute(
@@ -349,6 +406,7 @@ class RuntimeStore:
                     payload.get("updated_at") or event["created_at"],
                 ),
             )
+            self._project_session_binding(connection, event)
         elif event_type in {"session.updated", "session.resumed"}:
             connection.execute(
                 """
@@ -371,6 +429,7 @@ class RuntimeStore:
                     event["aggregate_id"],
                 ),
             )
+            self._project_session_binding(connection, event)
         elif event_type == "turn.started":
             connection.execute(
                 """
@@ -500,9 +559,10 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO scheduler_instances (
-                    core_id, schedule_id, due_at, task_id, claim_status, idempotency_key
+                    core_id, schedule_id, due_at, task_id, claim_status, idempotency_key,
+                    claim_id, lease_expires_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.get("core_id"),
@@ -511,6 +571,8 @@ class RuntimeStore:
                     payload.get("task_id"),
                     payload.get("claim_status", "claimed"),
                     payload.get("idempotency_key"),
+                    payload.get("claim_id"),
+                    payload.get("lease_expires_at"),
                 ),
             )
         elif event_type in {"scheduler.completed", "scheduler.error"}:
@@ -518,12 +580,16 @@ class RuntimeStore:
                 """
                 UPDATE scheduler_instances
                 SET task_id = COALESCE(?, task_id),
-                    claim_status = ?
+                    claim_status = ?,
+                    claim_id = COALESCE(?, claim_id),
+                    lease_expires_at = COALESCE(?, lease_expires_at)
                 WHERE core_id = ? AND schedule_id = ? AND due_at = ?
                 """,
                 (
                     payload.get("task_id"),
                     payload.get("claim_status") or ("error" if event_type == "scheduler.error" else "completed"),
+                    payload.get("claim_id"),
+                    payload.get("lease_expires_at"),
                     payload.get("core_id"),
                     payload.get("schedule_id"),
                     payload.get("due_at"),
@@ -535,8 +601,126 @@ class RuntimeStore:
             if key.endswith("_json"):
                 target = key.removesuffix("_json")
                 value = row.pop(key)
-                row[target] = json.loads(value) if value else None
+                try:
+                    row[target] = json.loads(value) if value else None
+                except json.JSONDecodeError:
+                    row[target] = {"_corrupt_json": value}
         return row
+
+    def _project_work_enqueued(self, connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+        payload = event["payload"]
+        now = event["created_at"]
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO runtime_work_items (
+                work_id, kind, status, owner_session_id, owner_turn_id, parent_work_id,
+                claim_id, owner_id, claimed_at, lease_expires_at, attempts,
+                next_attempt_at, last_error, external_ref, payload_json,
+                created_at, updated_at, completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["aggregate_id"],
+                payload.get("kind"),
+                payload.get("status", "queued"),
+                payload.get("owner_session_id"),
+                payload.get("owner_turn_id"),
+                payload.get("parent_work_id"),
+                payload.get("claim_id"),
+                payload.get("owner_id"),
+                payload.get("claimed_at"),
+                payload.get("lease_expires_at"),
+                int(payload.get("attempts") or 0),
+                payload.get("next_attempt_at"),
+                payload.get("last_error"),
+                payload.get("external_ref"),
+                json.dumps(payload.get("payload") or {}, ensure_ascii=False, sort_keys=True),
+                payload.get("created_at") or now,
+                now,
+                payload.get("completed_at"),
+            ),
+        )
+
+    def _project_work_updated(self, connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+        payload = event["payload"]
+        event_type = event["type"]
+        terminal_update = event_type in {
+            "work.succeeded",
+            "work.cancelled",
+            "work.acknowledged",
+            "work.corrupt",
+        } or (event_type == "work.failed" and payload.get("status") == "failed")
+        completed_at = event["created_at"] if terminal_update else None
+        payload_json = None
+        if "payload" in payload:
+            payload_json = json.dumps(payload.get("payload") or {}, ensure_ascii=False, sort_keys=True)
+        connection.execute(
+            """
+            UPDATE runtime_work_items
+            SET status = COALESCE(?, status),
+                claim_id = COALESCE(?, claim_id),
+                owner_id = COALESCE(?, owner_id),
+                claimed_at = COALESCE(?, claimed_at),
+                lease_expires_at = COALESCE(?, lease_expires_at),
+                attempts = COALESCE(?, attempts),
+                next_attempt_at = ?,
+                last_error = COALESCE(?, last_error),
+                external_ref = COALESCE(?, external_ref),
+                payload_json = COALESCE(?, payload_json),
+                updated_at = ?,
+                completed_at = COALESCE(?, completed_at)
+            WHERE work_id = ?
+            """,
+            (
+                payload.get("status"),
+                payload.get("claim_id"),
+                payload.get("owner_id"),
+                payload.get("claimed_at"),
+                payload.get("lease_expires_at"),
+                payload.get("attempts"),
+                payload.get("next_attempt_at"),
+                payload.get("last_error"),
+                payload.get("external_ref"),
+                payload_json,
+                event["created_at"],
+                completed_at,
+                event["aggregate_id"],
+            ),
+        )
+
+    def _project_session_binding(self, connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+        payload = event["payload"]
+        target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+        core_id = payload.get("core_id")
+        channel = payload.get("channel")
+        conversation_key = target.get("conversation_key")
+        if not core_id or not channel or not conversation_key:
+            return
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO session_bindings (
+                core_id, channel, conversation_key, session_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                core_id,
+                channel,
+                conversation_key,
+                event["aggregate_id"],
+                event["created_at"],
+                event["created_at"],
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE session_bindings
+            SET updated_at = ?
+            WHERE core_id = ? AND channel = ? AND conversation_key = ? AND session_id = ?
+            """,
+            (event["created_at"], core_id, channel, conversation_key, event["aggregate_id"]),
+        )
 
 
 _QUERY_TABLES = {
@@ -553,8 +737,25 @@ _QUERY_TABLES = {
     "tool_calls",
     "artifacts",
     "scheduler_instances",
+    "runtime_work_items",
+    "session_bindings",
 }
-_QUERY_ORDER_FIELDS = {"seq", "runtime_seq", "created_at", "updated_at", "started_at", "completed_at", "due_at"}
+_QUERY_ORDER_FIELDS = {
+    "seq",
+    "runtime_seq",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+    "due_at",
+    "lease_expires_at",
+    "next_attempt_at",
+}
+
+
+def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database is busy" in message
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runtime_events (
@@ -702,6 +903,42 @@ CREATE TABLE IF NOT EXISTS scheduler_instances (
     task_id TEXT,
     claim_status TEXT NOT NULL,
     idempotency_key TEXT,
+    claim_id TEXT,
+    lease_expires_at TEXT,
     PRIMARY KEY (core_id, schedule_id, due_at)
 );
+
+CREATE TABLE IF NOT EXISTS runtime_work_items (
+    work_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    owner_session_id TEXT,
+    owner_turn_id TEXT,
+    parent_work_id TEXT,
+    claim_id TEXT,
+    owner_id TEXT,
+    claimed_at TEXT,
+    lease_expires_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    external_ref TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_work_due ON runtime_work_items (kind, status, next_attempt_at, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_work_owner_session ON runtime_work_items (owner_session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS session_bindings (
+    core_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (core_id, channel, conversation_key)
+);
+CREATE INDEX IF NOT EXISTS idx_session_bindings_session ON session_bindings (session_id);
 """

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.storage import SessionMessage, SessionRecord, utc_now
@@ -116,6 +117,11 @@ class SessionRuntime:
         return bool(self.store.query(RuntimeQuery(table="sessions", where={"session_id": session_id}, limit=1)).rows)
 
     def ensure_session(self, session_id: str, **kwargs: Any) -> tuple[SessionRecord, bool]:
+        existing = self._resolve_binding_from_kwargs(kwargs)
+        if existing is not None:
+            record = self.update_session(existing, touch=False, **kwargs)
+            self._append_runtime_event(self._session_event(record, "session.resumed"))
+            return record, False
         if self.exists(session_id):
             record = self.update_session(session_id, touch=False, **kwargs)
             self._append_runtime_event(self._session_event(record, "session.resumed"))
@@ -149,7 +155,38 @@ class SessionRuntime:
             model=model,
             metadata=metadata or {},
         )
-        self._append_runtime_event(self._session_event(record, "session.created"))
+        try:
+            self._append_runtime_event(self._session_event(record, "session.created"))
+        except RuntimeError:
+            existing = self.resolve_interaction_session(
+                core_id=core_id,
+                channel=channel,
+                conversation_key=conversation_key,
+            )
+            if existing is not None:
+                return self.get_session(existing)
+            raise
+        existing = self.resolve_interaction_session(
+            core_id=core_id,
+            channel=channel,
+            conversation_key=conversation_key,
+        )
+        if existing is not None and existing != record.session_id:
+            self._append_runtime_event(
+                RuntimeEvent(
+                    type="session.binding_conflict",
+                    aggregate_type="session",
+                    aggregate_id=record.session_id,
+                    payload={
+                        "core_id": core_id,
+                        "channel": channel,
+                        "conversation_key": conversation_key,
+                        "winner_session_id": existing,
+                        "loser_session_id": record.session_id,
+                    },
+                )
+            )
+            return self.get_session(existing)
         return record
 
     def update_session(
@@ -236,9 +273,15 @@ class SessionRuntime:
     def resolve_interaction_session(self, *, core_id: str, channel: str | None, conversation_key: str | None) -> str | None:
         if not channel or not conversation_key:
             return None
-        for record in self.list_sessions(core_id=core_id, limit=10_000):
-            if record.channel == channel and record.conversation_key == conversation_key:
-                return record.session_id
+        rows = self.store.query(
+            RuntimeQuery(
+                table="session_bindings",
+                where={"core_id": core_id, "channel": channel, "conversation_key": conversation_key},
+                limit=1,
+            )
+        ).rows
+        if rows:
+            return str(rows[0]["session_id"])
         return None
 
     def can_bind_session(self, session_id: str, *, channel: str | None, conversation_key: str | None) -> bool:
@@ -329,6 +372,22 @@ class SessionRuntime:
                         "idempotency_key": delivery_idempotency_key or delivery_id,
                         "payload": payload,
                     },
+                ),
+                durable_work_enqueued_event(
+                    DurableWorkSpec(
+                        work_id=delivery_id,
+                        kind="delivery.send",
+                        owner_session_id=session_id,
+                        owner_turn_id=turn_id,
+                        parent_work_id=task_id,
+                        payload={
+                            "task_id": task_id,
+                            "channel": channel,
+                            "target": dict(target),
+                            "idempotency_key": delivery_idempotency_key or delivery_id,
+                            **payload,
+                        },
+                    )
                 ),
             ],
             idempotency_key=f"delivery:{delivery_id}:message_outbox",
@@ -617,6 +676,18 @@ class SessionRuntime:
             reply_to=content.get("reply_to"),
             conversation_key=content.get("conversation_key"),
             metadata=metadata,
+        )
+
+    def _resolve_binding_from_kwargs(self, values: dict[str, Any]) -> str | None:
+        core_id = values.get("core_id")
+        channel = values.get("channel")
+        conversation_key = values.get("conversation_key")
+        if not core_id or not channel or not conversation_key:
+            return None
+        return self.resolve_interaction_session(
+            core_id=str(core_id),
+            channel=str(channel),
+            conversation_key=str(conversation_key),
         )
 
     def _compacted_until_index(self, session_id: str, messages: list[SessionMessage]) -> int:

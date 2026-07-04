@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
+from demiurge.runtime.durable_work import DurableClaim, DurableWorkRuntime
 from demiurge.runtime.store import RuntimeQuery
 from demiurge.util import utc_id
 
@@ -210,6 +211,7 @@ class RuntimeTaskWorker:
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
         self._completion_consumers: dict[str, int] = {}
+        self._work = DurableWorkRuntime(control_plane.store)
 
     def start_task(
         self,
@@ -312,19 +314,46 @@ class RuntimeTaskWorker:
     def pending_events_for_session(self, session_id: str) -> list[RuntimeTaskCompletionEvent]:
         return [event for event in self._pending_completion_events() if event.owner_session_id == session_id]
 
-    def clear_pending_event(self, event_id: str) -> bool:
-        if not any(event.event_id == event_id for event in self._pending_completion_events()):
+    def claim_pending_event(self, event_id: str, *, owner_id: str) -> DurableClaim | None:
+        return self._work.claim(event_id, owner_id=owner_id)
+
+    def ack_pending_event(self, claim: DurableClaim) -> bool:
+        try:
+            self._work.acknowledge(claim)
+        except Exception:
             return False
-        self.control_plane.clear_completion(event_id)
+        self.control_plane.ack_completion(claim.work_id)
         return True
 
-    def clear_pending_event_for_task(self, task_id: str) -> bool:
-        cleared = False
+    def ack_pending_event_id(self, event_id: str, *, claim_id: str) -> bool:
+        rows = self.control_plane.store.query(
+            RuntimeQuery(table="runtime_work_items", where={"work_id": event_id}, limit=1)
+        ).rows
+        if not rows:
+            return False
+        row = rows[0]
+        if str(row.get("claim_id") or "") != claim_id:
+            return False
+        claim = DurableClaim(
+            work_id=event_id,
+            kind=str(row.get("kind") or "task.completion"),
+            claim_id=claim_id,
+            owner_id=str(row.get("owner_id") or "host.task_worker"),
+            lease_expires_at=str(row.get("lease_expires_at") or ""),
+            attempt=int(row.get("attempts") or 0),
+        )
+        return self.ack_pending_event(claim)
+
+    def ack_pending_event_for_task(self, task_id: str) -> bool:
+        acknowledged = False
         for event in self._pending_completion_events():
             if event.task_id != task_id:
                 continue
-            cleared = self.clear_pending_event(event.event_id) or cleared
-        return cleared
+            claim = self.claim_pending_event(event.event_id, owner_id="host.task_worker.wait")
+            if claim is None:
+                continue
+            acknowledged = self.ack_pending_event(claim) or acknowledged
+        return acknowledged
 
     def get(self, task_id: str) -> RuntimeTaskRecord:
         try:
@@ -393,7 +422,7 @@ class RuntimeTaskWorker:
                     pass
             record = self.get(task_id)
             if consume_completion and _is_completion_status(record.status):
-                self.clear_pending_event_for_task(task_id)
+                self.ack_pending_event_for_task(task_id)
                 completion_consumed = True
             return record
         finally:
@@ -628,12 +657,22 @@ class RuntimeTaskWorker:
         cleared = {
             str(row.get("aggregate_id"))
             for row in rows
-            if row.get("type") == "task.completion_cleared"
+            if row.get("type") == "task.completion_acknowledged"
+        }
+        work_rows = self.control_plane.store.query(
+            RuntimeQuery(table="runtime_work_items", where={"kind": "task.completion"}, order_by="created_at", limit=10_000)
+        ).rows
+        non_pending = {
+            str(row["work_id"])
+            for row in work_rows
+            if row.get("status") not in {"queued", "retry_scheduled"}
         }
         events = [
             RuntimeTaskCompletionEvent.from_runtime_event(row)
             for row in rows
-            if row.get("type") == "task.completion_ready" and str(row.get("aggregate_id")) not in cleared
+            if row.get("type") == "task.completion_ready"
+            and str(row.get("aggregate_id")) not in cleared
+            and str(row.get("aggregate_id")) not in non_pending
         ]
         return events
 

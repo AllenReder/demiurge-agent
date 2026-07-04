@@ -157,6 +157,37 @@ def test_scheduler_claim_coalesces_missed_runs_and_is_single_flight(tmp_path):
     assert claimed["runtime_timezone"] == "UTC"
 
 
+def test_scheduler_claim_lease_expiry_reclaims_and_rejects_stale_completion(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_schedule(agents, 'schedule: "* * * * *"\nprompt: "Tick"\n')
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="UTC")
+    schedule = _schedule(app)
+    store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+    due = datetime(2026, 6, 28, 10, 0, tzinfo=UTC)
+    store.set_next_run(schedule, due)
+
+    first = store.claim_due(schedule, now=due)
+    assert first is not None
+    second = store.claim_due(schedule, now=datetime(2026, 6, 28, 10, 2, tzinfo=UTC))
+
+    assert second is not None
+    assert second.run_id != first.run_id
+    assert second.due_at == first.due_at
+    with pytest.raises(RuntimeError):
+        store.record_completed(first, status="completed")
+    store.record_completed(second, status="completed")
+
+    row = app.runtime_store.query(
+        RuntimeQuery(
+            table="scheduler_instances",
+            where={"core_id": app.runner.core_id, "schedule_id": schedule.schedule_id, "due_at": "2026-06-28T10:00:00Z"},
+            limit=1,
+        )
+    ).rows[0]
+    assert row["task_id"] == second.run_id
+    assert row["claim_status"] == "completed"
+
+
 @pytest.mark.asyncio
 async def test_scheduler_run_uses_fresh_session_selected_modules_and_local_delivery(tmp_path):
     agents = _copy_agents(tmp_path)

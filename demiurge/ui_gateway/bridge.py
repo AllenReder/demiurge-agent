@@ -355,6 +355,9 @@ class TuiInteractionBridge:
     def _stored_completion_inbounds(self) -> list[InteractionInbound]:
         completions: list[InteractionInbound] = []
         for event in self.app.task_worker.pending_events_for_session(self.app.runner.session_id):
+            claim = self.app.task_worker.claim_pending_event(event.event_id, owner_id="bridge:tui:stored")
+            if claim is None:
+                continue
             completions.append(
                 _task_completion_inbound(
                     event,
@@ -362,9 +365,9 @@ class TuiInteractionBridge:
                     source="local",
                     reply_to=None,
                     conversation_key=self._conversation_key(),
+                    claim_id=claim.claim_id,
                 )
             )
-            self.app.task_worker.clear_pending_event(event.event_id)
         return completions
 
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
@@ -376,14 +379,17 @@ class TuiInteractionBridge:
             return
 
     async def _enqueue_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
+        claim = self.app.task_worker.claim_pending_event(event.event_id, owner_id="bridge:tui:enqueue")
+        if claim is None:
+            return
         inbound = _task_completion_inbound(
             event,
             channel="tui",
             source="local",
             reply_to=None,
             conversation_key=self._conversation_key(),
+            claim_id=claim.claim_id,
         )
-        self.app.task_worker.clear_pending_event(event.event_id)
         await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
         if self.running or not self._queued_inputs.empty():
             await self._queued_inputs.put(inbound)
@@ -1083,14 +1089,18 @@ def _task_completion_inbound(
     source: str,
     reply_to: str | None,
     conversation_key: str | None,
+    claim_id: str | None = None,
 ) -> InteractionInbound:
+    metadata = event.to_metadata()
+    if claim_id is not None:
+        metadata["completion_claim_id"] = claim_id
     return InteractionInbound(
         channel=channel,
         text=event.to_inbound_text(),
         source=source,
         reply_to=reply_to,
         conversation_key=conversation_key,
-        metadata=event.to_metadata(),
+        metadata=metadata,
     )
 
 
@@ -1102,6 +1112,11 @@ def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: li
     metadata = dict(user_inbound.metadata)
     metadata["merged_background_tasks"] = [
         item.metadata.get("task_id") for item in completions if item.metadata.get("task_id")
+    ]
+    metadata["completion_claims"] = [
+        {"event_id": item.metadata.get("event_id"), "claim_id": item.metadata.get("completion_claim_id")}
+        for item in completions
+        if item.metadata.get("event_id") and item.metadata.get("completion_claim_id")
     ]
     completion_text = "\n\n".join(item.text for item in completions if item.text)
     text = "\n\n".join(

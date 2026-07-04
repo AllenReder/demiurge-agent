@@ -63,6 +63,27 @@ def test_control_plane_submit_control_read_and_stream(tmp_path):
     assert [event["type"] for event in batch.events] == ["task.submitted", "task.cancelled"]
 
 
+def test_control_plane_stream_applies_cursor_before_limit(tmp_path):
+    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
+    control.store.append(
+        [
+            RuntimeEvent(
+                type="test.event",
+                aggregate_type="test",
+                aggregate_id=f"item_{index}",
+                payload={"index": index},
+            )
+            for index in range(200)
+        ]
+    )
+
+    batch = control.stream(EventCursor(seq=100), EventFilter(aggregate_type="test", limit=100))
+
+    assert len(batch.events) == 100
+    assert [int(event["seq"]) for event in batch.events] == list(range(101, 201))
+    assert batch.next_cursor.seq == 200
+
+
 def test_control_plane_rejects_unsupported_task_control(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
     handle = control.submit(

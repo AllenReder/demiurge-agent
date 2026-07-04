@@ -22,15 +22,18 @@ Host scheduler state is projected into:
 ```
 
 The `scheduler_instances` projection records due times, task ids, claim status,
-and idempotency keys. Older `~/.demiurge/scheduler/` JSON files are not read,
-migrated, or dual-written by the runtime.
+idempotency keys, claim ids, and lease expiry. Each due occurrence also has a
+`schedule.fire` durable work item. Older `~/.demiurge/scheduler/` JSON files
+are not read, migrated, or dual-written by the runtime.
 
 ## Claim Flow
 
 The scheduler computes due times from cron expressions and runtime timezone.
-When a schedule is due, the host records a transactional SQLite claim, advances
-the next run time, and creates a runtime task using an idempotency key derived
-from core id, schedule id, and due time.
+When a schedule is due, the host claims the durable work item with a claim token
+and lease, records the SQLite scheduler claim, advances the next run time, and
+creates a runtime task using an idempotency key derived from core id, schedule
+id, and due time. Completion must compare the claim token; stale completions
+from an expired claim are rejected.
 
 ## Run Flow
 
