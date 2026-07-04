@@ -5,6 +5,11 @@ import pytest
 from demiurge.security.workspace import WorkspaceScope, WorkspaceScopeError, truncate_text
 
 
+def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 def test_workspace_scope_resolves_relative_and_absolute_paths(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -63,7 +68,7 @@ def test_workspace_scope_expands_home_before_outside_read_check(tmp_path, monkey
     workspace.mkdir()
     home.mkdir()
     (home / "note.txt").write_text("home note", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_test_home(monkeypatch, home)
     scope = WorkspaceScope(workspace)
 
     resolved = scope.resolve_path("~/note.txt", allow_outside_read=True)
