@@ -67,6 +67,50 @@ def test_core_repository_change_set_proposal_promote_discard_and_rollback(tmp_pa
     assert not run_root.exists()
 
 
+def test_core_repository_change_set_cleans_generated_artifacts_before_proposal(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    change_set = repo.begin_change_set(kind="evolve", reason="edit soul", run_id="run_clean")
+    soul = change_set.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(soul.read_text(encoding="utf-8") + "\n\nRepository test edit.\n", encoding="utf-8")
+    cache_file = change_set.agents_root / "assistant" / "agent" / "__pycache__" / "module.cpython-311.pyc"
+    cache_file.parent.mkdir()
+    cache_file.write_bytes(b"cache")
+    runtime_file = change_set.agents_root / "runtime" / "tool-output.txt"
+    runtime_file.parent.mkdir()
+    runtime_file.write_text("runtime output\n", encoding="utf-8")
+
+    removed = change_set.clean_generated_artifacts()
+
+    assert removed == ["assistant/agent/__pycache__/module.cpython-311.pyc", "runtime/tool-output.txt"]
+    assert not cache_file.exists()
+    assert not runtime_file.exists()
+    assert change_set.changed_paths() == ["assistant/agent/SOUL.md"]
+
+    proposal = change_set.commit_proposal(reason="review")
+    tree = repo._run_git(["ls-tree", "-r", "--name-only", proposal.revision]).stdout
+    assert "__pycache__" not in tree
+    assert "runtime/tool-output.txt" not in tree
+
+
+def test_core_repository_change_set_cleanup_does_not_delete_tracked_artifacts(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    cache_file = repo.agents_root / "assistant" / "agent" / "__pycache__" / "module.pyc"
+    cache_file.parent.mkdir()
+    cache_file.write_bytes(b"tracked cache")
+    repo._run_git(["add", "-f", "assistant/agent/__pycache__/module.pyc"], work_tree=repo.agents_root)
+    repo._run_git(["commit", "-m", "add tracked artifact"], work_tree=repo.agents_root)
+    revision = repo._run_git(["rev-parse", "HEAD"], work_tree=repo.agents_root).stdout.strip()
+    repo._run_git(["update-ref", LIVE_REF, revision])
+    change_set = repo.begin_change_set(kind="evolve", reason="tracked artifact", run_id="run_tracked_artifact")
+    candidate_cache = change_set.agents_root / "assistant" / "agent" / "__pycache__" / "module.pyc"
+
+    assert change_set.clean_generated_artifacts() == []
+    assert candidate_cache.exists()
+    assert reject_generated_artifacts(change_set.agents_root) == ["assistant/agent/__pycache__/module.pyc"]
+
+
 def test_core_repository_rejects_stale_change_set_promotion(tmp_path):
     repo = CoreRepository(tmp_path / "home")
     repo.initialize_from_source(source_agents_root(), reason="test init")

@@ -32,6 +32,9 @@ CORE_EXCLUDE_PATTERNS = (
     ".mypy_cache/",
     ".ruff_cache/",
 )
+GENERATED_ARTIFACT_DIR_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+GENERATED_ARTIFACT_SUFFIXES = {".pyc", ".pyo"}
+GENERATED_RUNTIME_DIR_NAMES = {".evolve", "runtime", "logs", "runs", "history", "registry"}
 
 
 class CoreRepositoryError(RuntimeError):
@@ -762,6 +765,22 @@ class CoreChangeSet:
         diff_paths = self._git(["diff", "--name-only", LIVE_REF]).stdout.splitlines()
         return sorted({path for path in [*status_paths, *diff_paths] if path})
 
+    def clean_generated_artifacts(self) -> list[str]:
+        removed: set[str] = set()
+        for rel in self._untracked_paths():
+            if not _is_generated_artifact_path(rel):
+                continue
+            target = self.agents_root / rel
+            if not target.exists() and not target.is_symlink():
+                continue
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+            removed.add(Path(rel).as_posix())
+        self._prune_empty_generated_dirs()
+        return sorted(removed)
+
     def diff_summary(self) -> DiffSummary:
         return DiffSummary(
             changed_paths=self.changed_paths(),
@@ -770,6 +789,7 @@ class CoreChangeSet:
         )
 
     def commit_proposal(self, *, reason: str, metadata: dict[str, Any] | None = None) -> CommitResult:
+        self.clean_generated_artifacts()
         base_revision = self.repository._change_set_base_revision(self.run_id)
         self._git(["add", "-A"])
         worktree_paths = [line.strip() for line in self._git(["diff", "--cached", "--name-only"]).stdout.splitlines() if line.strip()]
@@ -795,6 +815,27 @@ class CoreChangeSet:
     def write_report(self, title: str, payload: dict[str, Any]) -> None:
         lines = [f"# {title}", "", "```json", json.dumps(payload, indent=2, ensure_ascii=False), "```", ""]
         self.report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _untracked_paths(self) -> list[str]:
+        paths: set[str] = set()
+        for args in (
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        ):
+            output = self._git(args).stdout
+            paths.update(path for path in output.split("\0") if path)
+        return sorted(paths)
+
+    def _prune_empty_generated_dirs(self) -> None:
+        directories = [path for path in self.agents_root.rglob("*") if path.is_dir()]
+        for path in sorted(directories, key=lambda item: len(item.relative_to(self.agents_root).parts), reverse=True):
+            rel = path.relative_to(self.agents_root).as_posix()
+            if not _is_generated_artifact_path(rel):
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                continue
 
     def _git(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
@@ -932,13 +973,19 @@ def reject_generated_artifacts(root: Path) -> list[str]:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-            rejected.append(rel)
-        elif path.name in {".pytest_cache"} or ".pytest_cache" in path.parts:
-            rejected.append(rel)
-        elif rel.startswith((".evolve/", "runtime/", "logs/", "runs/", "history/", "registry/")):
+        if _is_generated_artifact_path(rel):
             rejected.append(rel)
     return sorted(rejected)
+
+
+def _is_generated_artifact_path(rel: str | Path) -> bool:
+    path = Path(rel)
+    parts = path.parts
+    if any(part in GENERATED_ARTIFACT_DIR_NAMES for part in parts):
+        return True
+    if parts and parts[0] in GENERATED_RUNTIME_DIR_NAMES:
+        return True
+    return path.suffix in GENERATED_ARTIFACT_SUFFIXES
 
 
 def reject_dependency_files(root: Path) -> list[str]:

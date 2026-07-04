@@ -47,6 +47,7 @@ class EvolveResult:
     promoted: bool = False
     new_revision: str | None = None
     gates: dict[str, Any] | None = None
+    cleaned_artifacts: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -57,6 +58,7 @@ class EvolveReview:
     proposal_revision: str | None
     gates: GateResult
     report_path: str
+    cleaned_artifacts: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -111,6 +113,7 @@ class EvolutionRuntime:
                 reference_agents_root=self.core_repository.active_agents_root(),
                 run_root=change_set.run_root,
             )
+            cleaned_artifacts = change_set.clean_generated_artifacts()
             changed_files = change_set.changed_paths()
             evolver_payload = {
                 "summary": evolver_result.summary,
@@ -126,6 +129,7 @@ class EvolutionRuntime:
             payload = {
                 "request": request,
                 "changed_files": changed_files,
+                "cleaned_artifacts": cleaned_artifacts,
                 "evolver": evolver_payload,
                 "summary": summary,
             }
@@ -139,6 +143,7 @@ class EvolutionRuntime:
                 summary=summary,
                 report_path=str(change_set.report_path),
                 changed_files=changed_files,
+                cleaned_artifacts=cleaned_artifacts,
                 evolver=evolver_payload,
             )
         finally:
@@ -146,6 +151,7 @@ class EvolutionRuntime:
 
     async def review(self, run_id: str, *, target_core_id: str = "assistant", goal: str = "") -> EvolveReview:
         change_set = self.core_repository.change_set(run_id)
+        cleaned_artifacts = change_set.clean_generated_artifacts()
         changed_files = change_set.changed_paths()
         commit: CommitResult | None = None
         if changed_files:
@@ -165,6 +171,7 @@ class EvolutionRuntime:
             "run_id": run_id,
             "target_core_id": target_core_id,
             "changed_files": changed_files,
+            "cleaned_artifacts": cleaned_artifacts,
             "proposal_revision": commit.revision if commit else None,
             "gates": gates.as_dict(),
         }
@@ -178,6 +185,7 @@ class EvolutionRuntime:
             proposal_revision=commit.revision if commit else None,
             gates=gates,
             report_path=str(change_set.report_path),
+            cleaned_artifacts=cleaned_artifacts,
         )
 
     async def promote(self, run_id: str, *, target_core_id: str = "assistant", reason: str = "evolve promote") -> EvolveResult:
@@ -195,6 +203,7 @@ class EvolutionRuntime:
                 proposal_revision=review.proposal_revision,
                 gates=review.gates.as_dict(),
                 promoted=False,
+                cleaned_artifacts=review.cleaned_artifacts,
             )
         if not review.proposal_revision:
             return EvolveResult(
@@ -208,6 +217,7 @@ class EvolutionRuntime:
                 proposal_revision=None,
                 gates=review.gates.as_dict(),
                 promoted=False,
+                cleaned_artifacts=review.cleaned_artifacts,
             )
         result = self.core_repository.promote_run(run_id, reason=reason)
         return EvolveResult(
@@ -222,6 +232,7 @@ class EvolutionRuntime:
             gates=review.gates.as_dict(),
             promoted=True,
             new_revision=result.revision,
+            cleaned_artifacts=review.cleaned_artifacts,
         )
 
     def discard(self, run_id: str) -> dict[str, Any]:

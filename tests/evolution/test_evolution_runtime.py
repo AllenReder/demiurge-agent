@@ -26,6 +26,29 @@ class EditingRunner:
         return EvolverRunResult(summary=f"edited {target_core_id}", session_id="session_child", turn_id="turn_child")
 
 
+class CacheWritingRunner:
+    async def run(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        target_core_id: str,
+        agents_root: Path,
+        target_core_path: Path,
+        reference_agents_root: Path,
+        run_root: Path,
+    ) -> EvolverRunResult:
+        soul = target_core_path / "agent" / "SOUL.md"
+        soul.write_text(soul.read_text(encoding="utf-8") + f"\n\nEvolved: {goal}\n", encoding="utf-8")
+        cache_file = target_core_path / "agent" / "__pycache__" / "module.cpython-311.pyc"
+        cache_file.parent.mkdir()
+        cache_file.write_bytes(b"cache")
+        runtime_file = agents_root / "runtime" / "tool-output.txt"
+        runtime_file.parent.mkdir()
+        runtime_file.write_text("runtime output\n", encoding="utf-8")
+        return EvolverRunResult(summary=f"edited {target_core_id}", session_id="session_child", turn_id="turn_child")
+
+
 @pytest.mark.asyncio
 async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
     repo = CoreRepository(tmp_path / "home")
@@ -65,6 +88,33 @@ async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
     assert run_root.exists()
     assert runtime.discard(discard.run_id) == {"run_id": discard.run_id, "discarded": True}
     assert not run_root.exists()
+
+
+@pytest.mark.asyncio
+async def test_evolution_runtime_cleans_generated_artifacts_before_review(tmp_path):
+    repo = CoreRepository(tmp_path / "home")
+    repo.initialize_from_source(source_agents_root(), reason="test init")
+    runtime = EvolutionRuntime(
+        core_repository=repo,
+        gate_runner=GateRunner(project_root=tmp_path),
+        evolver_runner=CacheWritingRunner(),
+    )
+
+    started = await runtime.start(target_core_id="assistant", goal="make a test edit")
+
+    candidate_root = Path(started.agents_root)
+    assert started.changed_files == ["assistant/agent/SOUL.md"]
+    assert not any(candidate_root.rglob("*.pyc"))
+    assert not (candidate_root / "runtime" / "tool-output.txt").exists()
+
+    review = await runtime.review(started.run_id, target_core_id="assistant")
+
+    assert review.passed
+    assert review.changed_files == ["assistant/agent/SOUL.md"]
+    assert review.proposal_revision is not None
+    tree = repo._run_git(["ls-tree", "-r", "--name-only", review.proposal_revision]).stdout
+    assert "__pycache__" not in tree
+    assert "runtime/tool-output.txt" not in tree
 
 
 @pytest.mark.asyncio
