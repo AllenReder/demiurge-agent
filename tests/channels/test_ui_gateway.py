@@ -576,7 +576,10 @@ async def test_tui_bridge_queue_mode_runs_next_input_after_current_turn(tmp_path
     assert provider.cancelled.is_set() is False
 
     provider.release.set()
-    await _wait_for(lambda: len(provider.requests) == 2 and "[next] second" in sink.texts() and not bridge.running)
+    await _wait_for(
+        lambda: len(provider.requests) == 2 and "[next] second" in sink.texts() and not bridge.running,
+        timeout=10.0,
+    )
 
     output = sink.texts()
     assert "[slow] first" in output

@@ -614,7 +614,7 @@ class CoreRepository:
                 "",
             ]
         )
-        self._run_git(["update-ref", "--stdin"], input=commands)
+        self._run_git(["update-ref", "--stdin"], input=commands.encode("utf-8"))
 
     def _change_set_base_revision(self, run_id: str) -> str:
         run_root = self.evolve_root / run_id
@@ -707,7 +707,7 @@ class CoreRepository:
         *,
         work_tree: Path | None = None,
         check: bool = True,
-        input: str | None = None,
+        input: str | bytes | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = ["git", f"--git-dir={self.git_dir}", *([f"--work-tree={work_tree}"] if work_tree else []), *args]
         return self._run(command[1:], cwd=None, check=check, prefix=["git"], input=input)
@@ -719,21 +719,31 @@ class CoreRepository:
         cwd: Path | None,
         check: bool = True,
         prefix: list[str] | None = None,
-        input: str | None = None,
+        input: str | bytes | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [*(prefix or []), *args]
+        text_mode = not isinstance(input, bytes)
         try:
-            completed = subprocess.run(
+            completed_raw = subprocess.run(
                 command,
                 cwd=cwd,
                 check=False,
-                text=True,
+                text=text_mode,
                 input=input,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError as exc:
             raise CoreRepositoryError("required command not found: git") from exc
+        if text_mode:
+            completed = completed_raw
+        else:
+            completed = subprocess.CompletedProcess(
+                completed_raw.args,
+                completed_raw.returncode,
+                stdout=(completed_raw.stdout or b"").decode("utf-8", errors="replace"),
+                stderr=(completed_raw.stderr or b"").decode("utf-8", errors="replace"),
+            )
         if check and completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             raise CoreRepositoryError(f"{' '.join(command)} failed: {detail}")
