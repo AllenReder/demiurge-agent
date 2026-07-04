@@ -29,6 +29,11 @@ class RecordingApprovalProvider:
         return ApprovalDecision("deny", "no recorded decision left")
 
 
+def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 def _load_core_with(
     app,
     *,
@@ -413,7 +418,7 @@ async def test_read_file_expands_home_for_outside_workspace_approval(tmp_path, m
     home.mkdir()
     note = home / "note.txt"
     note.write_text("home note", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_test_home(monkeypatch, home)
     app = create_app(home=tmp_path / "runtime", provider_name="fake", workspace=workspace)
     app.approval_runtime.provider = StaticApprovalProvider("allow")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
