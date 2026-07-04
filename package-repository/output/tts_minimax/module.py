@@ -27,6 +27,7 @@ async def process(ctx):
         summary = await ctx.agents.run(
             str(summarizer_core),
             text,
+            output_slots=["result_output"],
         )
         result = summary.result
         if isinstance(result, dict) and result.get("text"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -84,6 +85,38 @@ SUMMARY_PREFIX = (
 )
 SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY - respond to the message below, not the summary above ---"
 DELEGATION_TOOL_NAMES = {"delegate_task", "task_status", "task_control", "yield_until"}
+CHILD_AGENT_DEFAULT_INPUT_SLOTS = ("base_input",)
+CHILD_AGENT_DEFAULT_OUTPUT_SLOTS = ("base_output",)
+CHILD_AGENT_ALL_SLOTS = "all"
+
+
+ChildSlotRequest = str | Sequence[str] | None
+
+
+@dataclass(slots=True)
+class ResolvedPhaseSlots:
+    serial: list[SlotDefinition]
+    parallel: list[SlotDefinition]
+
+    def to_metadata(self) -> dict[str, list[str]]:
+        return {
+            "serial": [slot.slot_id for slot in self.serial],
+            "parallel": [slot.slot_id for slot in self.parallel],
+        }
+
+
+@dataclass(slots=True)
+class ResolvedChildAgentSlots:
+    input: ResolvedPhaseSlots
+    output: ResolvedPhaseSlots
+    use_bootstrap: bool
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "input_slots": self.input.to_metadata(),
+            "output_slots": self.output.to_metadata(),
+            "use_bootstrap": self.use_bootstrap,
+        }
 
 
 @dataclass(slots=True)
@@ -244,6 +277,9 @@ class ModuleAgentsClient:
         raw_input: str,
         *,
         context: str | list[str] | None = None,
+        input_slots: ChildSlotRequest = None,
+        output_slots: ChildSlotRequest = None,
+        use_bootstrap: bool = False,
     ) -> AgentRunResult:
         self.capability.require(f"agents.run:{core_id}", slot_path=self.slot_path)
         run_id = utc_id("agent_run_")
@@ -260,6 +296,9 @@ class ModuleAgentsClient:
             parent_turn=self.turn,
             parent_slot_path=self.slot_path,
             context=self._normalize_context(context),
+            input_slots=input_slots,
+            output_slots=output_slots,
+            use_bootstrap=use_bootstrap,
         )
         self.emit_event(
             "agent_run.completed",
@@ -279,6 +318,9 @@ class ModuleAgentsClient:
         raw_input: str,
         *,
         context: str | list[str] | None = None,
+        input_slots: ChildSlotRequest = None,
+        output_slots: ChildSlotRequest = None,
+        use_bootstrap: bool = False,
     ) -> AgentSpawnHandle:
         self.capability.require(f"agents.spawn:{core_id}", slot_path=self.slot_path)
         return self.parent._spawn_child_agent(
@@ -287,6 +329,9 @@ class ModuleAgentsClient:
             parent_turn=self.turn,
             parent_slot_path=self.slot_path,
             context=self._normalize_context(context),
+            input_slots=input_slots,
+            output_slots=output_slots,
+            use_bootstrap=use_bootstrap,
         )
 
     def _normalize_context(self, context: str | list[str] | None) -> list[str]:
@@ -1385,6 +1430,9 @@ class SessionTurnStepRunner:
         injected_system_context: list[str] | None = None,
         input_slot_ids: list[str] | tuple[str, ...] | None = None,
         output_slot_ids: list[str] | tuple[str, ...] | None = None,
+        input_phase_slots: ResolvedPhaseSlots | None = None,
+        output_phase_slots: ResolvedPhaseSlots | None = None,
+        use_bootstrap: bool = True,
     ) -> TurnResult:
         core = self.core_loader.load(core_path) if core_path is not None else await self.load_active_core()
         interaction_metadata = self._interaction_metadata(interaction)
@@ -1398,13 +1446,18 @@ class SessionTurnStepRunner:
                 model=self._resolve_model_name(core),
                 touch=False,
             )
+        if input_slot_ids is not None and input_phase_slots is not None:
+            raise ValueError("input_slot_ids and input_phase_slots cannot both be set")
+        if output_slot_ids is not None and output_phase_slots is not None:
+            raise ValueError("output_slot_ids and output_phase_slots cannot both be set")
         input_slots_override = self._resolve_phase_slots(core, "input", input_slot_ids)
         output_slots_override = self._resolve_phase_slots(core, "output", output_slot_ids)
         capability = CapabilityFacade(core)
         if not self._session_started:
             self.event_log.emit("session.started", core_id=core.core_id, core_revision=self._core_revision(core), **interaction_metadata)
             self._session_started_ids.add(self.session_id)
-        await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
+        if use_bootstrap:
+            await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
 
         turn_id = utc_id("turn_")
         input_envelope = InputEnvelope(
@@ -1447,6 +1500,7 @@ class SessionTurnStepRunner:
                 interaction_bridge=get_current_bridge(),
                 injected_system_context=injected_system_context or [],
                 serial_slots=input_slots_override,
+                phase_slots=input_phase_slots,
             )
         except asyncio.CancelledError:
             self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
@@ -1480,6 +1534,7 @@ class SessionTurnStepRunner:
                     available_tools=available_tools,
                     interaction_metadata=interaction_metadata,
                     interaction_bridge=get_current_bridge(),
+                    use_bootstrap_context=use_bootstrap,
                 )
             )
         except asyncio.CancelledError:
@@ -1512,6 +1567,7 @@ class SessionTurnStepRunner:
                 interaction_bridge=get_current_bridge(),
                 result_client=result_client,
                 serial_slots=output_slots_override,
+                phase_slots=output_phase_slots,
             )
         except asyncio.CancelledError:
             self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
@@ -1677,6 +1733,7 @@ class SessionTurnStepRunner:
         *,
         turn_id: str,
         step_id: str,
+        use_bootstrap_context: bool = True,
     ) -> list[LLMMessage]:
         assembled = self.context_assembler.assemble(
             core=core,
@@ -1687,7 +1744,7 @@ class SessionTurnStepRunner:
                 if message.turn_id != turn_id
             ],
             current_turn_messages=turn_messages,
-            bootstrap_context=self.sessions.read_bootstrap_context(self.session_id),
+            bootstrap_context=self.sessions.read_bootstrap_context(self.session_id) if use_bootstrap_context else None,
             compaction_summary=self.sessions.latest_compaction_summary(self.session_id),
         )
         self.event_log.emit(
@@ -2113,6 +2170,106 @@ class SessionTurnStepRunner:
             raise ValueError(f"{kind} slot list must not be empty")
         return resolved
 
+    def _resolve_child_agent_slots(
+        self,
+        core: LoadedCore,
+        *,
+        input_slots: ChildSlotRequest,
+        output_slots: ChildSlotRequest,
+        use_bootstrap: bool,
+    ) -> ResolvedChildAgentSlots:
+        if not isinstance(use_bootstrap, bool):
+            raise ValueError("use_bootstrap must be a boolean")
+        return ResolvedChildAgentSlots(
+            input=self._resolve_child_phase_slots(core, "input", input_slots),
+            output=self._resolve_child_phase_slots(core, "output", output_slots),
+            use_bootstrap=use_bootstrap,
+        )
+
+    def _resolve_child_agent_slots_for_core_id(
+        self,
+        core_id: str,
+        *,
+        input_slots: ChildSlotRequest,
+        output_slots: ChildSlotRequest,
+        use_bootstrap: bool,
+    ) -> ResolvedChildAgentSlots:
+        core = self.core_loader.load(self.version_store.active_core_path(core_id))
+        return self._resolve_child_agent_slots(
+            core,
+            input_slots=input_slots,
+            output_slots=output_slots,
+            use_bootstrap=use_bootstrap,
+        )
+
+    def _resolve_child_phase_slots(
+        self,
+        core: LoadedCore,
+        kind: str,
+        requested: ChildSlotRequest,
+    ) -> ResolvedPhaseSlots:
+        pipeline = core.input_pipeline if kind == "input" else core.output_pipeline
+        default_ids = CHILD_AGENT_DEFAULT_INPUT_SLOTS if kind == "input" else CHILD_AGENT_DEFAULT_OUTPUT_SLOTS
+        requested_ids = self._normalize_child_slot_request(kind, requested, default_ids=default_ids)
+        if requested_ids == CHILD_AGENT_ALL_SLOTS:
+            return ResolvedPhaseSlots(serial=list(pipeline.serial), parallel=list(pipeline.parallel))
+
+        known_ids = {slot.slot_id for slot in (core.input_slots if kind == "input" else core.output_slots)}
+        pipeline_ids = {slot.slot_id for slot in [*pipeline.serial, *pipeline.parallel]}
+        for slot_id in requested_ids:
+            if slot_id not in known_ids:
+                raise ValueError(f"unknown {kind} slot id: {slot_id}")
+            if slot_id not in pipeline_ids:
+                raise ValueError(f"{kind} slot id is not in the active pipeline: {slot_id}")
+        selected_ids = set(requested_ids)
+        return ResolvedPhaseSlots(
+            serial=[slot for slot in pipeline.serial if slot.slot_id in selected_ids],
+            parallel=[slot for slot in pipeline.parallel if slot.slot_id in selected_ids],
+        )
+
+    def _normalize_child_slot_request(
+        self,
+        kind: str,
+        requested: ChildSlotRequest,
+        *,
+        default_ids: tuple[str, ...],
+    ) -> tuple[str, ...] | str:
+        if requested is None:
+            return default_ids
+        if isinstance(requested, str):
+            if requested == CHILD_AGENT_ALL_SLOTS:
+                return CHILD_AGENT_ALL_SLOTS
+            raise ValueError(f"{kind}_slots must be 'all' or a list of slot ids")
+        if not isinstance(requested, Sequence):
+            raise ValueError(f"{kind}_slots must be 'all' or a list of slot ids")
+        if not requested:
+            return default_ids
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_id in requested:
+            if not isinstance(raw_id, str):
+                raise ValueError(f"{kind}_slots items must be strings")
+            slot_id = raw_id.strip()
+            if not slot_id:
+                raise ValueError(f"{kind} slot id must not be empty")
+            if slot_id in seen:
+                raise ValueError(f"duplicate {kind} slot id: {slot_id}")
+            seen.add(slot_id)
+            normalized.append(slot_id)
+        return tuple(normalized)
+
+    def _child_slot_request_metadata(
+        self,
+        kind: str,
+        requested: ChildSlotRequest,
+        *,
+        default_ids: tuple[str, ...],
+    ) -> str | list[str]:
+        normalized = self._normalize_child_slot_request(kind, requested, default_ids=default_ids)
+        if normalized == CHILD_AGENT_ALL_SLOTS:
+            return CHILD_AGENT_ALL_SLOTS
+        return list(normalized)
+
     def _tool_result_model_content(self, result: ToolResult) -> str:
         return result.model_output if result.model_output is not None else result.content
 
@@ -2285,6 +2442,9 @@ class SessionTurnStepRunner:
         parent_turn: TurnContext,
         parent_slot_path: str,
         context: list[str],
+        input_slots: ChildSlotRequest = None,
+        output_slots: ChildSlotRequest = None,
+        use_bootstrap: bool = False,
         tool_policy: Mapping[str, Any] | None = None,
         session_id: str | None = None,
     ) -> AgentRunResult:
@@ -2308,11 +2468,21 @@ class SessionTurnStepRunner:
             slot_runtime=self.slot_runtime,
             prepare_live_core=self.prepare_live_core_callback,
         )
+        await child_runner.prepare_live_core()
+        child_core = child_runner.core_loader.load(child_runner.version_store.active_core_path(child_runner.core_id))
+        child_slots = child_runner._resolve_child_agent_slots(
+            child_core,
+            input_slots=input_slots,
+            output_slots=output_slots,
+            use_bootstrap=use_bootstrap,
+        )
+        child_slot_metadata = child_slots.to_metadata()
         child_metadata = {
             "delegation_depth": int(parent_turn.metadata.get("delegation_depth") or 0) + 1,
             "parent_session_id": parent_turn.session_id,
             "parent_turn_id": parent_turn.turn_id,
             "parent_slot": parent_slot_path,
+            "child_agent_slots": child_slot_metadata,
         }
         if tool_policy:
             child_metadata["tool_policy"] = dict(tool_policy)
@@ -2325,6 +2495,9 @@ class SessionTurnStepRunner:
                 metadata=child_metadata,
             ),
             injected_system_context=context,
+            input_phase_slots=child_slots.input,
+            output_phase_slots=child_slots.output,
+            use_bootstrap=child_slots.use_bootstrap,
         )
         needs_user = result.needs_user or self._turn_result_needs_user(result)
         return AgentRunResult(
@@ -2350,7 +2523,12 @@ class SessionTurnStepRunner:
                 )
                 for record in result.tool_results
             ),
-            metadata={"parent_turn_id": parent_turn.turn_id, "parent_slot": parent_slot_path, "needs_user": needs_user},
+            metadata={
+                "parent_turn_id": parent_turn.turn_id,
+                "parent_slot": parent_slot_path,
+                "needs_user": needs_user,
+                "child_agent_slots": child_slot_metadata,
+            },
         )
 
     def _spawn_child_agent(
@@ -2361,9 +2539,31 @@ class SessionTurnStepRunner:
         parent_turn: TurnContext,
         parent_slot_path: str,
         context: list[str],
+        input_slots: ChildSlotRequest = None,
+        output_slots: ChildSlotRequest = None,
+        use_bootstrap: bool = False,
         tool_policy: Mapping[str, Any] | None = None,
         notify_on_complete: bool = True,
     ) -> AgentSpawnHandle:
+        self._resolve_child_agent_slots_for_core_id(
+            core_id,
+            input_slots=input_slots,
+            output_slots=output_slots,
+            use_bootstrap=use_bootstrap,
+        )
+        requested_slot_metadata = {
+            "input_slots": self._child_slot_request_metadata(
+                "input",
+                input_slots,
+                default_ids=CHILD_AGENT_DEFAULT_INPUT_SLOTS,
+            ),
+            "output_slots": self._child_slot_request_metadata(
+                "output",
+                output_slots,
+                default_ids=CHILD_AGENT_DEFAULT_OUTPUT_SLOTS,
+            ),
+            "use_bootstrap": use_bootstrap,
+        }
         session_id = utc_id("session_child_")
 
         async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
@@ -2382,9 +2582,13 @@ class SessionTurnStepRunner:
                     parent_turn=parent_turn,
                     parent_slot_path=parent_slot_path,
                     context=context,
+                    input_slots=input_slots,
+                    output_slots=output_slots,
+                    use_bootstrap=use_bootstrap,
                     tool_policy=tool_policy,
                     session_id=session_id,
                 )
+                child_slot_metadata = result.metadata.get("child_agent_slots")
                 summary = result.content or f"child agent {core_id} completed"
                 ctx.update_metadata(
                     {
@@ -2392,6 +2596,7 @@ class SessionTurnStepRunner:
                         "child_session_id": session_id,
                         "child_turn_id": result.turn_id,
                         "needs_user": bool(result.metadata.get("needs_user")),
+                        "resolved_child_agent_slots": child_slot_metadata,
                     }
                 )
                 needs_user = bool(result.metadata.get("needs_user"))
@@ -2416,6 +2621,7 @@ class SessionTurnStepRunner:
                         "child_session_id": session_id,
                         "child_turn_id": result.turn_id,
                         "needs_user": needs_user,
+                        "resolved_child_agent_slots": child_slot_metadata,
                     },
                 )
             except Exception as exc:
@@ -2443,6 +2649,7 @@ class SessionTurnStepRunner:
                     "child_core_id": core_id,
                     "child_session_id": session_id,
                     "parent_slot": parent_slot_path,
+                    "requested_child_agent_slots": requested_slot_metadata,
                     **({"tool_policy": dict(tool_policy)} if tool_policy else {}),
                 },
             )
@@ -2561,16 +2768,24 @@ class SessionTurnStepRunner:
         notify_policy = str(call.arguments.get("notify_policy") or "return_to_parent").strip()
         if notify_policy not in {"return_to_parent", "silent"}:
             return ToolResult(content=f"unsupported notify_policy: {notify_policy}", is_error=True)
+        raw_use_bootstrap = call.arguments.get("use_bootstrap", False)
+        use_bootstrap = False if raw_use_bootstrap is None else raw_use_bootstrap
         context = self._delegation_context(context_mode)
-        handle = self._spawn_child_agent(
-            core_id=child_core_id,
-            raw_input=goal,
-            parent_turn=turn,
-            parent_slot_path="builtin:delegate_task",
-            context=context,
-            tool_policy=tool_policy,
-            notify_on_complete=notify_policy == "return_to_parent",
-        )
+        try:
+            handle = self._spawn_child_agent(
+                core_id=child_core_id,
+                raw_input=goal,
+                parent_turn=turn,
+                parent_slot_path="builtin:delegate_task",
+                context=context,
+                input_slots=call.arguments.get("input_slots"),
+                output_slots=call.arguments.get("output_slots"),
+                use_bootstrap=use_bootstrap,
+                tool_policy=tool_policy,
+                notify_on_complete=notify_policy == "return_to_parent",
+            )
+        except ValueError as exc:
+            return ToolResult(content=str(exc), is_error=True)
         payload = {"task_id": handle.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
@@ -2644,6 +2859,7 @@ class SessionTurnStepRunner:
         interaction_bridge: InteractionBridge | None,
         injected_system_context: list[str],
         serial_slots: list[SlotDefinition] | None = None,
+        phase_slots: ResolvedPhaseSlots | None = None,
     ) -> tuple[str, str, list[ContextContribution], list[InteractionItem]]:
         builder = ModuleInputBuilder()
         raw_input = RawInput(
@@ -2658,8 +2874,12 @@ class SessionTurnStepRunner:
         ]
         items: list[InteractionItem] = []
         activated: set[str] = set()
-        parallel_slots = [] if serial_slots is not None else core.input_pipeline.parallel
-        current_serial_slots = serial_slots or core.input_pipeline.serial
+        if phase_slots is not None:
+            parallel_slots = phase_slots.parallel
+            current_serial_slots = phase_slots.serial
+        else:
+            parallel_slots = [] if serial_slots is not None else core.input_pipeline.parallel
+            current_serial_slots = serial_slots or core.input_pipeline.serial
         parallel_tasks: list[asyncio.Task[Any]] = []
         for slot in parallel_slots:
             parallel_envelope = InputEnvelope(
@@ -2883,11 +3103,16 @@ class SessionTurnStepRunner:
         interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
         serial_slots: list[SlotDefinition] | None = None,
+        phase_slots: ResolvedPhaseSlots | None = None,
     ) -> list[InteractionItem]:
         items: list[InteractionItem] = []
         envelope = OutputEnvelope(content=current_output, metadata=interaction_metadata)
-        parallel_slots = [] if serial_slots is not None else core.output_pipeline.parallel
-        current_serial_slots = serial_slots or core.output_pipeline.serial
+        if phase_slots is not None:
+            parallel_slots = phase_slots.parallel
+            current_serial_slots = phase_slots.serial
+        else:
+            parallel_slots = [] if serial_slots is not None else core.output_pipeline.parallel
+            current_serial_slots = serial_slots or core.output_pipeline.serial
         parallel_tasks: list[asyncio.Task[Any]] = []
         for slot in parallel_slots:
             task = asyncio.create_task(

@@ -21,6 +21,7 @@ class TurnEngineRequest:
     available_tools: list[ToolDefinition]
     interaction_metadata: dict[str, Any]
     interaction_bridge: InteractionBridge | None = None
+    use_bootstrap_context: bool = True
 
 
 @dataclass(slots=True)
@@ -60,6 +61,7 @@ class TurnEngine:
                 turn_messages,
                 turn_id=request.turn.turn_id,
                 step_id=step_id,
+                use_bootstrap_context=request.use_bootstrap_context,
             )
             await self.host._maybe_deliver_system_prompt_debug(
                 messages,
