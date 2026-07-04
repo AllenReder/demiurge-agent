@@ -40,7 +40,6 @@ def _turn(app, core):
         core_id=core.core_id,
         core_revision=core.revision,
         user_input=AgentInput(content="delegate", metadata={}),
-        state={},
         metadata={},
     )
 

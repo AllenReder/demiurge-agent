@@ -75,9 +75,10 @@ capabilities:
 | `mcp.call:<server>` | 允许模型调用某个 MCP server 上的 tools。 |
 | `skill.activate` | 允许 input slots 激活 skills。 |
 | `skill.activate:<skill>` | 允许 input slots 激活特定 skill。 |
-| `state.read` | 通过 `ctx.state` 读取 host state。 |
-| `state.write` | 通过 `ctx.state` 写入 host state。 |
-| `state.propose` | 提交 legacy state proposal effects。 |
+| `state.core.read` | 通过 `ctx.state.core` 读取 core-scoped host state。 |
+| `state.core.write` | 通过 `ctx.state.core` 写入 core-scoped host state。 |
+| `state.session.read` | 通过 `ctx.state.session` 读取 session-scoped host state。 |
+| `state.session.write` | 通过 `ctx.state.session` 写入 session-scoped host state。 |
 | `agents.run:<core>` | 同步运行 child agent。 |
 | `agents.spawn:<core>` | 生成 child agent task。 |
 | `tool.call:evolve_core` | Start、review、promote 或 discard host-owned evolve run。 |

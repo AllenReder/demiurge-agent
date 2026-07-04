@@ -158,24 +158,32 @@ class CompactionResult:
     error: str | None = None
 
 
-class ModuleStateClient:
+@dataclass(slots=True)
+class ModuleStateStores:
+    core: StateStore
+    session: StateStore
+
+
+class ScopedModuleStateClient:
     def __init__(
         self,
         *,
         state_store: StateStore,
         capability: CapabilityFacade,
+        capability_prefix: str,
         slot_path: str,
         turn_id: str,
         emit_event: Callable[..., dict[str, Any]],
     ):
         self.state_store = state_store
         self.capability = capability
+        self.capability_prefix = capability_prefix
         self.slot_path = slot_path
         self.turn_id = turn_id
         self.emit_event = emit_event
 
     def get(self, target: str, default: Any = None) -> Any:
-        self._require("state.read", target)
+        self._require(f"{self.capability_prefix}.read", target)
         return self.state_store.read_target(target, default)
 
     def set(self, target: str, value: Any) -> Any:
@@ -187,13 +195,18 @@ class ModuleStateClient:
     def append(self, target: str, value: Any) -> Any:
         return self._write(StateProposal(target=target, operation="append", patch=value))
 
+    def snapshot(self) -> Mapping[str, Any]:
+        self.capability.require(f"{self.capability_prefix}.read", slot_path=self.slot_path)
+        return self.state_store.snapshot()
+
     def _write(self, proposal: StateProposal) -> Any:
-        self._require("state.write", proposal.target)
+        self._require(f"{self.capability_prefix}.write", proposal.target)
         entry = self.state_store.submit(proposal, source=self.slot_path, turn_id=self.turn_id)
         self.emit_event(
             "state.module_updated",
             turn_id=self.turn_id,
             slot=self.slot_path,
+            scope=self.state_store.scope,
             proposal_id=entry["id"],
             target=proposal.target,
             operation=proposal.operation,
@@ -201,11 +214,40 @@ class ModuleStateClient:
         return self.state_store.read_target(proposal.target)
 
     def _require(self, capability_name: str, target: str) -> None:
-        scoped = f"{capability_name}:{target}"
-        if self.capability.can(scoped, slot_path=self.slot_path):
-            self.capability.require(scoped, slot_path=self.slot_path)
-            return
+        if target:
+            scoped = f"{capability_name}:{target}"
+            if self.capability.can(scoped, slot_path=self.slot_path):
+                self.capability.require(scoped, slot_path=self.slot_path)
+                return
         self.capability.require(capability_name, slot_path=self.slot_path)
+
+
+class ModuleStateClient:
+    def __init__(
+        self,
+        *,
+        state_stores: ModuleStateStores,
+        capability: CapabilityFacade,
+        slot_path: str,
+        turn_id: str,
+        emit_event: Callable[..., dict[str, Any]],
+    ):
+        self.core = ScopedModuleStateClient(
+            state_store=state_stores.core,
+            capability=capability,
+            capability_prefix="state.core",
+            slot_path=slot_path,
+            turn_id=turn_id,
+            emit_event=emit_event,
+        )
+        self.session = ScopedModuleStateClient(
+            state_store=state_stores.session,
+            capability=capability,
+            capability_prefix="state.session",
+            slot_path=slot_path,
+            turn_id=turn_id,
+            emit_event=emit_event,
+        )
 
 
 class ModuleToolClient:
@@ -1466,15 +1508,16 @@ class SessionTurnStepRunner:
             attachments=list(interaction.attachments) if interaction is not None else [],
         )
         user_input = AgentInput(content=text, metadata=interaction_metadata)
-        state_store = StateStore(self.home, core.core_id)
-        state = state_store.read()
+        state_stores = ModuleStateStores(
+            core=StateStore.core(self.home, core.core_id),
+            session=StateStore.session(self.home, core_id=core.core_id, session_id=self.session_id),
+        )
         turn = TurnContext(
             session_id=self.session_id,
             turn_id=turn_id,
             core_id=core.core_id,
             core_revision=self._core_revision(core),
             user_input=user_input,
-            state=state,
             metadata=interaction_metadata,
         )
 
@@ -1495,7 +1538,7 @@ class SessionTurnStepRunner:
                 turn,
                 capability,
                 input_envelope,
-                state_store,
+                state_stores,
                 interaction_metadata=interaction_metadata,
                 interaction_bridge=get_current_bridge(),
                 injected_system_context=injected_system_context or [],
@@ -1562,7 +1605,7 @@ class SessionTurnStepRunner:
                 capability,
                 current_output=final_output,
                 tool_records=tool_records,
-                state_store=state_store,
+                state_stores=state_stores,
                 interaction_metadata=interaction_metadata,
                 interaction_bridge=get_current_bridge(),
                 result_client=result_client,
@@ -2863,7 +2906,7 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         capability: CapabilityFacade,
         envelope: InputEnvelope,
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         *,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
@@ -2906,7 +2949,7 @@ class SessionTurnStepRunner:
                     envelope=parallel_envelope,
                     raw_input=raw_input,
                     builder=builder,
-                    state_store=state_store,
+                    state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
                     interaction_bridge=interaction_bridge,
                 )
@@ -2926,7 +2969,7 @@ class SessionTurnStepRunner:
                     raw_input=raw_input,
                     builder=builder,
                     builder_writable=True,
-                    state_store=state_store,
+                    state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
                     interaction_bridge=interaction_bridge,
                     activated=activated,
@@ -2956,7 +2999,7 @@ class SessionTurnStepRunner:
         envelope: InputEnvelope,
         raw_input: RawInput,
         builder: ModuleInputBuilder,
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
     ) -> None:
@@ -2969,7 +3012,7 @@ class SessionTurnStepRunner:
             raw_input=raw_input,
             builder=builder,
             builder_writable=False,
-            state_store=state_store,
+            state_stores=state_stores,
             interaction_metadata=interaction_metadata,
             interaction_bridge=interaction_bridge,
             activated=set(),
@@ -2994,7 +3037,7 @@ class SessionTurnStepRunner:
         raw_input: RawInput,
         builder: ModuleInputBuilder,
         builder_writable: bool,
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
         activated: set[str],
@@ -3027,7 +3070,7 @@ class SessionTurnStepRunner:
                 emit_event=self.event_log.emit,
             ),
             state=ModuleStateClient(
-                state_store=state_store,
+                state_stores=state_stores,
                 capability=capability,
                 slot_path=slot.relative_path,
                 turn_id=turn.turn_id,
@@ -3108,7 +3151,7 @@ class SessionTurnStepRunner:
         *,
         current_output: str,
         tool_records: list[ToolExecutionRecord],
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
@@ -3134,7 +3177,7 @@ class SessionTurnStepRunner:
                     envelope=envelope,
                     current_output=current_output,
                     tool_records=tool_records,
-                    state_store=state_store,
+                    state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
                     interaction_bridge=interaction_bridge,
                     result_client=result_client.fork(writable=False),
@@ -3159,7 +3202,7 @@ class SessionTurnStepRunner:
                     envelope=envelope,
                     current_output=current_output,
                     tool_records=tool_records,
-                    state_store=state_store,
+                    state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
                     interaction_bridge=interaction_bridge,
                     result_client=result_client,
@@ -3182,7 +3225,7 @@ class SessionTurnStepRunner:
         envelope: OutputEnvelope,
         current_output: str,
         tool_records: list[ToolExecutionRecord],
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
@@ -3213,9 +3256,8 @@ class SessionTurnStepRunner:
                 interaction_metadata=interaction_metadata,
                 emit_event=self.event_log.emit,
             ),
-            state_slice=state_store.read(),
             state=ModuleStateClient(
-                state_store=state_store,
+                state_stores=state_stores,
                 capability=capability,
                 slot_path=slot.relative_path,
                 turn_id=turn.turn_id,
@@ -3276,7 +3318,7 @@ class SessionTurnStepRunner:
         envelope: OutputEnvelope,
         current_output: str,
         tool_records: list[ToolExecutionRecord],
-        state_store: StateStore,
+        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
         interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
@@ -3289,7 +3331,7 @@ class SessionTurnStepRunner:
             envelope=envelope,
             current_output=current_output,
             tool_records=tool_records,
-            state_store=state_store,
+            state_stores=state_stores,
             interaction_metadata=interaction_metadata,
             interaction_bridge=interaction_bridge,
             result_client=result_client,
@@ -3384,7 +3426,6 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         capability: CapabilityFacade,
         slot: SlotDefinition,
-        state_store: StateStore,
         interaction_metadata: dict[str, Any],
     ) -> list[InteractionDelivery]:
         deliveries: list[InteractionDelivery] = []
@@ -3419,11 +3460,6 @@ class SessionTurnStepRunner:
                                 metadata={"slot": slot.relative_path},
                             )
                         )
-                elif effect.type == "state_proposal":
-                    capability.require("state.propose", slot_path=slot.relative_path)
-                    proposal = self._normalize_state_proposal(effect.proposal)
-                    entry = state_store.submit(proposal, source=slot.relative_path, turn_id=turn.turn_id)
-                    self.event_log.emit("state.proposal", turn_id=turn.turn_id, proposal_id=entry["id"])
                 elif effect.type == "evolve_core":
                     capability.require("tool.call:evolve_core", slot_path=slot.relative_path)
                     result = await self.tool_runtime._execute_builtin(
@@ -3946,10 +3982,3 @@ class SessionTurnStepRunner:
         if isinstance(value, EffectRequest):
             return value
         return EffectRequest(**value)
-
-    def _normalize_state_proposal(self, value: StateProposal | dict[str, Any] | None) -> StateProposal:
-        if value is None:
-            raise ValueError("state_proposal effect requires proposal")
-        if isinstance(value, StateProposal):
-            return value
-        return StateProposal(**value)

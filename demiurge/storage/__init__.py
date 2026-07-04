@@ -173,14 +173,43 @@ class ArtifactStore:
 
 
 class StateStore:
-    def __init__(self, home: Path, core_id: str):
+    def __init__(
+        self,
+        home: Path,
+        core_id: str,
+        *,
+        scope: str = "core",
+        session_id: str | None = None,
+    ):
+        if scope not in {"core", "session"}:
+            raise ValueError(f"unsupported state scope: {scope}")
+        if scope == "session" and not session_id:
+            raise ValueError("session state requires session_id")
         self.home = home
         self.core_id = core_id
-        self.path = home / "state" / f"{core_id}.json"
+        self.scope = scope
+        self.session_id = session_id
+        self.path = self._path_for_scope(home, core_id, scope=scope, session_id=session_id)
         self.proposal_log = home / "state" / "proposals.jsonl"
+
+    @classmethod
+    def core(cls, home: Path, core_id: str) -> "StateStore":
+        return cls(home, core_id, scope="core")
+
+    @classmethod
+    def session(cls, home: Path, *, core_id: str, session_id: str) -> "StateStore":
+        return cls(home, core_id, scope="session", session_id=session_id)
+
+    def _path_for_scope(self, home: Path, core_id: str, *, scope: str, session_id: str | None) -> Path:
+        if scope == "core":
+            return home / "state" / f"{core_id}.json"
+        return home / "state" / "sessions" / f"{session_id}.json"
 
     def read(self) -> dict[str, Any]:
         return read_json(self.path, {"schema_version": 1})
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.read()
 
     def read_target(self, target: str, default: Any = None) -> Any:
         cursor: Any = self.read()
@@ -201,9 +230,14 @@ class StateStore:
     ) -> dict[str, Any]:
         entry = {
             "id": utc_id("proposal_"),
+            "scope": self.scope,
             "core_id": self.core_id,
+            "session_id": self.session_id,
             "turn_id": turn_id,
             "source": source,
+            "target": proposal.target,
+            "operation": proposal.operation,
+            "patch": proposal.patch,
             "proposal": {
                 "target": proposal.target,
                 "operation": proposal.operation,

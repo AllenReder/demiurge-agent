@@ -214,7 +214,6 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         core_id=core.core_id,
         core_revision=core.revision,
         user_input=AgentInput(content="", metadata={}),
-        state={},
         metadata={},
     )
     status = await app.runner.execute_tool(

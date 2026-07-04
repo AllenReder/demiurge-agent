@@ -77,9 +77,10 @@ This grants capabilities such as `mcp.call:docs`.
 | `mcp.call:<server>` | Let the model call tools from an MCP server. |
 | `skill.activate` | Let input slots activate skills. |
 | `skill.activate:<skill>` | Let input slots activate a specific skill. |
-| `state.read` | Read host state through `ctx.state`. |
-| `state.write` | Write host state through `ctx.state`. |
-| `state.propose` | Submit legacy state proposal effects. |
+| `state.core.read` | Read core-scoped host state through `ctx.state.core`. |
+| `state.core.write` | Write core-scoped host state through `ctx.state.core`. |
+| `state.session.read` | Read session-scoped host state through `ctx.state.session`. |
+| `state.session.write` | Write session-scoped host state through `ctx.state.session`. |
 | `agents.run:<core>` | Run a child agent synchronously. |
 | `agents.spawn:<core>` | Spawn a child agent task. |
 | `tool.call:evolve_core` | Start, review, promote, or discard a host-owned evolve run. |

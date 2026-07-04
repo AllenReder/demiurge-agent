@@ -107,7 +107,6 @@ class TurnContext:
     core_id: str
     core_revision: str
     user_input: AgentInput
-    state: Mapping[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -177,7 +176,7 @@ class CapabilityClient(Protocol):
         ...
 
 
-class ModuleStateClient(Protocol):
+class ScopedModuleStateClient(Protocol):
     def get(self, target: str, default: JsonValue | None = None) -> JsonValue:
         ...
 
@@ -189,6 +188,14 @@ class ModuleStateClient(Protocol):
 
     def append(self, target: str, value: JsonValue) -> JsonValue:
         ...
+
+    def snapshot(self) -> Mapping[str, Any]:
+        ...
+
+
+class ModuleStateClient(Protocol):
+    core: ScopedModuleStateClient
+    session: ScopedModuleStateClient
 
 
 @dataclass(slots=True)
@@ -232,7 +239,6 @@ class OutputContext:
     output: Any
     history: Any = None
     agents: Any = None
-    state_slice: Mapping[str, Any] = field(default_factory=dict)
     state: Any = None
     tools: Any = None
     result: Any = None
