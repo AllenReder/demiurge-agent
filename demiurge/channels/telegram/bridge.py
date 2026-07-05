@@ -1006,14 +1006,12 @@ class TelegramInteractionBridge:
         state: TelegramConversationState,
         inbound: InteractionInbound,
     ) -> InteractionInbound:
-        completions = state.claim_pending_completions(
+        return ConversationTurnController(state).merge_pending_completions(
+            inbound,
             channel="telegram",
             owner_id="bridge:telegram:merge",
             fallback_source=inbound.source,
         )
-        if not completions:
-            return inbound
-        return state.queue.merge_completions_into(inbound, stored_completions=completions)
 
     def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
         task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
@@ -1034,21 +1032,13 @@ class TelegramInteractionBridge:
             return
 
     async def _enqueue_task_completion(self, state: TelegramConversationState, event: RuntimeTaskCompletionEvent) -> None:
-        if not state.source:
-            return
-        if self._task_worker is None:
-            return
-        inbound = state.claim_completion_event(
+        await ConversationTurnController(state).enqueue_completion_event(
             event,
             channel="telegram",
             owner_id="bridge:telegram:enqueue",
+            run=lambda next_inbound: self._run_inbound(state, next_inbound),
             task_worker=self._task_worker,
-        )
-        if inbound is None:
-            return
-        await ConversationTurnController(state).enqueue_completion(
-            inbound,
-            lambda next_inbound: self._run_inbound(state, next_inbound),
+            require_source=True,
         )
 
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:

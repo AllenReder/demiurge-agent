@@ -352,11 +352,8 @@ class TuiInteractionBridge:
         return ConversationTurnController(self._ingress_state).next_queued_input()
 
     def _merge_pending_completions_into(self, inbound: InteractionInbound) -> InteractionInbound:
-        stored_completions = self._stored_completion_inbounds()
-        return self._ingress_state.queue.merge_completions_into(inbound, stored_completions=stored_completions)
-
-    def _stored_completion_inbounds(self) -> list[InteractionInbound]:
-        return self._ingress_state.claim_pending_completions(
+        return ConversationTurnController(self._ingress_state).merge_pending_completions(
+            inbound,
             channel="tui",
             owner_id="bridge:tui:stored",
             fallback_source="local",
@@ -371,15 +368,18 @@ class TuiInteractionBridge:
             return
 
     async def _enqueue_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        inbound = self._ingress_state.claim_completion_event(
+        async def before_enqueue(_inbound: InteractionInbound) -> None:
+            await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
+
+        result = await ConversationTurnController(self._ingress_state).enqueue_completion_event(
             event,
             channel="tui",
             owner_id="bridge:tui:enqueue",
+            run=self._run_inbound,
+            before_enqueue=before_enqueue,
         )
-        if inbound is None:
+        if result.inbound is None:
             return
-        await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
-        await ConversationTurnController(self._ingress_state).enqueue_completion(inbound, self._run_inbound)
         await self._emit_status()
 
     async def _open_prompt(self, prompt: UserPromptRequest, *, kind: str, wait: bool) -> PendingPrompt:

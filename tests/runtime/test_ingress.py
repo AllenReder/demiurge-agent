@@ -337,3 +337,122 @@ async def test_conversation_turn_controller_enqueue_completion_queues_when_activ
     await task
     assert started == ["completion idle"]
     assert state.active_task is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_merges_pending_completions_from_store_and_queue(tmp_path):
+    worker = RuntimeTaskWorker(control_plane=RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3")))
+    event = await _complete_task(worker, summary="stored complete")
+    state = ConversationIngressState(
+        runtime=_Runtime(_Runner(task_worker=worker)),
+        busy_mode="interrupt",
+        route_binding=_Route(),
+        source="source_1",
+        conversation_key="conversation_1",
+    )
+    await state.queue.put(_completion("queued", "queued complete"))
+
+    merged = ConversationTurnController(state).merge_pending_completions(
+        _user("hello", source="source_1"),
+        channel="test",
+        owner_id="bridge:test:merge",
+    )
+
+    assert merged.text.startswith("hello")
+    assert "stored complete" in merged.text
+    assert "queued complete" in merged.text
+    assert merged.metadata["merged_background_tasks"] == [event.task_id, "queued"]
+    assert worker.pending_events_for_session("session_1") == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_enqueue_completion_event_runs_before_enqueue_hook(tmp_path):
+    worker = RuntimeTaskWorker(control_plane=RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3")))
+    event = await _complete_task(worker)
+    state = ConversationIngressState(
+        runtime=_Runtime(_Runner(task_worker=worker)),
+        busy_mode="interrupt",
+        route_binding=_Route(),
+        source="source_1",
+        conversation_key="conversation_1",
+    )
+    observed: list[str] = []
+
+    async def before_enqueue(inbound):
+        observed.append(f"before:{inbound.metadata['task_id']}")
+        assert state.active_task is None
+
+    async def run(inbound):
+        try:
+            observed.append(f"run:{inbound.metadata['task_id']}")
+        finally:
+            ConversationTurnController(state).finish(asyncio.current_task())
+
+    result = await ConversationTurnController(state).enqueue_completion_event(
+        event,
+        channel="test",
+        owner_id="bridge:test:enqueue",
+        run=run,
+        before_enqueue=before_enqueue,
+    )
+
+    assert result.status == "started"
+    assert result.inbound is not None
+    task = state.active_task
+    assert task is not None
+    await task
+    assert observed == [f"before:{event.task_id}", f"run:{event.task_id}"]
+    assert worker.pending_events_for_session("session_1") == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_enqueue_completion_event_requires_source_before_claiming(tmp_path):
+    worker = RuntimeTaskWorker(control_plane=RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3")))
+    event = await _complete_task(worker)
+    state = ConversationIngressState(
+        runtime=_Runtime(_Runner(task_worker=worker)),
+        busy_mode="interrupt",
+        route_binding=_Route(),
+    )
+
+    async def run(_inbound):
+        raise AssertionError("completion should not run")
+
+    result = await ConversationTurnController(state).enqueue_completion_event(
+        event,
+        channel="test",
+        owner_id="bridge:test:enqueue",
+        run=run,
+        require_source=True,
+    )
+
+    assert result.status == "ignored_no_route"
+    assert result.inbound is None
+    assert [pending.event_id for pending in worker.pending_events_for_session("session_1")] == [event.event_id]
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_enqueue_completion_event_reports_missing_claim(tmp_path):
+    worker = RuntimeTaskWorker(control_plane=RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3")))
+    event = await _complete_task(worker)
+    worker.claim_pending_event(event.event_id, owner_id="other")
+    state = ConversationIngressState(
+        runtime=_Runtime(_Runner(task_worker=worker)),
+        busy_mode="interrupt",
+        route_binding=_Route(),
+        source="source_1",
+    )
+
+    async def run(_inbound):
+        raise AssertionError("completion should not run")
+
+    result = await ConversationTurnController(state).enqueue_completion_event(
+        event,
+        channel="test",
+        owner_id="bridge:test:enqueue",
+        run=run,
+    )
+
+    assert result.status == "not_claimed"
+    assert result.inbound is None
+    assert state.active_task is None

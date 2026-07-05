@@ -164,6 +164,12 @@ class ConversationIngressState:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletionEnqueueResult:
+    status: str
+    inbound: InteractionInbound | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BusyInboundDecision:
     kind: str
     notify: bool
@@ -249,6 +255,49 @@ class ConversationTurnController:
 
     def next_queued_input(self) -> InteractionInbound:
         return self.state.queue.next_inbound()
+
+    def merge_pending_completions(
+        self,
+        inbound: InteractionInbound,
+        *,
+        channel: str,
+        owner_id: str,
+        fallback_source: str = "",
+    ) -> InteractionInbound:
+        completions = self.state.claim_pending_completions(
+            channel=channel,
+            owner_id=owner_id,
+            fallback_source=fallback_source,
+        )
+        if not completions:
+            return inbound
+        return self.state.queue.merge_completions_into(inbound, stored_completions=completions)
+
+    async def enqueue_completion_event(
+        self,
+        event: Any,
+        *,
+        channel: str,
+        owner_id: str,
+        run: Callable[[InteractionInbound], Awaitable[None]],
+        task_worker: Any = None,
+        require_source: bool = False,
+        before_enqueue: Callable[[InteractionInbound], Awaitable[None]] | None = None,
+    ) -> CompletionEnqueueResult:
+        if require_source and not self.state.source:
+            return CompletionEnqueueResult("ignored_no_route")
+        inbound = self.state.claim_completion_event(
+            event,
+            channel=channel,
+            owner_id=owner_id,
+            task_worker=task_worker,
+        )
+        if inbound is None:
+            return CompletionEnqueueResult("not_claimed")
+        if before_enqueue is not None:
+            await before_enqueue(inbound)
+        status = await self.enqueue_completion(inbound, run)
+        return CompletionEnqueueResult(status, inbound)
 
     async def queue_and_drain_if_idle(
         self,
