@@ -428,6 +428,7 @@ def test_cli_init_uses_agents_root_override(tmp_path, capsys):
     assert (home / "agents" / "evolver" / "agent.yaml").exists()
 
 
+@pytest.mark.cross_platform
 def test_core_repository_uses_evolve_run_worktrees_and_git_refs(tmp_path):
     home = tmp_path / "home"
     store = VersionStore(home)

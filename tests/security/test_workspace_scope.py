@@ -5,6 +5,9 @@ import pytest
 from demiurge.security.workspace import WorkspaceScope, WorkspaceScopeError, truncate_text
 
 
+pytestmark = pytest.mark.cross_platform
+
+
 def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))

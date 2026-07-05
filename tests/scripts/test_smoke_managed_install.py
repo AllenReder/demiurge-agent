@@ -4,6 +4,11 @@ import importlib.util
 import sys
 from pathlib import Path, PureWindowsPath
 
+import pytest
+
+
+pytestmark = pytest.mark.cross_platform
+
 
 def load_smoke_module():
     script = Path(__file__).resolve().parents[2] / "scripts" / "smoke_managed_install.py"

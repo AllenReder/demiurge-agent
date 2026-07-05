@@ -5,6 +5,8 @@ import shutil
 import pytest
 import yaml
 
+pytestmark = pytest.mark.slow_integration
+
 from demiurge.app import create_app, source_agents_root
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime

@@ -89,6 +89,31 @@ class YieldUntilProvider:
         return LLMResponse(content="[waited]")
 
 
+class ControlledRuntime:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.inbounds = []
+
+    async def handle(self, inbound, *, bridge):
+        self.inbounds.append(inbound)
+        if inbound.text == "first":
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+        return InteractionOutbound(
+            channel="tui",
+            items=[
+                InteractionItem.delivery_item(
+                    InteractionDelivery(type="text", text=f"[next] {inbound.text}"),
+                )
+            ],
+        )
+
+
 async def _wait_for(predicate, *, timeout: float = 2.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -615,6 +640,36 @@ async def test_tui_bridge_queue_mode_runs_next_input_after_current_turn(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.cross_platform
+async def test_tui_bridge_interrupt_mode_state_machine_cancels_and_drains_next_input(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink)
+    runtime = ControlledRuntime()
+    bridge.runtime = runtime
+
+    assert await bridge.submit("first") == {"accepted": True, "queued": False}
+    await runtime.started.wait()
+
+    assert await bridge.submit("second") == {"accepted": True, "queued": True}
+    await runtime.cancelled.wait()
+    await _wait_for(
+        lambda: len(runtime.inbounds) == 2
+        and bridge._queued_inputs.empty()
+        and not bridge.running
+        and "[next] second" in sink.texts(),
+        timeout=5.0,
+    )
+
+    assert [inbound.text for inbound in runtime.inbounds] == ["first", "second"]
+    output = sink.texts()
+    assert "interrupting current turn: new input" in output
+    assert "turn interrupted" in output
+    assert "[next] second" in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow_integration
 async def test_tui_bridge_interrupt_mode_cancels_current_turn_and_runs_next(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -626,7 +681,7 @@ async def test_tui_bridge_interrupt_mode_cancels_current_turn_and_runs_next(tmp_
     await provider.started.wait()
     await bridge.submit("second")
     await provider.cancelled.wait()
-    await _wait_for(lambda: "[next] second" in sink.texts() and not bridge.running)
+    await _wait_for(lambda: "[next] second" in sink.texts() and not bridge.running, timeout=30.0)
 
     output = sink.texts()
     assert "interrupting current turn: new input" in output

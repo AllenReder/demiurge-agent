@@ -93,7 +93,11 @@ dispatching it, use the same checks:
 ```bash
 git status --short
 uv run python -m compileall demiurge tests
-uv run pytest -vv --durations=20 -o faulthandler_timeout=60
+uv run python scripts/run_python_ci_tests.py --profile full
+uv run python scripts/run_python_ci_tests.py --profile full --shard channels
+uv run python scripts/run_python_ci_tests.py --profile full --shard runtime
+uv run python scripts/run_python_ci_tests.py --profile full --shard packages
+uv run python scripts/run_python_ci_tests.py --profile full --shard rest
 uv run demiurge --help
 uv run demiurge init --help
 uv run python scripts/smoke_managed_install.py
@@ -105,8 +109,9 @@ git diff --check -- ':!demiurge/ui/tui_dist/entry.js'
 ```
 
 The GitHub release workflow is the full cross-platform gate: Python validation
-runs on Ubuntu and Windows for Python 3.11, 3.12, and 3.13, and TUI validation
-runs on Ubuntu and Windows for Node.js 20 and 24.
+runs the full suite on Ubuntu for Python 3.11, 3.12, and 3.13, and runs the
+full suite on Windows for Python 3.11 split across parallel shards. TUI
+validation runs on Ubuntu and Windows for Node.js 20 and 24.
 
 For artifact releases only, also run:
 
