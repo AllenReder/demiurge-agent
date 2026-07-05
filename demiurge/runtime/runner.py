@@ -44,7 +44,15 @@ from demiurge.runtime.interactions import (
 from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
-from demiurge.runtime.slots import SlotInvocation, SlotRuntime
+from demiurge.runtime.slots import (
+    InputPipelineRequest,
+    ModuleInputBuilder,
+    OutputPipelineRequest,
+    RunnerSlotPipelineHost,
+    SlotInvocation,
+    SlotPipelineRuntime,
+    SlotRuntime,
+)
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine, TurnEngineRequest
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
@@ -404,55 +412,6 @@ class ModuleBootstrapClient:
         content = str(text or "")
         if content.strip():
             self.fragments.append(content)
-
-
-class ModuleInputBuilder:
-    def __init__(self) -> None:
-        self.fragments: list[dict[str, str]] = []
-
-    def add_context(
-        self,
-        content: str,
-        *,
-        role: str,
-        write_history: bool,
-    ) -> None:
-        role = role.strip()
-        if role not in {"user", "system"}:
-            raise ValueError(f"invalid input context role: {role}")
-        text = str(content or "").strip()
-        if not text:
-            return
-        self.fragments.append(
-            {
-                "section": role,
-                "content": text,
-                "history_policy": "persist" if write_history else "transient",
-            }
-        )
-
-    def add(
-        self,
-        section: str,
-        content: str,
-        *,
-        history_policy: str | None = None,
-        default_history_policy: str = "persist",
-    ) -> None:
-        policy = history_policy if history_policy is not None else ("transient" if section == "system" else default_history_policy)
-        self.add_context(
-            content,
-            role=section,
-            write_history=policy == "persist",
-        )
-
-    def section_text(self, section: str, *, persisted_only: bool = False) -> str:
-        parts = [
-            item["content"]
-            for item in self.fragments
-            if item["section"] == section and (not persisted_only or item["history_policy"] == "persist")
-        ]
-        return "\n\n".join(parts).strip()
 
 
 class ModuleInputClient:
@@ -1455,6 +1414,7 @@ class SessionTurnStepRunner:
         self.session_runtime = session_runtime
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
+        self.slot_pipeline = SlotPipelineRuntime(RunnerSlotPipelineHost(self))
         self.turn_engine = turn_engine or TurnEngine(RunnerTurnEngineHost(self))
         self.interaction_router = interaction_router or SessionInteractionRouter()
         self.prepare_live_core_callback = prepare_live_core
@@ -1474,6 +1434,13 @@ class SessionTurnStepRunner:
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         return self.event_log.emit(event_type, **payload)
+
+    def emit_slot_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
+        return self.event_log.emit(event_type, **payload)
+
+    def track_slot_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def run_turn(
         self,
@@ -3185,80 +3152,28 @@ class SessionTurnStepRunner:
         serial_slots: list[SlotDefinition] | None = None,
         phase_slots: ResolvedPhaseSlots | None = None,
     ) -> tuple[str, str, list[ContextContribution], list[InteractionItem]]:
-        builder = ModuleInputBuilder()
-        raw_input = RawInput(
-            text=envelope.raw_text,
-            metadata=dict(envelope.metadata),
-            attachments=tuple(envelope.attachments),
-        )
-        contributions: list[ContextContribution] = [
-            ContextContribution(type="instruction", content=content, placement="system_context")
-            for content in injected_system_context
-            if content.strip()
-        ]
-        items: list[InteractionItem] = []
-        activated: set[str] = set()
         if phase_slots is not None:
             parallel_slots = phase_slots.parallel
             current_serial_slots = phase_slots.serial
         else:
             parallel_slots = [] if serial_slots is not None else core.input_pipeline.parallel
             current_serial_slots = serial_slots or core.input_pipeline.serial
-        parallel_tasks: list[asyncio.Task[Any]] = []
-        for slot in parallel_slots:
-            parallel_envelope = InputEnvelope(
-                raw_text=envelope.raw_text,
-                metadata=dict(envelope.metadata),
-                attachments=list(envelope.attachments),
+        result = await self.slot_pipeline.run_input(
+            InputPipelineRequest(
+                core=core,
+                turn=turn,
+                capability=capability,
+                envelope=envelope,
+                state_stores=state_stores,
+                interaction_metadata=interaction_metadata,
+                injected_system_context=injected_system_context,
+                serial_slots=current_serial_slots,
+                parallel_slots=parallel_slots,
             )
-            task = asyncio.create_task(
-                self._run_async_input_slot(
-                    slot,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    envelope=parallel_envelope,
-                    raw_input=raw_input,
-                    builder=builder,
-                    state_stores=state_stores,
-                    interaction_metadata=interaction_metadata,
-                )
-            )
-            parallel_tasks.append(task)
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-            self.event_log.emit("module.async_scheduled", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
-        for slot in current_serial_slots:
-            items.extend(
-                await self._run_input_slot(
-                    slot,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    envelope=envelope,
-                    raw_input=raw_input,
-                    builder=builder,
-                    builder_writable=True,
-                    state_stores=state_stores,
-                    interaction_metadata=interaction_metadata,
-                    activated=activated,
-                    contributions=contributions,
-                )
-            )
-        if parallel_tasks:
-            await asyncio.gather(
-                *parallel_tasks,
-                return_exceptions=False,
-            )
-        system_text = builder.section_text("system")
-        if system_text:
-            contributions.append(ContextContribution(type="instruction", content=system_text, placement="system_context"))
-        user_text = builder.section_text("user")
-        if not user_text:
-            raise RuntimeError("input pipeline did not produce a user message")
-        return user_text, builder.section_text("user", persisted_only=True), contributions, items
+        )
+        return result.user_text, result.persisted_user_text, result.context, result.items
 
-    async def _run_async_input_slot(
+    async def run_input_pipeline_slot(
         self,
         slot: SlotDefinition,
         *,
@@ -3268,10 +3183,14 @@ class SessionTurnStepRunner:
         envelope: InputEnvelope,
         raw_input: RawInput,
         builder: ModuleInputBuilder,
+        builder_writable: bool,
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-    ) -> None:
-        items = await self._run_input_slot(
+        activated: set[str],
+        contributions: list[ContextContribution],
+        background: bool = False,
+    ) -> list[InteractionItem]:
+        return await self._run_input_slot(
             slot,
             core=core,
             turn=turn,
@@ -3279,17 +3198,12 @@ class SessionTurnStepRunner:
             envelope=envelope,
             raw_input=raw_input,
             builder=builder,
-            builder_writable=False,
+            builder_writable=builder_writable,
             state_stores=state_stores,
             interaction_metadata=interaction_metadata,
-            activated=set(),
-            contributions=[],
-            background=True,
-        )
-        await self._flush_pending_background_items(
-            items,
-            turn=turn,
-            interaction_metadata=interaction_metadata,
+            activated=activated,
+            contributions=contributions,
+            background=background,
         )
 
     async def _run_input_slot(
@@ -3419,60 +3333,55 @@ class SessionTurnStepRunner:
         serial_slots: list[SlotDefinition] | None = None,
         phase_slots: ResolvedPhaseSlots | None = None,
     ) -> list[InteractionItem]:
-        items: list[InteractionItem] = []
-        envelope = OutputEnvelope(content=current_output, metadata=interaction_metadata)
         if phase_slots is not None:
             parallel_slots = phase_slots.parallel
             current_serial_slots = phase_slots.serial
         else:
             parallel_slots = [] if serial_slots is not None else core.output_pipeline.parallel
             current_serial_slots = serial_slots or core.output_pipeline.serial
-        parallel_tasks: list[asyncio.Task[Any]] = []
-        for slot in parallel_slots:
-            task = asyncio.create_task(
-                self._run_async_output_slot(
-                    slot,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    envelope=envelope,
-                    current_output=current_output,
-                    tool_records=tool_records,
-                    state_stores=state_stores,
-                    interaction_metadata=interaction_metadata,
-                    result_client=result_client.fork(writable=False),
-                )
+        return await self.slot_pipeline.run_output(
+            OutputPipelineRequest(
+                core=core,
+                turn=turn,
+                capability=capability,
+                current_output=current_output,
+                tool_records=tool_records,
+                state_stores=state_stores,
+                interaction_metadata=interaction_metadata,
+                result_client=result_client,
+                serial_slots=current_serial_slots,
+                parallel_slots=parallel_slots,
             )
-            parallel_tasks.append(task)
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-            self.event_log.emit(
-                "module.async_scheduled",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                kind="output",
-            )
-        for slot in current_serial_slots:
-            items.extend(
-                await self._run_output_slot(
-                    slot,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    envelope=envelope,
-                    current_output=current_output,
-                    tool_records=tool_records,
-                    state_stores=state_stores,
-                    interaction_metadata=interaction_metadata,
-                    result_client=result_client,
-                )
-            )
-        if parallel_tasks:
-            await asyncio.gather(
-                *parallel_tasks,
-                return_exceptions=False,
-            )
-        return items
+        )
+
+    async def run_output_pipeline_slot(
+        self,
+        slot: SlotDefinition,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        envelope: OutputEnvelope,
+        current_output: str,
+        tool_records: list[ToolExecutionRecord],
+        state_stores: ModuleStateStores,
+        interaction_metadata: dict[str, Any],
+        result_client: ModuleResultClient,
+        background: bool = False,
+    ) -> list[InteractionItem]:
+        return await self._run_output_slot(
+            slot,
+            core=core,
+            turn=turn,
+            capability=capability,
+            envelope=envelope,
+            current_output=current_output,
+            tool_records=tool_records,
+            state_stores=state_stores,
+            interaction_metadata=interaction_metadata,
+            result_client=result_client,
+            background=background,
+        )
 
     async def _run_output_slot(
         self,
@@ -3563,33 +3472,13 @@ class SessionTurnStepRunner:
                 raise
             return io_client.items
 
-    async def _run_async_output_slot(
+    async def flush_slot_background_items(
         self,
-        slot: SlotDefinition,
+        items: list[InteractionItem],
         *,
-        core: LoadedCore,
         turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: OutputEnvelope,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
     ) -> None:
-        items = await self._run_output_slot(
-            slot,
-            core=core,
-            turn=turn,
-            capability=capability,
-            envelope=envelope,
-            current_output=current_output,
-            tool_records=tool_records,
-            state_stores=state_stores,
-            interaction_metadata=interaction_metadata,
-            result_client=result_client,
-            background=True,
-        )
         await self._flush_pending_background_items(
             items,
             turn=turn,
