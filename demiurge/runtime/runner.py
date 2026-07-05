@@ -46,7 +46,7 @@ from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slots import SlotInvocation, SlotRuntime
 from demiurge.runtime.store import RuntimeEvent
-from demiurge.runtime.turn import TurnEngine, TurnEngineRequest
+from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine, TurnEngineRequest
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
@@ -1455,7 +1455,7 @@ class SessionTurnStepRunner:
         self.session_runtime = session_runtime
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
-        self.turn_engine = turn_engine or TurnEngine(self)
+        self.turn_engine = turn_engine or TurnEngine(RunnerTurnEngineHost(self))
         self.interaction_router = interaction_router or SessionInteractionRouter()
         self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
@@ -1471,6 +1471,9 @@ class SessionTurnStepRunner:
         self._session_started_ids: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._ensure_current_session()
+
+    def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
+        return self.event_log.emit(event_type, **payload)
 
     async def run_turn(
         self,
@@ -1809,6 +1812,25 @@ class SessionTurnStepRunner:
         )
         return assembled.messages
 
+    def build_turn_messages(
+        self,
+        core: LoadedCore,
+        context: list[ContextContribution],
+        turn_messages: list[LLMMessage],
+        *,
+        turn_id: str,
+        step_id: str,
+        use_bootstrap_context: bool = True,
+    ) -> list[LLMMessage]:
+        return self._build_messages(
+            core,
+            context,
+            turn_messages,
+            turn_id=turn_id,
+            step_id=step_id,
+            use_bootstrap_context=use_bootstrap_context,
+        )
+
     async def _maybe_deliver_system_prompt_debug(
         self,
         messages: list[LLMMessage],
@@ -1898,6 +1920,21 @@ class SessionTurnStepRunner:
                 **interaction_metadata,
             )
 
+    async def deliver_turn_system_prompt_debug(
+        self,
+        messages: list[LLMMessage],
+        *,
+        turn: TurnContext,
+        step_id: str,
+        interaction_metadata: dict[str, Any],
+    ) -> None:
+        await self._maybe_deliver_system_prompt_debug(
+            messages,
+            turn=turn,
+            step_id=step_id,
+            interaction_metadata=interaction_metadata,
+        )
+
     def _format_system_prompt_debug(self, messages: list[LLMMessage], *, turn_id: str, step_id: str) -> str:
         sections = [
             "# System prompt debug",
@@ -1930,6 +1967,12 @@ class SessionTurnStepRunner:
         if self.model_override:
             return self.model_override
         return core.manifest.model.model_name or "fake/demo"
+
+    def resolve_turn_model_name(self, core: LoadedCore) -> str:
+        return self._resolve_model_name(core)
+
+    async def complete_turn_provider(self, request: LLMRequest) -> LLMResponse:
+        return await self.provider.complete(request)
 
     async def prepare_live_core(self) -> None:
         if self.prepare_live_core_callback is not None:
@@ -2438,10 +2481,16 @@ class SessionTurnStepRunner:
     def _tool_result_model_content(self, result: ToolResult) -> str:
         return result.model_output if result.model_output is not None else result.content
 
+    def turn_tool_result_model_content(self, result: ToolResult) -> str:
+        return self._tool_result_model_content(result)
+
     def _truncate_model_content(self, content: str) -> str:
         if len(content) > 4000:
             return f"{content[:4000]}\n...[truncated {len(content) - 4000} chars]"
         return content
+
+    def truncate_turn_model_content(self, content: str) -> str:
+        return self._truncate_model_content(content)
 
     def _session_history_messages(self) -> list[LLMMessage]:
         messages: list[LLMMessage] = []
@@ -2492,6 +2541,70 @@ class SessionTurnStepRunner:
             route=route,
             background=background,
             items=items,
+        )
+
+    def turn_output_client(
+        self,
+        slot: SlotDefinition,
+        *,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        interaction_metadata: dict[str, Any],
+        items: list[InteractionItem],
+    ) -> ModuleIOClient:
+        return self._module_io_client(
+            slot,
+            turn=turn,
+            capability=capability,
+            interaction_metadata=interaction_metadata,
+            items=items,
+        )
+
+    async def send_turn_assistant_step(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        content: str,
+        tool_calls: list[ToolCall],
+        interaction_metadata: dict[str, Any],
+    ) -> tuple[SessionMessage | None, list[InteractionItem]]:
+        return await self.runtime_io.send_assistant_step(
+            turn=turn,
+            step_id=step_id,
+            content=content,
+            tool_calls=tool_calls,
+            interaction_metadata=interaction_metadata,
+        )
+
+    async def send_turn_tool_call_started(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        call: ToolCall,
+        interaction_metadata: dict[str, Any],
+    ) -> InteractionItem:
+        return await self.runtime_io.send_tool_call_started(
+            turn=turn,
+            step_id=step_id,
+            call=call,
+            interaction_metadata=interaction_metadata,
+        )
+
+    async def send_turn_tool_call_finished(
+        self,
+        *,
+        turn: TurnContext,
+        step_id: str,
+        record: ToolExecutionRecord,
+        interaction_metadata: dict[str, Any],
+    ) -> InteractionItem:
+        return await self.runtime_io.send_tool_call_finished(
+            turn=turn,
+            step_id=step_id,
+            record=record,
+            interaction_metadata=interaction_metadata,
         )
 
     def _commit_module_delivery_request(
@@ -2884,6 +2997,24 @@ class SessionTurnStepRunner:
             turn=turn,
             capability=capability,
             emit_event=emit_event,
+            output_factory=output_factory,
+        )
+
+    async def execute_turn_tool(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        output_factory: Callable[[SlotDefinition], Any],
+    ) -> ToolResult:
+        return await self.execute_tool(
+            call,
+            core=core,
+            turn=turn,
+            capability=capability,
+            emit_event=self.event_log.emit,
             output_factory=output_factory,
         )
 
@@ -3998,10 +4129,13 @@ class SessionTurnStepRunner:
     def _append_runtime_event(self, event: RuntimeEvent) -> None:
         self._append_runtime_events([event])
 
+    def append_turn_runtime_event(self, event: RuntimeEvent) -> None:
+        self._append_runtime_event(event)
+
     def _append_runtime_events(self, events: list[RuntimeEvent]) -> None:
         control_plane = getattr(self.session_runtime, "control_plane", None)
         if control_plane is not None:
-            control_plane.store.append(events)
+            control_plane.record_events(events)
 
     def _ack_background_completion_claims(self, metadata: Mapping[str, Any]) -> None:
         claims = []

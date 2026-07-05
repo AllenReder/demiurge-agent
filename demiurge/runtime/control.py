@@ -226,6 +226,12 @@ class RuntimeControlPlane:
             ]
         )
 
+    def record_events(self, events: list[RuntimeEvent]) -> None:
+        """Append host runtime events through the control-plane seam."""
+        if not events:
+            return
+        self.store.append(events)
+
     def emit_completion_ready(
         self,
         *,
