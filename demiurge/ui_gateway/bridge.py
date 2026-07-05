@@ -22,6 +22,12 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.session_commands import (
+    build_session_list_view,
+    format_sessions_table,
+    resolve_session_choice,
+    session_list_view,
+)
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -237,11 +243,13 @@ class TuiInteractionBridge:
             return {"accepted": False, "reason": "prompt not pending"}
         normalized = self._normalize_prompt_answer(answer, pending.choices)
         if pending.kind == "resume":
-            session_id = self._resolve_resume_arg(normalized, pending.records)
-            if session_id is None:
+            view = session_list_view(pending.records, active_session_id=self.app.runner.session_id)
+            resolution = resolve_session_choice(normalized, view)
+            if not resolution.ok:
                 return {"accepted": False, "reason": "invalid session selection"}
-            await self._resume_session(session_id)
-            return {"accepted": True, "kind": "resume", "session_id": session_id}
+            assert resolution.session_id is not None
+            await self._resume_session(resolution.session_id)
+            return {"accepted": True, "kind": "resume", "session_id": resolution.session_id}
         if pending.future is not None and not pending.future.done():
             pending.future.set_result(normalized)
             return {"accepted": True, "kind": pending.kind}
@@ -758,8 +766,13 @@ class TuiInteractionBridge:
 
     async def _sessions(self, args: str) -> bool:
         limit = int(args.strip()) if args.strip().isdigit() else 20
-        records = self.app.session_runtime.list_sessions(core_id=self.app.runner.core_id, limit=limit)
-        await self._emit_command_output("sessions", _format_sessions(records, active_session_id=self.app.runner.session_id))
+        view = build_session_list_view(
+            self.app.session_runtime,
+            core_id=self.app.runner.core_id,
+            active_session_id=self.app.runner.session_id,
+            limit=limit,
+        )
+        await self._emit_command_output("sessions", format_sessions_table(view))
         return True
 
     async def _subagents(self, args: str) -> bool:
@@ -773,16 +786,21 @@ class TuiInteractionBridge:
 
     async def _resume(self, args: str) -> bool:
         raw = args.strip()
-        records = self.app.session_runtime.list_sessions(core_id=self.app.runner.core_id, limit=20)
+        view = build_session_list_view(
+            self.app.session_runtime,
+            core_id=self.app.runner.core_id,
+            active_session_id=self.app.runner.session_id,
+            limit=20,
+        )
         if not raw:
             self._prompt_counter += 1
             prompt_id = f"prompt_{self._prompt_counter}"
             pending = PendingPrompt(
                 prompt_id=prompt_id,
                 question="Resume session",
-                choices=[record.session_id for record in records],
+                choices=view.session_ids,
                 kind="resume",
-                records=records,
+                records=view.records,
                 metadata={"kind": "resume"},
             )
             self._pending_prompts[prompt_id] = pending
@@ -792,16 +810,19 @@ class TuiInteractionBridge:
                     "prompt_id": prompt_id,
                     "kind": "resume",
                     "question": "Resume session",
-                    "choices": [record.session_id for record in records],
-                    "records": [_session_record_dict(record) for record in records],
+                    "choices": view.session_ids,
+                    "records": [choice.as_dict() for choice in view.choices],
                     "metadata": {"kind": "resume"},
                 },
             )
             await self._emit_status()
             return True
-        session_id = self._resolve_resume_arg(raw, records)
-        if session_id is not None:
-            await self._resume_session(session_id)
+        resolution = resolve_session_choice(raw, view)
+        if not resolution.ok:
+            await self._emit_notice(resolution.message or "invalid session selection", level="error")
+            return True
+        assert resolution.session_id is not None
+        await self._resume_session(resolution.session_id)
         return True
 
     async def _resume_session(self, session_id: str) -> None:
@@ -967,15 +988,6 @@ class TuiInteractionBridge:
                 return choices[index]
         return text or (choices[0] if choices else "")
 
-    def _resolve_resume_arg(self, raw: str, records: list[SessionRecord]) -> str | None:
-        value = _strip_outer_wrappers(raw.strip())
-        if value.isdigit():
-            index = int(value) - 1
-            if 0 <= index < len(records):
-                return records[index].session_id
-            return None
-        return value
-
     async def _active_core(self):
         return await self.app.load_active_core()
 
@@ -1126,17 +1138,6 @@ def _tool_call_start_summary(call: ToolCall) -> str:
     return "running"
 
 
-def _session_record_dict(record: SessionRecord) -> dict[str, Any]:
-    return {
-        "session_id": record.session_id,
-        "title": record.title,
-        "updated_at": record.updated_at,
-        "channel": record.channel,
-        "message_count": record.message_count,
-        "preview": record.preview,
-    }
-
-
 def _slash_spec_dict(spec: SlashCommandSpec) -> dict[str, Any]:
     return {
         "name": spec.name,
@@ -1144,22 +1145,6 @@ def _slash_spec_dict(spec: SlashCommandSpec) -> dict[str, Any]:
         "group": spec.group,
         "usage": spec.usage,
     }
-
-
-def _format_sessions(records: list[SessionRecord], *, active_session_id: str) -> str:
-    rows = [
-        (
-            str(index),
-            "*" if record.session_id == active_session_id else "",
-            record.session_id,
-            record.updated_at,
-            record.channel or "",
-            str(record.message_count),
-            record.preview or "",
-        )
-        for index, record in enumerate(records, start=1)
-    ]
-    return _format_table(["#", "", "session_id", "updated", "channel", "messages", "preview"], rows, title="Sessions")
 
 
 def _format_key_values(title: str, values: dict[str, Any]) -> str:
@@ -1200,10 +1185,3 @@ def shorten_text(text: str, limit: int = 160) -> str:
     if limit <= 15:
         return normalized[:limit]
     return f"{normalized[: limit - 15]}...[truncated]"
-
-
-def _strip_outer_wrappers(value: str) -> str:
-    pairs = {"<": ">", "[": "]", '"': '"', "'": "'"}
-    if len(value) >= 2 and value[0] in pairs and value[-1] == pairs[value[0]]:
-        return value[1:-1]
-    return value

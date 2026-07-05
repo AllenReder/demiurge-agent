@@ -20,6 +20,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.providers import ToolCall
@@ -439,34 +440,47 @@ class TextChannelBridgeBase:
 
     async def _command_sessions(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         limit = int(args.strip()) if args.strip().isdigit() else 10
-        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=limit)
-        await self._send_text(inbound.source, self._sessions_text(records, state.runtime.runner.session_id), reply_to=inbound.reply_to, metadata=inbound.metadata)
+        view = build_session_list_view(
+            state.runtime.session_runtime,
+            core_id=state.runtime.runner.core_id,
+            active_session_id=state.runtime.runner.session_id,
+            limit=limit,
+        )
+        await self._send_text(inbound.source, view.text(), reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_resume(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         raw = args.strip()
-        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=20)
+        view = build_session_list_view(
+            state.runtime.session_runtime,
+            core_id=state.runtime.runner.core_id,
+            active_session_id=state.runtime.runner.session_id,
+            limit=20,
+        )
         if not raw:
             await self._send_text(
                 inbound.source,
-                self._sessions_text(records, state.runtime.runner.session_id) + "\n\nUse `/resume <number|session_id>`.",
+                view.text() + "\n\nUse `/resume <number|session_id>`.",
                 reply_to=inbound.reply_to,
                 metadata=inbound.metadata,
             )
             return
-        session_id = raw
-        if raw.isdigit():
-            index = int(raw) - 1
-            if index < 0 or index >= len(records):
-                await self._send_text(inbound.source, f"Session number out of range: {raw}", reply_to=inbound.reply_to, metadata=inbound.metadata)
-                return
-            session_id = records[index].session_id
+        resolution = resolve_session_choice(raw, view)
+        if not resolution.ok:
+            await self._send_text(
+                inbound.source,
+                resolution.message or "Invalid session selection.",
+                reply_to=inbound.reply_to,
+                metadata=inbound.metadata,
+            )
+            return
+        assert resolution.session_id is not None
         try:
-            state.runtime.runner.resume_session(session_id)
+            state.runtime.runner.resume_session(resolution.session_id)
         except FileNotFoundError as exc:
             await self._send_text(inbound.source, str(exc), reply_to=inbound.reply_to, metadata=inbound.metadata)
             return
-        state.route_binding.bind(state.runtime.runner.interaction_router, session_id)
-        await self._send_text(inbound.source, f"Resumed session: `{session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
+        state.route_binding.bind(state.runtime.runner.interaction_router, resolution.session_id)
+        await self._send_text(inbound.source, f"Resumed session: `{resolution.session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         runner = state.runtime.runner
@@ -576,16 +590,6 @@ class TextChannelBridgeBase:
             if state.session_id == session_id:
                 return state
         return None
-
-    def _sessions_text(self, records: Any, active_session_id: str | None) -> str:
-        if not records:
-            return "No sessions found."
-        lines = ["# Sessions"]
-        for index, record in enumerate(records, start=1):
-            marker = "*" if record.session_id == active_session_id else " "
-            preview = f" - {record.preview}" if record.preview else ""
-            lines.append(f"{index}. {marker} `{record.session_id}` - {record.updated_at} - {record.message_count} msg{preview}")
-        return "\n".join(lines)
 
     def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
         if not inbound.conversation_key:
