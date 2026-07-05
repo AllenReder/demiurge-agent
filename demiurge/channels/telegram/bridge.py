@@ -15,18 +15,14 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
-from demiurge.runtime.completions import (
-    CompletionInbox,
-    CompletionRoute,
-    is_background_completion,
-)
+from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
@@ -39,7 +35,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import InboundQueueRuntime
+from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
@@ -59,16 +55,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class TelegramConversationState:
-    runtime: InteractionRuntime
-    busy_mode: str
-    route_binding: SessionRouteBinding
-    conversation_key: str = ""
-    source: str = ""
-    reply_to: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    active_task: asyncio.Task[None] | None = None
-    queue: InboundQueueRuntime = field(default_factory=InboundQueueRuntime)
+class TelegramConversationState(ConversationIngressState):
     pending_approval_id: str | None = None
 
 
@@ -1129,30 +1116,17 @@ class TelegramInteractionBridge:
         return state.queue.next_inbound()
 
     def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        state.source = inbound.source
-        state.reply_to = inbound.reply_to
-        state.metadata = dict(inbound.metadata)
-        state.conversation_key = inbound.conversation_key or state.conversation_key
+        state.remember_route(inbound)
 
     def _merge_stored_task_completions(
         self,
         state: TelegramConversationState,
         inbound: InteractionInbound,
     ) -> InteractionInbound:
-        task_worker = getattr(getattr(state.runtime, "runner", None), "task_worker", None)
-        session_id = getattr(getattr(state.runtime, "runner", None), "session_id", None)
-        if task_worker is None or not session_id:
-            return inbound
-        completions = CompletionInbox(task_worker).claim_pending_for_session(
-            str(session_id),
+        completions = state.claim_pending_completions(
+            channel="telegram",
             owner_id="bridge:telegram:merge",
-            route=CompletionRoute(
-                channel="telegram",
-                source=state.source or inbound.source,
-                reply_to=state.reply_to,
-                conversation_key=state.conversation_key,
-                metadata=state.metadata,
-            ),
+            fallback_source=inbound.source,
         )
         if not completions:
             return inbound
@@ -1181,16 +1155,11 @@ class TelegramInteractionBridge:
             return
         if self._task_worker is None:
             return
-        inbound = CompletionInbox(self._task_worker).claim_event(
+        inbound = state.claim_completion_event(
             event,
+            channel="telegram",
             owner_id="bridge:telegram:enqueue",
-            route=CompletionRoute(
-                channel="telegram",
-                source=state.source,
-                reply_to=state.reply_to,
-                conversation_key=state.conversation_key,
-                metadata=state.metadata,
-            ),
+            task_worker=self._task_worker,
         )
         if inbound is None:
             return
@@ -1205,8 +1174,7 @@ class TelegramInteractionBridge:
 
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:
         for state in self._conversations.values():
-            runner = getattr(state.runtime, "runner", None)
-            if getattr(runner, "session_id", None) == session_id:
+            if state.session_id == session_id:
                 return state
         return None
 

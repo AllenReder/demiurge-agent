@@ -5,14 +5,9 @@ import contextlib
 import contextvars
 import json
 import logging
-from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
-from demiurge.runtime.completions import (
-    CompletionInbox,
-    CompletionRoute,
-    is_background_completion,
-)
+from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -23,7 +18,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import InboundQueueRuntime
+from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.slash import SlashCommand, parse_slash_command
@@ -49,17 +44,7 @@ class GatewayBridge(Protocol):
         ...
 
 
-@dataclass(slots=True)
-class TextConversationState:
-    runtime: InteractionRuntime
-    busy_mode: str
-    route_binding: SessionRouteBinding
-    conversation_key: str = ""
-    source: str = ""
-    reply_to: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    active_task: asyncio.Task[None] | None = None
-    queue: InboundQueueRuntime = field(default_factory=InboundQueueRuntime)
+TextConversationState = ConversationIngressState
 
 
 class TextChannelBridgeBase:
@@ -548,30 +533,17 @@ class TextChannelBridgeBase:
         return state.queue.next_inbound()
 
     def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        state.source = inbound.source
-        state.reply_to = inbound.reply_to
-        state.metadata = dict(inbound.metadata)
-        state.conversation_key = inbound.conversation_key or state.conversation_key
+        state.remember_route(inbound)
 
     def _merge_stored_task_completions(
         self,
         state: TextConversationState,
         inbound: InteractionInbound,
     ) -> InteractionInbound:
-        task_worker = getattr(getattr(state.runtime, "runner", None), "task_worker", None)
-        session_id = getattr(getattr(state.runtime, "runner", None), "session_id", None)
-        if task_worker is None or not session_id:
-            return inbound
-        completions = CompletionInbox(task_worker).claim_pending_for_session(
-            str(session_id),
+        completions = state.claim_pending_completions(
+            channel=self.channel_name,
             owner_id=f"bridge:{self.channel_name}:merge",
-            route=CompletionRoute(
-                channel=self.channel_name,
-                source=state.source or inbound.source,
-                reply_to=state.reply_to,
-                conversation_key=state.conversation_key,
-                metadata=state.metadata,
-            ),
+            fallback_source=inbound.source,
         )
         if not completions:
             return inbound
@@ -600,16 +572,11 @@ class TextChannelBridgeBase:
             return
         if self._task_worker is None:
             return
-        inbound = CompletionInbox(self._task_worker).claim_event(
+        inbound = state.claim_completion_event(
             event,
+            channel=self.channel_name,
             owner_id=f"bridge:{self.channel_name}:enqueue",
-            route=CompletionRoute(
-                channel=self.channel_name,
-                source=state.source,
-                reply_to=state.reply_to,
-                conversation_key=state.conversation_key,
-                metadata=state.metadata,
-            ),
+            task_worker=self._task_worker,
         )
         if inbound is None:
             return
@@ -624,8 +591,7 @@ class TextChannelBridgeBase:
 
     def _state_for_session(self, session_id: str) -> TextConversationState | None:
         for state in self._conversations.values():
-            runner = getattr(state.runtime, "runner", None)
-            if getattr(runner, "session_id", None) == session_id:
+            if state.session_id == session_id:
                 return state
         return None
 
