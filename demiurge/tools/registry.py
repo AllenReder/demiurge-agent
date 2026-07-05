@@ -156,8 +156,14 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "core_id": {"type": "string"},
                 "context_mode": {"type": "string", "enum": ["isolated", "fork"], "default": "isolated"},
                 "notify_policy": {"type": "string", "enum": ["return_to_parent", "silent"], "default": "return_to_parent"},
-                "tool_policy": {"type": "object"},
                 "max_depth": {"type": "integer"},
+                "tools": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["all", "none"]},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "default": "all",
+                },
                 "input_slots": {
                     "anyOf": [
                         {"type": "string", "enum": ["all"]},
