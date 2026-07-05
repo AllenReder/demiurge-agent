@@ -279,6 +279,41 @@ async def test_conversation_key_routes_to_durable_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_new_session_can_replace_conversation_binding(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = EchoInspectingProvider()
+    app.runner.provider = provider
+    runtime = InteractionRuntime(app.runner)
+
+    first = await runtime.handle(
+        InteractionInbound(channel="telegram", text="old chat message", source="123", conversation_key="telegram:123")
+    )
+    new_session_id = app.runner.start_new_session(
+        channel="telegram",
+        conversation_key="telegram:123",
+        source="123",
+        replace_conversation_binding=True,
+    )
+    followup = await runtime.handle(
+        InteractionInbound(channel="telegram", text="fresh chat message", source="123", conversation_key="telegram:123")
+    )
+
+    assert new_session_id != first.session_id
+    assert followup.session_id == new_session_id
+    assert (
+        app.session_runtime.resolve_interaction_session(
+            core_id=app.runner.core_id,
+            channel="telegram",
+            conversation_key="telegram:123",
+        )
+        == new_session_id
+    )
+    request_text = "\n".join(message.content for message in provider.requests[-1].messages)
+    assert "fresh chat message" in request_text
+    assert "old chat message" not in request_text
+
+
+@pytest.mark.asyncio
 async def test_manual_compaction_keeps_summary_and_excludes_compacted_history_from_context(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     provider = EchoInspectingProvider()

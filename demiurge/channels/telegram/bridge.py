@@ -981,6 +981,7 @@ class TelegramInteractionBridge:
             conversation_key=inbound.conversation_key,
             source=inbound.source,
             reply_to=inbound.reply_to,
+            replace_conversation_binding=True,
         )
         state.route_binding.bind(runner.interaction_router, session_id)
         await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to)
