@@ -28,6 +28,7 @@ from demiurge.runtime.session_commands import (
     resolve_session_choice,
     session_list_view,
 )
+from demiurge.runtime.status_commands import RuntimeStatusView, build_runtime_status_view, runtime_status_key_values
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -484,24 +485,25 @@ class TuiInteractionBridge:
 
     def _status_payload(self) -> dict[str, Any]:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
+        view = self._runtime_status_view()
         return {
             "workspace": str(self.app.workspace.root),
             "core_id": pointer.core_id,
             "core_revision": pointer.active_revision,
-            "session_id": self.app.runner.session_id,
+            "session_id": view.session_id,
             "provider": self.app.provider_name,
             "model": self.app.model_name,
             "runtime_timezone": self.app.runtime_timezone.name,
             "runtime_timezone_source": self.app.runtime_timezone.source,
-            "status": "running" if self.running else "idle",
+            "status": view.status_text,
             "tool_display": self.tool_display,
             "user_message_align": self.app.user_message_align,
             "demiurge_theme_color": self.app.demiurge_theme_color,
             "user_theme_color": self.app.user_theme_color,
-            "busy_mode": self.busy_mode,
-            "queued_inputs": self._queued_inputs.qsize(),
+            "busy_mode": view.busy_mode,
+            "queued_inputs": view.queued_inputs,
             "background_tasks": self.app.runner.background_task_count,
-            "message_count": self.app.session_runtime.message_count(self.app.runner.session_id),
+            "message_count": view.message_count or 0,
             "pending_prompts": len(self._pending_prompts),
             "pending_approvals": len(self._pending_approvals),
             "last_error": self._last_error,
@@ -555,12 +557,10 @@ class TuiInteractionBridge:
     async def _status(self, _: str) -> bool:
         status = self.app.status()
         status.update(
-            {
-                "busy_mode": self.busy_mode,
-                "current_status": "running" if self.running else "idle",
-                "queued_inputs": self._queued_inputs.qsize(),
-                "tool_display": self.tool_display,
-            }
+            runtime_status_key_values(
+                self._runtime_status_view(),
+                extra=(("tool_display", self.tool_display),),
+            )
         )
         await self._emit_command_output("status", _format_key_values("Status", status))
         return True
@@ -976,6 +976,15 @@ class TuiInteractionBridge:
 
     def _bind_current_session(self) -> None:
         self._route_binding.bind(self.app.runner.interaction_router, self.app.runner.session_id)
+
+    def _runtime_status_view(self) -> RuntimeStatusView:
+        return build_runtime_status_view(
+            self.app.runner,
+            self.app.session_runtime,
+            running=self.running,
+            busy_mode=self.busy_mode,
+            queued_inputs=self._queued_inputs.qsize(),
+        )
 
     def _normalize_prompt_answer(self, answer: str, choices: list[str]) -> str:
         text = str(answer or "").strip()

@@ -38,6 +38,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
+from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import command_names_for_surface, help_text_for_surface, parse_slash_command, telegram_command_specs
@@ -920,29 +921,31 @@ class TelegramInteractionBridge:
         await self._send_text(inbound.source, help_text_for_surface("telegram"), reply_to=inbound.reply_to)
 
     async def _command_status(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        queue_depth = state.queue.qsize()
-        running = ConversationTurnController(state).running
-        lines = [
-            "# Status",
-            f"- core: `{getattr(runner, 'core_id', '?')}`",
-            f"- session: `{getattr(runner, 'session_id', '?')}`",
-            f"- running: `{str(running).lower()}`",
-            f"- busy mode: `{state.busy_mode}`",
-            f"- queued: `{queue_depth}`",
-            "- access: `restricted`",
-            f"- allowed users: `{len(self.allowed_users)}`",
-            f"- allowed chats: `{len(self.allowed_chats)}`",
-            f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
-        ]
-        session_id = getattr(runner, "session_id", None)
-        if session_id:
-            with contextlib.suppress(Exception):
-                lines.append(f"- messages: `{state.runtime.session_runtime.message_count(session_id)}`")
-        provider_name = getattr(runner, "provider_name", None)
-        if provider_name:
-            lines.append(f"- provider: `{provider_name}`")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
+        session_runtime = getattr(state.runtime, "session_runtime", None) or getattr(
+            state.runtime.runner,
+            "session_runtime",
+            None,
+        )
+        view = build_runtime_status_view(
+            state.runtime.runner,
+            session_runtime,
+            running=ConversationTurnController(state).running,
+            busy_mode=state.busy_mode,
+            queued_inputs=state.queue.qsize(),
+        )
+        await self._send_text(
+            inbound.source,
+            format_runtime_status_markdown(
+                view,
+                extra_lines=(
+                    "- access: `restricted`",
+                    f"- allowed users: `{len(self.allowed_users)}`",
+                    f"- allowed chats: `{len(self.allowed_chats)}`",
+                    f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
+                ),
+            ),
+            reply_to=inbound.reply_to,
+        )
 
     async def _command_new(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         await self._cancel_active(state)

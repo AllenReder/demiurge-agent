@@ -21,6 +21,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
+from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.providers import ToolCall
@@ -351,29 +352,25 @@ class TextChannelBridgeBase:
         )
 
     async def _command_status(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        runner = state.runtime.runner
-        queue_depth = state.queue.qsize()
-        running = ConversationTurnController(state).running
-        lines = [
-            "# Status",
-            f"- channel: `{self.channel_name}`",
-            f"- core: `{getattr(runner, 'core_id', '?')}`",
-            f"- session: `{getattr(runner, 'session_id', '?')}`",
-            f"- running: `{str(running).lower()}`",
-            f"- busy mode: `{state.busy_mode}`",
-            f"- queued: `{queue_depth}`",
-        ]
-        session_id = getattr(runner, "session_id", None)
-        if session_id:
-            with contextlib.suppress(Exception):
-                lines.append(f"- messages: `{state.runtime.session_runtime.message_count(session_id)}`")
-        provider_name = getattr(runner, "provider_name", None)
-        if provider_name:
-            lines.append(f"- provider: `{provider_name}`")
-        runtime_timezone = getattr(runner, "runtime_timezone", None)
-        if runtime_timezone is not None:
-            lines.append(f"- runtime timezone: `{runtime_timezone.name}` ({runtime_timezone.source})")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to, metadata=inbound.metadata)
+        session_runtime = getattr(state.runtime, "session_runtime", None) or getattr(
+            state.runtime.runner,
+            "session_runtime",
+            None,
+        )
+        view = build_runtime_status_view(
+            state.runtime.runner,
+            session_runtime,
+            running=ConversationTurnController(state).running,
+            busy_mode=state.busy_mode,
+            queued_inputs=state.queue.qsize(),
+            channel=self.channel_name,
+        )
+        await self._send_text(
+            inbound.source,
+            format_runtime_status_markdown(view),
+            reply_to=inbound.reply_to,
+            metadata=inbound.metadata,
+        )
 
     async def _command_new(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         await self._cancel_active(state)
