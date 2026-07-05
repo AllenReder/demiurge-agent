@@ -23,6 +23,7 @@ from demiurge.runtime.child_agents import (
     RunnerChildAgentHost,
 )
 from demiurge.runtime.control import ActionSource, ActionSpec
+from demiurge.runtime.completions import CompletionInbox
 from demiurge.runtime.delivery import DeliveryRequest, DeliveryRouteContext
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -1964,17 +1965,7 @@ class SessionTurnStepRunner:
             control_plane.record_events(events)
 
     def _ack_background_completion_claims(self, metadata: Mapping[str, Any]) -> None:
-        claims = []
-        raw_claims = metadata.get("completion_claims")
-        if isinstance(raw_claims, list):
-            claims.extend(item for item in raw_claims if isinstance(item, Mapping))
-        if metadata.get("event_id") and metadata.get("completion_claim_id"):
-            claims.append({"event_id": metadata.get("event_id"), "claim_id": metadata.get("completion_claim_id")})
-        for item in claims:
-            event_id = item.get("event_id")
-            claim_id = item.get("claim_id")
-            if event_id and claim_id:
-                self.task_worker.ack_pending_event_id(str(event_id), claim_id=str(claim_id))
+        CompletionInbox(self.task_worker).ack_from_metadata(metadata)
 
     def _sanitize_runtime_error(self, exc: Exception) -> str:
         message = str(exc).replace("\n", " ").strip()

@@ -8,6 +8,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from demiurge.runtime.completions import (
+    CompletionInbox,
+    CompletionRoute,
+    is_background_completion,
+    merge_completion_inbounds,
+)
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -107,7 +113,7 @@ class TextChannelBridgeBase:
 
         if inbound.conversation_key:
             inbound = self._consume_inbound_pending_choice(inbound)
-        if not _is_background_completion(inbound):
+        if not is_background_completion(inbound):
             inbound = self._merge_stored_task_completions(state, inbound)
         if state.active_task and not state.active_task.done():
             await self._handle_busy_inbound(state, inbound)
@@ -285,7 +291,7 @@ class TextChannelBridgeBase:
 
     async def _handle_busy_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         await state.queue.put(inbound)
-        if _is_background_completion(inbound):
+        if is_background_completion(inbound):
             return
         if state.busy_mode == "queue":
             await self._send_text(
@@ -541,7 +547,7 @@ class TextChannelBridgeBase:
         while not state.queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 inbound = state.queue.get_nowait()
-                if preserve_completions and _is_background_completion(inbound):
+                if preserve_completions and is_background_completion(inbound):
                     preserved.append(inbound)
                 else:
                     count += 1
@@ -554,14 +560,14 @@ class TextChannelBridgeBase:
         while not state.queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 pending.append(state.queue.get_nowait())
-        user_index = next((index for index, item in enumerate(pending) if not _is_background_completion(item)), None)
+        user_index = next((index for index, item in enumerate(pending) if not is_background_completion(item)), None)
         selected_index = user_index if user_index is not None else 0
         selected = pending.pop(selected_index)
-        if not _is_background_completion(selected):
-            completions = [item for item in pending if _is_background_completion(item)]
-            pending = [item for item in pending if not _is_background_completion(item)]
+        if not is_background_completion(selected):
+            completions = [item for item in pending if is_background_completion(item)]
+            pending = [item for item in pending if not is_background_completion(item)]
             if completions:
-                selected = _merge_completion_inbounds(selected, completions)
+                selected = merge_completion_inbounds(selected, completions)
         for item in pending:
             state.queue.put_nowait(item)
         return selected
@@ -581,25 +587,20 @@ class TextChannelBridgeBase:
         session_id = getattr(getattr(state.runtime, "runner", None), "session_id", None)
         if task_worker is None or not session_id:
             return inbound
-        completions: list[InteractionInbound] = []
-        for event in task_worker.pending_events_for_session(str(session_id)):
-            claim = task_worker.claim_pending_event(event.event_id, owner_id=f"bridge:{self.channel_name}:merge")
-            if claim is None:
-                continue
-            completions.append(
-                _task_completion_inbound(
-                    event,
-                    channel=self.channel_name,
-                    source=state.source or inbound.source,
-                    reply_to=state.reply_to,
-                    conversation_key=state.conversation_key,
-                    metadata=state.metadata,
-                    claim_id=claim.claim_id,
-                )
-            )
+        completions = CompletionInbox(task_worker).claim_pending_for_session(
+            str(session_id),
+            owner_id=f"bridge:{self.channel_name}:merge",
+            route=CompletionRoute(
+                channel=self.channel_name,
+                source=state.source or inbound.source,
+                reply_to=state.reply_to,
+                conversation_key=state.conversation_key,
+                metadata=state.metadata,
+            ),
+        )
         if not completions:
             return inbound
-        return _merge_completion_inbounds(inbound, completions)
+        return merge_completion_inbounds(inbound, completions)
 
     def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
         task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
@@ -622,21 +623,21 @@ class TextChannelBridgeBase:
     async def _enqueue_task_completion(self, state: TextConversationState, event: RuntimeTaskCompletionEvent) -> None:
         if not state.source:
             return
-        claim_id = None
-        if self._task_worker is not None:
-            claim = self._task_worker.claim_pending_event(event.event_id, owner_id=f"bridge:{self.channel_name}:enqueue")
-            if claim is None:
-                return
-            claim_id = claim.claim_id
-        inbound = _task_completion_inbound(
+        if self._task_worker is None:
+            return
+        inbound = CompletionInbox(self._task_worker).claim_event(
             event,
-            channel=self.channel_name,
-            source=state.source,
-            reply_to=state.reply_to,
-            conversation_key=state.conversation_key,
-            metadata=state.metadata,
-            claim_id=claim_id,
+            owner_id=f"bridge:{self.channel_name}:enqueue",
+            route=CompletionRoute(
+                channel=self.channel_name,
+                source=state.source,
+                reply_to=state.reply_to,
+                conversation_key=state.conversation_key,
+                metadata=state.metadata,
+            ),
         )
+        if inbound is None:
+            return
         if state.active_task and not state.active_task.done():
             await state.queue.put(inbound)
             return
@@ -811,61 +812,3 @@ def _media_block_fallback(block: dict[str, Any]) -> str:
     caption = block.get("text")
     prefix = f"{caption}\n" if caption else ""
     return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
-
-
-def _task_completion_inbound(
-    event: RuntimeTaskCompletionEvent,
-    *,
-    channel: str,
-    source: str,
-    reply_to: str | None,
-    conversation_key: str | None,
-    metadata: dict[str, Any] | None = None,
-    claim_id: str | None = None,
-) -> InteractionInbound:
-    event_metadata = event.to_metadata()
-    if claim_id is not None:
-        event_metadata["completion_claim_id"] = claim_id
-    return InteractionInbound(
-        channel=channel,
-        text=event.to_inbound_text(),
-        source=source,
-        reply_to=reply_to,
-        conversation_key=conversation_key,
-        metadata={**dict(metadata or {}), **event_metadata},
-    )
-
-
-def _is_background_completion(inbound: InteractionInbound) -> bool:
-    return inbound.metadata.get("trigger") == "background_task"
-
-
-def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
-    metadata = dict(user_inbound.metadata)
-    metadata["merged_background_tasks"] = [
-        item.metadata.get("task_id") for item in completions if item.metadata.get("task_id")
-    ]
-    metadata["completion_claims"] = [
-        {"event_id": item.metadata.get("event_id"), "claim_id": item.metadata.get("completion_claim_id")}
-        for item in completions
-        if item.metadata.get("event_id") and item.metadata.get("completion_claim_id")
-    ]
-    completion_text = "\n\n".join(item.text for item in completions if item.text)
-    text = "\n\n".join(
-        part
-        for part in [
-            user_inbound.text,
-            "[SYSTEM: Pending background task events merged into this user turn]",
-            completion_text,
-        ]
-        if part
-    )
-    return InteractionInbound(
-        channel=user_inbound.channel,
-        text=text,
-        source=user_inbound.source,
-        reply_to=user_inbound.reply_to,
-        conversation_key=user_inbound.conversation_key,
-        metadata=metadata,
-        attachments=list(user_inbound.attachments),
-    )

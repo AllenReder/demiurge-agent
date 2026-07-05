@@ -11,6 +11,12 @@ from demiurge.diagnostics.doctor import DoctorRuntime
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
+from demiurge.runtime.completions import (
+    CompletionInbox,
+    CompletionRoute,
+    is_background_completion,
+    merge_completion_inbounds,
+)
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.interactions import (
     InteractionInbound,
@@ -99,6 +105,7 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
+        self.completion_inbox = CompletionInbox(self.app.task_worker)
         self._task_unsubscribe = self.app.task_worker.subscribe(self._on_task_completion)
 
     @property
@@ -316,7 +323,7 @@ class TuiInteractionBridge:
 
     async def _run_inbound(self, inbound: InteractionInbound) -> None:
         try:
-            if not _is_background_completion(inbound):
+            if not is_background_completion(inbound):
                 await self.emit("interaction.message", {"role": "user", "text": inbound.text})
             result = await self.runtime.handle(inbound, route_binding=self._route_binding)
             await self.deliver(result)
@@ -342,14 +349,14 @@ class TuiInteractionBridge:
         while not self._queued_inputs.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 pending.append(self._queued_inputs.get_nowait())
-        user_index = next((index for index, item in enumerate(pending) if not _is_background_completion(item)), None)
+        user_index = next((index for index, item in enumerate(pending) if not is_background_completion(item)), None)
         selected_index = user_index if user_index is not None else 0
         selected = pending.pop(selected_index)
-        if not _is_background_completion(selected):
-            completions = [item for item in pending if _is_background_completion(item)]
-            pending = [item for item in pending if not _is_background_completion(item)]
+        if not is_background_completion(selected):
+            completions = [item for item in pending if is_background_completion(item)]
+            pending = [item for item in pending if not is_background_completion(item)]
             if completions:
-                selected = _merge_completion_inbounds(selected, completions)
+                selected = merge_completion_inbounds(selected, completions)
         for item in pending:
             self._queued_inputs.put_nowait(item)
         return selected
@@ -359,35 +366,28 @@ class TuiInteractionBridge:
         if self._queued_inputs.empty():
             if not stored_completions:
                 return inbound
-            return _merge_completion_inbounds(inbound, stored_completions)
+            return merge_completion_inbounds(inbound, stored_completions)
         pending: list[InteractionInbound] = []
         while not self._queued_inputs.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 pending.append(self._queued_inputs.get_nowait())
-        completions = stored_completions + [item for item in pending if _is_background_completion(item)]
-        for item in [item for item in pending if not _is_background_completion(item)]:
+        completions = stored_completions + [item for item in pending if is_background_completion(item)]
+        for item in [item for item in pending if not is_background_completion(item)]:
             self._queued_inputs.put_nowait(item)
         if not completions:
             return inbound
-        return _merge_completion_inbounds(inbound, completions)
+        return merge_completion_inbounds(inbound, completions)
 
     def _stored_completion_inbounds(self) -> list[InteractionInbound]:
-        completions: list[InteractionInbound] = []
-        for event in self.app.task_worker.pending_events_for_session(self.app.runner.session_id):
-            claim = self.app.task_worker.claim_pending_event(event.event_id, owner_id="bridge:tui:stored")
-            if claim is None:
-                continue
-            completions.append(
-                _task_completion_inbound(
-                    event,
-                    channel="tui",
-                    source="local",
-                    reply_to=None,
-                    conversation_key=self._conversation_key(),
-                    claim_id=claim.claim_id,
-                )
-            )
-        return completions
+        return self.completion_inbox.claim_pending_for_session(
+            self.app.runner.session_id,
+            owner_id="bridge:tui:stored",
+            route=CompletionRoute(
+                channel="tui",
+                source="local",
+                conversation_key=self._conversation_key(),
+            ),
+        )
 
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
         if event.owner_session_id != self.app.runner.session_id or self.should_exit:
@@ -398,17 +398,17 @@ class TuiInteractionBridge:
             return
 
     async def _enqueue_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        claim = self.app.task_worker.claim_pending_event(event.event_id, owner_id="bridge:tui:enqueue")
-        if claim is None:
-            return
-        inbound = _task_completion_inbound(
+        inbound = self.completion_inbox.claim_event(
             event,
-            channel="tui",
-            source="local",
-            reply_to=None,
-            conversation_key=self._conversation_key(),
-            claim_id=claim.claim_id,
+            owner_id="bridge:tui:enqueue",
+            route=CompletionRoute(
+                channel="tui",
+                source="local",
+                conversation_key=self._conversation_key(),
+            ),
         )
+        if inbound is None:
+            return
         await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
         if self.running or not self._queued_inputs.empty():
             await self._queued_inputs.put(inbound)
@@ -1110,63 +1110,6 @@ def _historical_tool_item(message: Any, events: dict[str, dict[str, Any]], *, fu
         "display": "full" if full else "summary",
         "tools": [tool],
     }
-
-
-def _task_completion_inbound(
-    event: RuntimeTaskCompletionEvent,
-    *,
-    channel: str,
-    source: str,
-    reply_to: str | None,
-    conversation_key: str | None,
-    claim_id: str | None = None,
-) -> InteractionInbound:
-    metadata = event.to_metadata()
-    if claim_id is not None:
-        metadata["completion_claim_id"] = claim_id
-    return InteractionInbound(
-        channel=channel,
-        text=event.to_inbound_text(),
-        source=source,
-        reply_to=reply_to,
-        conversation_key=conversation_key,
-        metadata=metadata,
-    )
-
-
-def _is_background_completion(inbound: InteractionInbound) -> bool:
-    return inbound.metadata.get("trigger") == "background_task"
-
-
-def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
-    metadata = dict(user_inbound.metadata)
-    metadata["merged_background_tasks"] = [
-        item.metadata.get("task_id") for item in completions if item.metadata.get("task_id")
-    ]
-    metadata["completion_claims"] = [
-        {"event_id": item.metadata.get("event_id"), "claim_id": item.metadata.get("completion_claim_id")}
-        for item in completions
-        if item.metadata.get("event_id") and item.metadata.get("completion_claim_id")
-    ]
-    completion_text = "\n\n".join(item.text for item in completions if item.text)
-    text = "\n\n".join(
-        part
-        for part in [
-            user_inbound.text,
-            "[SYSTEM: Pending background task events merged into this user turn]",
-            completion_text,
-        ]
-        if part
-    )
-    return InteractionInbound(
-        channel=user_inbound.channel,
-        text=text,
-        source=user_inbound.source,
-        reply_to=user_inbound.reply_to,
-        conversation_key=user_inbound.conversation_key,
-        metadata=metadata,
-        attachments=list(user_inbound.attachments),
-    )
 
 
 def _tool_call_record_dict(index: int, record: ToolInteractionRecord, *, full: bool) -> dict[str, Any]:
