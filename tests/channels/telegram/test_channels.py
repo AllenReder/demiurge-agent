@@ -34,7 +34,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.providers import ToolCall
+from demiurge.providers import LLMResponse, ToolCall
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.util import write_json
@@ -86,6 +86,16 @@ class FakeRunner:
         result.items = [InteractionItem.delivery_item(delivery) for delivery in result.deliveries]
         self.kwargs = kwargs
         return result
+
+
+class InspectingProvider:
+    def __init__(self):
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        user_text = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
+        return LLMResponse(content=f"assistant: {user_text}")
 
 
 class BlockingRunner(FakeRunner):
@@ -2075,6 +2085,69 @@ async def test_telegram_status_slash_bypasses_model_turn():
     assert "allowed users: `1`" in api.sent[0]["text"]
     assert "allowed chats: `1`" in api.sent[0]["text"]
     assert "current authorized: `true`" in api.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_new_rebinds_conversation_to_fresh_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = InspectingProvider()
+    app.runner.provider = provider
+    api = FakeApi()
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(app.runner),
+        api=api,
+        bot_username="demiurge_bot",
+    )
+
+    await bridge.handle_inbound(
+        InteractionInbound(
+            channel="telegram",
+            text="old telegram message",
+            source="123",
+            reply_to="1",
+            conversation_key="telegram:123",
+        )
+    )
+    state = bridge._conversations["telegram:123"]
+    await state.active_task
+    old_session_id = state.runtime.runner.session_id
+
+    await bridge.handle_inbound(
+        InteractionInbound(
+            channel="telegram",
+            text="/new",
+            source="123",
+            reply_to="2",
+            conversation_key="telegram:123",
+        )
+    )
+    new_session_id = state.runtime.runner.session_id
+
+    await bridge.handle_inbound(
+        InteractionInbound(
+            channel="telegram",
+            text="fresh telegram message",
+            source="123",
+            reply_to="3",
+            conversation_key="telegram:123",
+        )
+    )
+    await state.active_task
+
+    assert new_session_id != old_session_id
+    assert state.runtime.runner.session_id == new_session_id
+    assert (
+        app.session_runtime.resolve_interaction_session(
+            core_id=app.runner.core_id,
+            channel="telegram",
+            conversation_key="telegram:123",
+        )
+        == new_session_id
+    )
+    request_text = "\n".join(message.content for message in provider.requests[-1].messages)
+    assert "fresh telegram message" in request_text
+    assert "old telegram message" not in request_text
+    assert any("New session:" in sent["text"] for sent in api.sent)
 
 
 @pytest.mark.asyncio

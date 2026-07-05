@@ -1946,23 +1946,36 @@ class SessionTurnStepRunner:
         conversation_key: str | None = None,
         source: str | None = None,
         reply_to: str | None = None,
+        replace_conversation_binding: bool = False,
     ) -> str:
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
+        core_revision = self._core_revision(core)
+        metadata = {key: value for key, value in {"source": source, "reply_to": reply_to}.items() if value is not None}
+        bind_immediately = not (replace_conversation_binding and channel and conversation_key)
         record = self.session_runtime.create_session(
             core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            channel=channel,
-            conversation_key=conversation_key,
+            core_revision=core_revision,
+            channel=channel if bind_immediately else None,
+            conversation_key=conversation_key if bind_immediately else None,
             workspace=self.workspace,
             provider=self.provider_name,
             model=self._resolve_model_name(core),
-            metadata={key: value for key, value in {"source": source, "reply_to": reply_to}.items() if value is not None},
+            metadata=metadata,
         )
+        if not bind_immediately:
+            record = self.session_runtime.rebind_interaction_session(
+                record.session_id,
+                core_id=core.core_id,
+                core_revision=core_revision,
+                channel=channel,
+                conversation_key=conversation_key,
+                metadata=metadata,
+            )
         self._switch_session(record.session_id, emit_resumed=False)
         self.event_log.emit(
             "session.created",
             core_id=core.core_id,
-            core_revision=self._core_revision(core),
+            core_revision=core_revision,
             channel=channel,
             conversation_key=conversation_key,
         )

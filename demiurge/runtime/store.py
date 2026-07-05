@@ -414,6 +414,29 @@ class RuntimeStore:
                 ),
             )
             self._project_session_binding(connection, event)
+        elif event_type == "session.binding.rebound":
+            connection.execute(
+                """
+                UPDATE sessions
+                SET core_id = COALESCE(?, core_id),
+                    status = COALESCE(?, status),
+                    channel = COALESCE(?, channel),
+                    target_json = COALESCE(?, target_json),
+                    updated_at = COALESCE(?, updated_at)
+                WHERE session_id = ?
+                """,
+                (
+                    payload.get("core_id"),
+                    payload.get("status"),
+                    payload.get("channel"),
+                    json.dumps(payload.get("target"), ensure_ascii=False, sort_keys=True)
+                    if payload.get("target") is not None
+                    else None,
+                    payload.get("updated_at") or event["created_at"],
+                    event["aggregate_id"],
+                ),
+            )
+            self._project_session_binding(connection, event, replace=True)
         elif event_type in {"session.updated", "session.resumed"}:
             connection.execute(
                 """
@@ -696,7 +719,13 @@ class RuntimeStore:
             ),
         )
 
-    def _project_session_binding(self, connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+    def _project_session_binding(
+        self,
+        connection: sqlite3.Connection,
+        event: dict[str, Any],
+        *,
+        replace: bool = False,
+    ) -> None:
         payload = event["payload"]
         target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
         core_id = payload.get("core_id")
@@ -704,6 +733,17 @@ class RuntimeStore:
         conversation_key = target.get("conversation_key")
         if not core_id or not channel or not conversation_key:
             return
+        if replace:
+            cursor = connection.execute(
+                """
+                UPDATE session_bindings
+                SET session_id = ?, updated_at = ?
+                WHERE core_id = ? AND channel = ? AND conversation_key = ?
+                """,
+                (event["aggregate_id"], event["created_at"], core_id, channel, conversation_key),
+            )
+            if cursor.rowcount:
+                return
         connection.execute(
             """
             INSERT OR IGNORE INTO session_bindings (

@@ -256,6 +256,43 @@ class SessionRuntime:
         self._append_runtime_event(event)
         return self.get_session(session_id)
 
+    def rebind_interaction_session(
+        self,
+        session_id: str,
+        *,
+        core_id: str,
+        core_revision: str,
+        channel: str,
+        conversation_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SessionRecord:
+        if not channel or not conversation_key:
+            raise ValueError("interaction session rebind requires channel and conversation_key")
+        current = self.get_session(session_id)
+        merged_metadata = dict(current.metadata or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        record = SessionRecord(
+            session_id=session_id,
+            core_id=core_id,
+            core_revision=core_revision,
+            created_at=current.created_at,
+            updated_at=utc_now(),
+            channel=channel,
+            conversation_key=conversation_key,
+            workspace=current.workspace,
+            provider=current.provider,
+            model=current.model,
+            title=current.title,
+            preview=current.preview,
+            message_count=current.message_count,
+            compaction_summary_id=current.compaction_summary_id,
+            compacted_until_message_id=current.compacted_until_message_id,
+            metadata=merged_metadata,
+        )
+        self._append_runtime_event(self._session_event(record, "session.binding.rebound"))
+        return self.get_session(session_id)
+
     def get_session(self, session_id: str) -> SessionRecord:
         rows = self.store.query(RuntimeQuery(table="sessions", where={"session_id": session_id}, limit=1)).rows
         if not rows:
