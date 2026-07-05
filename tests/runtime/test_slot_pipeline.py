@@ -58,46 +58,22 @@ class _Host:
     def track_background_task(self, task: asyncio.Task[Any]) -> None:
         self.background_tasks.append(task)
 
-    async def run_input_slot(
-        self,
-        slot,
-        *,
-        core,
-        turn,
-        capability,
-        envelope,
-        raw_input,
-        builder,
-        builder_writable,
-        state_stores,
-        interaction_metadata,
-        activated,
-        contributions,
-        background=False,
-    ):
-        self.input_calls.append((slot.slot_id, builder_writable, background))
-        if builder_writable:
-            builder.add("user", f"{slot.slot_id}:{raw_input.text}")
-            builder.add("system", f"system:{slot.slot_id}")
-        return [InteractionItem(kind=f"input:{slot.slot_id}")]
+    async def run_input_slot(self, request):
+        self.input_calls.append((request.slot.slot_id, request.builder_writable, request.background))
+        assert request.turn.turn_id == "turn_1"
+        assert request.raw_input.text == "hello"
+        assert request.interaction_metadata.get("channel") in {None, "test"}
+        if request.builder_writable:
+            request.builder.add("user", f"{request.slot.slot_id}:{request.raw_input.text}")
+            request.builder.add("system", f"system:{request.slot.slot_id}")
+        return [InteractionItem(kind=f"input:{request.slot.slot_id}")]
 
-    async def run_output_slot(
-        self,
-        slot,
-        *,
-        core,
-        turn,
-        capability,
-        envelope,
-        current_output,
-        tool_records,
-        state_stores,
-        interaction_metadata,
-        result_client,
-        background=False,
-    ):
-        self.output_calls.append((slot.slot_id, result_client.writable, background))
-        return [InteractionItem(kind=f"output:{slot.slot_id}")]
+    async def run_output_slot(self, request):
+        self.output_calls.append((request.slot.slot_id, request.result_client.writable, request.background))
+        assert request.turn.turn_id == "turn_1"
+        assert request.current_output == "assistant"
+        assert request.envelope.content == "assistant"
+        return [InteractionItem(kind=f"output:{request.slot.slot_id}")]
 
     async def flush_background_items(self, items, *, turn, interaction_metadata):
         self.flushed.append([item.kind for item in items])

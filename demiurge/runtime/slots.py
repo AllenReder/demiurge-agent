@@ -138,6 +138,38 @@ class OutputPipelineRequest:
     parallel_slots: list[SlotDefinition] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class InputSlotRunRequest:
+    slot: SlotDefinition
+    core: Any
+    turn: TurnContext
+    capability: Any
+    envelope: InputEnvelope
+    raw_input: RawInput
+    builder: ModuleInputBuilder
+    builder_writable: bool
+    state_stores: Any
+    interaction_metadata: dict[str, Any]
+    activated: set[str]
+    contributions: list[ContextContribution]
+    background: bool = False
+
+
+@dataclass(slots=True)
+class OutputSlotRunRequest:
+    slot: SlotDefinition
+    core: Any
+    turn: TurnContext
+    capability: Any
+    envelope: OutputEnvelope
+    current_output: str
+    tool_records: list[ToolExecutionRecord]
+    state_stores: Any
+    interaction_metadata: dict[str, Any]
+    result_client: Any
+    background: bool = False
+
+
 class SlotPipelineHost(Protocol):
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         ...
@@ -145,40 +177,10 @@ class SlotPipelineHost(Protocol):
     def track_background_task(self, task: asyncio.Task[Any]) -> None:
         ...
 
-    async def run_input_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: Any,
-        turn: TurnContext,
-        capability: Any,
-        envelope: InputEnvelope,
-        raw_input: RawInput,
-        builder: ModuleInputBuilder,
-        builder_writable: bool,
-        state_stores: Any,
-        interaction_metadata: dict[str, Any],
-        activated: set[str],
-        contributions: list[ContextContribution],
-        background: bool = False,
-    ) -> list[InteractionItem]:
+    async def run_input_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
         ...
 
-    async def run_output_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: Any,
-        turn: TurnContext,
-        capability: Any,
-        envelope: OutputEnvelope,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: Any,
-        interaction_metadata: dict[str, Any],
-        result_client: Any,
-        background: bool = False,
-    ) -> list[InteractionItem]:
+    async def run_output_slot(self, request: OutputSlotRunRequest) -> list[InteractionItem]:
         ...
 
     async def flush_background_items(
@@ -203,67 +205,11 @@ class RunnerSlotPipelineHost:
     def track_background_task(self, task: asyncio.Task[Any]) -> None:
         self.runner.track_slot_background_task(task)
 
-    async def run_input_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: Any,
-        turn: TurnContext,
-        capability: Any,
-        envelope: InputEnvelope,
-        raw_input: RawInput,
-        builder: ModuleInputBuilder,
-        builder_writable: bool,
-        state_stores: Any,
-        interaction_metadata: dict[str, Any],
-        activated: set[str],
-        contributions: list[ContextContribution],
-        background: bool = False,
-    ) -> list[InteractionItem]:
-        return await self.runner.run_input_pipeline_slot(
-            slot,
-            core=core,
-            turn=turn,
-            capability=capability,
-            envelope=envelope,
-            raw_input=raw_input,
-            builder=builder,
-            builder_writable=builder_writable,
-            state_stores=state_stores,
-            interaction_metadata=interaction_metadata,
-            activated=activated,
-            contributions=contributions,
-            background=background,
-        )
+    async def run_input_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
+        return await self.runner.run_input_pipeline_slot(request)
 
-    async def run_output_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: Any,
-        turn: TurnContext,
-        capability: Any,
-        envelope: OutputEnvelope,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: Any,
-        interaction_metadata: dict[str, Any],
-        result_client: Any,
-        background: bool = False,
-    ) -> list[InteractionItem]:
-        return await self.runner.run_output_pipeline_slot(
-            slot,
-            core=core,
-            turn=turn,
-            capability=capability,
-            envelope=envelope,
-            current_output=current_output,
-            tool_records=tool_records,
-            state_stores=state_stores,
-            interaction_metadata=interaction_metadata,
-            result_client=result_client,
-            background=background,
-        )
+    async def run_output_slot(self, request: OutputSlotRunRequest) -> list[InteractionItem]:
+        return await self.runner.run_output_pipeline_slot(request)
 
     async def flush_background_items(
         self,
@@ -321,18 +267,20 @@ class SlotPipelineRuntime:
         for slot in request.serial_slots:
             items.extend(
                 await self.host.run_input_slot(
-                    slot,
-                    core=request.core,
-                    turn=request.turn,
-                    capability=request.capability,
-                    envelope=request.envelope,
-                    raw_input=raw_input,
-                    builder=builder,
-                    builder_writable=True,
-                    state_stores=request.state_stores,
-                    interaction_metadata=request.interaction_metadata,
-                    activated=activated,
-                    contributions=contributions,
+                    InputSlotRunRequest(
+                        slot=slot,
+                        core=request.core,
+                        turn=request.turn,
+                        capability=request.capability,
+                        envelope=request.envelope,
+                        raw_input=raw_input,
+                        builder=builder,
+                        builder_writable=True,
+                        state_stores=request.state_stores,
+                        interaction_metadata=request.interaction_metadata,
+                        activated=activated,
+                        contributions=contributions,
+                    )
                 )
             )
         if parallel_tasks:
@@ -360,19 +308,21 @@ class SlotPipelineRuntime:
         builder: ModuleInputBuilder,
     ) -> None:
         items = await self.host.run_input_slot(
-            slot,
-            core=request.core,
-            turn=request.turn,
-            capability=request.capability,
-            envelope=envelope,
-            raw_input=raw_input,
-            builder=builder,
-            builder_writable=False,
-            state_stores=request.state_stores,
-            interaction_metadata=request.interaction_metadata,
-            activated=set(),
-            contributions=[],
-            background=True,
+            InputSlotRunRequest(
+                slot=slot,
+                core=request.core,
+                turn=request.turn,
+                capability=request.capability,
+                envelope=envelope,
+                raw_input=raw_input,
+                builder=builder,
+                builder_writable=False,
+                state_stores=request.state_stores,
+                interaction_metadata=request.interaction_metadata,
+                activated=set(),
+                contributions=[],
+                background=True,
+            )
         )
         await self.host.flush_background_items(
             items,
@@ -403,16 +353,18 @@ class SlotPipelineRuntime:
         for slot in request.serial_slots:
             items.extend(
                 await self.host.run_output_slot(
-                    slot,
-                    core=request.core,
-                    turn=request.turn,
-                    capability=request.capability,
-                    envelope=envelope,
-                    current_output=request.current_output,
-                    tool_records=request.tool_records,
-                    state_stores=request.state_stores,
-                    interaction_metadata=request.interaction_metadata,
-                    result_client=request.result_client,
+                    OutputSlotRunRequest(
+                        slot=slot,
+                        core=request.core,
+                        turn=request.turn,
+                        capability=request.capability,
+                        envelope=envelope,
+                        current_output=request.current_output,
+                        tool_records=request.tool_records,
+                        state_stores=request.state_stores,
+                        interaction_metadata=request.interaction_metadata,
+                        result_client=request.result_client,
+                    )
                 )
             )
         if parallel_tasks:
@@ -427,17 +379,19 @@ class SlotPipelineRuntime:
         envelope: OutputEnvelope,
     ) -> None:
         items = await self.host.run_output_slot(
-            slot,
-            core=request.core,
-            turn=request.turn,
-            capability=request.capability,
-            envelope=envelope,
-            current_output=request.current_output,
-            tool_records=request.tool_records,
-            state_stores=request.state_stores,
-            interaction_metadata=request.interaction_metadata,
-            result_client=request.result_client.fork(writable=False),
-            background=True,
+            OutputSlotRunRequest(
+                slot=slot,
+                core=request.core,
+                turn=request.turn,
+                capability=request.capability,
+                envelope=envelope,
+                current_output=request.current_output,
+                tool_records=request.tool_records,
+                state_stores=request.state_stores,
+                interaction_metadata=request.interaction_metadata,
+                result_client=request.result_client.fork(writable=False),
+                background=True,
+            )
         )
         await self.host.flush_background_items(
             items,

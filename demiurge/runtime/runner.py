@@ -46,8 +46,10 @@ from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slots import (
     InputPipelineRequest,
+    InputSlotRunRequest,
     ModuleInputBuilder,
     OutputPipelineRequest,
+    OutputSlotRunRequest,
     RunnerSlotPipelineHost,
     SlotInvocation,
     SlotPipelineRuntime,
@@ -3173,37 +3175,21 @@ class SessionTurnStepRunner:
         )
         return result.user_text, result.persisted_user_text, result.context, result.items
 
-    async def run_input_pipeline_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: InputEnvelope,
-        raw_input: RawInput,
-        builder: ModuleInputBuilder,
-        builder_writable: bool,
-        state_stores: ModuleStateStores,
-        interaction_metadata: dict[str, Any],
-        activated: set[str],
-        contributions: list[ContextContribution],
-        background: bool = False,
-    ) -> list[InteractionItem]:
+    async def run_input_pipeline_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
         return await self._run_input_slot(
-            slot,
-            core=core,
-            turn=turn,
-            capability=capability,
-            envelope=envelope,
-            raw_input=raw_input,
-            builder=builder,
-            builder_writable=builder_writable,
-            state_stores=state_stores,
-            interaction_metadata=interaction_metadata,
-            activated=activated,
-            contributions=contributions,
-            background=background,
+            request.slot,
+            core=request.core,
+            turn=request.turn,
+            capability=request.capability,
+            envelope=request.envelope,
+            raw_input=request.raw_input,
+            builder=request.builder,
+            builder_writable=request.builder_writable,
+            state_stores=request.state_stores,
+            interaction_metadata=request.interaction_metadata,
+            activated=request.activated,
+            contributions=request.contributions,
+            background=request.background,
         )
 
     async def _run_input_slot(
@@ -3354,33 +3340,19 @@ class SessionTurnStepRunner:
             )
         )
 
-    async def run_output_pipeline_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: OutputEnvelope,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: ModuleStateStores,
-        interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
-        background: bool = False,
-    ) -> list[InteractionItem]:
+    async def run_output_pipeline_slot(self, request: OutputSlotRunRequest) -> list[InteractionItem]:
         return await self._run_output_slot(
-            slot,
-            core=core,
-            turn=turn,
-            capability=capability,
-            envelope=envelope,
-            current_output=current_output,
-            tool_records=tool_records,
-            state_stores=state_stores,
-            interaction_metadata=interaction_metadata,
-            result_client=result_client,
-            background=background,
+            request.slot,
+            core=request.core,
+            turn=request.turn,
+            capability=request.capability,
+            envelope=request.envelope,
+            current_output=request.current_output,
+            tool_records=request.tool_records,
+            state_stores=request.state_stores,
+            interaction_metadata=request.interaction_metadata,
+            result_client=request.result_client,
+            background=request.background,
         )
 
     async def _run_output_slot(
