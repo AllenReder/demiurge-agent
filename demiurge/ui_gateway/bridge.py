@@ -13,6 +13,7 @@ from demiurge.packages import PackageManager, PackageOperationError, load_packag
 from demiurge.providers import ToolCall
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.delegation import subagents_command_text
+from demiurge.runtime.event_commands import build_events_command_text, build_trace_command_text
 from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionOutbound,
@@ -863,46 +864,18 @@ class TuiInteractionBridge:
         return await self._trace("last")
 
     async def _trace(self, args: str) -> bool:
-        turn_id = args.strip() or "last"
-        if turn_id == "last":
-            if self.app.runner.display_turns:
-                turn_id = str(self.app.runner.display_turns[-1]["turn_id"])
-            else:
-                latest = self.app.session_runtime.latest_turn_id(self.app.runner.session_id)
-                if latest:
-                    turn_id = latest
-                else:
-                    await self._emit_command_output("trace", "no turns yet")
-                    return True
-        events = self.app.runner.event_log.for_turn(turn_id)
-        if not events:
-            latest = self.app.session_runtime.latest_turn_id(self.app.runner.session_id)
-            if latest and latest != turn_id:
-                events = self.app.runner.event_log.for_turn(latest)
-                turn_id = latest
-        if not events:
-            await self._emit_command_output("trace", "no turns yet")
-            return True
-        rows = [(str(event.get("created_at", "")), str(event.get("type", "")), self._event_detail(event)) for event in events]
-        await self._emit_command_output("trace", format_table(["time", "type", "detail"], rows, title=f"Trace {turn_id}"))
+        text = build_trace_command_text(
+            self.app.runner.event_log,
+            self.app.session_runtime,
+            session_id=self.app.runner.session_id,
+            display_turns=self.app.runner.display_turns,
+            args=args,
+        )
+        await self._emit_command_output("trace", text)
         return True
 
     async def _events(self, args: str) -> bool:
-        event_type: str | None = None
-        limit = 10
-        parts = args.split()
-        if parts:
-            if parts[0].isdigit():
-                limit = int(parts[0])
-            else:
-                event_type = parts[0]
-                if len(parts) > 1 and parts[1].isdigit():
-                    limit = int(parts[1])
-        rows = [
-            (str(event.get("created_at", "")), str(event.get("type", "")), str(event.get("turn_id", "")), self._event_detail(event))
-            for event in self.app.runner.event_log.tail(limit, event_type=event_type)
-        ]
-        await self._emit_command_output("events", format_table(["time", "type", "turn", "detail"], rows, title="Events"))
+        await self._emit_command_output("events", build_events_command_text(self.app.runner.event_log, args=args))
         return True
 
     async def _tool_display(self, args: str) -> bool:
@@ -1008,25 +981,6 @@ class TuiInteractionBridge:
             user_input=AgentInput(content=""),
             metadata={"channel": "tui", "source": "local", "target": "local"},
         )
-
-    def _event_detail(self, event: dict[str, Any]) -> str:
-        event_type = event.get("type")
-        if event_type == "actions.requested":
-            actions = event.get("actions") or []
-            return ", ".join(str(action.get("name")) for action in actions if isinstance(action, dict))
-        if event_type == "action.result":
-            status = "error" if event.get("is_error") else "ok"
-            return f"{event.get('tool_name')} {status}: {shorten_text(str(event.get('content') or ''))}"
-        if event_type and str(event_type).startswith("approval."):
-            return " ".join(
-                str(part)
-                for part in [event.get("tool_name"), event.get("decision"), event.get("reason"), event.get("summary")]
-                if part
-            )
-        if event_type == "message.completed":
-            return shorten_text(str(event.get("content") or ""))
-        return shorten_text(json.dumps({k: v for k, v in event.items() if k not in {"id", "created_at", "type", "session_id"}}, ensure_ascii=False))
-
 
 def _delivery_dict(delivery: Any) -> dict[str, Any]:
     return {
