@@ -64,6 +64,7 @@ async def test_email_deliver_sends_threaded_reply():
     await bridge.deliver(
         InteractionOutbound(
             "email",
+            session_id="session_1",
             items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
             metadata={"source": "alice@example.com", "email_subject": "Question", "email_message_id": "<m1>", "email_references": "<root>"},
         )

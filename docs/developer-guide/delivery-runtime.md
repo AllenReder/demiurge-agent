@@ -10,10 +10,17 @@ events, artifacts, and channel items.
 
 Every output `send_*` call also writes a delivery intent into the SQLite
 runtime `outbox` projection and a matching `delivery.send` durable work item.
-`DeliveryRuntime` owns dispatch through the active channel bridge and records
-`sending`, `sent`, `failed`, or `unknown` status back to the outbox. Channel
-bridges adapt payloads to platform APIs; they do not own durable delivery
-state.
+`DeliveryRuntime` owns dispatch through `SessionInteractionRouter`, which looks
+up the active route for `InteractionOutbound.session_id`. Channel adapters are
+bound to sessions; they adapt payloads to platform APIs but do not own durable
+delivery state.
+
+The in-memory `InteractionItem.dispatch_status` lifecycle is
+`pending -> scheduled -> delivered/failed/unrouted`. The durable outbox
+lifecycle is `queued -> sending -> sent/failed/unknown/unrouted`.
+`unrouted` means no route is currently bound for the outbound session. It is
+different from `failed`, which means a route existed and adapter delivery raised
+an error.
 
 ## Sources
 
@@ -22,7 +29,7 @@ Delivery requests can come from:
 - output modules
 - authored tools
 - schedule runs
-- channel bridge logic
+- channel adapter logic
 
 ## History Policy
 
@@ -34,10 +41,32 @@ useful for progress, notices, and live-only output.
 Artifacts are represented by host-owned records. Output modules may request
 artifact delivery, but the host owns paths, metadata, and persistence.
 
+## Session Routes
+
+`InteractionOutbound.session_id` is required. The `channel` field is adapter
+metadata; it no longer decides route ownership. Ordinary live delivery is routed
+only by `outbound.session_id`.
+
+`SessionInteractionRouter` owns the live route table:
+
+- `bind(session_id, route)` attaches a TUI, Telegram, or other adapter route to
+  one session and returns a token.
+- `unbind(token)` removes that live route.
+- `deliver(outbound)` sends only to the route bound for `outbound.session_id`.
+- `prompt_user(prompt)` and `request_approval(request)` perform separate
+  session-aware route lookups for interactive prompts and approvals.
+
+Routes defensively reject outbound payloads for any session other than the one
+they are bound to. `InteractionRuntime.handle()` binds the inbound route after
+the runner resolves the final session. `/new`, `/resume`, and session switch
+paths must rebind to the new session.
+
 ## Channels
 
-Channel bridges adapt delivery into platform-specific messages. They also carry
-route context for scheduled and asynchronous delivery.
+Channel adapters adapt delivery into platform-specific messages. They no longer
+act as ambient bridges inherited by nested work. If a session has no active
+route, ordinary deliveries and tool lifecycle items are marked `unrouted` and
+are not returned as pending fallback output from `InteractionRuntime.handle()`.
 
 If bridge delivery fails after history was written, the history row remains
 durable. Non-text delivery with `write_history=True` must provide explicit
@@ -51,6 +80,16 @@ that delivery `unknown` instead of replaying it automatically. A channel that
 can reconcile platform state may resolve `unknown`; otherwise it remains
 operator-visible state.
 
+## Subagents
+
+Child agent runs use separate `session_child_*` sessions. The router does not
+know parent/child lineage. Child ordinary output and tool lifecycle delivery go
+only to a route explicitly bound for the child session. Without such a route,
+they are `unrouted`; the parent sees the child only through explicit
+`AgentRunResult`, task completion, or future observability events.
+
 ## Boundary
 
 Do not let output modules write session history or channel state directly.
+Do not route delivery by parent/child relationships, conversation keys, or
+ambient adapter state.

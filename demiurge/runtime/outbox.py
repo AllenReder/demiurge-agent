@@ -4,7 +4,7 @@ import contextlib
 from typing import Any, Mapping
 
 from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
-from demiurge.runtime.interactions import InteractionBridge, InteractionItem, InteractionOutbound
+from demiurge.runtime.interactions import InteractionItem, InteractionOutbound, SessionInteractionRouter
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 from demiurge.storage import EventLog
 
@@ -12,9 +12,10 @@ from demiurge.storage import EventLog
 class DeliveryRuntime:
     """Dispatches delivery intents and projects outbox status."""
 
-    def __init__(self, *, store: RuntimeStore, event_log: EventLog):
+    def __init__(self, *, store: RuntimeStore, event_log: EventLog, router: SessionInteractionRouter):
         self.store = store
         self.event_log = event_log
+        self.router = router
         self.work = DurableWorkRuntime(store)
 
     async def dispatch_item(
@@ -25,7 +26,6 @@ class DeliveryRuntime:
         turn_id: str,
         channel: str,
         metadata: Mapping[str, Any],
-        interaction_bridge: InteractionBridge,
         event_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         delivery_id = self._delivery_id(item)
@@ -51,7 +51,17 @@ class DeliveryRuntime:
             metadata=dict(metadata),
         )
         try:
-            await interaction_bridge.deliver(outbound)
+            result = await self.router.deliver(outbound)
+            if result.status == "unrouted":
+                self.mark_unrouted(
+                    item,
+                    turn_id=turn_id,
+                    event_metadata=event_metadata,
+                    attempts=claim.attempt if claim is not None else None,
+                )
+                if claim is not None:
+                    self.work.succeed(claim)
+                return
             item.set_dispatch_status("delivered")
             if delivery_id:
                 if claim is not None:
@@ -79,6 +89,42 @@ class DeliveryRuntime:
                 event_metadata=event_metadata,
                 attempts=claim.attempt if claim is not None else None,
             )
+
+    def mark_unrouted(
+        self,
+        item: InteractionItem,
+        *,
+        turn_id: str,
+        event_metadata: Mapping[str, Any] | None = None,
+        attempts: int | None = None,
+    ) -> None:
+        item.metadata["dispatch_error"] = "no_interactive_route"
+        if item.delivery is not None:
+            item.delivery.metadata = {
+                **dict(item.delivery.metadata),
+                "delivery_error": "no_interactive_route",
+            }
+            delivery_id = self._delivery_id(item)
+            if delivery_id:
+                self._append(
+                    RuntimeEvent(
+                        type="delivery.unrouted",
+                        aggregate_type="delivery",
+                        aggregate_id=delivery_id,
+                        payload={
+                            "status": "unrouted",
+                            "attempts": attempts if attempts is not None else self.delivery_attempts(delivery_id) + 1,
+                            "last_error": "no_interactive_route",
+                        },
+                    )
+                )
+        item.set_dispatch_status("unrouted")
+        self.event_log.emit(
+            "delivery.unrouted",
+            turn_id=turn_id,
+            reason="no_interactive_route",
+            **dict(event_metadata or {}),
+        )
 
     def mark_failed(
         self,

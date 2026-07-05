@@ -30,6 +30,7 @@ from demiurge.runtime.interactions import (
     InteractionItem,
     InteractionOutbound,
     InteractionRuntime,
+    SessionInteractionRouter,
     ToolInteractionRecord,
     UserPromptRequest,
 )
@@ -46,7 +47,7 @@ def _outbound(
     delivery_list=None,
     tool_result_list=None,
     prompt=None,
-    session_id=None,
+    session_id="session_1",
     turn_id=None,
     metadata=None,
 ):
@@ -65,6 +66,7 @@ def _outbound(
 
 class FakeRunner:
     core_id = "assistant"
+    session_id = "session_1"
 
     def __init__(self):
         self.texts = []
@@ -128,10 +130,14 @@ class ApprovalRunner(FakeRunner):
     async def run_turn(self, text, **kwargs):
         self.texts.append(text)
         self.kwargs = kwargs
+        route_binding = kwargs.get("route_binding")
+        if route_binding is not None:
+            route_binding.bind(self.interaction_router, "session_1")
         request = ApprovalRequest(
             tool_name="terminal",
             tool_call_id="call_1",
             turn_id="turn_1",
+            session_id="session_1",
             capability="terminal.exec",
             action="exec",
             risk="critical",
@@ -141,7 +147,7 @@ class ApprovalRunner(FakeRunner):
             arguments_preview={"cwd": ".", "command": "whoami", "env_keys": []},
         )
         self.request_started.set()
-        self.decision = await BridgeApprovalProvider().decide(request)
+        self.decision = await BridgeApprovalProvider(self.interaction_router).decide(request)
 
         class Result:
             session_id = "session_1"
@@ -596,20 +602,22 @@ async def test_interaction_runtime_calls_runner_with_metadata():
 
 @pytest.mark.asyncio
 async def test_bridge_approval_provider_fails_closed_without_bridge():
+    router = SessionInteractionRouter()
     request = ApprovalRequest(
         tool_name="terminal",
         tool_call_id="call_1",
         turn_id="turn_1",
+        session_id="session_1",
         capability="terminal.exec",
         action="exec",
         risk="high",
         summary="run",
     )
 
-    decision = await BridgeApprovalProvider().decide(request)
+    decision = await BridgeApprovalProvider(router).decide(request)
 
     assert decision.value == "deny"
-    assert "no active interaction bridge" in decision.reason
+    assert decision.reason == "no_interactive_route"
 
 
 def test_telegram_normalizes_private_group_command_mention_and_reply():

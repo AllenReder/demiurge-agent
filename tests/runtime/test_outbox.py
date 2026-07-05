@@ -1,7 +1,7 @@
 import pytest
 
 from demiurge.runtime.control import RuntimeControlPlane
-from demiurge.runtime.interactions import InteractionDelivery, InteractionItem
+from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, SessionInteractionRouter
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeQuery, RuntimeStore
@@ -57,7 +57,9 @@ async def test_delivery_runtime_claims_sends_and_marks_sent_once(tmp_path):
     store = RuntimeStore(tmp_path / "runtime.sqlite3")
     item = _queue_delivery(store)
     bridge = RecordingBridge()
-    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_1"))
+    router = SessionInteractionRouter()
+    router.bind("session_1", bridge)
+    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_1"), router=router)
 
     await runtime.dispatch_item(
         item,
@@ -65,7 +67,6 @@ async def test_delivery_runtime_claims_sends_and_marks_sent_once(tmp_path):
         turn_id="turn_1",
         channel="tui",
         metadata={},
-        interaction_bridge=bridge,
     )
 
     outbox = store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
@@ -83,7 +84,9 @@ async def test_delivery_runtime_claims_sends_and_marks_sent_once(tmp_path):
 async def test_delivery_runtime_marks_failed_with_current_claim_attempt(tmp_path):
     store = RuntimeStore(tmp_path / "runtime.sqlite3")
     item = _queue_delivery(store)
-    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_1"))
+    router = SessionInteractionRouter()
+    router.bind("session_1", FailingBridge())
+    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_1"), router=router)
 
     await runtime.dispatch_item(
         item,
@@ -91,7 +94,6 @@ async def test_delivery_runtime_marks_failed_with_current_claim_attempt(tmp_path
         turn_id="turn_1",
         channel="tui",
         metadata={},
-        interaction_bridge=FailingBridge(),
     )
 
     outbox = store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
@@ -103,3 +105,46 @@ async def test_delivery_runtime_marks_failed_with_current_claim_attempt(tmp_path
     assert outbox["last_error"] == "bridge boom"
     assert work["status"] == "failed"
     assert work["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_runtime_marks_unrouted_without_active_route(tmp_path):
+    store = RuntimeStore(tmp_path / "runtime.sqlite3")
+    item = _queue_delivery(store)
+    runtime = DeliveryRuntime(
+        store=store,
+        event_log=EventLog(tmp_path, "session_1"),
+        router=SessionInteractionRouter(),
+    )
+
+    await runtime.dispatch_item(
+        item,
+        session_id="session_1",
+        turn_id="turn_1",
+        channel="tui",
+        metadata={},
+    )
+
+    outbox = store.query(RuntimeQuery(table="outbox", where={"delivery_id": "delivery_1"})).rows[0]
+    work = store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": "delivery_1"})).rows[0]
+
+    assert item.dispatch_status == "unrouted"
+    assert outbox["status"] == "unrouted"
+    assert outbox["last_error"] == "no_interactive_route"
+    assert work["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_bound_route_rejects_mismatched_session_id():
+    router = SessionInteractionRouter()
+    router.bind("session_1", RecordingBridge())
+    bound = router.route_for("session_1")
+    assert bound is not None
+    outbound = InteractionOutbound(
+        "tui",
+        session_id="session_2",
+        items=[InteractionItem.delivery_item(InteractionDelivery(text="wrong"))],
+    )
+
+    with pytest.raises(RuntimeError, match="received outbound for `session_2`"):
+        await bound.deliver(outbound)

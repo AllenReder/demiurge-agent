@@ -28,7 +28,11 @@ async def test_router_uses_fallback_for_missing_delivery_channel():
         return bridge
 
     router = ChannelRouterBridge({}, fallback=fallback)
-    outbound = InteractionOutbound("email", items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))])
+    outbound = InteractionOutbound(
+        "email",
+        session_id="session_1",
+        items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
+    )
 
     await router.deliver(outbound)
 

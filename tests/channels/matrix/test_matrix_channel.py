@@ -62,6 +62,7 @@ async def test_matrix_deliver_sends_room_message(monkeypatch):
     await bridge.deliver(
         InteractionOutbound(
             "matrix",
+            session_id="session_1",
             items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
             metadata={"source": "!room:example"},
         )

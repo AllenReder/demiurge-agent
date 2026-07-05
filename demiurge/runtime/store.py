@@ -345,7 +345,14 @@ class RuntimeStore:
                     None,
                 ),
             )
-        elif event_type in {"delivery.sent", "delivery.failed", "delivery.retry_scheduled", "delivery.sending", "delivery.unknown"}:
+        elif event_type in {
+            "delivery.sent",
+            "delivery.failed",
+            "delivery.retry_scheduled",
+            "delivery.sending",
+            "delivery.unknown",
+            "delivery.unrouted",
+        }:
             status = payload.get("status") or event_type.split(".", 1)[1]
             connection.execute(
                 """

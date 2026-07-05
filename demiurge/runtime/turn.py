@@ -5,7 +5,7 @@ from typing import Any
 
 from demiurge.core import LoadedCore
 from demiurge.providers import LLMMessage, LLMRequest, ToolDefinition
-from demiurge.runtime.interactions import InteractionBridge, InteractionItem, get_current_bridge
+from demiurge.runtime.interactions import InteractionItem
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.sdk import ContextContribution, ToolResult, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
@@ -20,7 +20,6 @@ class TurnEngineRequest:
     context: list[ContextContribution]
     available_tools: list[ToolDefinition]
     interaction_metadata: dict[str, Any]
-    interaction_bridge: InteractionBridge | None = None
     use_bootstrap_context: bool = True
 
 
@@ -68,7 +67,6 @@ class TurnEngine:
                 turn=request.turn,
                 step_id=step_id,
                 interaction_metadata=request.interaction_metadata,
-                interaction_bridge=request.interaction_bridge or get_current_bridge(),
             )
             provider_request = LLMRequest(
                 model=self.host._resolve_model_name(request.core),
@@ -92,7 +90,6 @@ class TurnEngine:
                     content=response.content,
                     tool_calls=response.tool_calls,
                     interaction_metadata=request.interaction_metadata,
-                    interaction_bridge=request.interaction_bridge or get_current_bridge(),
                 )
                 items.extend(interim_items)
                 self.host.event_log.emit(
@@ -109,7 +106,6 @@ class TurnEngine:
                             step_id=step_id,
                             call=call,
                             interaction_metadata=request.interaction_metadata,
-                            interaction_bridge=request.interaction_bridge or get_current_bridge(),
                         )
                     )
                     self._append_runtime_event(
@@ -139,7 +135,6 @@ class TurnEngine:
                             turn=request.turn,
                             capability=request.capability,
                             interaction_metadata=request.interaction_metadata,
-                            interaction_bridge=request.interaction_bridge or get_current_bridge(),
                             items=tool_items,
                         ),
                     )
@@ -193,7 +188,6 @@ class TurnEngine:
                             step_id=step_id,
                             record=record,
                             interaction_metadata=request.interaction_metadata,
-                            interaction_bridge=request.interaction_bridge or get_current_bridge(),
                         )
                     )
                     if result.terminate:

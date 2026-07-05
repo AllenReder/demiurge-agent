@@ -341,7 +341,7 @@ async def test_scheduler_telegram_delivery_uses_telegram_bridge(tmp_path):
         message_format="plain",
         allowed_users=[123],
     )
-    service = SchedulerService(app, delivery_bridge=bridge)
+    service = SchedulerService(app, delivery_route=bridge)
     schedule = _schedule(app)
     service.store.set_next_run(schedule, datetime(2026, 6, 28, 10, 0, tzinfo=UTC))
 

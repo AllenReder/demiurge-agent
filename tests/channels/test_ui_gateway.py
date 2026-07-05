@@ -261,6 +261,7 @@ async def test_tui_bridge_preserves_item_order_between_delivery_and_tool_result(
     await bridge.deliver(
         InteractionOutbound(
             channel="tui",
+            session_id=app.runner.session_id,
             items=[
                 InteractionItem.delivery_item(InteractionDelivery(type="text", text="first")),
                 InteractionItem.tool_result_item(record),
@@ -286,6 +287,7 @@ async def test_tui_bridge_emits_tool_lifecycle_payloads(tmp_path):
     await bridge.deliver(
         InteractionOutbound(
             channel="tui",
+            session_id=app.runner.session_id,
             items=[
                 InteractionItem.tool_call_item(ToolInteractionRecord.started(call)),
                 InteractionItem.tool_call_item(ToolInteractionRecord.finished(ToolExecutionRecord(call=call, result=result))),
@@ -481,6 +483,7 @@ async def test_tui_bridge_renders_progress_and_background_delivery(tmp_path):
 
     outbound = InteractionOutbound(
         channel="tui",
+        session_id=app.runner.session_id,
         items=[
             InteractionItem.delivery_item(
                 InteractionDelivery(

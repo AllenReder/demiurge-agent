@@ -33,6 +33,7 @@ class ApprovalRequest:
     cache_key: str | None = None
     auto_approve: bool = False
     policy: str = "prompt"
+    session_id: str | None = None
 
 
 class ApprovalProvider(Protocol):

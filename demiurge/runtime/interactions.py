@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import contextvars
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
+from uuid import uuid4
 
 from demiurge.providers import ToolCall
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -119,7 +119,7 @@ class InteractionOutbound:
     channel: str
     items: list[InteractionItem]
     prompt: UserPromptRequest | None = None
-    session_id: str | None = None
+    session_id: str
     turn_id: str | None = None
     metadata: dict[str, Any]
     on_delivered: Callable[[], None] | None = None
@@ -128,13 +128,15 @@ class InteractionOutbound:
         self,
         channel: str,
         *,
+        session_id: str,
         items: list[InteractionItem] | None = None,
         prompt: UserPromptRequest | None = None,
-        session_id: str | None = None,
         turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         on_delivered: Callable[[], None] | None = None,
     ) -> None:
+        if not session_id:
+            raise ValueError("InteractionOutbound.session_id is required")
         self.channel = channel
         self.items = list(items or [])
         self.prompt = prompt
@@ -172,8 +174,12 @@ class InteractionOutbound:
         if callback is not None:
             callback()
 
+    def mark_unrouted(self) -> None:
+        for item in self.items:
+            item.set_dispatch_status("unrouted")
 
-class InteractionBridge(Protocol):
+
+class SessionInteractionRoute(Protocol):
     async def deliver(self, outbound: InteractionOutbound) -> None:
         ...
 
@@ -184,51 +190,164 @@ class InteractionBridge(Protocol):
         ...
 
 
-_CURRENT_BRIDGE: contextvars.ContextVar[InteractionBridge | None] = contextvars.ContextVar(
-    "demiurge_interaction_bridge",
-    default=None,
-)
+@dataclass(frozen=True, slots=True)
+class SessionRouteToken:
+    token_id: str
+    session_id: str
 
 
-def get_current_bridge() -> InteractionBridge | None:
-    return _CURRENT_BRIDGE.get()
+@dataclass(frozen=True, slots=True)
+class SessionRouteDeliveryResult:
+    status: str
+
+
+@dataclass(slots=True)
+class SessionRouteBinding:
+    route: SessionInteractionRoute
+    token: SessionRouteToken | None = None
+
+    def bind(self, router: "SessionInteractionRouter", session_id: str) -> SessionRouteToken:
+        if self.token is not None:
+            if self.token.session_id == session_id and router.is_bound(self.token):
+                return self.token
+            router.unbind(self.token)
+        self.token = router.bind(session_id, self.route)
+        return self.token
+
+    def unbind(self, router: "SessionInteractionRouter") -> None:
+        if self.token is not None:
+            router.unbind(self.token)
+            self.token = None
+
+
+@dataclass(slots=True)
+class _BoundSessionRoute:
+    session_id: str
+    route: SessionInteractionRoute
+
+    async def deliver(self, outbound: InteractionOutbound) -> None:
+        if outbound.session_id != self.session_id:
+            raise RuntimeError(
+                f"route bound to session `{self.session_id}` received outbound for `{outbound.session_id}`"
+            )
+        value = self.route.deliver(outbound)
+        if inspect.isawaitable(value):
+            await value
+
+    async def prompt_user(self, prompt: UserPromptRequest) -> str:
+        if prompt.session_id and prompt.session_id != self.session_id:
+            raise RuntimeError(f"route bound to session `{self.session_id}` received prompt for `{prompt.session_id}`")
+        value = self.route.prompt_user(prompt)
+        if inspect.isawaitable(value):
+            return await value
+        return str(value)
+
+    async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+        request_session_id = getattr(request, "session_id", None)
+        if request_session_id and request_session_id != self.session_id:
+            raise RuntimeError(
+                f"route bound to session `{self.session_id}` received approval for `{request_session_id}`"
+            )
+        value = self.route.request_approval(request)
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+
+class SessionInteractionRouter:
+    """Routes live interaction effects to the adapter bound for a session."""
+
+    def __init__(self) -> None:
+        self._routes: dict[str, dict[str, _BoundSessionRoute]] = {}
+
+    def bind(self, session_id: str, route: SessionInteractionRoute) -> SessionRouteToken:
+        if not session_id:
+            raise ValueError("session_id is required")
+        token = SessionRouteToken(token_id=f"route_{uuid4().hex}", session_id=session_id)
+        self._routes.setdefault(session_id, {})[token.token_id] = _BoundSessionRoute(session_id=session_id, route=route)
+        return token
+
+    def unbind(self, token: SessionRouteToken) -> None:
+        routes = self._routes.get(token.session_id)
+        if not routes:
+            return
+        routes.pop(token.token_id, None)
+        if not routes:
+            self._routes.pop(token.session_id, None)
+
+    def is_bound(self, token: SessionRouteToken) -> bool:
+        return token.token_id in self._routes.get(token.session_id, {})
+
+    def route_for(self, session_id: str | None) -> _BoundSessionRoute | None:
+        if not session_id:
+            return None
+        routes = self._routes.get(session_id)
+        if not routes:
+            return None
+        return next(reversed(routes.values()))
+
+    async def deliver(self, outbound: InteractionOutbound) -> SessionRouteDeliveryResult:
+        route = self.route_for(outbound.session_id)
+        if route is None:
+            outbound.mark_unrouted()
+            return SessionRouteDeliveryResult(status="unrouted")
+        await route.deliver(outbound)
+        outbound.mark_delivered()
+        return SessionRouteDeliveryResult(status="delivered")
+
+    async def prompt_user(self, prompt: UserPromptRequest) -> str:
+        route = self.route_for(prompt.session_id)
+        if route is None:
+            return ""
+        return await route.prompt_user(prompt)
+
+    async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+        session_id = getattr(request, "session_id", None)
+        route = self.route_for(session_id)
+        if route is None:
+            return ApprovalDecision("deny", "no_interactive_route")
+        return await route.request_approval(request)
 
 
 class BridgeApprovalProvider:
-    name = "interaction_bridge"
+    name = "session_interaction_router"
+
+    def __init__(self, router: SessionInteractionRouter):
+        self.router = router
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        bridge = _CURRENT_BRIDGE.get()
-        if bridge is None:
-            return ApprovalDecision("deny", "no active interaction bridge")
-        decision = bridge.request_approval(request)
+        decision = self.router.request_approval(request)
         if inspect.isawaitable(decision):
             decision = await decision
         return decision
 
 
 class InteractionRuntime:
-    def __init__(self, runner):
+    def __init__(self, runner, *, router: SessionInteractionRouter | None = None):
         self.runner = runner
+        self.router = router or getattr(runner, "interaction_router", None) or SessionInteractionRouter()
+        setattr(runner, "interaction_router", self.router)
 
     async def handle(
         self,
         inbound: InteractionInbound,
         *,
-        bridge: InteractionBridge | None = None,
+        route_binding: SessionRouteBinding | None = None,
+        route: SessionInteractionRoute | None = None,
     ) -> InteractionOutbound:
-        token = _CURRENT_BRIDGE.set(bridge)
-        try:
-            result = await self.runner.run_turn(inbound.text, interaction=inbound)
-        finally:
-            _CURRENT_BRIDGE.reset(token)
+        if route_binding is None and route is not None:
+            route_binding = SessionRouteBinding(route=route)
+        result = await self.runner.run_turn(inbound.text, interaction=inbound, route_binding=route_binding)
+        drain = getattr(self.runner, "drain_background_tasks", None)
+        if drain is not None:
+            await drain(include_task_worker=False)
         prompt = self._prompt_from_tool_results(result, inbound)
         pending_items = [item for item in result.items if item.dispatch_status == "pending"]
         return InteractionOutbound(
             channel=inbound.channel,
+            session_id=result.session_id,
             items=pending_items,
             prompt=prompt,
-            session_id=result.session_id,
             turn_id=result.turn_id,
             metadata={
                 "source": inbound.source,

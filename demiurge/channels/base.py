@@ -14,6 +14,7 @@ from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionOutbound,
     InteractionRuntime,
+    SessionRouteBinding,
     ToolInteractionRecord,
     UserPromptRequest,
 )
@@ -46,6 +47,7 @@ class GatewayBridge(Protocol):
 class TextConversationState:
     runtime: InteractionRuntime
     busy_mode: str
+    route_binding: SessionRouteBinding
     conversation_key: str = ""
     source: str = ""
     reply_to: str | None = None
@@ -274,6 +276,7 @@ class TextChannelBridgeBase:
             state = TextConversationState(
                 runtime=self._runtime_factory(conversation_key),
                 busy_mode=self.default_busy_mode,
+                route_binding=SessionRouteBinding(route=self),
                 conversation_key=conversation_key,
             )
             self._conversations[conversation_key] = state
@@ -312,7 +315,7 @@ class TextChannelBridgeBase:
         token = self._active_inbound.set(inbound)
         try:
             await self._send_typing(inbound)
-            outbound = await state.runtime.handle(inbound, bridge=self)
+            outbound = await state.runtime.handle(inbound, route_binding=state.route_binding)
             await self.deliver(outbound)
         except asyncio.CancelledError:
             raise
@@ -400,6 +403,7 @@ class TextChannelBridgeBase:
             source=inbound.source,
             reply_to=inbound.reply_to,
         )
+        state.route_binding.bind(runner.interaction_router, session_id)
         await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
@@ -475,6 +479,7 @@ class TextChannelBridgeBase:
         except FileNotFoundError as exc:
             await self._send_text(inbound.source, str(exc), reply_to=inbound.reply_to, metadata=inbound.metadata)
             return
+        state.route_binding.bind(state.runtime.runner.interaction_router, session_id)
         await self._send_text(inbound.source, f"Resumed session: `{session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
@@ -773,6 +778,7 @@ def runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
             runtime_timezone=app.runtime_timezone,
             task_worker=app.task_worker,
             session_runtime=app.session_runtime,
+            interaction_router=app.runner.interaction_router,
             prepare_live_core=app.prepare_live_core,
         )
         return InteractionRuntime(runner)

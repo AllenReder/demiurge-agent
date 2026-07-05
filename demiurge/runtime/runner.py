@@ -33,13 +33,13 @@ from demiurge.runtime.delivery import (
     is_url,
 )
 from demiurge.runtime.interactions import (
-    InteractionBridge,
     InteractionDelivery,
     InteractionInbound,
     InteractionItem,
     InteractionOutbound,
+    SessionInteractionRouter,
+    SessionRouteBinding,
     ToolInteractionRecord,
-    get_current_bridge,
 )
 from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.outbox import DeliveryRuntime
@@ -271,7 +271,6 @@ class ModuleToolClient:
         capability: CapabilityFacade,
         slot_path: str,
         interaction_metadata: Mapping[str, Any],
-        interaction_bridge: InteractionBridge | None,
         emit_event: Callable[..., dict[str, Any]],
         items: list[InteractionItem],
     ):
@@ -282,7 +281,6 @@ class ModuleToolClient:
         self.capability = capability
         self.slot_path = slot_path
         self.interaction_metadata = dict(interaction_metadata)
-        self.interaction_bridge = interaction_bridge
         self.emit_event = emit_event
         self.items = items
 
@@ -299,7 +297,6 @@ class ModuleToolClient:
                 turn=self.turn,
                 capability=self.capability,
                 interaction_metadata=self.interaction_metadata,
-                interaction_bridge=self.interaction_bridge,
                 items=self.items,
             ),
         )
@@ -1094,7 +1091,6 @@ class RuntimeIO:
         content: str,
         tool_calls: list[ToolCall],
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> tuple[SessionMessage, list[InteractionItem]]:
         message = self.runner.session_runtime.append_message(
             self.runner.session_id,
@@ -1134,7 +1130,6 @@ class RuntimeIO:
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
         return message, [item]
 
@@ -1145,7 +1140,6 @@ class RuntimeIO:
         step_id: str,
         record: ToolExecutionRecord,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> InteractionItem:
         message = self._persist_tool_result_message(
             turn=turn,
@@ -1168,7 +1162,6 @@ class RuntimeIO:
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
         return item
 
@@ -1179,7 +1172,6 @@ class RuntimeIO:
         step_id: str,
         call: ToolCall,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> InteractionItem:
         record = ToolInteractionRecord.started(
             call,
@@ -1196,7 +1188,6 @@ class RuntimeIO:
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
         return item
 
@@ -1207,7 +1198,6 @@ class RuntimeIO:
         step_id: str,
         record: ToolExecutionRecord,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> InteractionItem:
         message = self._persist_tool_result_message(
             turn=turn,
@@ -1232,7 +1222,6 @@ class RuntimeIO:
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
         return item
 
@@ -1441,6 +1430,7 @@ class SessionTurnStepRunner:
         session_runtime: SessionRuntime | None = None,
         slot_runtime: SlotRuntime | None = None,
         turn_engine: TurnEngine | None = None,
+        interaction_router: SessionInteractionRouter | None = None,
         prepare_live_core: Callable[[], Awaitable[Any]] | None = None,
     ):
         self.home = home
@@ -1466,10 +1456,15 @@ class SessionTurnStepRunner:
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
         self.turn_engine = turn_engine or TurnEngine(self)
+        self.interaction_router = interaction_router or SessionInteractionRouter()
         self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
-        self.delivery_runtime = DeliveryRuntime(store=self.session_runtime.store, event_log=self.event_log)
+        self.delivery_runtime = DeliveryRuntime(
+            store=self.session_runtime.store,
+            event_log=self.event_log,
+            router=self.interaction_router,
+        )
         self.runtime_io = RuntimeIO(self)
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
@@ -1489,10 +1484,13 @@ class SessionTurnStepRunner:
         input_phase_slots: ResolvedPhaseSlots | None = None,
         output_phase_slots: ResolvedPhaseSlots | None = None,
         use_bootstrap: bool = True,
+        route_binding: SessionRouteBinding | None = None,
     ) -> TurnResult:
         core = self.core_loader.load(core_path) if core_path is not None else await self.load_active_core()
         interaction_metadata = self._interaction_metadata(interaction)
         self._resolve_session_for_interaction(core, interaction_metadata)
+        if route_binding is not None:
+            route_binding.bind(self.interaction_router, self.session_id)
         if core_path is None:
             self.session_runtime.update_session(
                 self.session_id,
@@ -1554,7 +1552,6 @@ class SessionTurnStepRunner:
                 input_envelope,
                 state_stores,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=get_current_bridge(),
                 injected_system_context=injected_system_context or [],
                 serial_slots=input_slots_override,
                 phase_slots=input_phase_slots,
@@ -1590,7 +1587,6 @@ class SessionTurnStepRunner:
                     context=context,
                     available_tools=available_tools,
                     interaction_metadata=interaction_metadata,
-                    interaction_bridge=get_current_bridge(),
                     use_bootstrap_context=use_bootstrap,
                 )
             )
@@ -1621,7 +1617,6 @@ class SessionTurnStepRunner:
                 tool_records=tool_records,
                 state_stores=state_stores,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=get_current_bridge(),
                 result_client=result_client,
                 serial_slots=output_slots_override,
                 phase_slots=output_phase_slots,
@@ -1821,7 +1816,6 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         step_id: str,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         if not self.show_system_prompt:
             return
@@ -1840,14 +1834,13 @@ class SessionTurnStepRunner:
             )
             return
 
-        bridge = interaction_bridge or get_current_bridge()
         channel = interaction_metadata.get("channel")
-        if bridge is None or not channel:
+        if not channel:
             self.event_log.emit(
                 "debug.system_prompt.skipped",
                 turn_id=turn.turn_id,
                 step_id=step_id,
-                reason="no_active_interaction_bridge",
+                reason="no_channel",
                 system_messages=len(system_messages),
                 total_chars=sum(len(message.content or "") for message in system_messages),
                 **interaction_metadata,
@@ -1884,10 +1877,9 @@ class SessionTurnStepRunner:
             metadata=dict(interaction_metadata),
         )
         try:
-            await bridge.deliver(outbound)
-            item.set_dispatch_status("delivered")
+            result = await self.interaction_router.deliver(outbound)
             self.event_log.emit(
-                "debug.system_prompt.delivered",
+                "debug.system_prompt.unrouted" if result.status == "unrouted" else "debug.system_prompt.delivered",
                 turn_id=turn.turn_id,
                 step_id=step_id,
                 system_messages=len(system_messages),
@@ -2106,6 +2098,7 @@ class SessionTurnStepRunner:
             model=self._resolve_model_name(core),
         )
         self.event_log = EventLog(self.home, self.session_id)
+        self.delivery_runtime.event_log = self.event_log
         self.event_log.emit(
             "session.created" if created else "session.resumed",
             core_id=core.core_id,
@@ -2118,6 +2111,7 @@ class SessionTurnStepRunner:
             raise FileNotFoundError(f"session not found: {session_id}")
         self.session_id = session_id
         self.event_log = EventLog(self.home, self.session_id)
+        self.delivery_runtime.event_log = self.event_log
         self.history = self._session_history_messages()
         if emit_resumed:
             record = self.sessions.get_session(session_id)
@@ -2451,7 +2445,6 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         capability: CapabilityFacade,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         background: bool = False,
         items: list[InteractionItem] | None = None,
     ) -> ModuleIOClient:
@@ -2466,7 +2459,6 @@ class SessionTurnStepRunner:
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
         default_write_history = slot.history_policy != "transient"
         allow_write_history = True
@@ -2512,21 +2504,19 @@ class SessionTurnStepRunner:
         *,
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         if item.dispatch_status != "pending":
             return
         metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-        bridge = interaction_bridge or get_current_bridge()
         channel = metadata.get("channel") or interaction_metadata.get("channel")
-        if bridge is None or not channel:
+        if not channel:
+            item.set_dispatch_status("unrouted")
             return
         item.set_dispatch_status("scheduled")
         self._enqueue_interaction_item(
             item,
             turn=turn,
             metadata=metadata,
-            interaction_bridge=bridge,
             channel=str(channel),
         )
 
@@ -2536,14 +2526,13 @@ class SessionTurnStepRunner:
         *,
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         if item.dispatch_status != "pending":
             return
         metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-        bridge = interaction_bridge or get_current_bridge()
         channel = metadata.get("channel") or interaction_metadata.get("channel")
-        if bridge is None or not channel:
+        if not channel:
+            item.set_dispatch_status("unrouted")
             return
         item.set_dispatch_status("scheduled")
         await self.delivery_runtime.dispatch_item(
@@ -2552,7 +2541,6 @@ class SessionTurnStepRunner:
             turn_id=turn.turn_id,
             channel=str(channel),
             metadata=metadata,
-            interaction_bridge=bridge,
             event_metadata=self._delivery_event_metadata(metadata),
         )
 
@@ -2562,14 +2550,12 @@ class SessionTurnStepRunner:
         *,
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         for item in items:
             self._schedule_interaction_item(
                 item,
                 turn=turn,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=interaction_bridge,
             )
 
     def _mark_slot_end_delivery_failed(self, items: list[InteractionItem], *, reason: str) -> None:
@@ -2624,6 +2610,7 @@ class SessionTurnStepRunner:
             task_worker=self.task_worker,
             session_runtime=self.session_runtime,
             slot_runtime=self.slot_runtime,
+            interaction_router=self.interaction_router,
             prepare_live_core=self.prepare_live_core_callback,
         )
         await child_runner.prepare_live_core()
@@ -2674,6 +2661,7 @@ class SessionTurnStepRunner:
             output_phase_slots=child_slots.output,
             use_bootstrap=child_slots.use_bootstrap,
         )
+        await child_runner.drain_background_tasks(include_task_worker=False)
         needs_user = result.needs_user or self._turn_result_needs_user(result)
         return AgentRunResult(
             content="\n\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip(),
@@ -2861,7 +2849,7 @@ class SessionTurnStepRunner:
             approval = data.get("approval")
             if isinstance(approval, Mapping):
                 reason = str(approval.get("reason") or "").lower()
-                if approval.get("value") == "deny" and "no active interaction bridge" in reason:
+                if approval.get("value") == "deny" and "no_interactive_route" in reason:
                     return True
         return False
 
@@ -3049,7 +3037,6 @@ class SessionTurnStepRunner:
         state_stores: ModuleStateStores,
         *,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         injected_system_context: list[str],
         serial_slots: list[SlotDefinition] | None = None,
         phase_slots: ResolvedPhaseSlots | None = None,
@@ -3091,7 +3078,6 @@ class SessionTurnStepRunner:
                     builder=builder,
                     state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
-                    interaction_bridge=interaction_bridge,
                 )
             )
             parallel_tasks.append(task)
@@ -3111,7 +3097,6 @@ class SessionTurnStepRunner:
                     builder_writable=True,
                     state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
-                    interaction_bridge=interaction_bridge,
                     activated=activated,
                     contributions=contributions,
                 )
@@ -3141,7 +3126,6 @@ class SessionTurnStepRunner:
         builder: ModuleInputBuilder,
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         items = await self._run_input_slot(
             slot,
@@ -3154,7 +3138,6 @@ class SessionTurnStepRunner:
             builder_writable=False,
             state_stores=state_stores,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
             activated=set(),
             contributions=[],
             background=True,
@@ -3163,7 +3146,6 @@ class SessionTurnStepRunner:
             items,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
 
     async def _run_input_slot(
@@ -3179,7 +3161,6 @@ class SessionTurnStepRunner:
         builder_writable: bool,
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         activated: set[str],
         contributions: list[ContextContribution],
         background: bool = False,
@@ -3190,7 +3171,6 @@ class SessionTurnStepRunner:
             turn=turn,
             capability=capability,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
             background=background,
             items=items,
         )
@@ -3224,7 +3204,6 @@ class SessionTurnStepRunner:
                 capability=capability,
                 slot_path=slot.relative_path,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=interaction_bridge,
                 emit_event=self.event_log.emit,
                 items=items,
             ),
@@ -3259,7 +3238,6 @@ class SessionTurnStepRunner:
                 io_client.slot_end_items,
                 turn=turn,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=interaction_bridge,
             )
             self.event_log.emit("module.completed", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
             return io_client.items
@@ -3293,7 +3271,6 @@ class SessionTurnStepRunner:
         tool_records: list[ToolExecutionRecord],
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
         serial_slots: list[SlotDefinition] | None = None,
         phase_slots: ResolvedPhaseSlots | None = None,
@@ -3319,7 +3296,6 @@ class SessionTurnStepRunner:
                     tool_records=tool_records,
                     state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
-                    interaction_bridge=interaction_bridge,
                     result_client=result_client.fork(writable=False),
                 )
             )
@@ -3344,7 +3320,6 @@ class SessionTurnStepRunner:
                     tool_records=tool_records,
                     state_stores=state_stores,
                     interaction_metadata=interaction_metadata,
-                    interaction_bridge=interaction_bridge,
                     result_client=result_client,
                 )
             )
@@ -3367,7 +3342,6 @@ class SessionTurnStepRunner:
         tool_records: list[ToolExecutionRecord],
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
         background: bool = False,
     ) -> list[InteractionItem]:
@@ -3377,7 +3351,6 @@ class SessionTurnStepRunner:
             turn=turn,
             capability=capability,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
             background=background,
             items=items,
         )
@@ -3411,7 +3384,6 @@ class SessionTurnStepRunner:
                 capability=capability,
                 slot_path=slot.relative_path,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=interaction_bridge,
                 emit_event=self.event_log.emit,
                 items=items,
             ),
@@ -3425,7 +3397,6 @@ class SessionTurnStepRunner:
                 io_client.slot_end_items,
                 turn=turn,
                 interaction_metadata=interaction_metadata,
-                interaction_bridge=interaction_bridge,
             )
             self.history = self._session_history_messages()
             self.event_log.emit(
@@ -3460,7 +3431,6 @@ class SessionTurnStepRunner:
         tool_records: list[ToolExecutionRecord],
         state_stores: ModuleStateStores,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
         result_client: ModuleResultClient,
     ) -> None:
         items = await self._run_output_slot(
@@ -3473,7 +3443,6 @@ class SessionTurnStepRunner:
             tool_records=tool_records,
             state_stores=state_stores,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
             result_client=result_client,
             background=True,
         )
@@ -3481,7 +3450,6 @@ class SessionTurnStepRunner:
             items,
             turn=turn,
             interaction_metadata=interaction_metadata,
-            interaction_bridge=interaction_bridge,
         )
 
     def _delivery_route_context(
@@ -3507,7 +3475,6 @@ class SessionTurnStepRunner:
         *,
         turn: TurnContext,
         metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge,
         channel: str,
     ) -> None:
         task = asyncio.create_task(
@@ -3517,7 +3484,6 @@ class SessionTurnStepRunner:
                 turn_id=turn.turn_id,
                 channel=channel,
                 metadata=metadata,
-                interaction_bridge=interaction_bridge,
                 event_metadata=self._delivery_event_metadata(metadata),
             )
         )
@@ -3530,22 +3496,14 @@ class SessionTurnStepRunner:
         *,
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
-        interaction_bridge: InteractionBridge | None,
     ) -> None:
         for item in items:
             if item.dispatch_status != "pending":
                 continue
             metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-            bridge = interaction_bridge or get_current_bridge()
             channel = metadata.get("channel") or interaction_metadata.get("channel")
-            if bridge is None or not channel:
-                self.delivery_runtime.mark_failed(
-                    item,
-                    turn_id=turn.turn_id,
-                    error=None,
-                    reason="no_active_interaction_bridge",
-                    event_metadata=self._delivery_event_metadata(metadata),
-                )
+            if not channel:
+                item.set_dispatch_status("unrouted")
                 continue
             item.set_dispatch_status("scheduled")
             await self.delivery_runtime.dispatch_item(
@@ -3554,7 +3512,6 @@ class SessionTurnStepRunner:
                 turn_id=turn.turn_id,
                 channel=str(channel),
                 metadata=metadata,
-                interaction_bridge=bridge,
                 event_metadata=self._delivery_event_metadata(metadata),
             )
 
@@ -3954,10 +3911,11 @@ class SessionTurnStepRunner:
             lines.append(f"[artifact:{artifact.artifact_id} {artifact.kind} {summary}]")
         return "\n\n".join(line for line in lines if line).strip()
 
-    async def drain_background_tasks(self) -> None:
+    async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
         while self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
-        await self.task_worker.drain()
+        if include_task_worker:
+            await self.task_worker.drain()
 
     @property
     def background_task_count(self) -> int:

@@ -13,6 +13,7 @@ controlled interfaces; they do not own the lifecycle.
 ```text
 inbound interaction
   -> create or resume session
+  -> bind inbound route to the resolved session
   -> run bootstrap when needed
   -> run input pipeline
   -> assemble provider context
@@ -66,6 +67,40 @@ tasks continue until they finish or a user calls `task_control(command="cancel")
 
 Background work that needs user input is marked `blocked_needs_user` and is
 not auto-approved.
+
+## Session Delivery Routes
+
+The runner owns a shared `SessionInteractionRouter`. `InteractionRuntime`
+passes the current adapter as a `SessionRouteBinding`; after the runner resolves
+the final session for the inbound, it binds that route to `runner.session_id`.
+TUI and channel `/new`, `/resume`, and session switch paths must rebind the
+same adapter route to the new session.
+
+Ordinary output, tool lifecycle events, and background output flushes create
+`InteractionOutbound` objects with a required `session_id`. The router delivers
+only to the route bound for that session. If no route is bound, items are marked
+`unrouted` and are not treated as failed adapter calls.
+
+## Subagent Sessions
+
+`ctx.agents.run()`, `ctx.agents.spawn()`, and `delegate_task` run child agents
+in independent `session_child_*` sessions. Child runners share the same router
+table but do not receive the parent route binding. Their ordinary output and
+tool lifecycle delivery appear only on a route explicitly bound for the child
+session.
+
+Parent/child lineage remains task and observability metadata. It is not part of
+ordinary delivery routing. Parent turns receive child work through
+`AgentRunResult`, durable task completion, or explicit future `subagent.*`
+events.
+
+## Approval and Prompts
+
+Interactive prompts and approval decisions use session-aware lookup on the same
+router, but they are not ordinary delivery. By default an approval request is
+looked up by `turn.session_id`; when no interactive route is bound, the approval
+provider denies with `no_interactive_route` unless a host, global, or core
+policy has already auto-allowed the action.
 
 ## Failure Handling
 

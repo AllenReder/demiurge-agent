@@ -86,6 +86,7 @@ async def test_slack_deliver_posts_message():
     await bridge.deliver(
         InteractionOutbound(
             "slack",
+            session_id="session_1",
             items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
             metadata={"source": "C1", "slack_thread_ts": "123.4"},
         )
