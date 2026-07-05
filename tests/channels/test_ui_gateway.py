@@ -90,12 +90,13 @@ class YieldUntilProvider:
 
 
 class ControlledRuntime:
-    def __init__(self):
+    def __init__(self, session_id: str):
+        self.session_id = session_id
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
         self.inbounds = []
 
-    async def handle(self, inbound, *, bridge):
+    async def handle(self, inbound, *, route_binding):
         self.inbounds.append(inbound)
         if inbound.text == "first":
             self.started.set()
@@ -106,6 +107,7 @@ class ControlledRuntime:
                 raise
         return InteractionOutbound(
             channel="tui",
+            session_id=self.session_id,
             items=[
                 InteractionItem.delivery_item(
                     InteractionDelivery(type="text", text=f"[next] {inbound.text}"),
@@ -648,7 +650,7 @@ async def test_tui_bridge_interrupt_mode_state_machine_cancels_and_drains_next_i
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
     bridge = TuiInteractionBridge(app, emit=sink)
-    runtime = ControlledRuntime()
+    runtime = ControlledRuntime(app.runner.session_id)
     bridge.runtime = runtime
 
     assert await bridge.submit("first") == {"accepted": True, "queued": False}
