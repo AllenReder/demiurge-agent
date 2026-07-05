@@ -15,7 +15,6 @@ from demiurge.runtime.completions import (
     CompletionInbox,
     CompletionRoute,
     is_background_completion,
-    merge_completion_inbounds,
 )
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.interactions import (
@@ -26,6 +25,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
+from demiurge.runtime.ingress import InboundQueueRuntime
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -97,7 +97,7 @@ class TuiInteractionBridge:
         resolved_busy_mode = busy_mode or app.channel_busy_mode
         self.busy_mode = resolved_busy_mode if resolved_busy_mode in {"interrupt", "queue"} else "interrupt"
         self._running_task: asyncio.Task[None] | None = None
-        self._queued_inputs: asyncio.Queue[InteractionInbound] = asyncio.Queue()
+        self._queued_inputs = InboundQueueRuntime()
         self._pending_prompts: dict[str, PendingPrompt] = {}
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._prompt_counter = 0
@@ -340,43 +340,16 @@ class TuiInteractionBridge:
     async def _drain_next_queued_input(self) -> None:
         if self.running or self._queued_inputs.empty() or self.should_exit:
             return
-        inbound = await self._next_queued_input()
+        inbound = self._next_queued_input()
         self._running_task = asyncio.create_task(self._run_inbound(inbound))
         await self._emit_status()
 
-    async def _next_queued_input(self) -> InteractionInbound:
-        pending: list[InteractionInbound] = []
-        while not self._queued_inputs.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                pending.append(self._queued_inputs.get_nowait())
-        user_index = next((index for index, item in enumerate(pending) if not is_background_completion(item)), None)
-        selected_index = user_index if user_index is not None else 0
-        selected = pending.pop(selected_index)
-        if not is_background_completion(selected):
-            completions = [item for item in pending if is_background_completion(item)]
-            pending = [item for item in pending if not is_background_completion(item)]
-            if completions:
-                selected = merge_completion_inbounds(selected, completions)
-        for item in pending:
-            self._queued_inputs.put_nowait(item)
-        return selected
+    def _next_queued_input(self) -> InteractionInbound:
+        return self._queued_inputs.next_inbound()
 
     def _merge_pending_completions_into(self, inbound: InteractionInbound) -> InteractionInbound:
         stored_completions = self._stored_completion_inbounds()
-        if self._queued_inputs.empty():
-            if not stored_completions:
-                return inbound
-            return merge_completion_inbounds(inbound, stored_completions)
-        pending: list[InteractionInbound] = []
-        while not self._queued_inputs.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                pending.append(self._queued_inputs.get_nowait())
-        completions = stored_completions + [item for item in pending if is_background_completion(item)]
-        for item in [item for item in pending if not is_background_completion(item)]:
-            self._queued_inputs.put_nowait(item)
-        if not completions:
-            return inbound
-        return merge_completion_inbounds(inbound, completions)
+        return self._queued_inputs.merge_completions_into(inbound, stored_completions=stored_completions)
 
     def _stored_completion_inbounds(self) -> list[InteractionInbound]:
         return self.completion_inbox.claim_pending_for_session(

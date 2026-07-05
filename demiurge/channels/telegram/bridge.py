@@ -26,7 +26,6 @@ from demiurge.runtime.completions import (
     CompletionInbox,
     CompletionRoute,
     is_background_completion,
-    merge_completion_inbounds,
 )
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.delegation import subagents_command_text
@@ -40,6 +39,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
+from demiurge.runtime.ingress import InboundQueueRuntime
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
@@ -68,7 +68,7 @@ class TelegramConversationState:
     reply_to: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     active_task: asyncio.Task[None] | None = None
-    queue: asyncio.Queue[InteractionInbound] = field(default_factory=asyncio.Queue)
+    queue: InboundQueueRuntime = field(default_factory=InboundQueueRuntime)
     pending_approval_id: str | None = None
 
 
@@ -1123,35 +1123,10 @@ class TelegramInteractionBridge:
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
 
     def _clear_queue(self, state: TelegramConversationState, *, preserve_completions: bool) -> int:
-        count = 0
-        preserved: list[InteractionInbound] = []
-        while not state.queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                inbound = state.queue.get_nowait()
-                if preserve_completions and is_background_completion(inbound):
-                    preserved.append(inbound)
-                else:
-                    count += 1
-        for inbound in preserved:
-            state.queue.put_nowait(inbound)
-        return count
+        return state.queue.clear(preserve_completions=preserve_completions)
 
     def _next_queued_input(self, state: TelegramConversationState) -> InteractionInbound:
-        pending: list[InteractionInbound] = []
-        while not state.queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                pending.append(state.queue.get_nowait())
-        user_index = next((index for index, item in enumerate(pending) if not is_background_completion(item)), None)
-        selected_index = user_index if user_index is not None else 0
-        selected = pending.pop(selected_index)
-        if not is_background_completion(selected):
-            completions = [item for item in pending if is_background_completion(item)]
-            pending = [item for item in pending if not is_background_completion(item)]
-            if completions:
-                selected = merge_completion_inbounds(selected, completions)
-        for item in pending:
-            state.queue.put_nowait(item)
-        return selected
+        return state.queue.next_inbound()
 
     def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         state.source = inbound.source
@@ -1181,7 +1156,7 @@ class TelegramInteractionBridge:
         )
         if not completions:
             return inbound
-        return merge_completion_inbounds(inbound, completions)
+        return state.queue.merge_completions_into(inbound, stored_completions=completions)
 
     def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
         task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
