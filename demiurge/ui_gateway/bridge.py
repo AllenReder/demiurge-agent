@@ -11,6 +11,7 @@ from demiurge.diagnostics.doctor import DoctorRuntime
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
+from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.event_commands import build_events_command_text, build_trace_command_text
@@ -149,7 +150,7 @@ class TuiInteractionBridge:
                 await self._emit_notice("turn interrupted")
             await self._emit_status()
             return {"accepted": True, "queued": True}
-        inbound = self._merge_pending_completions_into(inbound)
+        inbound = self._completion_delivery_runtime().merge_pending_into(self._ingress_state, inbound)
         ConversationTurnController(self._ingress_state).start(inbound, self._run_inbound)
         await self._emit_status()
         return {"accepted": True, "queued": False}
@@ -336,14 +337,6 @@ class TuiInteractionBridge:
     def _next_queued_input(self) -> InteractionInbound:
         return ConversationTurnController(self._ingress_state).next_queued_input()
 
-    def _merge_pending_completions_into(self, inbound: InteractionInbound) -> InteractionInbound:
-        return ConversationTurnController(self._ingress_state).merge_pending_completions(
-            inbound,
-            channel="tui",
-            owner_id="bridge:tui:stored",
-            fallback_source="local",
-        )
-
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
         if event.owner_session_id != self.app.runner.session_id or self.should_exit:
             return
@@ -356,16 +349,23 @@ class TuiInteractionBridge:
         async def before_enqueue(_inbound: InteractionInbound) -> None:
             await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
 
-        result = await ConversationTurnController(self._ingress_state).enqueue_completion_event(
+        result = await self._completion_delivery_runtime().enqueue_event(
+            self._ingress_state,
             event,
-            channel="tui",
-            owner_id="bridge:tui:enqueue",
             run=self._run_inbound,
             before_enqueue=before_enqueue,
         )
         if result.inbound is None:
             return
         await self._emit_status()
+
+    def _completion_delivery_runtime(self) -> CompletionDeliveryRuntime:
+        return CompletionDeliveryRuntime(
+            channel="tui",
+            merge_owner_id="bridge:tui:stored",
+            enqueue_owner_id="bridge:tui:enqueue",
+            fallback_source="local",
+        )
 
     async def _open_prompt(self, prompt: UserPromptRequest, *, kind: str, wait: bool) -> PendingPrompt:
         self._prompt_counter += 1

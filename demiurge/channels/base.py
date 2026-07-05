@@ -7,7 +7,7 @@ import logging
 from typing import Any, Callable, Protocol
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
-from demiurge.runtime.completions import is_background_completion
+from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -99,8 +99,11 @@ class TextChannelBridgeBase:
 
         if inbound.conversation_key:
             inbound = self._consume_inbound_pending_choice(inbound)
-        if not is_background_completion(inbound):
-            inbound = self._merge_stored_task_completions(state, inbound)
+        inbound = self._completion_delivery_runtime().merge_pending_into(
+            state,
+            inbound,
+            fallback_source=inbound.source,
+        )
         if state.active_task and not state.active_task.done():
             await self._handle_busy_inbound(state, inbound)
             return
@@ -292,18 +295,6 @@ class TextChannelBridgeBase:
     def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
 
-    def _merge_stored_task_completions(
-        self,
-        state: TextConversationState,
-        inbound: InteractionInbound,
-    ) -> InteractionInbound:
-        return ConversationTurnController(state).merge_pending_completions(
-            inbound,
-            channel=self.channel_name,
-            owner_id=f"bridge:{self.channel_name}:merge",
-            fallback_source=inbound.source,
-        )
-
     def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
         task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
         if task_worker is None or task_worker is self._task_worker:
@@ -323,11 +314,17 @@ class TextChannelBridgeBase:
             return
 
     async def _enqueue_task_completion(self, state: TextConversationState, event: RuntimeTaskCompletionEvent) -> None:
-        await ConversationTurnController(state).enqueue_completion_event(
+        await self._completion_delivery_runtime().enqueue_event(
+            state,
             event,
-            channel=self.channel_name,
-            owner_id=f"bridge:{self.channel_name}:enqueue",
             run=lambda next_inbound: self._run_inbound(state, next_inbound),
+        )
+
+    def _completion_delivery_runtime(self) -> CompletionDeliveryRuntime:
+        return CompletionDeliveryRuntime(
+            channel=self.channel_name,
+            merge_owner_id=f"bridge:{self.channel_name}:merge",
+            enqueue_owner_id=f"bridge:{self.channel_name}:enqueue",
             task_worker=self._task_worker,
             require_source=True,
         )

@@ -890,10 +890,14 @@ async def test_telegram_access_policy_unauthorized_approval_callback_does_not_re
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
     await _wait_until(lambda: bridge._pending_approvals.count > 0, timeout=5)
+    await _wait_until(lambda: bool(api.sent), timeout=5)
+    approval_id = bridge._pending_approvals.pending_ids()[0]
 
-    await bridge.handle_update(_callback("approval:1:allow", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
+    await bridge.handle_update(
+        _callback(approval_callback_data(approval_id, "allow"), chat_id=123, user_id=99, message_id=456, callback_id="cb_bad")
+    )
 
-    assert "1" in bridge._pending_approvals.pending_ids()
+    assert approval_id in bridge._pending_approvals.pending_ids()
     assert runner.decision is None
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
     state = bridge._conversations["telegram:123"]
@@ -1834,6 +1838,8 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
     await _wait_until(lambda: bridge._pending_approvals.count > 0)
+    await _wait_until(lambda: bool(api.sent))
+    approval_id = bridge._pending_approvals.pending_ids()[0]
     task = bridge._conversations["telegram:123"].active_task
     await bridge.handle_inbound(
         InteractionInbound(
@@ -1852,7 +1858,7 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
     assert bridge._pending_approvals.count == 0
     assert api.edits
     assert "Approval expired" in api.edits[-1]["text"]
-    await bridge.handle_update(_callback("approval:1:allow", chat_id=123, message_id=456, callback_id="cb_old"))
+    await bridge.handle_update(_callback(approval_callback_data(approval_id, "allow"), chat_id=123, message_id=456, callback_id="cb_old"))
     assert {"callback_query_id": "cb_old", "text": "Approval expired."} in api.callbacks
     assert "Approval expired" in api.edits[-1]["text"]
 
@@ -1897,12 +1903,14 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
         )
     )
     await _wait_until(lambda: bridge._pending_approvals.count > 0, timeout=20)
+    await _wait_until(lambda: bool(api.sent), timeout=20)
+    approval_id = bridge._pending_approvals.pending_ids()[0]
 
     assert not (workspace / "out.txt").exists()
 
     state = bridge._conversations["telegram:123"]
     task = state.active_task
-    await bridge.handle_update(_callback("approval:1:deny", chat_id=123, message_id=456, callback_id="cb_deny"))
+    await bridge.handle_update(_callback(approval_callback_data(approval_id, "deny"), chat_id=123, message_id=456, callback_id="cb_deny"))
     if task is not None:
         await task
 
