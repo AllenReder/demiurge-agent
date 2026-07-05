@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+pytestmark = pytest.mark.slow_integration
+
 from demiurge.app import create_app
 from demiurge.packages import (
     PackageManager,

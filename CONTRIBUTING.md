@@ -134,8 +134,23 @@ Broad Python runtime changes:
 
 ```bash
 uv run python -m compileall demiurge tests
-uv run pytest
+uv run python scripts/run_python_ci_tests.py --profile full
 uv run python scripts/smoke_managed_install.py
+```
+
+To mirror the Windows CI pytest shards locally:
+
+```bash
+uv run python scripts/run_python_ci_tests.py --profile full --shard channels
+uv run python scripts/run_python_ci_tests.py --profile full --shard runtime
+uv run python scripts/run_python_ci_tests.py --profile full --shard packages
+uv run python scripts/run_python_ci_tests.py --profile full --shard rest
+```
+
+For OS-sensitive smoke coverage without running the full suite:
+
+```bash
+uv run python scripts/run_python_ci_tests.py --profile cross-platform-smoke
 ```
 
 TUI changes:
@@ -152,7 +167,8 @@ node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/en
 Release-path changes should preserve the default notes/tag-only release policy.
 CI and release validation should cover the public support surface:
 
-- Python 3.11, 3.12, and 3.13 on Ubuntu and Windows;
+- Python 3.11, 3.12, and 3.13 on Ubuntu with the full Python suite;
+- Python 3.11 on Windows with the full Python suite split across parallel shards;
 - TUI smoke checks on Node.js 20 and 24 on Ubuntu and Windows;
 - managed checkout installation smoke checks on Ubuntu and Windows.
 

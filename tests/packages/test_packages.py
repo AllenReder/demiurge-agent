@@ -7,6 +7,8 @@ import pytest
 import yaml
 from rich.console import Console
 
+pytestmark = pytest.mark.slow_integration
+
 from demiurge.app import HostPackageRepositoryConfig, create_app, load_host_config
 from demiurge.cli import main
 from demiurge.core_repository import CoreRepositoryError

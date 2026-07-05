@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
+pytestmark = pytest.mark.slow_integration
+
 from demiurge.app import create_app, source_agents_root
 from demiurge.channels.telegram import TelegramInteractionBridge
 from demiurge.providers import LLMResponse

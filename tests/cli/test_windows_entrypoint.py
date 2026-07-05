@@ -1,6 +1,11 @@
 import subprocess
 import sys
 
+import pytest
+
+
+pytestmark = pytest.mark.cross_platform
+
 
 def test_module_entrypoint_help_starts_on_windows():
     result = subprocess.run(

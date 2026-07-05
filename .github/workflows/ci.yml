@@ -8,13 +8,61 @@ on:
 
 jobs:
   python:
-    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }} / ${{ matrix.test-label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            test-profile: full
+            test-shard: all
+            test-label: full
+            run-baseline: "true"
+            managed-install-smoke: "true"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            test-profile: full
+            test-shard: all
+            test-label: full
+            run-baseline: "true"
+            managed-install-smoke: "false"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            test-profile: full
+            test-shard: all
+            test-label: full
+            run-baseline: "true"
+            managed-install-smoke: "false"
+          - os: windows-latest
+            python-version: "3.11"
+            test-profile: full
+            test-shard: channels
+            test-label: channels
+            run-baseline: "false"
+            managed-install-smoke: "false"
+          - os: windows-latest
+            python-version: "3.11"
+            test-profile: full
+            test-shard: runtime
+            test-label: runtime
+            run-baseline: "false"
+            managed-install-smoke: "false"
+          - os: windows-latest
+            python-version: "3.11"
+            test-profile: full
+            test-shard: packages
+            test-label: packages
+            run-baseline: "false"
+            managed-install-smoke: "false"
+          - os: windows-latest
+            python-version: "3.11"
+            test-profile: full
+            test-shard: rest
+            test-label: rest
+            run-baseline: "true"
+            managed-install-smoke: "true"
 
     steps:
       - name: Check out repository
@@ -34,21 +82,24 @@ jobs:
         run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
 
       - name: Compile Python sources
+        if: matrix.run-baseline == 'true'
         run: uv run python -m compileall demiurge tests
 
       - name: Run Python tests
-        run: uv run pytest -vv --durations=20 -o faulthandler_timeout=60
+        run: uv run python scripts/run_python_ci_tests.py --profile "${{ matrix.test-profile }}" --shard "${{ matrix.test-shard }}"
 
       - name: Check CLI help
+        if: matrix.run-baseline == 'true'
         run: |
           uv run demiurge --help
           uv run demiurge init --help
 
       - name: Build package
+        if: matrix.run-baseline == 'true'
         run: uv build
 
       - name: Smoke-test managed install
-        if: matrix.python-version == '3.11'
+        if: matrix.managed-install-smoke == 'true'
         run: uv run python scripts/smoke_managed_install.py
 
   tui:

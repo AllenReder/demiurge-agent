@@ -583,6 +583,7 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert (workspace / "denied.txt").exists()
 
 
+@pytest.mark.cross_platform
 def test_windows_terminal_printf_compat_formats_common_smoke_command():
     assert tool_runtime._format_windows_printf("%s\\n", ["hello"]) == "hello\n"
 
@@ -594,6 +595,7 @@ def test_windows_terminal_printf_compat_formats_common_smoke_command():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cross_platform
 async def test_windows_terminal_executes_compat_command_but_approves_original(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
