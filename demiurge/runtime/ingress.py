@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from demiurge.runtime.completions import (
     CompletionInbox,
@@ -161,3 +161,116 @@ class ConversationIngressState:
             owner_id=owner_id,
             route=self.completion_route(channel),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BusyInboundDecision:
+    kind: str
+    notify: bool
+    cancel_active: bool
+
+
+class ConversationTurnController:
+    """Turn lifecycle rules for one conversation ingress state."""
+
+    def __init__(self, state: ConversationIngressState):
+        self.state = state
+
+    @property
+    def running(self) -> bool:
+        task = self.state.active_task
+        return bool(task and not task.done())
+
+    async def handle_busy_inbound(
+        self,
+        inbound: InteractionInbound,
+        *,
+        notify: Callable[[BusyInboundDecision], Awaitable[None]] | None = None,
+    ) -> BusyInboundDecision:
+        await self.state.queue.put(inbound)
+        if is_background_completion(inbound):
+            return BusyInboundDecision(kind="background_completion", notify=False, cancel_active=False)
+        if self.state.busy_mode == "queue":
+            decision = BusyInboundDecision(kind="queue", notify=True, cancel_active=False)
+            if notify is not None:
+                await notify(decision)
+            return decision
+        decision = BusyInboundDecision(kind="interrupt", notify=True, cancel_active=True)
+        if notify is not None:
+            await notify(decision)
+        task = self.state.active_task
+        if task and not task.done():
+            task.cancel()
+        return decision
+
+    def start(
+        self,
+        inbound: InteractionInbound,
+        run: Callable[[InteractionInbound], Awaitable[None]],
+    ) -> bool:
+        if self.running:
+            self.state.queue.put_nowait(inbound)
+            return False
+        self.state.active_task = asyncio.create_task(run(inbound))
+        return True
+
+    def finish(self, task: asyncio.Task[Any] | None) -> bool:
+        if self.state.active_task is not task:
+            return False
+        self.state.active_task = None
+        return True
+
+    async def drain_next(
+        self,
+        run: Callable[[InteractionInbound], Awaitable[None]],
+    ) -> bool:
+        if self.running or self.state.queue.empty():
+            return False
+        return self.start(self.state.queue.next_inbound(), run)
+
+    async def cancel_active(
+        self,
+        *,
+        before_cancel: Callable[[], Awaitable[None]] | None = None,
+        timeout_seconds: float = 5,
+    ) -> bool:
+        task = self.state.active_task
+        if not task or task.done():
+            return False
+        if before_cancel is not None:
+            await before_cancel()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        return True
+
+    def clear_queue(self, *, preserve_completions: bool) -> int:
+        return self.state.queue.clear(preserve_completions=preserve_completions)
+
+    def next_queued_input(self) -> InteractionInbound:
+        return self.state.queue.next_inbound()
+
+    async def queue_and_drain_if_idle(
+        self,
+        inbound: InteractionInbound,
+        run: Callable[[InteractionInbound], Awaitable[None]],
+    ) -> bool:
+        await self.state.queue.put(inbound)
+        if self.running:
+            return False
+        return await self.drain_next(run)
+
+    async def enqueue_completion(
+        self,
+        inbound: InteractionInbound,
+        run: Callable[[InteractionInbound], Awaitable[None]],
+    ) -> str:
+        if self.running:
+            await self.state.queue.put(inbound)
+            return "queued_running"
+        if not self.state.queue.empty():
+            await self.state.queue.put(inbound)
+            await self.drain_next(run)
+            return "queued_drained"
+        self.start(inbound, run)
+        return "started"

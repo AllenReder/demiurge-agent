@@ -18,7 +18,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import ConversationIngressState
+from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.slash import SlashCommand, parse_slash_command
@@ -275,31 +275,27 @@ class TextChannelBridgeBase:
         return state
 
     async def _handle_busy_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        await state.queue.put(inbound)
-        if is_background_completion(inbound):
-            return
-        if state.busy_mode == "queue":
-            await self._send_text(
-                inbound.source,
-                f"Queued for next turn: {self._shorten(inbound.text)}",
-                reply_to=inbound.reply_to,
-                metadata=inbound.metadata,
-            )
-            return
-        await self._send_text(
-            inbound.source,
-            f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
-            reply_to=inbound.reply_to,
-            metadata=inbound.metadata,
-        )
-        if state.active_task and not state.active_task.done():
-            state.active_task.cancel()
+        async def notify(decision) -> None:
+            if decision.kind == "queue":
+                await self._send_text(
+                    inbound.source,
+                    f"Queued for next turn: {self._shorten(inbound.text)}",
+                    reply_to=inbound.reply_to,
+                    metadata=inbound.metadata,
+                )
+                return
+            if decision.kind == "interrupt":
+                await self._send_text(
+                    inbound.source,
+                    f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
+                    reply_to=inbound.reply_to,
+                    metadata=inbound.metadata,
+                )
+
+        await ConversationTurnController(state).handle_busy_inbound(inbound, notify=notify)
 
     def _start_turn(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        if state.active_task and not state.active_task.done():
-            state.queue.put_nowait(inbound)
-            return
-        state.active_task = asyncio.create_task(self._run_inbound(state, inbound))
+        ConversationTurnController(state).start(inbound, lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _run_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         task = asyncio.current_task()
@@ -315,17 +311,14 @@ class TextChannelBridgeBase:
             await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to, metadata=inbound.metadata)
         finally:
             self._active_inbound.reset(token)
-            if state.active_task is task:
-                state.active_task = None
-            await self._drain_next_queued_input(state)
+            controller = ConversationTurnController(state)
+            controller.finish(task)
+            await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _drain_next_queued_input(self, state: TextConversationState) -> None:
-        if state.active_task and not state.active_task.done():
-            return
-        if state.queue.empty():
-            return
-        next_inbound = self._next_queued_input(state)
-        self._start_turn(state, next_inbound)
+        await ConversationTurnController(state).drain_next(
+            lambda next_inbound: self._run_inbound(state, next_inbound)
+        )
 
     async def _handle_command(self, command: SlashCommand, inbound: InteractionInbound, state: TextConversationState) -> None:
         handlers = {
@@ -358,7 +351,7 @@ class TextChannelBridgeBase:
     async def _command_status(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         runner = state.runtime.runner
         queue_depth = state.queue.qsize()
-        running = bool(state.active_task and not state.active_task.done())
+        running = ConversationTurnController(state).running
         lines = [
             "# Status",
             f"- channel: `{self.channel_name}`",
@@ -399,7 +392,7 @@ class TextChannelBridgeBase:
         await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        running = bool(state.active_task and not state.active_task.done())
+        running = ConversationTurnController(state).running
         queued = self._clear_queue(state, preserve_completions=True)
         if running:
             await self._cancel_active(state)
@@ -418,7 +411,7 @@ class TextChannelBridgeBase:
         if not text:
             await self._send_text(inbound.source, "Usage: `/queue <prompt>`", reply_to=inbound.reply_to, metadata=inbound.metadata)
             return
-        await state.queue.put(
+        await ConversationTurnController(state).queue_and_drain_if_idle(
             InteractionInbound(
                 channel=inbound.channel,
                 text=text,
@@ -426,11 +419,10 @@ class TextChannelBridgeBase:
                 reply_to=inbound.reply_to,
                 conversation_key=inbound.conversation_key,
                 metadata=dict(inbound.metadata),
-            )
+            ),
+            lambda next_inbound: self._run_inbound(state, next_inbound),
         )
         await self._send_text(inbound.source, f"Queued: {self._shorten(text)}", reply_to=inbound.reply_to, metadata=inbound.metadata)
-        if not state.active_task or state.active_task.done():
-            await self._drain_next_queued_input(state)
 
     async def _command_busy(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         mode = args.strip().lower()
@@ -519,18 +511,10 @@ class TextChannelBridgeBase:
         await self._send_text(inbound.source, content[:3800], reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     async def _cancel_active(self, state: TextConversationState) -> None:
-        task = state.active_task
-        if not task or task.done():
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        await ConversationTurnController(state).cancel_active()
 
     def _clear_queue(self, state: TextConversationState, *, preserve_completions: bool) -> int:
-        return state.queue.clear(preserve_completions=preserve_completions)
-
-    def _next_queued_input(self, state: TextConversationState) -> InteractionInbound:
-        return state.queue.next_inbound()
+        return ConversationTurnController(state).clear_queue(preserve_completions=preserve_completions)
 
     def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
@@ -580,14 +564,10 @@ class TextChannelBridgeBase:
         )
         if inbound is None:
             return
-        if state.active_task and not state.active_task.done():
-            await state.queue.put(inbound)
-            return
-        if not state.queue.empty():
-            await state.queue.put(inbound)
-            await self._drain_next_queued_input(state)
-            return
-        self._start_turn(state, inbound)
+        await ConversationTurnController(state).enqueue_completion(
+            inbound,
+            lambda next_inbound: self._run_inbound(state, next_inbound),
+        )
 
     def _state_for_session(self, session_id: str) -> TextConversationState | None:
         for state in self._conversations.values():

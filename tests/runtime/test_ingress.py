@@ -1,9 +1,10 @@
 import asyncio
+import contextlib
 
 import pytest
 
 from demiurge.runtime.control import RuntimeControlPlane
-from demiurge.runtime.ingress import ConversationIngressState, InboundQueueRuntime
+from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController, InboundQueueRuntime
 from demiurge.runtime.interactions import InteractionInbound
 from demiurge.runtime.store import RuntimeStore
 from demiurge.runtime.tasks import RuntimeTaskWorker
@@ -218,3 +219,121 @@ async def test_conversation_ingress_state_claims_single_completion_event(tmp_pat
     assert inbound.source == "source_1"
     assert inbound.conversation_key == "conversation_1"
     assert worker.pending_events_for_session("session_1") == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_queue_busy_mode_keeps_active_task():
+    state = ConversationIngressState(runtime=_Runtime(_Runner()), busy_mode="queue", route_binding=_Route())
+    active = asyncio.create_task(asyncio.sleep(60))
+    state.active_task = active
+    notifications = []
+
+    async def notify(decision):
+        notifications.append((decision.kind, active.done()))
+
+    decision = await ConversationTurnController(state).handle_busy_inbound(_user("second"), notify=notify)
+
+    assert decision.kind == "queue"
+    assert decision.notify is True
+    assert decision.cancel_active is False
+    assert notifications == [("queue", False)]
+    assert active.done() is False
+    assert state.queue.next_inbound().text == "second"
+    active.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await active
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_interrupt_notifies_before_cancelling_active_task():
+    state = ConversationIngressState(runtime=_Runtime(_Runner()), busy_mode="interrupt", route_binding=_Route())
+    active = asyncio.create_task(asyncio.sleep(60))
+    state.active_task = active
+    notifications = []
+
+    async def notify(decision):
+        notifications.append((decision.kind, active.cancelled(), active.done()))
+
+    decision = await ConversationTurnController(state).handle_busy_inbound(_user("second"), notify=notify)
+
+    assert decision.kind == "interrupt"
+    assert decision.notify is True
+    assert decision.cancel_active is True
+    assert notifications == [("interrupt", False, False)]
+    assert state.queue.next_inbound().text == "second"
+    with contextlib.suppress(asyncio.CancelledError):
+        await active
+    assert active.cancelled() is True
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_finish_clears_only_owned_active_task():
+    state = ConversationIngressState(runtime=_Runtime(_Runner()), busy_mode="interrupt", route_binding=_Route())
+    active = asyncio.create_task(asyncio.sleep(60))
+    unrelated = asyncio.create_task(asyncio.sleep(60))
+    state.active_task = active
+    controller = ConversationTurnController(state)
+
+    try:
+        assert controller.finish(unrelated) is False
+        assert state.active_task is active
+        assert controller.finish(active) is True
+        assert state.active_task is None
+    finally:
+        active.cancel()
+        unrelated.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await active
+        with contextlib.suppress(asyncio.CancelledError):
+            await unrelated
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_queue_and_drain_starts_input_when_idle():
+    state = ConversationIngressState(runtime=_Runtime(_Runner()), busy_mode="interrupt", route_binding=_Route())
+    controller = ConversationTurnController(state)
+    started = []
+
+    async def run(inbound):
+        try:
+            started.append(inbound.text)
+        finally:
+            ConversationTurnController(state).finish(asyncio.current_task())
+
+    assert await controller.queue_and_drain_if_idle(_user("queued"), run) is True
+    task = state.active_task
+    assert task is not None
+    await task
+    assert started == ["queued"]
+    assert state.active_task is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_controller_enqueue_completion_queues_when_active_and_starts_when_idle():
+    state = ConversationIngressState(runtime=_Runtime(_Runner()), busy_mode="interrupt", route_binding=_Route())
+    controller = ConversationTurnController(state)
+    active = asyncio.create_task(asyncio.sleep(60))
+    state.active_task = active
+    started = []
+
+    async def run(inbound):
+        try:
+            started.append(inbound.text)
+        finally:
+            ConversationTurnController(state).finish(asyncio.current_task())
+
+    try:
+        assert await controller.enqueue_completion(_completion("active"), run) == "queued_running"
+        assert state.queue.next_inbound().metadata["task_id"] == "active"
+    finally:
+        active.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await active
+    state.active_task = None
+
+    assert await controller.enqueue_completion(_completion("idle"), run) == "started"
+    task = state.active_task
+    assert task is not None
+    await task
+    assert started == ["completion idle"]
+    assert state.active_task is None

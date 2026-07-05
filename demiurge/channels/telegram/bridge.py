@@ -35,7 +35,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import ConversationIngressState
+from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
@@ -851,26 +851,21 @@ class TelegramInteractionBridge:
         return state
 
     async def _handle_busy_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        await state.queue.put(inbound)
-        if is_background_completion(inbound):
-            return
-        if state.busy_mode == "queue":
-            await self._send_text(inbound.source, f"Queued for next turn: {self._shorten(inbound.text)}", reply_to=inbound.reply_to)
-            return
-        await self._send_text(
-            inbound.source,
-            f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
-            reply_to=inbound.reply_to,
-        )
-        if state.active_task and not state.active_task.done():
-            state.active_task.cancel()
+        async def notify(decision) -> None:
+            if decision.kind == "queue":
+                await self._send_text(inbound.source, f"Queued for next turn: {self._shorten(inbound.text)}", reply_to=inbound.reply_to)
+                return
+            if decision.kind == "interrupt":
+                await self._send_text(
+                    inbound.source,
+                    f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
+                    reply_to=inbound.reply_to,
+                )
+
+        await ConversationTurnController(state).handle_busy_inbound(inbound, notify=notify)
 
     def _start_turn(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        if state.active_task and not state.active_task.done():
-            state.queue.put_nowait(inbound)
-            return
-        task = asyncio.create_task(self._run_inbound(state, inbound))
-        state.active_task = task
+        ConversationTurnController(state).start(inbound, lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _run_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         task = asyncio.current_task()
@@ -887,17 +882,14 @@ class TelegramInteractionBridge:
             await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to)
         finally:
             self._active_inbound.reset(token)
-            if state.active_task is task:
-                state.active_task = None
-            await self._drain_next_queued_input(state)
+            controller = ConversationTurnController(state)
+            controller.finish(task)
+            await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _drain_next_queued_input(self, state: TelegramConversationState) -> None:
-        if state.active_task and not state.active_task.done():
-            return
-        if state.queue.empty():
-            return
-        next_inbound = self._next_queued_input(state)
-        self._start_turn(state, next_inbound)
+        await ConversationTurnController(state).drain_next(
+            lambda next_inbound: self._run_inbound(state, next_inbound)
+        )
 
     async def _handle_telegram_command(
         self,
@@ -939,7 +931,7 @@ class TelegramInteractionBridge:
     async def _command_status(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         runner = state.runtime.runner
         queue_depth = state.queue.qsize()
-        running = bool(state.active_task and not state.active_task.done())
+        running = ConversationTurnController(state).running
         lines = [
             "# Status",
             f"- core: `{getattr(runner, 'core_id', '?')}`",
@@ -980,7 +972,7 @@ class TelegramInteractionBridge:
         await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to)
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        running = bool(state.active_task and not state.active_task.done())
+        running = ConversationTurnController(state).running
         queued = self._clear_queue(state, preserve_completions=True)
         if running:
             await self._cancel_active(state)
@@ -1002,10 +994,11 @@ class TelegramInteractionBridge:
             conversation_key=inbound.conversation_key,
             metadata=dict(inbound.metadata),
         )
-        await state.queue.put(queued)
+        await ConversationTurnController(state).queue_and_drain_if_idle(
+            queued,
+            lambda next_inbound: self._run_inbound(state, next_inbound),
+        )
         await self._send_text(inbound.source, f"Queued: {self._shorten(text)}", reply_to=inbound.reply_to)
-        if not state.active_task or state.active_task.done():
-            await self._drain_next_queued_input(state)
 
     async def _command_busy(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         mode = args.strip().lower()
@@ -1101,19 +1094,12 @@ class TelegramInteractionBridge:
         await self._send_text(inbound.source, content[:3800], reply_to=inbound.reply_to)
 
     async def _cancel_active(self, state: TelegramConversationState) -> None:
-        task = state.active_task
-        if not task or task.done():
-            return
-        await self._cancel_pending_approval(state, reason="telegram turn stopped")
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        await ConversationTurnController(state).cancel_active(
+            before_cancel=lambda: self._cancel_pending_approval(state, reason="telegram turn stopped")
+        )
 
     def _clear_queue(self, state: TelegramConversationState, *, preserve_completions: bool) -> int:
-        return state.queue.clear(preserve_completions=preserve_completions)
-
-    def _next_queued_input(self, state: TelegramConversationState) -> InteractionInbound:
-        return state.queue.next_inbound()
+        return ConversationTurnController(state).clear_queue(preserve_completions=preserve_completions)
 
     def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
@@ -1163,14 +1149,10 @@ class TelegramInteractionBridge:
         )
         if inbound is None:
             return
-        if state.active_task and not state.active_task.done():
-            await state.queue.put(inbound)
-            return
-        if not state.queue.empty():
-            await state.queue.put(inbound)
-            await self._drain_next_queued_input(state)
-            return
-        self._start_turn(state, inbound)
+        await ConversationTurnController(state).enqueue_completion(
+            inbound,
+            lambda next_inbound: self._run_inbound(state, next_inbound),
+        )
 
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:
         for state in self._conversations.values():
