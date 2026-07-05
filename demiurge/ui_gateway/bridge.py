@@ -32,7 +32,7 @@ from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
-from demiurge.slash import SLASH_COMMANDS, SlashCommand, SlashCommandSpec, parse_slash_command, specs_for_surface
+from demiurge.slash import SlashCommand, SlashCommandSpec, help_text_for_surface, parse_slash_command, specs_for_surface
 from demiurge.storage import EventLog, SessionRecord
 from demiurge.ui_gateway.protocol import JsonEventSink
 
@@ -546,13 +546,10 @@ class TuiInteractionBridge:
         )
 
     async def _help(self, _: str) -> bool:
-        lines = ["# Commands", ""]
-        for spec in SLASH_COMMANDS:
-            usage = f" `{spec.usage}`" if spec.usage else ""
-            lines.append(f"- `/{spec.name}` - {spec.description}{usage}")
-        lines.append("")
-        lines.append("Enter submits. Ctrl-C interrupts a running turn.")
-        await self._emit_command_output("help", "\n".join(lines))
+        await self._emit_command_output(
+            "help",
+            help_text_for_surface("tui", footer_lines=("Enter submits. Ctrl-C interrupts a running turn.",)),
+        )
         return True
 
     async def _status(self, _: str) -> bool:

@@ -40,7 +40,7 @@ from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnC
 from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
-from demiurge.slash import parse_slash_command, specs_for_surface, telegram_command_specs
+from demiurge.slash import command_names_for_surface, help_text_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
     _needs_rich_telegram_rendering,
@@ -159,7 +159,7 @@ class TelegramInteractionBridge:
         self.approval_timeout_seconds = approval_timeout_seconds
         self.tool_display = _normalize_tool_display(tool_display)
         self._command_runtime = ChannelCommandRuntime(
-            command_names={spec.name for spec in specs_for_surface("telegram")},
+            command_names=command_names_for_surface("telegram"),
             unavailable_template="Command not available on Telegram: /{name}",
             unknown_template="Unknown command: /{name}",
         )
@@ -917,15 +917,7 @@ class TelegramInteractionBridge:
         }
 
     async def _command_help(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        lines = ["# Commands"]
-        current_group = ""
-        for spec in specs_for_surface("telegram"):
-            if spec.group != current_group:
-                current_group = spec.group
-                lines.extend(["", f"## {current_group}"])
-            usage = spec.usage or f"/{spec.name}"
-            lines.append(f"- `{usage}` - {spec.description}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
+        await self._send_text(inbound.source, help_text_for_surface("telegram"), reply_to=inbound.reply_to)
 
     async def _command_status(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         runner = state.runtime.runner
@@ -1457,7 +1449,7 @@ class TelegramInteractionBridge:
                 return rest
             if self._telegram_command_mentioned_bot(command_token):
                 return f"/{command.name}" + (f" {rest}" if rest else "")
-            if not self.bot_username and command.name in {spec.name for spec in specs_for_surface("telegram")}:
+            if not self.bot_username and command.name in command_names_for_surface("telegram"):
                 return stripped
             return None
         if self.bot_username and f"@{self.bot_username}".lower() in stripped.lower():

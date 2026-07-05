@@ -26,6 +26,7 @@ from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.slash import command_names_for_surface, help_text_for_surface
 
 
 logger = logging.getLogger(__name__)
@@ -47,9 +48,7 @@ class GatewayBridge(Protocol):
 
 TextConversationState = ConversationIngressState
 
-TEXT_CHANNEL_COMMAND_NAMES = frozenset(
-    {"help", "status", "new", "stop", "queue", "busy", "sessions", "resume", "tools", "skills", "skill"}
-)
+TEXT_CHANNEL_COMMAND_NAMES = command_names_for_surface("text")
 
 
 class TextChannelBridgeBase:
@@ -346,7 +345,7 @@ class TextChannelBridgeBase:
     async def _command_help(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         await self._send_text(
             inbound.source,
-            "# Commands\n- `/ask <prompt>` - send a prompt\n- `/status` - show runtime status\n- `/new` - start a new session\n- `/stop` - stop current work\n- `/queue <prompt>` - queue input\n- `/busy interrupt|queue` - set busy behavior\n- `/sessions [limit]` - list sessions\n- `/resume <number|session_id>` - resume a session\n- `/tools` - show tools\n- `/skills [category]` - show skills\n- `/skill <name>` - view a skill",
+            help_text_for_surface("text", extra_lines=("- `/ask <prompt>` - send a prompt",)),
             reply_to=inbound.reply_to,
             metadata=inbound.metadata,
         )
