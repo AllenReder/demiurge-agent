@@ -35,6 +35,30 @@ class RecordingProvider:
         return LLMResponse(content=self.default)
 
 
+class FakeMcpTool:
+    def __init__(self, name: str, *, description: str = "Fake MCP tool"):
+        self.name = name
+        self.description = description
+        self.inputSchema = {"type": "object", "properties": {}}
+
+
+class FakeMcpConnection:
+    def __init__(self, tools):
+        self.tools = list(tools)
+        self.list_count = 0
+        self.closed = False
+
+    async def list_tools(self):
+        self.list_count += 1
+        return self.tools
+
+    async def call_tool(self, name, arguments, *, timeout_seconds):
+        return LLMResponse(content=f"{name}:ok")
+
+    async def close(self):
+        self.closed = True
+
+
 class ToolCallingProvider(RecordingProvider):
     async def complete(self, request):
         self.requests.append(request)
@@ -1512,6 +1536,89 @@ async def test_agents_run_filters_child_tools_by_allowlist(tmp_path):
 
     assert [tool.name for tool in provider.requests[1].tools] == ["read_file"]
     assert _delivery_texts(result) == ["parent", "read_file"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_tool_allowlist_uses_exact_tool_ids(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/tools/fs/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    return ToolResult(content='fs exact')\n",
+    )
+    _write_slot(
+        agents,
+        "evolver/agent/tools/fs/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Exact fs tool.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', tools=['fs'])\n"
+        "    resolved = ','.join(result.metadata['child_agent_tools']['resolved'])\n"
+        "    ctx.output.send_text(resolved, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert [tool.name for tool in provider.requests[1].tools] == ["fs"]
+    assert _delivery_texts(result) == ["parent", "fs"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
+    agents = _copy_agents(tmp_path)
+    mcp_dir = agents / "evolver" / "agent" / "mcp"
+    mcp_dir.mkdir(parents=True, exist_ok=True)
+    (mcp_dir / "docs.yaml").write_text(
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', tools=['docs__lookup'])\n"
+        "    resolved = ','.join(result.metadata['child_agent_tools']['resolved'])\n"
+        "    ctx.output.send_text(resolved, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    connection = FakeMcpConnection([FakeMcpTool("lookup")])
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert [tool.name for tool in provider.requests[1].tools] == ["docs__lookup"]
+    assert _delivery_texts(result) == ["parent", "docs__lookup"]
+    assert connection.list_count == 1
 
 
 @pytest.mark.asyncio
