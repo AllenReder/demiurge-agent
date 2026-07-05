@@ -29,6 +29,7 @@ from demiurge.runtime.session_commands import (
     session_list_view,
 )
 from demiurge.runtime.status_commands import RuntimeStatusView, build_runtime_status_view, runtime_status_key_values
+from demiurge.runtime.tool_display import historical_tool_item, tool_call_item
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -478,7 +479,7 @@ class TuiInteractionBridge:
                     )
                 continue
             if message.role == "tool" and self.tool_display != "quiet":
-                tool = _historical_tool_item(message, tool_events, full=self.tool_display == "full")
+                tool = historical_tool_item(message, tool_events, full=self.tool_display == "full")
                 if tool is not None:
                     items.append(tool)
         return items[-500:]
@@ -542,7 +543,7 @@ class TuiInteractionBridge:
                 "session_id": outbound.session_id if outbound is not None else self.app.runner.session_id,
                 "turn_id": outbound.turn_id if outbound is not None else None,
                 "deliveries": [],
-                "tool_calls": [_tool_call_record_dict(index, record, full=self.tool_display == "full") for index, record in enumerate(records, start=1)],
+                "tool_calls": [tool_call_item(index, record, full=self.tool_display == "full") for index, record in enumerate(records, start=1)],
                 "tool_display": self.tool_display,
             },
         )
@@ -1076,72 +1077,6 @@ def _tool_history_events(events: list[dict[str, Any]]) -> dict[str, dict[str, An
             }
         )
     return by_id
-
-
-def _historical_tool_item(message: Any, events: dict[str, dict[str, Any]], *, full: bool) -> dict[str, Any] | None:
-    metadata = message.metadata or {}
-    call_id = str(metadata.get("tool_call_id") or "")
-    event = events.get(call_id, {}) if call_id else {}
-    name = str(event.get("name") or metadata.get("tool_name") or "")
-    if not name and not message.content:
-        return None
-    result_text = str(event.get("display_output") or event.get("content") or message.content or "")
-    tool = {
-        "index": 1,
-        "name": name or "tool",
-        "id": call_id or message.id,
-        "status": "error" if bool(event.get("is_error") or metadata.get("is_error")) else "ok",
-        "summary": shorten_text(result_text),
-    }
-    if full:
-        tool.update(
-            {
-                "arguments": _json_safe(event.get("arguments") if isinstance(event.get("arguments"), dict) else {}),
-                "result": result_text,
-                "model_output": event.get("model_output"),
-            }
-        )
-    return {
-        "id": f"history_tool_{call_id or message.id}",
-        "type": "tool",
-        "display": "full" if full else "summary",
-        "tools": [tool],
-    }
-
-
-def _tool_call_record_dict(index: int, record: ToolInteractionRecord, *, full: bool) -> dict[str, Any]:
-    result_text = ""
-    if record.result is not None:
-        result_text = record.result.display_output or record.result.content or ""
-    item = {
-        "index": index,
-        "name": record.call.name,
-        "id": record.call.id,
-        "phase": record.phase,
-        "status": record.status,
-        "summary": shorten_text(result_text) if result_text else _tool_call_start_summary(record.call),
-    }
-    if full:
-        item.update(
-            {
-                "arguments": _json_safe(record.call.arguments),
-                "result": result_text,
-                "model_output": record.result.model_output if record.result is not None else None,
-            }
-        )
-    return item
-
-
-def _tool_call_start_summary(call: ToolCall) -> str:
-    if call.name == "terminal":
-        command = str(call.arguments.get("command") or "").strip()
-        return f"$ {command}" if command else "running terminal"
-    if call.name in {"read_file", "write_file", "patch"}:
-        path = call.arguments.get("path") or call.arguments.get("file_path")
-        return f"{call.name}: {path}" if path else call.name
-    if call.arguments:
-        return shorten_text(json.dumps(call.arguments, ensure_ascii=False, sort_keys=True))
-    return "running"
 
 
 def _slash_spec_dict(spec: SlashCommandSpec) -> dict[str, Any]:

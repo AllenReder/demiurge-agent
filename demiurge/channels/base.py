@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import json
 import logging
 from typing import Any, Callable, Protocol
 
@@ -23,6 +22,7 @@ from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnC
 from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
 from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
@@ -67,7 +67,7 @@ class TextChannelBridgeBase:
         self.channel_name = channel_name
         self._runtime_factory = runtime_factory or (lambda _conversation_key: runtime)  # type: ignore[return-value]
         self.default_busy_mode = busy_mode if busy_mode in {"interrupt", "queue"} else "interrupt"
-        self.tool_display = _normalize_tool_display(tool_display)
+        self.tool_display = normalize_tool_display(tool_display)
         self._command_runtime = ChannelCommandRuntime(
             command_names=TEXT_CHANNEL_COMMAND_NAMES,
             unavailable_template="Command not available: /{name}",
@@ -221,42 +221,10 @@ class TextChannelBridgeBase:
             )
 
     def _tool_call_text(self, record: ToolInteractionRecord) -> str:
-        status = record.status
-        if record.phase == "start":
-            return f"## Tool call\n`{record.call.name}` - `running` - {self._shorten(_tool_call_start_summary(record.call), limit=220)}"
-        result = ""
-        if record.result is not None:
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-        return f"## Tool call\n`{record.call.name}` - `{status}` - {result}"
+        return tool_call_markdown(record, mode=self.tool_display)
 
     def _tool_results_text(self, records: list[Any]) -> str:
-        if self.tool_display == "full":
-            sections: list[str] = ["## Tool calls"]
-            for index, record in enumerate(records, start=1):
-                status = "error" if record.result.is_error else "ok"
-                sections.extend(
-                    [
-                        "",
-                        f"### {index}. `{record.call.name}` - `{status}`",
-                        "",
-                        "**Arguments**",
-                        "```json",
-                        self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
-                        "```",
-                        "",
-                        "**Result**",
-                        "```",
-                        self._shorten(record.result.display_output or record.result.content or "", limit=1800),
-                        "```",
-                    ]
-                )
-            return "\n".join(sections)
-        lines = ["## Tool calls"]
-        for index, record in enumerate(records, start=1):
-            status = "error" if record.result.is_error else "ok"
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-            lines.append(f"{index}. `{record.call.name}` - `{status}` - {result}")
-        return "\n".join(lines)
+        return tool_results_markdown(records, mode=self.tool_display)
 
     def _conversation_state(self, conversation_key: str) -> TextConversationState:
         state = self._conversations.get(conversation_key)
@@ -640,18 +608,6 @@ class TextChannelBridgeBase:
         return compact[: max(0, limit - 3)] + "..."
 
 
-def _tool_call_start_summary(call: ToolCall) -> str:
-    if call.name == "terminal":
-        command = str(call.arguments.get("command") or "").strip()
-        return f"$ {command}" if command else "running terminal"
-    if call.name in {"read_file", "write_file", "patch"}:
-        path = call.arguments.get("path") or call.arguments.get("file_path")
-        return f"{call.name}: {path}" if path else call.name
-    if call.arguments:
-        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
-    return "running"
-
-
 class ChannelRouterBridge:
     def __init__(self, bridges: dict[str, GatewayBridge], *, fallback: Callable[[str], GatewayBridge] | None = None) -> None:
         self.bridges = dict(bridges)
@@ -719,11 +675,6 @@ def resolve_env_value(env_name: str | None, inline_value: str | None) -> str | N
         if value:
             return value
     return inline_value
-
-
-def _normalize_tool_display(value: str | None) -> str:
-    normalized = (value or "summary").strip().lower()
-    return normalized if normalized in {"quiet", "summary", "full"} else "summary"
 
 
 def _media_block_fallback(block: dict[str, Any]) -> str:

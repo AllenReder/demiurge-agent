@@ -27,6 +27,7 @@ from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -80,47 +81,6 @@ TELEGRAM_POLL_CONFLICT_STEP_DELAY_SECONDS = 10.0
 TELEGRAM_POLL_CONFLICT_MAX_RETRIES = 5
 
 
-def _normalize_tool_display(value: str | None) -> str:
-    normalized = (value or "summary").strip().lower()
-    return normalized if normalized in {"quiet", "summary", "full"} else "summary"
-
-
-def _tool_call_start_summary(call: ToolCall) -> str:
-    if call.name == "terminal":
-        command = str(call.arguments.get("command") or "").strip()
-        return f"$ {command}" if command else "running terminal"
-    if call.name in {"read_file", "write_file", "patch"}:
-        path = call.arguments.get("path") or call.arguments.get("file_path")
-        return f"{call.name}: {path}" if path else call.name
-    if call.arguments:
-        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
-    return "running"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class TelegramInteractionBridge:
     def __init__(
         self,
@@ -158,7 +118,7 @@ class TelegramInteractionBridge:
         self.allowed_chats = set(allowed_chats or [])
         self.unauthorized_response = unauthorized_response
         self.approval_timeout_seconds = approval_timeout_seconds
-        self.tool_display = _normalize_tool_display(tool_display)
+        self.tool_display = normalize_tool_display(tool_display)
         self._command_runtime = ChannelCommandRuntime(
             command_names=command_names_for_surface("telegram"),
             unavailable_template="Command not available on Telegram: /{name}",
@@ -634,72 +594,10 @@ class TelegramInteractionBridge:
         return (conversation, record.call.id)
 
     def _tool_call_text(self, record: ToolInteractionRecord) -> str:
-        status = record.status
-        if record.phase == "start":
-            return f"## Tool call\n`{record.call.name}` - `running` - {self._shorten(_tool_call_start_summary(record.call), limit=220)}"
-        result = ""
-        if record.result is not None:
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-        if self.tool_display == "full" and record.result is not None:
-            sections = [
-                "## Tool call",
-                "",
-                f"### `{record.call.name}` - `{status}`",
-                "",
-                "**Arguments**",
-                "```json",
-                self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
-                "```",
-                "",
-                "**Result**",
-                "```",
-                self._shorten(record.result.display_output or record.result.content or "", limit=1800),
-                "```",
-            ]
-            if record.result.model_output and record.result.model_output != record.result.content:
-                sections.extend(["", "**Model output**", "```", self._shorten(record.result.model_output, limit=1200), "```"])
-            return "\n".join(sections)
-        return f"## Tool call\n`{record.call.name}` - `{status}` - {result}"
+        return tool_call_markdown(record, mode=self.tool_display)
 
     def _tool_results_text(self, records) -> str:
-        if self.tool_display == "full":
-            sections: list[str] = ["## Tool calls"]
-            for index, record in enumerate(records, start=1):
-                status = "error" if record.result.is_error else "ok"
-                sections.extend(
-                    [
-                        "",
-                        f"### {index}. `{record.call.name}` - `{status}`",
-                        "",
-                        "**Arguments**",
-                        "```json",
-                        self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
-                        "```",
-                        "",
-                        "**Result**",
-                        "```",
-                        self._shorten(record.result.display_output or record.result.content or "", limit=1800),
-                        "```",
-                    ]
-                )
-                if record.result.model_output and record.result.model_output != record.result.content:
-                    sections.extend(
-                        [
-                            "",
-                            "**Model output**",
-                            "```",
-                            self._shorten(record.result.model_output, limit=1200),
-                            "```",
-                        ]
-                    )
-            return "\n".join(sections)
-
-        lines = ["## Tool calls"]
-        for index, record in enumerate(records, start=1):
-            status = "error" if record.result.is_error else "ok"
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-            lines.append(f"{index}. `{record.call.name}` - `{status}` - {result}")
-        return "\n".join(lines)
+        return tool_results_markdown(records, mode=self.tool_display)
 
     async def _deliver_delivery(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
         if not delivery.visible:
