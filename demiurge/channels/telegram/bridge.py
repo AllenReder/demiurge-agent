@@ -38,6 +38,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.outbound_delivery import text_delivery_steps
 from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
 from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.providers import ToolCall
@@ -436,26 +437,18 @@ class TelegramInteractionBridge:
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
         try:
-            pending_tool_results = []
-            for item in outbound.items:
-                if item.kind == "tool_call" and item.tool_call is not None:
-                    if pending_tool_results:
-                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-                        pending_tool_results = []
-                    await self._deliver_tool_call(item.tool_call, outbound=outbound)
+            for step in text_delivery_steps(outbound):
+                if step.kind == "tool_call" and step.tool_call is not None:
+                    await self._deliver_tool_call(step.tool_call, outbound=outbound)
                     continue
-                if item.kind == "tool_result" and item.tool_result is not None:
-                    pending_tool_results.append(item.tool_result)
+                if step.kind == "tool_results":
+                    await self._deliver_tool_results(list(step.tool_results), outbound=outbound)
                     continue
-                if item.kind == "delivery" and item.delivery is not None:
-                    if pending_tool_results:
-                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-                        pending_tool_results = []
-                    await self._deliver_delivery(item.delivery, outbound=outbound)
-            if pending_tool_results:
-                await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-            if outbound.prompt is not None:
-                await self.prompt_user(outbound.prompt)
+                if step.kind == "delivery" and step.deliveries:
+                    await self._deliver_delivery(step.deliveries[0], outbound=outbound)
+                    continue
+                if step.kind == "prompt" and step.prompt is not None:
+                    await self.prompt_user(step.prompt)
         finally:
             outbound.mark_delivered()
 

@@ -24,6 +24,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.outbound_delivery import ui_delivery_steps
 from demiurge.runtime.session_commands import (
     build_session_list_view,
     format_sessions_table,
@@ -173,32 +174,15 @@ class TuiInteractionBridge:
                 f"TUI route bound to session `{self.app.runner.session_id}` received outbound for `{outbound.session_id}`"
             )
         try:
-            pending_tool_calls = []
-            pending_deliveries = []
-            for item in outbound.items:
-                if item.kind == "tool_call" and item.tool_call is not None:
-                    if pending_deliveries:
-                        await self._emit_deliveries(outbound, pending_deliveries)
-                        pending_deliveries = []
-                    pending_tool_calls.append(item.tool_call)
+            for step in ui_delivery_steps(outbound):
+                if step.kind == "tool_calls":
+                    await self._emit_tool_calls(list(step.tool_calls), outbound=outbound)
                     continue
-                if item.kind == "tool_result" and item.tool_result is not None:
-                    if pending_deliveries:
-                        await self._emit_deliveries(outbound, pending_deliveries)
-                        pending_deliveries = []
-                    pending_tool_calls.append(ToolInteractionRecord.finished(item.tool_result))
+                if step.kind == "deliveries":
+                    await self._emit_deliveries(outbound, list(step.deliveries))
                     continue
-                if item.kind == "delivery" and item.delivery is not None:
-                    if pending_tool_calls:
-                        await self._emit_tool_calls(pending_tool_calls, outbound=outbound)
-                        pending_tool_calls = []
-                    pending_deliveries.append(item.delivery)
-            if pending_tool_calls:
-                await self._emit_tool_calls(pending_tool_calls, outbound=outbound)
-            if pending_deliveries:
-                await self._emit_deliveries(outbound, pending_deliveries)
-            if outbound.prompt is not None:
-                await self._open_prompt(outbound.prompt, kind="clarify", wait=False)
+                if step.kind == "prompt" and step.prompt is not None:
+                    await self._open_prompt(step.prompt, kind="clarify", wait=False)
         finally:
             outbound.mark_delivered()
             await self._emit_status()
