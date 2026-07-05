@@ -861,7 +861,7 @@ async def test_telegram_access_policy_unauthorized_choice_callback_does_not_cons
 
     await bridge.handle_update(_callback("choice:1", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
 
-    assert bridge._pending_choices["telegram:123"] == ["fast", "careful"]
+    assert bridge._pending_choices.get("telegram:123") == ["fast", "careful"]
     assert runner.texts == []
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
 

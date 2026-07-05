@@ -25,6 +25,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import ui_delivery_steps
+from demiurge.runtime.prompts import normalize_prompt_answer
 from demiurge.runtime.session_commands import (
     build_session_list_view,
     format_sessions_table,
@@ -232,7 +233,7 @@ class TuiInteractionBridge:
         pending = self._pending_prompts.pop(prompt_id, None)
         if pending is None:
             return {"accepted": False, "reason": "prompt not pending"}
-        normalized = self._normalize_prompt_answer(answer, pending.choices)
+        normalized = normalize_prompt_answer(answer, pending.choices, empty="first").text
         if pending.kind == "resume":
             view = session_list_view(pending.records, active_session_id=self.app.runner.session_id)
             resolution = resolve_session_choice(normalized, view)
@@ -925,14 +926,6 @@ class TuiInteractionBridge:
             busy_mode=self.busy_mode,
             queued_inputs=self._queued_inputs.qsize(),
         )
-
-    def _normalize_prompt_answer(self, answer: str, choices: list[str]) -> str:
-        text = str(answer or "").strip()
-        if text.isdigit():
-            index = int(text) - 1
-            if 0 <= index < len(choices):
-                return choices[index]
-        return text or (choices[0] if choices else "")
 
     async def _active_core(self):
         return await self.app.load_active_core()

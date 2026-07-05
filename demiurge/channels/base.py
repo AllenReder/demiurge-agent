@@ -20,6 +20,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import text_delivery_steps
+from demiurge.runtime.prompts import PromptChoiceRuntime, format_prompt_text
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -76,7 +77,7 @@ class TextChannelBridgeBase:
             run_inbound=self._run_inbound,
             help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
-        self._pending_choices: dict[str, list[str]] = {}
+        self._pending_choices = PromptChoiceRuntime()
         self._conversations: dict[str, TextConversationState] = {}
         self._task_worker: RuntimeTaskWorker | None = None
         self._task_unsubscribe: Callable[[], None] | None = None
@@ -123,15 +124,14 @@ class TextChannelBridgeBase:
             outbound.mark_delivered()
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
-        if prompt.conversation_key and prompt.choices:
-            self._pending_choices[prompt.conversation_key] = list(prompt.choices)
+        self._pending_choices.remember(prompt.conversation_key, prompt.choices)
         source = prompt.metadata.get("source")
         if source is None:
             return ""
         reply_to = prompt.metadata.get("reply_to")
         await self._send_text(
             str(source),
-            self._prompt_text(prompt),
+            format_prompt_text(prompt.question, prompt.choices),
             reply_to=str(reply_to) if reply_to is not None else None,
             metadata=prompt.metadata,
         )
@@ -341,7 +341,7 @@ class TextChannelBridgeBase:
     def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
         if not inbound.conversation_key:
             return inbound
-        text = self._consume_pending_choice(inbound.conversation_key, inbound.text.strip())
+        text = self._pending_choices.consume_text(inbound.conversation_key, inbound.text.strip()).text
         if text == inbound.text:
             return inbound
         return InteractionInbound(
@@ -352,24 +352,6 @@ class TextChannelBridgeBase:
             conversation_key=inbound.conversation_key,
             metadata=dict(inbound.metadata),
         )
-
-    def _consume_pending_choice(self, conversation_key: str, text: str) -> str:
-        choices = self._pending_choices.get(conversation_key)
-        if not choices:
-            return text
-        value = text.strip()
-        self._pending_choices.pop(conversation_key, None)
-        if value.isdigit():
-            index = int(value) - 1
-            if 0 <= index < len(choices):
-                return choices[index]
-        return text
-
-    def _prompt_text(self, prompt: UserPromptRequest) -> str:
-        lines = [prompt.question]
-        for index, choice in enumerate(prompt.choices, start=1):
-            lines.append(f"{index}. {choice}")
-        return "\n".join(lines)
 
     async def _send_typing(self, inbound: InteractionInbound) -> None:
         return None

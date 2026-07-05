@@ -37,6 +37,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import text_delivery_steps
+from demiurge.runtime.prompts import PromptChoiceRuntime, choice_button_rows, format_prompt_text
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
@@ -138,7 +139,7 @@ class TelegramInteractionBridge:
         self._polling_conflict_max_retries = TELEGRAM_POLL_CONFLICT_MAX_RETRIES
         self._rich_messages_disabled = False
         self.offset: int | None = None
-        self._pending_choices: dict[str, list[str]] = {}
+        self._pending_choices = PromptChoiceRuntime()
         self._pending_approvals: dict[str, TelegramPendingApproval] = {}
         self._approval_counter = 0
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
@@ -311,7 +312,7 @@ class TelegramInteractionBridge:
             return None
         conversation_key = f"telegram:{chat_id}"
         if self._telegram_access_allowed(chat_id=chat_id, chat_type=str(chat_type), user_id=user_id):
-            normalized = self._consume_pending_choice(conversation_key, normalized.strip())
+            normalized = self._pending_choices.consume_text(conversation_key, normalized.strip()).text
         return InteractionInbound(
             channel="telegram",
             text=normalized.strip(),
@@ -329,7 +330,7 @@ class TelegramInteractionBridge:
     def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
         if not inbound.conversation_key:
             return inbound
-        text = self._consume_pending_choice(inbound.conversation_key, inbound.text.strip())
+        text = self._pending_choices.consume_text(inbound.conversation_key, inbound.text.strip()).text
         if text == inbound.text:
             return inbound
         return InteractionInbound(
@@ -398,19 +399,13 @@ class TelegramInteractionBridge:
         chat_type = chat.get("type") or "private"
         user_id = (callback.get("from") or {}).get("id")
         conversation_key = f"telegram:{chat_id}"
-        choices = self._pending_choices.pop(conversation_key, None)
-        if not choices:
-            return None
-        try:
-            index = int(data.split(":", 1)[1])
-        except ValueError:
-            return None
-        if index < 0 or index >= len(choices):
+        resolution = self._pending_choices.consume_callback_data(conversation_key, data)
+        if resolution is None:
             return None
         message_id = message.get("message_id")
         return InteractionInbound(
             channel="telegram",
-            text=choices[index],
+            text=resolution.text,
             source=str(chat_id),
             reply_to=str(message_id) if message_id is not None else None,
             conversation_key=conversation_key,
@@ -457,17 +452,16 @@ class TelegramInteractionBridge:
             outbound.mark_delivered()
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
-        if prompt.conversation_key and prompt.choices:
-            self._pending_choices[prompt.conversation_key] = list(prompt.choices)
+        self._pending_choices.remember(prompt.conversation_key, prompt.choices)
         source = prompt.metadata.get("source")
         if source is None:
             return ""
         reply_to = prompt.metadata.get("reply_to")
         await self._send_text(
             str(source),
-            self._prompt_text(prompt),
+            format_prompt_text(prompt.question, prompt.choices),
             reply_to=str(reply_to) if reply_to is not None else None,
-            reply_markup=self._choice_reply_markup(prompt.choices) if prompt.choices else None,
+            reply_markup={"inline_keyboard": choice_button_rows(prompt.choices)} if prompt.choices else None,
         )
         return ""
 
@@ -949,31 +943,6 @@ class TelegramInteractionBridge:
             return
         with contextlib.suppress(Exception):
             await asyncio.to_thread(self.api.answer_callback_query, callback_query_id=callback_query_id, text=text)
-
-    def _consume_pending_choice(self, conversation_key: str, text: str) -> str:
-        choices = self._pending_choices.get(conversation_key)
-        if not choices:
-            return text
-        value = text.strip()
-        self._pending_choices.pop(conversation_key, None)
-        if value.isdigit():
-            index = int(value) - 1
-            if 0 <= index < len(choices):
-                return choices[index]
-        return text
-
-    def _prompt_text(self, prompt: UserPromptRequest) -> str:
-        lines = [prompt.question]
-        for index, choice in enumerate(prompt.choices, start=1):
-            lines.append(f"{index}. {choice}")
-        return "\n".join(lines)
-
-    def _choice_reply_markup(self, choices: list[str]) -> dict[str, Any]:
-        buttons = []
-        for index, choice in enumerate(choices):
-            label = f"{index + 1}. {self._shorten(choice, limit=32)}"
-            buttons.append([{"text": label, "callback_data": f"choice:{index}"}])
-        return {"inline_keyboard": buttons}
 
     def _next_approval_id(self) -> str:
         self._approval_counter += 1
