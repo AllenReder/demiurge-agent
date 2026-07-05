@@ -329,61 +329,22 @@ class SchedulerRuntime:
         return int(rows[-1]["seq"])
 
 
-class SchedulerService:
+class ScheduleFireRuntime:
+    """Execute one claimed schedule fire through the normal turn pipeline."""
+
     def __init__(
         self,
         app: Any,
+        store: SchedulerRuntime,
         *,
         delivery_route: Any | None = None,
-        poll_interval_seconds: float = 30.0,
     ):
         self.app = app
+        self.store = store
         self.delivery_route = delivery_route
-        self.poll_interval_seconds = poll_interval_seconds
-        self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
-        self._task: asyncio.Task[None] | None = None
         self._bridges: dict[str, Any] = {}
 
-    @property
-    def running(self) -> bool:
-        return self._task is not None and not self._task.done()
-
-    def start(self) -> None:
-        if not self.running:
-            self._task = asyncio.create_task(self._loop())
-
-    async def stop(self) -> None:
-        task = self._task
-        self._task = None
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    async def run_due_once(self, *, now: datetime | None = None) -> list[ScheduleRunResult]:
-        core = await self._load_core()
-        results: list[ScheduleRunResult] = []
-        for schedule in core.schedules:
-            if not schedule.enabled:
-                continue
-            claim = self.store.claim_due(schedule, now=now)
-            if claim is None:
-                continue
-            results.append(await self._run_claim(core, schedule, claim))
-        return results
-
-    async def _loop(self) -> None:
-        while True:
-            try:
-                await self.run_due_once()
-            except Exception:
-                pass
-            await asyncio.sleep(self.poll_interval_seconds)
-
-    async def _load_core(self) -> LoadedCore:
-        return await self.app.load_active_core()
-
-    async def _run_claim(
+    async def run(
         self,
         core: LoadedCore,
         schedule: ScheduleDefinition,
@@ -626,6 +587,60 @@ class SchedulerService:
         validate_schedule_target(channel, config, schedule.delivery)
 
 
+class SchedulerService:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        delivery_route: Any | None = None,
+        poll_interval_seconds: float = 30.0,
+    ):
+        self.app = app
+        self.poll_interval_seconds = poll_interval_seconds
+        self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+        self.fire_runtime = ScheduleFireRuntime(app, self.store, delivery_route=delivery_route)
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        if not self.running:
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def run_due_once(self, *, now: datetime | None = None) -> list[ScheduleRunResult]:
+        core = await self._load_core()
+        results: list[ScheduleRunResult] = []
+        for schedule in core.schedules:
+            if not schedule.enabled:
+                continue
+            claim = self.store.claim_due(schedule, now=now)
+            if claim is None:
+                continue
+            results.append(await self.fire_runtime.run(core, schedule, claim))
+        return results
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self.run_due_once()
+            except Exception:
+                pass
+            await asyncio.sleep(self.poll_interval_seconds)
+
+    async def _load_core(self) -> LoadedCore:
+        return await self.app.load_active_core()
+
+
 def start_scheduler_for_app(
     app: Any,
     *,
@@ -642,6 +657,7 @@ def start_scheduler_for_app(
 
 
 __all__ = [
+    "ScheduleFireRuntime",
     "ScheduleRunClaim",
     "ScheduleRunResult",
     "SchedulerService",
