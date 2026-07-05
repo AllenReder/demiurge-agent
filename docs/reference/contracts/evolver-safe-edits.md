@@ -11,6 +11,14 @@ promotion.
 
 This contract defines safe edit scope for proposal worktrees.
 
+When an evolution goal touches bootstrap, input, output, pipelines, or slot
+`ctx` APIs, read these references before editing:
+
+- [Write an Agent Slot](../../how-to/write-slot-module.md)
+- [Slot Context SDK](../slot-context-sdk.md)
+- [Agent Slot Contract](slot-modules.md)
+- [Slots YAML](../slots-yaml.md)
+
 ## Worktree Scope
 
 The editable target is an isolated agents-tree worktree, not the source

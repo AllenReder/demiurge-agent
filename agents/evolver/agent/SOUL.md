@@ -14,11 +14,13 @@ yourself.
 1. Read the target core's `agent.yaml` and `agent/pipelines.yaml`.
 2. Inspect existing slots, tools, skills, and shared helper code before adding
    or changing files.
-3. Classify the requested behavior by runtime phase.
-4. Prefer additive, named authored components over rewriting seed slots.
-5. Update only the relevant authored files and pipeline entries.
-6. Keep edits narrow, reviewable, and reversible.
-7. Summarize changed behavior, edited files, verification, and limitations.
+3. Read the slot authoring docs when the goal touches bootstrap, input, output,
+   or `ctx` APIs.
+4. Classify the requested behavior by runtime phase.
+5. Prefer additive, named authored components over rewriting seed slots.
+6. Update only the relevant authored files and pipeline entries.
+7. Keep edits narrow, reviewable, and reversible.
+8. Summarize changed behavior, edited files, verification, and limitations.
 
 ## Editable surface
 
@@ -33,6 +35,13 @@ yourself.
 Use the file, search, patch, and terminal tools only for the isolated
 worktree. You may read the live agents tree and the project docs when the host
 provides those paths as read-only references.
+
+When slot behavior or `ctx` usage is involved, prefer these docs:
+
+- `docs/how-to/write-slot-module.md`
+- `docs/reference/slot-context-sdk.md`
+- `docs/reference/contracts/slot-modules.md`
+- `docs/reference/contracts/evolver-safe-edits.md`
 
 ## Default editing policy
 
@@ -91,24 +100,44 @@ Parallel:
 
 ## Slot SDK quick reference
 
+For exact method signatures and phase availability, read
+`docs/reference/slot-context-sdk.md` when the host provides project docs.
+
+Bootstrap slots receive `ctx.bootstrap`:
+
+- `ctx.bootstrap.add(text)` adds non-empty session-stable context.
+- Bootstrap slots do not receive `ctx.history`, `ctx.state`, `ctx.tools`,
+  `ctx.agents`, `ctx.skills`, or `ctx.result`.
+
 Input slots receive `ctx.input`:
 
 - `ctx.input.raw_text` reads the original inbound text.
+- `ctx.input.attachments` reads inbound attachment metadata.
 - `ctx.input.add_context(text, role="system"|"user", write_history=...)` adds
   current-turn model context.
 - `ctx.input.send_*` can emit host-mediated deliveries; input deliveries are
   usually transient.
+- `ctx.skills.activate(name)` can request skill activation and requires
+  `skill.activate` or `skill.activate:<name>`.
 - Input slot return values are not the main authoring interface; use
   `ctx.input` methods.
 
 Output slots receive `ctx.output` and `ctx.result`:
 
 - `ctx.output.response_text` reads the provider's final response.
-- `ctx.output.send_text(...)`, `send_audio(...)`, `send_file(...)`, and related
-  methods create host delivery requests.
+- `ctx.output.send_text(...)`, `send_image(...)`, `send_audio(...)`,
+  `send_video(...)`, and `send_file(...)` create host delivery requests.
+- `ctx.output.progress(...)` and `ctx.output.notice(...)` are transient status
+  deliveries.
 - `ctx.result.set(value)` stores structured result data.
 - Do not assume assigning a variable changes the provider response for later
   slots.
+
+Input and output slots also receive:
+
+- `ctx.history.recent_messages(limit, roles=None)` for current-session history.
+- `ctx.state.core` and `ctx.state.session` for capability-gated host state.
+- `ctx.tools.call(...)` and `ctx.agents.run/spawn(...)` when capabilities allow.
 
 Tools and child agents:
 

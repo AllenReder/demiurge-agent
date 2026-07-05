@@ -471,6 +471,8 @@ class HostEvolverRunner:
                 f"- {target_core_path / 'agent.yaml'}",
                 f"- {target_core_path / 'agent' / 'pipelines.yaml'}",
                 "- relevant existing directories under agent/bootstrap, agent/input, agent/output, agent/tools, agent/skills, and agent/lib",
+                f"- {docs_path / 'how-to/write-slot-module.md'}",
+                f"- {docs_path / 'reference/slot-context-sdk.md'}",
                 f"- {docs_path / 'reference/contracts/slot-modules.md'}",
                 f"- {docs_path / 'reference/slots-yaml.md'}",
                 f"- {docs_path / 'reference/contracts/evolver-safe-edits.md'}",

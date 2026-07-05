@@ -9,6 +9,14 @@ description: Host-managed evolver core 的稳定规则。
 
 这个 contract 定义 proposal worktree 的 safe edit scope。
 
+当 evolution goal 涉及 bootstrap、input、output、pipelines 或 slot `ctx` APIs 时，
+编辑前先读这些参考：
+
+- [编写 Agent Slot](../../how-to/write-slot-module.md)
+- [Slot Context SDK](../slot-context-sdk.md)
+- [Agent Slot 合约](slot-modules.md)
+- [Slots YAML](../slots-yaml.md)
+
 ## Worktree Scope
 
 可编辑目标是隔离的 agents-tree worktree，不是 source checkout，也不是 host runtime state。Evolver 通常编辑一个 target concrete core；当目标需要跨 core 行为时，也可以编辑 helper cores。
