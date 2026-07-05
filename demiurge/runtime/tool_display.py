@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, is_dataclass
 from typing import Any, Literal
 
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import ToolInteractionRecord
+from demiurge.runtime.text_format import json_safe, shorten_text
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
@@ -46,7 +46,7 @@ def tool_call_item(index: int, record: ToolInteractionRecord, *, full: bool = Fa
         "id": record.call.id,
         "phase": record.phase,
         "status": record.status,
-        "summary": shorten_tool_text(result_text) if result_text else shorten_tool_text(tool_call_start_summary(record.call)),
+        "summary": shorten_text(result_text) if result_text else shorten_text(tool_call_start_summary(record.call)),
     }
     if full:
         item.update(
@@ -72,7 +72,7 @@ def historical_tool_item(message: Any, events: dict[str, dict[str, Any]], *, ful
         "name": name or "tool",
         "id": call_id or message.id,
         "status": "error" if bool(event.get("is_error") or metadata.get("is_error")) else "ok",
-        "summary": shorten_tool_text(result_text),
+        "summary": shorten_text(result_text),
     }
     if full:
         tool.update(
@@ -95,11 +95,11 @@ def tool_call_markdown(record: ToolInteractionRecord, *, mode: ToolDisplayMode |
     if display_mode == "quiet":
         return ""
     if record.phase == "start" or record.result is None:
-        summary = shorten_tool_text(tool_call_start_summary(record.call), limit=220)
+        summary = shorten_text(tool_call_start_summary(record.call), limit=220)
         return f"## Tool call\n`{record.call.name}` - `running` - {summary}"
     if display_mode == "full":
         return _finished_tool_call_markdown(record)
-    result = shorten_tool_text(tool_result_text(record.result), limit=220)
+    result = shorten_text(tool_result_text(record.result), limit=220)
     return f"## Tool call\n`{record.call.name}` - `{record.status}` - {result}"
 
 
@@ -116,30 +116,9 @@ def tool_results_markdown(records: list[ToolExecutionRecord], *, mode: ToolDispl
     lines = ["## Tool calls"]
     for index, record in enumerate(records, start=1):
         status = "error" if record.result.is_error else "ok"
-        result = shorten_tool_text(tool_result_text(record.result), limit=220)
+        result = shorten_text(tool_result_text(record.result), limit=220)
         lines.append(f"{index}. `{record.call.name}` - `{status}` - {result}")
     return "\n".join(lines)
-
-
-def shorten_tool_text(text: str, limit: int = 160) -> str:
-    normalized = " ".join(str(text).split())
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 15:
-        return normalized[:limit]
-    return f"{normalized[: limit - 15]}...[truncated]"
-
-
-def json_safe(value: Any) -> Any:
-    if is_dataclass(value):
-        return json_safe(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_safe(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
 
 
 def _finished_tool_call_markdown(record: ToolInteractionRecord) -> str:
@@ -152,12 +131,12 @@ def _finished_tool_call_markdown(record: ToolInteractionRecord) -> str:
         "",
         "**Arguments**",
         "```json",
-        shorten_tool_text(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
+        shorten_text(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
         "```",
         "",
         "**Result**",
         "```",
-        shorten_tool_text(tool_result_text(record.result), limit=1800),
+        shorten_text(tool_result_text(record.result), limit=1800),
         "```",
     ]
     _append_model_output(sections, record.result)
@@ -172,12 +151,12 @@ def _tool_result_full_section(index: int, record: ToolExecutionRecord) -> list[s
         "",
         "**Arguments**",
         "```json",
-        shorten_tool_text(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
+        shorten_text(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
         "```",
         "",
         "**Result**",
         "```",
-        shorten_tool_text(tool_result_text(record.result), limit=1800),
+        shorten_text(tool_result_text(record.result), limit=1800),
         "```",
     ]
     _append_model_output(section, record.result)
@@ -191,7 +170,7 @@ def _append_model_output(sections: list[str], result: ToolResult) -> None:
                 "",
                 "**Model output**",
                 "```",
-                shorten_tool_text(result.model_output, limit=1200),
+                shorten_text(result.model_output, limit=1200),
                 "```",
             ]
         )

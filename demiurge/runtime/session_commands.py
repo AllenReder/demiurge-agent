@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from demiurge.runtime.text_format import format_table
 from demiurge.storage import SessionRecord
 
 
@@ -137,29 +138,6 @@ def format_sessions_table(view: SessionListView) -> str:
         for choice in view.choices
     ]
     return format_table(["#", "", "session_id", "updated", "channel", "messages", "preview"], rows, title="Sessions")
-
-
-def format_table(headers: list[str], rows: list[tuple[Any, ...]], *, title: str | None = None) -> str:
-    table_rows = [[str(cell) for cell in row] for row in rows]
-    widths = [len(header) for header in headers]
-    for row in table_rows:
-        for index, cell in enumerate(row):
-            widths[index] = max(widths[index], min(len(cell), 72))
-    lines = [f"## {title}", ""] if title else []
-    lines.append(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
-    lines.append(" | ".join("-" * width for width in widths))
-    for row in table_rows:
-        lines.append(" | ".join(shorten_text(cell, limit=widths[index]).ljust(widths[index]) for index, cell in enumerate(row)))
-    return "\n".join(lines)
-
-
-def shorten_text(text: str, limit: int = 160) -> str:
-    normalized = " ".join(str(text).split())
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 15:
-        return normalized[:limit]
-    return f"{normalized[: limit - 15]}...[truncated]"
 
 
 def strip_outer_wrappers(value: str) -> str:

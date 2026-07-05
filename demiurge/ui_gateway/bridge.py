@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from demiurge.app import DemiurgeApp, load_host_config
@@ -29,6 +29,7 @@ from demiurge.runtime.session_commands import (
     session_list_view,
 )
 from demiurge.runtime.status_commands import RuntimeStatusView, build_runtime_status_view, runtime_status_key_values
+from demiurge.runtime.text_format import format_key_values, format_table, json_safe, shorten_text
 from demiurge.runtime.tool_display import historical_tool_item, tool_call_item
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
@@ -207,7 +208,7 @@ class TuiInteractionBridge:
                 "channel": outbound.channel,
                 "session_id": outbound.session_id,
                 "turn_id": outbound.turn_id,
-                "metadata": _json_safe(outbound.metadata),
+                "metadata": json_safe(outbound.metadata),
                 "deliveries": [_delivery_dict(delivery) for delivery in deliveries],
             },
         )
@@ -415,7 +416,7 @@ class TuiInteractionBridge:
                 "kind": kind,
                 "question": prompt.question,
                 "choices": list(prompt.choices),
-                "metadata": _json_safe(prompt.metadata),
+                "metadata": json_safe(prompt.metadata),
             },
         )
         await self._emit_status()
@@ -467,7 +468,7 @@ class TuiInteractionBridge:
                             "type": "message",
                             "role": message.role,
                             "text": message.content,
-                            "metadata": _json_safe(
+                            "metadata": json_safe(
                                 {
                                     **(message.metadata or {}),
                                     "message_id": message.id,
@@ -563,7 +564,7 @@ class TuiInteractionBridge:
                 extra=(("tool_display", self.tool_display),),
             )
         )
-        await self._emit_command_output("status", _format_key_values("Status", status))
+        await self._emit_command_output("status", format_key_values("Status", status))
         return True
 
     async def _core(self, _: str) -> bool:
@@ -589,7 +590,7 @@ class TuiInteractionBridge:
             core_id=self.app.runner.core_id,
         ).run()
         rows = [(finding.severity, finding.code, finding.message, finding.remediation or "") for finding in report.findings]
-        await self._emit_command_output("doctor", _format_table(["severity", "code", "message", "remediation"], rows, title="Doctor"))
+        await self._emit_command_output("doctor", format_table(["severity", "code", "message", "remediation"], rows, title="Doctor"))
         return True
 
     async def _tools(self, _: str) -> bool:
@@ -605,7 +606,7 @@ class TuiInteractionBridge:
             )
             for entry in self.app.tool_runtime.registry_for(core)
         ]
-        await self._emit_command_output("tools", _format_table(["name", "source", "risk", "capability", "approval", "output"], rows, title="Tools"))
+        await self._emit_command_output("tools", format_table(["name", "source", "risk", "capability", "approval", "output"], rows, title="Tools"))
         return True
 
     async def _skills(self, args: str) -> bool:
@@ -616,7 +617,7 @@ class TuiInteractionBridge:
             for skill in core.skills
             if category is None or skill.category == category
         ]
-        await self._emit_command_output("skills", _format_table(["name", "category", "description", "linked"], rows, title="Skills"))
+        await self._emit_command_output("skills", format_table(["name", "category", "description", "linked"], rows, title="Skills"))
         return True
 
     async def _skill(self, args: str) -> bool:
@@ -663,7 +664,7 @@ class TuiInteractionBridge:
                 )
                 for package in result.packages
             ]
-            await self._emit_command_output("packages", _format_table(["", "package", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
+            await self._emit_command_output("packages", format_table(["", "package", "tags", "summary"], rows, title=f"Packages -> {core_id}"))
             return True
         action = parts[0]
         if action in {"install", "uninstall"}:
@@ -692,7 +693,7 @@ class TuiInteractionBridge:
             package = manager.repositories.resolve_package_ref(action)
         except PackageOperationError:
             package = None
-        await self._emit_command_output("packages", f"unknown package: {action}" if package is None else _format_key_values(f"Package: {package.ref}", asdict(package)))
+        await self._emit_command_output("packages", f"unknown package: {action}" if package is None else format_key_values(f"Package: {package.ref}", asdict(package)))
         return True
 
     async def _evolve(self, args: str) -> bool:
@@ -883,7 +884,7 @@ class TuiInteractionBridge:
             await self._emit_command_output("trace", "no turns yet")
             return True
         rows = [(str(event.get("created_at", "")), str(event.get("type", "")), self._event_detail(event)) for event in events]
-        await self._emit_command_output("trace", _format_table(["time", "type", "detail"], rows, title=f"Trace {turn_id}"))
+        await self._emit_command_output("trace", format_table(["time", "type", "detail"], rows, title=f"Trace {turn_id}"))
         return True
 
     async def _events(self, args: str) -> bool:
@@ -901,7 +902,7 @@ class TuiInteractionBridge:
             (str(event.get("created_at", "")), str(event.get("type", "")), str(event.get("turn_id", "")), self._event_detail(event))
             for event in self.app.runner.event_log.tail(limit, event_type=event_type)
         ]
-        await self._emit_command_output("events", _format_table(["time", "type", "turn", "detail"], rows, title="Events"))
+        await self._emit_command_output("events", format_table(["time", "type", "turn", "detail"], rows, title="Events"))
         return True
 
     async def _tool_display(self, args: str) -> bool:
@@ -1032,13 +1033,13 @@ def _delivery_dict(delivery: Any) -> dict[str, Any]:
         "type": delivery.type,
         "kind": delivery.kind,
         "text": delivery.text,
-        "blocks": _json_safe(delivery.blocks),
+        "blocks": json_safe(delivery.blocks),
         "fallback_text": delivery.fallback_text,
-        "payload": _json_safe(delivery.payload),
-        "artifacts": _json_safe(delivery.artifacts),
+        "payload": json_safe(delivery.payload),
+        "artifacts": json_safe(delivery.artifacts),
         "visible": delivery.visible,
         "history_policy": delivery.history_policy,
-        "metadata": _json_safe(delivery.metadata),
+        "metadata": json_safe(delivery.metadata),
     }
 
 
@@ -1086,43 +1087,3 @@ def _slash_spec_dict(spec: SlashCommandSpec) -> dict[str, Any]:
         "group": spec.group,
         "usage": spec.usage,
     }
-
-
-def _format_key_values(title: str, values: dict[str, Any]) -> str:
-    rows = [(str(key), json.dumps(_json_safe(value), ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)) for key, value in values.items()]
-    return _format_table(["key", "value"], rows, title=title)
-
-
-def _format_table(headers: list[str], rows: list[tuple[Any, ...]], *, title: str | None = None) -> str:
-    table_rows = [[str(cell) for cell in row] for row in rows]
-    widths = [len(header) for header in headers]
-    for row in table_rows:
-        for index, cell in enumerate(row):
-            widths[index] = max(widths[index], min(len(cell), 72))
-    lines = [f"## {title}", ""] if title else []
-    lines.append(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
-    lines.append(" | ".join("-" * width for width in widths))
-    for row in table_rows:
-        lines.append(" | ".join(shorten_text(cell, limit=widths[index]).ljust(widths[index]) for index, cell in enumerate(row)))
-    return "\n".join(lines)
-
-
-def _json_safe(value: Any) -> Any:
-    if is_dataclass(value):
-        return _json_safe(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def shorten_text(text: str, limit: int = 160) -> str:
-    normalized = " ".join(str(text).split())
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 15:
-        return normalized[:limit]
-    return f"{normalized[: limit - 15]}...[truncated]"

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Protocol
+
+from demiurge.runtime.text_format import format_key_values
 
 
 class MessageCountRuntime(Protocol):
@@ -119,37 +120,3 @@ def runtime_status_key_values(view: RuntimeStatusView, *, extra: Iterable[tuple[
     for key, value in extra:
         values[str(key)] = value
     return values
-
-
-def format_key_values(title: str, values: dict[str, Any]) -> str:
-    rows = [
-        (
-            str(key),
-            json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value),
-        )
-        for key, value in values.items()
-    ]
-    return format_table(["key", "value"], rows, title=title)
-
-
-def format_table(headers: list[str], rows: list[tuple[Any, ...]], *, title: str | None = None) -> str:
-    table_rows = [[str(cell) for cell in row] for row in rows]
-    widths = [len(header) for header in headers]
-    for row in table_rows:
-        for index, cell in enumerate(row):
-            widths[index] = max(widths[index], min(len(cell), 72))
-    lines = [f"## {title}", ""] if title else []
-    lines.append(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
-    lines.append(" | ".join("-" * width for width in widths))
-    for row in table_rows:
-        lines.append(" | ".join(shorten_text(cell, limit=widths[index]).ljust(widths[index]) for index, cell in enumerate(row)))
-    return "\n".join(lines)
-
-
-def shorten_text(text: str, limit: int = 160) -> str:
-    normalized = " ".join(str(text).split())
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 15:
-        return normalized[:limit]
-    return f"{normalized[: limit - 15]}...[truncated]"
