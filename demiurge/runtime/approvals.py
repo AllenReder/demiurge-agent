@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from demiurge.runtime.text_format import shorten_text
@@ -18,6 +19,70 @@ class ApprovalCallback:
 class ApprovalResolution:
     title: str
     detail: str
+
+
+@dataclass(slots=True)
+class PendingApproval:
+    approval_id: str
+    request: ApprovalRequest
+    future: asyncio.Future[ApprovalDecision]
+    payload: Any = None
+
+
+@dataclass(slots=True)
+class ApprovalPromptRuntime:
+    id_prefix: str = ""
+    _counter: int = 0
+    _pending: dict[str, PendingApproval] = field(default_factory=dict)
+
+    @property
+    def count(self) -> int:
+        return len(self._pending)
+
+    def pending_ids(self) -> tuple[str, ...]:
+        return tuple(self._pending)
+
+    def open(self, request: ApprovalRequest, *, payload: Any = None) -> PendingApproval:
+        self._counter += 1
+        approval_id = f"{self.id_prefix}{self._counter}"
+        future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
+        pending = PendingApproval(
+            approval_id=approval_id,
+            request=request,
+            future=future,
+            payload=payload,
+        )
+        self._pending[approval_id] = pending
+        return pending
+
+    def get(self, approval_id: str) -> PendingApproval | None:
+        return self._pending.get(str(approval_id))
+
+    async def wait(self, pending: PendingApproval, *, shield: bool = False) -> ApprovalDecision:
+        waiter = asyncio.shield(pending.future) if shield else pending.future
+        return await waiter
+
+    def resolve(self, approval_id: str, decision: ApprovalDecision) -> PendingApproval | None:
+        pending = self._pending.pop(str(approval_id), None)
+        if pending is None:
+            return None
+        if not pending.future.done():
+            pending.future.set_result(decision)
+        return pending
+
+    def cancel(self, approval_id: str, reason: str) -> PendingApproval | None:
+        return self.resolve(str(approval_id), ApprovalDecision("deny", reason))
+
+    def cancel_all(self, reason: str) -> list[PendingApproval]:
+        cancelled: list[PendingApproval] = []
+        for approval_id in list(self._pending):
+            pending = self.cancel(approval_id, reason)
+            if pending is not None:
+                cancelled.append(pending)
+        return cancelled
+
+    def discard(self, approval_id: str) -> PendingApproval | None:
+        return self._pending.pop(str(approval_id), None)
 
 
 _TEXT_ALIASES = {

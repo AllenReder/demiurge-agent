@@ -889,11 +889,11 @@ async def test_telegram_access_policy_unauthorized_approval_callback_does_not_re
         )
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
-    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=5)
+    await _wait_until(lambda: bridge._pending_approvals.count > 0, timeout=5)
 
     await bridge.handle_update(_callback("approval:1:allow", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
 
-    assert "1" in bridge._pending_approvals
+    assert "1" in bridge._pending_approvals.pending_ids()
     assert runner.decision is None
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
     state = bridge._conversations["telegram:123"]
@@ -1726,8 +1726,8 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
     await _wait_until(lambda: bool(api.sent))
-    await _wait_until(lambda: bool(bridge._pending_approvals))
-    approval_id = next(iter(bridge._pending_approvals))
+    await _wait_until(lambda: bridge._pending_approvals.count > 0)
+    approval_id = bridge._pending_approvals.pending_ids()[0]
     state = bridge._conversations["telegram:123"]
     task = state.active_task
 
@@ -1742,7 +1742,7 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     await asyncio.wait_for(task, timeout=1)
 
     assert runner.decision.value == expected
-    assert bridge._pending_approvals == {}
+    assert bridge._pending_approvals.count == 0
     assert api.callbacks == [
         {"callback_query_id": "cb_approval", "text": "Approved." if expected != "deny" else "Denied."}
     ]
@@ -1776,7 +1776,7 @@ async def test_telegram_group_approval_fails_closed():
     assert runner.decision.value == "deny"
     assert "only supported in private chat" in runner.decision.reason
     assert any("only supported in private chat" in item["text"] for item in api.sent)
-    assert bridge._pending_approvals == {}
+    assert bridge._pending_approvals.count == 0
 
 
 @pytest.mark.asyncio
@@ -1805,7 +1805,7 @@ async def test_telegram_approval_times_out_and_denies():
 
     assert runner.decision.value == "deny"
     assert "timed out" in runner.decision.reason
-    assert bridge._pending_approvals == {}
+    assert bridge._pending_approvals.count == 0
     assert api.edits
     assert "Approval expired" in api.edits[-1]["text"]
     assert api.edits[-1]["reply_markup"] is None
@@ -1833,7 +1833,7 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
         )
     )
     await asyncio.wait_for(runner.request_started.wait(), timeout=1)
-    await _wait_until(lambda: bool(bridge._pending_approvals))
+    await _wait_until(lambda: bridge._pending_approvals.count > 0)
     task = bridge._conversations["telegram:123"].active_task
     await bridge.handle_inbound(
         InteractionInbound(
@@ -1849,7 +1849,7 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
     if task is not None:
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    assert bridge._pending_approvals == {}
+    assert bridge._pending_approvals.count == 0
     assert api.edits
     assert "Approval expired" in api.edits[-1]["text"]
     await bridge.handle_update(_callback("approval:1:allow", chat_id=123, message_id=456, callback_id="cb_old"))
@@ -1896,7 +1896,7 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
             metadata={"telegram_chat_type": "private"},
         )
     )
-    await _wait_until(lambda: bool(bridge._pending_approvals), timeout=20)
+    await _wait_until(lambda: bridge._pending_approvals.count > 0, timeout=20)
 
     assert not (workspace / "out.txt").exists()
 

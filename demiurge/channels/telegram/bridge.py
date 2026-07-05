@@ -36,6 +36,8 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.approvals import (
+    ApprovalPromptRuntime,
+    PendingApproval,
     approval_button_rows,
     approval_callback_answer,
     approval_decision_for_action,
@@ -69,8 +71,6 @@ class TelegramConversationState(ConversationIngressState):
 
 @dataclass(slots=True)
 class TelegramPendingApproval:
-    request: ApprovalRequest
-    future: asyncio.Future[ApprovalDecision]
     source: str
     reply_to: str | None
     conversation_key: str
@@ -148,8 +148,7 @@ class TelegramInteractionBridge:
         self._rich_messages_disabled = False
         self.offset: int | None = None
         self._pending_choices = PromptChoiceRuntime()
-        self._pending_approvals: dict[str, TelegramPendingApproval] = {}
-        self._approval_counter = 0
+        self._pending_approvals = ApprovalPromptRuntime()
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             "demiurge_telegram_active_inbound",
             default=None,
@@ -486,38 +485,43 @@ class TelegramInteractionBridge:
             )
             return ApprovalDecision("deny", "telegram approval is only supported in private chat")
 
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision] = loop.create_future()
-        approval_id = self._next_approval_id()
         conversation_key = inbound.conversation_key or f"telegram:{inbound.source}"
-        pending = TelegramPendingApproval(
-            request=request,
-            future=future,
+        payload = TelegramPendingApproval(
             source=inbound.source,
             reply_to=inbound.reply_to,
             conversation_key=conversation_key,
         )
-        sent = await self._send_text(
-            inbound.source,
-            format_approval_request_text(request),
-            reply_to=inbound.reply_to,
-            reply_markup={"inline_keyboard": approval_button_rows(approval_id)},
-        )
-        pending.message_id = _telegram_message_id(sent)
-        self._pending_approvals[approval_id] = pending
-        self._conversation_state(conversation_key).pending_approval_id = approval_id
+        pending = self._pending_approvals.open(request, payload=payload)
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=self.approval_timeout_seconds)
+            sent = await self._send_text(
+                inbound.source,
+                format_approval_request_text(request),
+                reply_to=inbound.reply_to,
+                reply_markup={"inline_keyboard": approval_button_rows(pending.approval_id)},
+            )
+        except BaseException:
+            self._pending_approvals.discard(pending.approval_id)
+            raise
+        payload.message_id = _telegram_message_id(sent)
+        self._conversation_state(conversation_key).pending_approval_id = pending.approval_id
+        try:
+            return await asyncio.wait_for(
+                self._pending_approvals.wait(pending, shield=True),
+                timeout=self.approval_timeout_seconds,
+            )
         except asyncio.TimeoutError:
             decision = ApprovalDecision("deny", "telegram approval timed out")
-            pending = self._resolve_pending_approval(approval_id, decision)
-            if pending is not None:
-                await self._edit_approval_message(pending, "Approval expired", "Request denied after 10 minutes.")
+            resolved = self._resolve_pending_approval(pending.approval_id, decision)
+            if resolved is not None:
+                await self._edit_approval_message(resolved, "Approval expired", "Request denied after 10 minutes.")
             else:
                 await self._send_text(inbound.source, "Approval timed out; request denied.", reply_to=inbound.reply_to)
             return decision
         except asyncio.CancelledError:
-            self._resolve_pending_approval(approval_id, ApprovalDecision("deny", "telegram approval cancelled"))
+            self._resolve_pending_approval(
+                pending.approval_id,
+                ApprovalDecision("deny", "telegram approval cancelled"),
+            )
             raise
 
     async def _deliver_text(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
@@ -952,10 +956,6 @@ class TelegramInteractionBridge:
         with contextlib.suppress(Exception):
             await asyncio.to_thread(self.api.answer_callback_query, callback_query_id=callback_query_id, text=text)
 
-    def _next_approval_id(self) -> str:
-        self._approval_counter += 1
-        return str(self._approval_counter)
-
     async def _handle_approval_callback(self, callback: dict[str, Any]) -> None:
         callback_id = callback.get("id")
         data = str(callback.get("data") or "")
@@ -969,7 +969,7 @@ class TelegramInteractionBridge:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        if parsed.approval_id not in self._pending_approvals:
+        if self._pending_approvals.get(parsed.approval_id) is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Approval expired.")
             await self._edit_expired_callback_message(callback)
@@ -982,15 +982,14 @@ class TelegramInteractionBridge:
             if resolution is not None:
                 await self._edit_approval_message(pending, resolution.title, resolution.detail)
 
-    def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> TelegramPendingApproval | None:
-        pending = self._pending_approvals.pop(approval_id, None)
+    def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> PendingApproval | None:
+        pending = self._pending_approvals.resolve(approval_id, decision)
         if pending is None:
             return None
-        state = self._conversations.get(pending.conversation_key)
+        payload: TelegramPendingApproval = pending.payload
+        state = self._conversations.get(payload.conversation_key)
         if state is not None and state.pending_approval_id == approval_id:
             state.pending_approval_id = None
-        if not pending.future.done():
-            pending.future.set_result(decision)
         return pending
 
     async def _cancel_pending_approval(self, state: TelegramConversationState, *, reason: str) -> None:
@@ -1001,16 +1000,17 @@ class TelegramInteractionBridge:
         if pending is not None:
             await self._edit_approval_message(pending, "Approval expired", "The turn was stopped before approval.")
 
-    async def _edit_approval_message(self, pending: TelegramPendingApproval, title: str, detail: str) -> None:
-        if pending.message_id is None or not hasattr(self.api, "edit_message_text"):
+    async def _edit_approval_message(self, pending: PendingApproval, title: str, detail: str) -> None:
+        payload: TelegramPendingApproval = pending.payload
+        if payload.message_id is None or not hasattr(self.api, "edit_message_text"):
             return
         text = format_resolved_approval_text(pending.request, title=title, detail=detail)
         formatted = format_telegram_markdown_v2(text)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(
                 self.api.edit_message_text,
-                chat_id=pending.source,
-                message_id=pending.message_id,
+                chat_id=payload.source,
+                message_id=payload.message_id,
                 text=formatted,
                 parse_mode="MarkdownV2",
                 reply_markup=None,
@@ -1019,8 +1019,8 @@ class TelegramInteractionBridge:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
                     self.api.edit_message_reply_markup,
-                    chat_id=pending.source,
-                    message_id=pending.message_id,
+                    chat_id=payload.source,
+                    message_id=payload.message_id,
                     reply_markup=None,
                 )
 

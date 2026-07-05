@@ -24,7 +24,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
-from demiurge.runtime.approvals import parse_approval_response
+from demiurge.runtime.approvals import ApprovalPromptRuntime, parse_approval_response
 from demiurge.runtime.outbound_delivery import ui_delivery_steps
 from demiurge.runtime.prompts import normalize_prompt_answer
 from demiurge.runtime.session_commands import (
@@ -106,9 +106,8 @@ class TuiInteractionBridge:
         )
         self._queued_inputs = self._ingress_state.queue
         self._pending_prompts: dict[str, PendingPrompt] = {}
-        self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
+        self._pending_approvals = ApprovalPromptRuntime(id_prefix="approval_")
         self._prompt_counter = 0
-        self._approval_counter = 0
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
@@ -198,25 +197,20 @@ class TuiInteractionBridge:
         return await pending.future
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
-        self._approval_counter += 1
-        approval_id = f"approval_{self._approval_counter}"
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision] = loop.create_future()
-        self._pending_approvals[approval_id] = future
-        await self.emit("interaction.approval.request", {"approval_id": approval_id, "request": asdict(request)})
+        pending = self._pending_approvals.open(request)
+        await self.emit("interaction.approval.request", {"approval_id": pending.approval_id, "request": asdict(request)})
         await self._emit_status()
         try:
-            return await future
+            return await self._pending_approvals.wait(pending)
         finally:
-            self._pending_approvals.pop(approval_id, None)
+            self._pending_approvals.discard(pending.approval_id)
             await self._emit_status()
 
     async def reply_approval(self, approval_id: str, value: str) -> dict[str, Any]:
-        future = self._pending_approvals.get(approval_id)
-        if future is None or future.done():
-            return {"accepted": False, "reason": "approval not pending"}
         decision = parse_approval_response(value, actor="TUI user")
-        future.set_result(decision)
+        pending = self._pending_approvals.resolve(approval_id, decision)
+        if pending is None:
+            return {"accepted": False, "reason": "approval not pending"}
         return {"accepted": True, "decision": decision.value}
 
     async def reply_prompt(self, prompt_id: str, answer: str) -> dict[str, Any]:
@@ -266,9 +260,7 @@ class TuiInteractionBridge:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        for future in self._pending_approvals.values():
-            if not future.done():
-                future.set_result(ApprovalDecision("deny", "TUI shutdown"))
+        self._pending_approvals.cancel_all("TUI shutdown")
         for prompt in self._pending_prompts.values():
             if prompt.future is not None and not prompt.future.done():
                 prompt.future.set_result("")
@@ -464,7 +456,7 @@ class TuiInteractionBridge:
             "background_tasks": self.app.runner.background_task_count,
             "message_count": view.message_count or 0,
             "pending_prompts": len(self._pending_prompts),
-            "pending_approvals": len(self._pending_approvals),
+            "pending_approvals": self._pending_approvals.count,
             "last_error": self._last_error,
         }
 

@@ -1,4 +1,7 @@
+import pytest
+
 from demiurge.runtime.approvals import (
+    ApprovalPromptRuntime,
     approval_button_rows,
     approval_callback_answer,
     approval_callback_data,
@@ -9,7 +12,7 @@ from demiurge.runtime.approvals import (
     parse_approval_callback_data,
     parse_approval_response,
 )
-from demiurge.security.approval import ApprovalRequest
+from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 
 
 def _request(**overrides):
@@ -111,3 +114,74 @@ def test_format_resolved_approval_text_includes_summary_tool_and_command():
     assert "**Summary:** Run command" in text
     assert "**Tool:** `terminal`" in text
     assert "whoami" in text
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_runtime_opens_with_prefixed_id_and_payload():
+    runtime = ApprovalPromptRuntime(id_prefix="approval_")
+    request = _request()
+
+    pending = runtime.open(request, payload={"source": "tui"})
+
+    assert pending.approval_id == "approval_1"
+    assert pending.request is request
+    assert pending.payload == {"source": "tui"}
+    assert pending.future.done() is False
+    assert runtime.count == 1
+    assert runtime.pending_ids() == ("approval_1",)
+    assert runtime.get("approval_1") is pending
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_runtime_resolves_waiter_and_clears_pending_entry():
+    runtime = ApprovalPromptRuntime()
+    pending = runtime.open(_request())
+    waiter = runtime.wait(pending)
+    decision = ApprovalDecision("allow", "ok")
+
+    resolved = runtime.resolve(pending.approval_id, decision)
+
+    assert resolved is pending
+    assert await waiter is decision
+    assert runtime.count == 0
+    assert runtime.resolve(pending.approval_id, decision) is None
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_runtime_cancels_with_deny_decision():
+    runtime = ApprovalPromptRuntime()
+    pending = runtime.open(_request())
+
+    cancelled = runtime.cancel(pending.approval_id, "stopped")
+
+    assert cancelled is pending
+    decision = await runtime.wait(pending)
+    assert decision.value == "deny"
+    assert decision.reason == "stopped"
+    assert runtime.count == 0
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_runtime_cancels_all_pending_entries():
+    runtime = ApprovalPromptRuntime()
+    first = runtime.open(_request(summary="first"))
+    second = runtime.open(_request(summary="second"))
+
+    cancelled = runtime.cancel_all("shutdown")
+
+    assert cancelled == [first, second]
+    assert runtime.count == 0
+    assert (await runtime.wait(first)).reason == "shutdown"
+    assert (await runtime.wait(second)).reason == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_runtime_discards_without_resolving_future():
+    runtime = ApprovalPromptRuntime()
+    pending = runtime.open(_request())
+
+    discarded = runtime.discard(pending.approval_id)
+
+    assert discarded is pending
+    assert runtime.count == 0
+    assert pending.future.done() is False
