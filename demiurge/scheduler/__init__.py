@@ -12,7 +12,7 @@ from croniter import croniter
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
 from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
-from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime
+from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
@@ -334,11 +334,11 @@ class SchedulerService:
         self,
         app: Any,
         *,
-        delivery_bridge: Any | None = None,
+        delivery_route: Any | None = None,
         poll_interval_seconds: float = 30.0,
     ):
         self.app = app
-        self.delivery_bridge = delivery_bridge
+        self.delivery_route = delivery_route
         self.poll_interval_seconds = poll_interval_seconds
         self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
         self._task: asyncio.Task[None] | None = None
@@ -395,21 +395,29 @@ class SchedulerService:
         task_id = claim.run_id
         self._record_claim_task(core, schedule, claim, task_id=task_id)
         try:
+            route_binding: SessionRouteBinding | None = None
             if schedule.delivery.mode != "local":
                 self._require_channel_target_allowed(core, schedule)
+                route_binding = SessionRouteBinding(route=self._delivery_route(core, schedule))
             runner = self._new_run_runner()
             inbound = self._schedule_inbound(schedule, claim)
-            result = await runner.run_turn(
-                schedule.prompt,
-                interaction=inbound,
-                input_slot_ids=schedule.modules.input,
-                output_slot_ids=schedule.modules.output,
-            )
+            try:
+                result = await runner.run_turn(
+                    schedule.prompt,
+                    interaction=inbound,
+                    input_slot_ids=schedule.modules.input,
+                    output_slot_ids=schedule.modules.output,
+                    route_binding=route_binding,
+                )
+                await runner.drain_background_tasks(include_task_worker=False)
+            finally:
+                if route_binding is not None:
+                    route_binding.unbind(runner.interaction_router)
             session_id = result.session_id
             turn_id = result.turn_id
             if result.needs_user:
                 raise RuntimeError("schedule run requested user input")
-            deliveries = await self._deliver_if_needed(core, schedule, claim, result)
+            deliveries = self._delivery_count(schedule, result)
             self.store.record_completed(
                 claim,
                 status="completed",
@@ -481,6 +489,7 @@ class SchedulerService:
             runtime_timezone=self.app.runtime_timezone,
             task_worker=self.app.task_worker,
             session_runtime=self.app.session_runtime,
+            interaction_router=self.app.runner.interaction_router,
             prepare_live_core=self.app.prepare_live_core,
         )
 
@@ -583,36 +592,17 @@ class SchedulerService:
             **self.store.runtime_timezone.metadata(now=claim.scheduled_at),
         }
 
-    async def _deliver_if_needed(
+    def _delivery_count(
         self,
-        core: LoadedCore,
         schedule: ScheduleDefinition,
-        claim: ScheduleRunClaim,
         result: Any,
     ) -> int:
         if schedule.delivery.mode == "local":
             return 0
-        channel = schedule.delivery.channel_name
-        target = schedule.delivery.delivery_target
-        assert target is not None
-        bridge = self.delivery_bridge or self._get_channel_bridge(core, channel)
-        metadata = {
-            "source": str(target),
-            f"{channel}_target": target,
-            **self._schedule_metadata(schedule, claim),
-        }
-        if channel == "telegram" and schedule.delivery.chat_id is not None:
-            metadata["telegram_chat_id"] = schedule.delivery.chat_id
-        await bridge.deliver(
-            InteractionOutbound(
-                channel=channel,
-                items=list(result.items),
-                session_id=result.session_id,
-                turn_id=result.turn_id,
-                metadata=metadata,
-            )
-        )
         return len(result.deliveries)
+
+    def _delivery_route(self, core: LoadedCore, schedule: ScheduleDefinition) -> Any:
+        return self.delivery_route or self._get_channel_bridge(core, schedule.delivery.channel_name)
 
     def _get_channel_bridge(self, core: LoadedCore, channel: str) -> Any:
         bridge = self._bridges.get(channel)
@@ -639,12 +629,12 @@ class SchedulerService:
 def start_scheduler_for_app(
     app: Any,
     *,
-    delivery_bridge: Any | None = None,
+    delivery_route: Any | None = None,
     poll_interval_seconds: float = 30.0,
 ) -> SchedulerService:
     service = SchedulerService(
         app,
-        delivery_bridge=delivery_bridge,
+        delivery_route=delivery_route,
         poll_interval_seconds=poll_interval_seconds,
     )
     service.start()

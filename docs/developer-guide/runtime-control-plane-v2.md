@@ -100,9 +100,11 @@ cancel callbacks, and live completion subscribers in memory. Public task reads,
 lists, logs, waits, cancellation results, and pending completion notifications
 are rebuilt from `RuntimeControlPlane` / SQLite projections and runtime events.
 
-`DeliveryRuntime` dispatches queued delivery intents through channel bridges
-after claiming the matching durable work item. The outbox lifecycle is
-`queued -> sending -> sent/failed/unknown`. Delivery failure can update a
+`DeliveryRuntime` dispatches queued delivery intents through the
+session-scoped interaction router after claiming the matching durable work item.
+The outbox lifecycle is `queued -> sending -> sent/failed/unknown/unrouted`.
+`unrouted` means no live route is bound for the delivery session; `failed` means
+a route existed and adapter delivery raised. Delivery failure can update a
 previously persisted history row with explicit failure history text, but retries
 must not rewrite the original history body.
 

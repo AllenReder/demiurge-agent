@@ -53,6 +53,7 @@ async def test_mattermost_deliver_posts_message():
     await bridge.deliver(
         InteractionOutbound(
             "mattermost",
+            session_id="session_1",
             items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
             metadata={"source": "C1", "mattermost_root_id": "root"},
         )

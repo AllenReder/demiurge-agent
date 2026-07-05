@@ -13,6 +13,7 @@ lifecycle。
 ```text
 inbound interaction
   -> create or resume session
+  -> bind inbound route to the resolved session
   -> run bootstrap when needed
   -> run input pipeline
   -> assemble provider context
@@ -56,6 +57,35 @@ completion turn。
 直到完成或用户调用 `task_control(command="cancel")`。
 
 需要用户输入的 background work 会被标记为 `blocked_needs_user`，并且不会自动批准。
+
+## Session Delivery Routes
+
+Runner 拥有一个共享的 `SessionInteractionRouter`。`InteractionRuntime` 会把当前
+adapter 作为 `SessionRouteBinding` 传入；runner 解析出 inbound 的最终 session 后，
+把该 route 绑定到 `runner.session_id`。TUI 和 channel 的 `/new`、`/resume` 以及
+session switch 路径必须把同一个 adapter route 重新绑定到新的 session。
+
+Ordinary output、tool lifecycle events 和 background output flushes 都会创建带必填
+`session_id` 的 `InteractionOutbound`。Router 只投递到绑定了该 session 的 route。
+如果没有 route，items 会被标记为 `unrouted`，并且不视为 adapter call failure。
+
+## Subagent Sessions
+
+`ctx.agents.run()`、`ctx.agents.spawn()` 和 `delegate_task` 会在独立
+`session_child_*` sessions 中运行 child agents。Child runners 共享同一个 router
+table，但不会接收 parent route binding。它们的 ordinary output 和 tool lifecycle
+delivery 只会出现在显式绑定到 child session 的 route 上。
+
+Parent/child lineage 仍然是 task 和 observability metadata，不参与 ordinary delivery
+routing。Parent turns 通过 `AgentRunResult`、durable task completion 或未来显式
+`subagent.*` events 接收 child work。
+
+## Approval 和 Prompts
+
+Interactive prompts 和 approval decisions 使用同一个 router 的 session-aware lookup，
+但它们不是 ordinary delivery。默认情况下 approval request 按 `turn.session_id` 查找；
+如果没有绑定 interactive route，approval provider 会以 `no_interactive_route` 拒绝，
+除非 host、global 或 core policy 已经 auto-allow 该 action。
 
 ## Failure Handling
 

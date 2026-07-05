@@ -60,6 +60,7 @@ async def test_webhook_deliver_posts_to_callback(monkeypatch):
     await bridge.deliver(
         InteractionOutbound(
             "webhook",
+            session_id="session_1",
             items=[InteractionItem.delivery_item(InteractionDelivery(text="hi"))],
             metadata={"source": "alice", "webhook_callback_url": "http://127.0.0.1/cb"},
         )

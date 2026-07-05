@@ -47,7 +47,7 @@ async def _run_gateway(app: Any) -> None:
     channel_map = {channel.name: channel.bridge for channel in channels}
     scheduler = start_scheduler_for_app(
         app,
-        delivery_bridge=ChannelRouterBridge(
+        delivery_route=ChannelRouterBridge(
             channel_map,
             fallback=lambda channel_name: _build_schedule_bridge(app, channel_name, channel_map),
         ),

@@ -30,6 +30,7 @@ from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionOutbound,
     InteractionRuntime,
+    SessionRouteBinding,
     ToolInteractionRecord,
     UserPromptRequest,
 )
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 class TelegramConversationState:
     runtime: InteractionRuntime
     busy_mode: str
+    route_binding: SessionRouteBinding
     conversation_key: str = ""
     source: str = ""
     reply_to: str | None = None
@@ -848,6 +850,7 @@ class TelegramInteractionBridge:
             state = TelegramConversationState(
                 runtime=self._runtime_factory(conversation_key),
                 busy_mode=self.default_busy_mode,
+                route_binding=SessionRouteBinding(route=self),
                 conversation_key=conversation_key,
             )
             self._conversations[conversation_key] = state
@@ -882,7 +885,7 @@ class TelegramInteractionBridge:
         try:
             if self.send_typing:
                 await self._send_typing(inbound.source)
-            outbound = await state.runtime.handle(inbound, bridge=self)
+            outbound = await state.runtime.handle(inbound, route_binding=state.route_binding)
             await self.deliver(outbound)
         except asyncio.CancelledError:
             raise
@@ -979,6 +982,7 @@ class TelegramInteractionBridge:
             source=inbound.source,
             reply_to=inbound.reply_to,
         )
+        state.route_binding.bind(runner.interaction_router, session_id)
         await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to)
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
@@ -1055,6 +1059,7 @@ class TelegramInteractionBridge:
         except FileNotFoundError as exc:
             await self._send_text(inbound.source, str(exc), reply_to=inbound.reply_to)
             return
+        state.route_binding.bind(state.runtime.runner.interaction_router, session_id)
         await self._send_text(inbound.source, f"Resumed session: `{session_id}`", reply_to=inbound.reply_to)
 
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
@@ -1623,6 +1628,7 @@ def _runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
             runtime_timezone=app.runtime_timezone,
             task_worker=app.task_worker,
             session_runtime=app.session_runtime,
+            interaction_router=app.runner.interaction_router,
             prepare_live_core=app.prepare_live_core,
         )
         return InteractionRuntime(runner)

@@ -93,6 +93,10 @@ class _RecordingBridge:
     def deliveries(self):
         return [delivery for outbound in self.outbounds for delivery in outbound.deliveries]
 
+    @property
+    def tool_results(self):
+        return [record for outbound in self.outbounds for record in outbound.tool_results]
+
 
 class _RecordingProvider:
     def __init__(self, responses=None, *, default: str = "main"):
@@ -2279,7 +2283,7 @@ async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_pat
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="hello voice", source="local", conversation_key="pkg:test"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 
@@ -2305,7 +2309,7 @@ async def test_minimax_summary_mode_uses_child_result_then_parent_delivers_audio
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="summarize voice", source="local", conversation_key="pkg:test"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 
@@ -2335,9 +2339,11 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="tts_minimax", option_answers={"enable_tool": True})
     calls = _mock_minimax_http(monkeypatch)
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="make tool voice", source="local", conversation_key="pkg:test")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="make tool voice", source="local", conversation_key="pkg:test"),
+        route=bridge,
     )
 
     assert (app.version_store.active_core_path("assistant") / "agent" / "tools" / "text_to_speech").exists()
@@ -2348,12 +2354,12 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
     assert tool_config == {"filename_template": "{turn_id}-tool.{format}"}
     assert "tool voice" in calls[0]["json"]["text"]
     audio_delivery = next(
-        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+        delivery for delivery in bridge.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
     )
     assert audio_delivery.history_policy == "transient"
     assert audio_delivery.metadata["slot"] == "agent/tools/text_to_speech"
-    assert result.tool_results[0].call.name == "text_to_speech"
-    assert result.tool_results[0].result.content == "sent audio"
+    assert bridge.tool_results[0].call.name == "text_to_speech"
+    assert bridge.tool_results[0].result.content == "sent audio"
     messages = app.session_runtime.read_messages(app.runner.session_id)
     tool_message = next(message for message in messages if message.role == "tool")
     assert tool_message.content == "Sent speech audio to the user."
@@ -2380,7 +2386,7 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="hello url voice", source="local", conversation_key="pkg:test"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 
@@ -2407,7 +2413,7 @@ async def test_provider_tts_direct_mode_delivers_audio(tmp_path, monkeypatch, pa
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text=f"hello {provider} voice", source="local", conversation_key=f"pkg:{provider}"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 
@@ -2472,7 +2478,7 @@ async def test_gemini_tts_decodes_inline_audio_to_wav(tmp_path, monkeypatch):
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="gemini voice", source="local", conversation_key="pkg:gemini"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 
@@ -2541,9 +2547,11 @@ async def test_provider_tts_tool_generates_audio_with_shared_tool_name(
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
     _manager(app).install(core_id="assistant", package_id=package_id, option_answers={"enable_tool": True})
     calls = _mock_provider_tts_http(monkeypatch, provider=provider, audio=expected_bytes)
+    bridge = _RecordingBridge()
 
-    result = await InteractionRuntime(app.runner).handle(
-        InteractionInbound(channel="tui", text="make provider voice", source="local", conversation_key=f"pkg:{provider}")
+    await InteractionRuntime(app.runner).handle(
+        InteractionInbound(channel="tui", text="make provider voice", source="local", conversation_key=f"pkg:{provider}"),
+        route=bridge,
     )
 
     if provider == "openai":
@@ -2554,13 +2562,13 @@ async def test_provider_tts_tool_generates_audio_with_shared_tool_name(
         request_text = json.dumps(calls[0]["json"]["contents"], ensure_ascii=False)
     assert "tool voice" in request_text
     audio_delivery = next(
-        delivery for delivery in result.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
+        delivery for delivery in bridge.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
     )
     audio_block = next(block for block in audio_delivery.blocks if block.get("type") == "audio")
     assert audio_delivery.history_policy == "transient"
     assert audio_delivery.metadata["slot"] == "agent/tools/text_to_speech"
     assert audio_block["artifact"]["media_type"] == expected_media_type
-    assert result.tool_results[0].call.name == "text_to_speech"
+    assert bridge.tool_results[0].call.name == "text_to_speech"
     artifact_bytes = next(workspace.glob(f".demiurge-tts/*-{expected_suffix}")).read_bytes()
     if provider == "gemini":
         assert artifact_bytes.startswith(b"RIFF")
@@ -2586,7 +2594,7 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
 
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="hello failure", source="local", conversation_key="pkg:test"),
-        bridge=bridge,
+        route=bridge,
     )
     await app.runner.drain_background_tasks()
 

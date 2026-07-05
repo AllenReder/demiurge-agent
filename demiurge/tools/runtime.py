@@ -1808,6 +1808,7 @@ class ToolRuntime:
             cache_key=f"{call.name}:{capability_name}:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1869,6 +1870,7 @@ class ToolRuntime:
             cache_key=f"terminal:terminal.exec:{command_guard.rule_key}",
             auto_approve=auto_approve,
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1910,6 +1912,7 @@ class ToolRuntime:
             cache_key=f"web_extract:network.fetch:{url}",
             auto_approve=policy == "auto",
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1952,6 +1955,7 @@ class ToolRuntime:
             cache_key=f"{call.name}:{capability_name}:mcp.call:{target}",
             auto_approve=policy == "auto",
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1992,6 +1996,7 @@ class ToolRuntime:
             cache_key=f"skill_manage:fs.write:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2038,6 +2043,7 @@ class ToolRuntime:
             cache_key=f"schedule_manage:schedule.manage:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
+            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:

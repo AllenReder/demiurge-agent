@@ -19,7 +19,7 @@ from demiurge.gates import GateRunner
 from demiurge.runtime.tasks import RuntimeTaskWorker
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
-from demiurge.runtime.interactions import BridgeApprovalProvider
+from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInteractionRouter
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
@@ -225,6 +225,7 @@ class DemiurgeApp:
     runtime_store: RuntimeStore
     control_plane: RuntimeControlPlane
     session_runtime: SessionRuntime
+    interaction_router: SessionInteractionRouter
     task_worker: RuntimeTaskWorker
     tool_runtime: ToolRuntime
     approval_runtime: ApprovalRuntime
@@ -509,7 +510,7 @@ def _turn_result_needs_user(result: Any) -> bool:
         approval = data.get("approval")
         if isinstance(approval, Mapping):
             reason = str(approval.get("reason") or "").lower()
-            if approval.get("value") == "deny" and "no active interaction bridge" in reason:
+            if approval.get("value") == "deny" and "no_interactive_route" in reason:
                 return True
     return False
 
@@ -543,7 +544,8 @@ def create_app(
     )
     resolved_core_id = core_id or host_config.runtime.default_core or "assistant"
     source_agents = source_agents_root(agents_root)
-    approval_runtime = ApprovalRuntime(BridgeApprovalProvider())
+    interaction_router = SessionInteractionRouter()
+    approval_runtime = ApprovalRuntime(BridgeApprovalProvider(interaction_router))
     version_store = VersionStore(home)
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
     runtime_store = RuntimeStore.default(home)
@@ -622,6 +624,7 @@ def create_app(
         runtime_timezone=runtime_timezone,
         task_worker=task_worker,
         session_runtime=session_runtime,
+        interaction_router=interaction_router,
         prepare_live_core=lambda: version_store.core_repository.prepare_live_for_edit_async(
             validate=lambda agents_root, changed_paths: gate_runner.run(agents_root, changed_paths=changed_paths)
         ),
@@ -637,6 +640,7 @@ def create_app(
         runtime_store=runtime_store,
         control_plane=control_plane,
         session_runtime=session_runtime,
+        interaction_router=interaction_router,
         task_worker=task_worker,
         tool_runtime=tool_runtime,
         approval_runtime=approval_runtime,

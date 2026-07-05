@@ -89,10 +89,12 @@ callbacks 和 live completion subscribers。Public task reads、lists、logs、
 waits、cancellation results 和 pending completion notifications 都从
 `RuntimeControlPlane` / SQLite projections 与 runtime events 重建。
 
-`DeliveryRuntime` 通过 channel bridges dispatch queued delivery intents，并用
-`sent` 或 `failed` status 更新 SQLite outbox projection。Delivery failure 可以
-用显式 failure history text 更新此前已持久化的 history row，但 retries 不能重写
-原始 history body。
+`DeliveryRuntime` claim 匹配的 durable work item 后，通过 session-scoped interaction
+router dispatch queued delivery intents。Outbox lifecycle 是
+`queued -> sending -> sent/failed/unknown/unrouted`。`unrouted` 表示该 delivery
+session 没有绑定 live route；`failed` 表示 route 存在但 adapter delivery 抛错。
+Delivery failure 可以用显式 failure history text 更新此前已持久化的 history row，
+但 retries 不能重写原始 history body。
 
 `SessionTurnStepRunner` 现在委托：
 

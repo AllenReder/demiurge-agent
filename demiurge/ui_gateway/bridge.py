@@ -12,7 +12,14 @@ from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
 from demiurge.runtime.delegation import subagents_command_text
-from demiurge.runtime.interactions import InteractionInbound, InteractionOutbound, InteractionRuntime, ToolInteractionRecord, UserPromptRequest
+from demiurge.runtime.interactions import (
+    InteractionInbound,
+    InteractionOutbound,
+    InteractionRuntime,
+    SessionRouteBinding,
+    ToolInteractionRecord,
+    UserPromptRequest,
+)
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -65,7 +72,7 @@ class TuiInteractionBridge:
     This class is intentionally the Python-side channel adapter, mirroring
     TelegramInteractionBridge's boundary. TypeScript renders the terminal and
     sends interaction intents; this class owns the conversion to
-    InteractionInbound/InteractionOutbound and implements InteractionBridge.
+    InteractionInbound/InteractionOutbound and implements SessionInteractionRoute.
     """
 
     def __init__(
@@ -79,6 +86,7 @@ class TuiInteractionBridge:
         self.app = app
         self.emit = emit
         self.runtime = InteractionRuntime(app.runner)
+        self._route_binding = SessionRouteBinding(route=self)
         self.tool_display = parse_tool_display_level(tool_display or app.tool_display) or "summary"
         resolved_busy_mode = busy_mode or app.channel_busy_mode
         self.busy_mode = resolved_busy_mode if resolved_busy_mode in {"interrupt", "queue"} else "interrupt"
@@ -99,6 +107,7 @@ class TuiInteractionBridge:
 
     async def initialize(self) -> dict[str, Any]:
         self._start_scheduler()
+        self._bind_current_session()
         await self._emit_ready()
         if self.app.session_runtime.message_count(self.app.runner.session_id):
             await self._emit_history_snapshot(self.app.runner.session_id)
@@ -131,6 +140,10 @@ class TuiInteractionBridge:
                 await task
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
+        if outbound.session_id != self.app.runner.session_id:
+            raise RuntimeError(
+                f"TUI route bound to session `{self.app.runner.session_id}` received outbound for `{outbound.session_id}`"
+            )
         try:
             pending_tool_calls = []
             pending_deliveries = []
@@ -149,11 +162,11 @@ class TuiInteractionBridge:
                     continue
                 if item.kind == "delivery" and item.delivery is not None:
                     if pending_tool_calls:
-                        await self._emit_tool_calls(pending_tool_calls)
+                        await self._emit_tool_calls(pending_tool_calls, outbound=outbound)
                         pending_tool_calls = []
                     pending_deliveries.append(item.delivery)
             if pending_tool_calls:
-                await self._emit_tool_calls(pending_tool_calls)
+                await self._emit_tool_calls(pending_tool_calls, outbound=outbound)
             if pending_deliveries:
                 await self._emit_deliveries(outbound, pending_deliveries)
             if outbound.prompt is not None:
@@ -257,6 +270,7 @@ class TuiInteractionBridge:
         if self._task_unsubscribe is not None:
             self._task_unsubscribe()
             self._task_unsubscribe = None
+        self._route_binding.unbind(self.app.runner.interaction_router)
         await self.emit("channel.shutdown", {})
 
     def _start_scheduler(self) -> None:
@@ -304,7 +318,7 @@ class TuiInteractionBridge:
         try:
             if not _is_background_completion(inbound):
                 await self.emit("interaction.message", {"role": "user", "text": inbound.text})
-            result = await self.runtime.handle(inbound, bridge=self)
+            result = await self.runtime.handle(inbound, route_binding=self._route_binding)
             await self.deliver(result)
         except asyncio.CancelledError:
             raise
@@ -535,13 +549,20 @@ class TuiInteractionBridge:
             },
         )
 
-    async def _emit_tool_calls(self, records: list[ToolInteractionRecord]) -> None:
+    async def _emit_tool_calls(
+        self,
+        records: list[ToolInteractionRecord],
+        *,
+        outbound: InteractionOutbound | None = None,
+    ) -> None:
         if self.tool_display == "quiet":
             return
         await self.emit(
             "interaction.deliver",
             {
                 "channel": "tui",
+                "session_id": outbound.session_id if outbound is not None else self.app.runner.session_id,
+                "turn_id": outbound.turn_id if outbound is not None else None,
                 "deliveries": [],
                 "tool_calls": [_tool_call_record_dict(index, record, full=self.tool_display == "full") for index, record in enumerate(records, start=1)],
                 "tool_display": self.tool_display,
@@ -822,6 +843,7 @@ class TuiInteractionBridge:
             await self._emit_notice(str(exc), level="error")
             return
         self.runtime = InteractionRuntime(self.app.runner)
+        self._bind_current_session()
         await self._emit_history_snapshot(session_id)
         await self._emit_notice(f"resumed session: {session_id}")
         await self._emit_status()
@@ -830,6 +852,7 @@ class TuiInteractionBridge:
         await self.app.runner.prepare_live_core()
         session_id = self.app.runner.start_new_session(channel="tui", source="local")
         self.runtime = InteractionRuntime(self.app.runner)
+        self._bind_current_session()
         await self._emit_history_snapshot(session_id)
         await self._emit_notice(f"new session: {session_id}")
         await self._emit_status()
@@ -953,6 +976,9 @@ class TuiInteractionBridge:
             reply_to=None,
             conversation_key=self._conversation_key(),
         )
+
+    def _bind_current_session(self) -> None:
+        self._route_binding.bind(self.app.runner.interaction_router, self.app.runner.session_id)
 
     def _normalize_prompt_answer(self, answer: str, choices: list[str]) -> str:
         text = str(answer or "").strip()

@@ -14,7 +14,7 @@ The host turns delivery requests into:
 - session messages
 - runtime events
 - artifacts
-- TUI or gateway deliveries
+- TUI or gateway deliveries routed by session
 - model-visible or model-hidden history
 
 ## Delivery Calls
@@ -99,9 +99,33 @@ input slots run before the assistant response.
 ## Delivery Timing
 
 Author-facing delivery timing options are not part of the current SDK. `send_*`
-submits an immediate host delivery request. The host owns channel routing,
+submits an immediate host delivery request. The host owns session route lookup,
 artifact storage, dispatch status, retry/degradation events, and final session
 records.
+
+## Dispatch Status
+
+Every live delivery has a required `session_id`. The runtime dispatches ordinary
+delivery through the active route bound to that session. `channel` remains
+adapter metadata and does not determine route ownership.
+
+`InteractionItem.dispatch_status` uses:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | The item has not been scheduled or delivered yet. |
+| `scheduled` | The item is queued for host-managed dispatch. |
+| `delivered` | A route for the session accepted the outbound. |
+| `failed` | A route existed, but adapter delivery raised an error. |
+| `unrouted` | No active route exists for the outbound session. |
+
+Durable outbox rows use `queued`, `sending`, `sent`, `failed`, `unknown`, and
+`unrouted`. `unknown` is reserved for recovery after a crash between claiming
+delivery work and recording a platform result.
+
+Child agent sessions do not inherit the parent's route. Their live deliveries
+are sent only to a route explicitly bound for the child session; otherwise they
+become `unrouted`.
 
 ## Channel Fallback
 
@@ -111,5 +135,5 @@ channel cannot render the richer block type.
 
 ## Boundary
 
-Authored modules request delivery. The host owns persistence, artifacts, route
-context, channel dispatch, delivery status, and history visibility.
+Authored modules request delivery. The host owns persistence, artifacts, session
+route lookup, channel dispatch, delivery status, and history visibility.
