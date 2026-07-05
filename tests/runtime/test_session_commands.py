@@ -5,8 +5,10 @@ from demiurge.runtime.session_commands import (
     format_sessions_markdown,
     format_sessions_table,
     resolve_session_choice,
+    resume_bound_session,
     session_list_view,
     session_record_dict,
+    start_bound_session,
 )
 from demiurge.storage import SessionRecord
 
@@ -31,6 +33,41 @@ class FakeSessionRuntime:
     def list_sessions(self, *, core_id: str | None = None, limit: int = 20):
         self.calls.append({"core_id": core_id, "limit": limit})
         return [_record("session_1"), _record("session_2")]
+
+
+class FakeRouteBinding:
+    def __init__(self):
+        self.binds = []
+
+    def bind(self, router, session_id: str):
+        self.binds.append((router, session_id))
+        return {"router": router, "session_id": session_id}
+
+
+class FakeRunner:
+    def __init__(self, *, start_session_id: str = "session_new", missing: bool = False):
+        self.interaction_router = object()
+        self.start_session_id = start_session_id
+        self.missing = missing
+        self.prepared = False
+        self.start_calls = []
+        self.resume_calls = []
+
+    async def prepare_live_core(self):
+        self.prepared = True
+
+    def start_new_session(self, **kwargs):
+        self.start_calls.append(kwargs)
+        return self.start_session_id
+
+    def resume_session(self, session_id: str) -> None:
+        self.resume_calls.append(session_id)
+        if self.missing:
+            raise FileNotFoundError(f"session not found: {session_id}")
+
+
+class NoStartRunner:
+    pass
 
 
 def test_build_session_list_view_reads_runtime_with_core_and_limit():
@@ -100,3 +137,67 @@ def test_resolve_session_choice_strips_wrapped_session_ids():
     assert resolve_session_choice("<session_1>", view).session_id == "session_1"
     assert resolve_session_choice('"session_1"', view).session_id == "session_1"
     assert resolve_session_choice("[session_1]", view).session_id == "session_1"
+
+
+async def test_start_bound_session_prepares_starts_and_binds_route():
+    runner = FakeRunner(start_session_id="session_created")
+    binding = FakeRouteBinding()
+
+    result = await start_bound_session(
+        runner,
+        binding,
+        channel="telegram",
+        conversation_key="telegram:1",
+        source="1",
+        reply_to="2",
+        replace_conversation_binding=True,
+    )
+
+    assert result.ok is True
+    assert result.session_id == "session_created"
+    assert runner.prepared is True
+    assert runner.start_calls == [
+        {
+            "channel": "telegram",
+            "conversation_key": "telegram:1",
+            "source": "1",
+            "reply_to": "2",
+            "replace_conversation_binding": True,
+        }
+    ]
+    assert binding.binds == [(runner.interaction_router, "session_created")]
+
+
+async def test_start_bound_session_reports_unavailable_runner_without_binding():
+    binding = FakeRouteBinding()
+
+    result = await start_bound_session(NoStartRunner(), binding, channel="text")
+
+    assert result.ok is False
+    assert result.session_id is None
+    assert result.message == "Session reset is not available."
+    assert binding.binds == []
+
+
+def test_resume_bound_session_resumes_and_binds_route():
+    runner = FakeRunner()
+    binding = FakeRouteBinding()
+
+    result = resume_bound_session(runner, binding, "session_existing")
+
+    assert result.ok is True
+    assert result.session_id == "session_existing"
+    assert runner.resume_calls == ["session_existing"]
+    assert binding.binds == [(runner.interaction_router, "session_existing")]
+
+
+def test_resume_bound_session_reports_missing_session_without_binding():
+    runner = FakeRunner(missing=True)
+    binding = FakeRouteBinding()
+
+    result = resume_bound_session(runner, binding, "missing")
+
+    assert result.ok is False
+    assert result.session_id is None
+    assert result.message == "session not found: missing"
+    assert binding.binds == []

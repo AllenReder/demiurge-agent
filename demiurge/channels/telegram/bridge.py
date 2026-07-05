@@ -39,7 +39,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import text_delivery_steps
-from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice
+from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice, resume_bound_session, start_bound_session
 from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
@@ -842,19 +842,19 @@ class TelegramInteractionBridge:
         await self._cancel_active(state)
         self._clear_queue(state, preserve_completions=False)
         runner = state.runtime.runner
-        if not hasattr(runner, "start_new_session"):
-            await self._send_text(inbound.source, "Session reset is not available.", reply_to=inbound.reply_to)
-            return
-        await runner.prepare_live_core()
-        session_id = runner.start_new_session(
+        result = await start_bound_session(
+            runner,
+            state.route_binding,
             channel="telegram",
             conversation_key=inbound.conversation_key,
             source=inbound.source,
             reply_to=inbound.reply_to,
             replace_conversation_binding=True,
         )
-        state.route_binding.bind(runner.interaction_router, session_id)
-        await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to)
+        if not result.ok:
+            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to)
+            return
+        await self._send_text(inbound.source, f"New session: `{result.session_id}`", reply_to=inbound.reply_to)
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         running = ConversationTurnController(state).running
@@ -938,13 +938,11 @@ class TelegramInteractionBridge:
             )
             return
         assert resolution.session_id is not None
-        try:
-            state.runtime.runner.resume_session(resolution.session_id)
-        except FileNotFoundError as exc:
-            await self._send_text(inbound.source, str(exc), reply_to=inbound.reply_to)
+        result = resume_bound_session(state.runtime.runner, state.route_binding, resolution.session_id)
+        if not result.ok:
+            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to)
             return
-        state.route_binding.bind(state.runtime.runner.interaction_router, resolution.session_id)
-        await self._send_text(inbound.source, f"Resumed session: `{resolution.session_id}`", reply_to=inbound.reply_to)
+        await self._send_text(inbound.source, f"Resumed session: `{result.session_id}`", reply_to=inbound.reply_to)
 
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         runner = state.runtime.runner

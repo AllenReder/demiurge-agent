@@ -12,6 +12,11 @@ class SessionListRuntime(Protocol):
         ...
 
 
+class SessionRouteBindingRuntime(Protocol):
+    def bind(self, router: Any, session_id: str) -> Any:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class SessionChoice:
     index: int
@@ -45,6 +50,16 @@ class SessionListView:
         return format_sessions_markdown(self)
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSwitchResult:
+    session_id: str | None = None
+    message: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.session_id is not None and not self.message
+
+
 SessionChoiceResolutionKind = Literal["session_id", "out_of_range", "empty"]
 
 
@@ -69,6 +84,43 @@ def build_session_list_view(
 ) -> SessionListView:
     records = session_runtime.list_sessions(core_id=core_id, limit=limit)
     return session_list_view(records, active_session_id=active_session_id)
+
+
+async def start_bound_session(
+    runner: Any,
+    route_binding: SessionRouteBindingRuntime,
+    *,
+    channel: str,
+    conversation_key: str | None = None,
+    source: str | None = None,
+    reply_to: str | None = None,
+    replace_conversation_binding: bool = False,
+) -> SessionSwitchResult:
+    if not hasattr(runner, "start_new_session"):
+        return SessionSwitchResult(message="Session reset is not available.")
+    await runner.prepare_live_core()
+    session_id = runner.start_new_session(
+        channel=channel,
+        conversation_key=conversation_key,
+        source=source,
+        reply_to=reply_to,
+        replace_conversation_binding=replace_conversation_binding,
+    )
+    route_binding.bind(runner.interaction_router, session_id)
+    return SessionSwitchResult(session_id=session_id)
+
+
+def resume_bound_session(
+    runner: Any,
+    route_binding: SessionRouteBindingRuntime,
+    session_id: str,
+) -> SessionSwitchResult:
+    try:
+        runner.resume_session(session_id)
+    except FileNotFoundError as exc:
+        return SessionSwitchResult(message=str(exc))
+    route_binding.bind(runner.interaction_router, session_id)
+    return SessionSwitchResult(session_id=session_id)
 
 
 def session_list_view(records: list[SessionRecord], *, active_session_id: str | None = None) -> SessionListView:

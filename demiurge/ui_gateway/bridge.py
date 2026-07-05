@@ -29,7 +29,9 @@ from demiurge.runtime.session_commands import (
     build_session_list_view,
     format_sessions_table,
     resolve_session_choice,
+    resume_bound_session,
     session_list_view,
+    start_bound_session,
 )
 from demiurge.runtime.status_commands import RuntimeStatusView, build_runtime_status_view, runtime_status_key_values
 from demiurge.runtime.text_format import format_key_values, format_table, json_safe, shorten_text
@@ -789,26 +791,26 @@ class TuiInteractionBridge:
         return True
 
     async def _resume_session(self, session_id: str) -> None:
-        try:
-            self.app.runner.resume_session(session_id)
-        except FileNotFoundError as exc:
-            await self._emit_notice(str(exc), level="error")
+        result = resume_bound_session(self.app.runner, self._route_binding, session_id)
+        if not result.ok:
+            await self._emit_notice(result.message, level="error")
             return
         self.runtime = InteractionRuntime(self.app.runner)
         self._sync_ingress_state()
-        self._bind_current_session()
         await self._emit_history_snapshot(session_id)
         await self._emit_notice(f"resumed session: {session_id}")
         await self._emit_status()
 
     async def _new(self, _: str) -> bool:
-        await self.app.runner.prepare_live_core()
-        session_id = self.app.runner.start_new_session(channel="tui", source="local")
+        result = await start_bound_session(self.app.runner, self._route_binding, channel="tui", source="local")
+        if not result.ok:
+            await self._emit_notice(result.message, level="error")
+            return True
+        assert result.session_id is not None
         self.runtime = InteractionRuntime(self.app.runner)
         self._sync_ingress_state()
-        self._bind_current_session()
-        await self._emit_history_snapshot(session_id)
-        await self._emit_notice(f"new session: {session_id}")
+        await self._emit_history_snapshot(result.session_id)
+        await self._emit_notice(f"new session: {result.session_id}")
         await self._emit_status()
         return True
 
