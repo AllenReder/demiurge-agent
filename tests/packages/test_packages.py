@@ -727,6 +727,50 @@ def test_install_and_uninstall_minimax_direct_package(tmp_path):
     assert not (core_path / "packages.yaml").exists()
 
 
+def test_install_self_learning_skills_package_installs_parallel_output_and_lib_only(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manager = _manager(app)
+
+    result = manager.install(
+        core_id="assistant",
+        package_id="self_learning_skills",
+        option_answers={"interval": "2", "history_limit": "8", "notify": False},
+    )
+
+    core_path = app.version_store.active_core_path("assistant")
+    assert result.registry_path == core_path / "packages.yaml"
+    assert (core_path / "agent" / "output" / "self_learning_skills" / "module.py").exists()
+    assert (core_path / "agent" / "lib" / "self_learning_skills" / "review.py").exists()
+    assert not (core_path / "agent" / "skills" / "self_learning_skills").exists()
+    assert _pipeline(core_path, "output")["serial"] == ["base_output"]
+    assert _pipeline(core_path, "output")["parallel"] == ["self_learning_skills"]
+    output_slot = _slot_declaration(core_path, "output", "self_learning_skills")
+    assert output_slot["failure_policy"] == "soft"
+    assert output_slot["history_policy"] == "transient"
+    assert output_slot["capabilities"] == [
+        "agents.run:*",
+        "state.session.read:self_learning_skills.counter",
+        "state.session.write:self_learning_skills.counter",
+    ]
+    output_config = yaml.safe_load((core_path / "agent" / "output" / "self_learning_skills" / "config.yaml").read_text())
+    lib_config = yaml.safe_load((core_path / "agent" / "lib" / "self_learning_skills" / "config.yaml").read_text())
+    assert output_config == {"interval": "2", "history_limit": "8", "notify": False, "max_message_chars": 1200}
+    assert lib_config == {"interval": "2", "history_limit": "8", "notify": False, "max_message_chars": 1200}
+    registry = yaml.safe_load((core_path / "packages.yaml").read_text())
+    installed = registry["installed"][0]
+    assert installed["package_id"] == "self_learning_skills"
+    assert {component["kind"] for component in installed["components"]} == {"output", "lib"}
+    assert all(component["target"].split("/")[1] != "skills" for component in installed["components"])
+
+    removed = manager.uninstall(core_id="assistant", package_id="self_learning_skills")
+
+    assert removed.action == "uninstall"
+    assert not (core_path / "agent" / "output" / "self_learning_skills").exists()
+    assert not (core_path / "agent" / "lib" / "self_learning_skills").exists()
+    assert not (core_path / "agent" / "skills" / "self_learning_skills").exists()
+    assert _pipeline(core_path, "output")["parallel"] == []
+
+
 def test_package_list_reports_drift_and_uninstall_requires_force(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     manager = _manager(app)

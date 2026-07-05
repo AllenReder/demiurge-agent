@@ -1,0 +1,48 @@
+schema_version: 1
+id: self_learning_skills
+name: Self-Learning Skills
+summary: Periodically review recent turns and update the active core's skills with a constrained same-core child.
+tags:
+- output
+- skills
+- self-learning
+options:
+- id: interval
+  type: string
+  prompt: Review interval
+  description: Number of turns between skill review passes.
+  default: '10'
+- id: history_limit
+  type: string
+  prompt: History message limit
+  description: Number of recent history messages to include in each skill review.
+  default: '40'
+- id: notify
+  type: bool
+  prompt: Show review notices
+  description: Emit a transient notice when the review updates a skill or fails.
+  default: true
+capabilities:
+- agents.run:*
+- state.session.read:self_learning_skills.counter
+- state.session.write:self_learning_skills.counter
+components:
+- id: self_learning_skills_output
+  kind: output
+  source: self_learning_skills
+  target: agent/output/self_learning_skills
+  pipeline:
+    group: parallel
+    append: true
+  config:
+    interval: ${options.interval}
+    history_limit: ${options.history_limit}
+    notify: ${options.notify}
+- id: self_learning_skills_lib
+  kind: lib
+  source: self_learning_skills
+  target: agent/lib/self_learning_skills
+  config:
+    interval: ${options.interval}
+    history_limit: ${options.history_limit}
+    notify: ${options.notify}

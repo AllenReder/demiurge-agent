@@ -147,6 +147,7 @@ The built-in repository currently ships:
 | Memory | `memory_basic`, `memory_honcho` |
 | Context | `context_reseed` |
 | Communication | `conversation_style` |
+| Self-learning | `self_learning_skills` |
 | Web search | `web_search_brave`, `web_search_tavily` |
 | Speech-to-text | `stt_openai`, `stt_groq`, `stt_deepgram`, `stt_assemblyai`, `stt_gemini`, `stt_dashscope`, `stt_baidu`, `stt_tencent` |
 | Text-to-speech | `tts_minimax`, `tts_openai`, `tts_gemini`, `tts_xai` |
@@ -157,6 +158,7 @@ See the built-in package pages for package behavior and options:
 - [memory_honcho](../builtin-packages/memory/memory_honcho.md)
 - [context_reseed](../builtin-packages/context-reseed.md)
 - [conversation_style](../builtin-packages/conversation-style.md)
+- [self_learning_skills](../builtin-packages/self-learning-skills.md)
 - [Web Search Packages](../builtin-packages/web-search.md)
 - [Speech-to-Text Packages](../builtin-packages/speech-to-text.md)
 - [Text-to-Speech Packages](../builtin-packages/text-to-speech.md)
