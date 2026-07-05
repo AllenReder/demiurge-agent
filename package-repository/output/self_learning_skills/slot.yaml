@@ -1,0 +1,8 @@
+capabilities:
+- agents.run:*
+- state.session.read:self_learning_skills.counter
+- state.session.write:self_learning_skills.counter
+description: Periodically reviews recent turns and lets a constrained same-core child update skills.
+entrypoint: module:process
+failure_policy: soft
+history_policy: transient

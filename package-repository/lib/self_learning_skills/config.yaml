@@ -1,0 +1,4 @@
+interval: 10
+history_limit: 40
+notify: true
+max_message_chars: 1200

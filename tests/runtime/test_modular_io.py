@@ -6,9 +6,10 @@ import pytest
 import yaml
 
 from demiurge.app import create_app, source_agents_root
+from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
-from demiurge.security.approval import ApprovalDecision
+from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.sdk import AgentInput, OutputContext, TurnContext
 from demiurge.storage import StateStore
@@ -92,6 +93,14 @@ def _copy_agents(tmp_path):
     target = tmp_path / "agents"
     shutil.copytree(source_agents_root(), target)
     return target
+
+
+def _builtin_package_manager(app) -> PackageManager:
+    repositories = load_package_repository_collection(
+        home=app.home,
+        repository_configs={"builtin": {"type": "builtin"}},
+    )
+    return PackageManager(version_store=app.version_store, repository=repositories)
 
 
 def _write_module(root, rel_path, code):
@@ -1547,6 +1556,30 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agents_run_allows_slot_local_prefix_wildcard_capability(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    ctx.output.send_text('wildcard:' + result.content, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:*"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent", "child"])
+
+    result = await app.runner.run_turn("hello")
+
+    assert _delivery_texts(result) == ["parent", "wildcard:child"]
+
+
+@pytest.mark.asyncio
 async def test_agents_run_tools_default_all_preserves_child_tools(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
@@ -2016,6 +2049,174 @@ async def test_agents_run_can_enable_child_bootstrap(tmp_path):
     assert "CHILD_BOOT" in child_request_text
     child_session_id = _delivery_texts(result)[1].rsplit(":", 1)[1]
     assert app.session_runtime.read_bootstrap_context(child_session_id) == "CHILD_BOOT"
+
+
+@pytest.mark.asyncio
+async def test_self_learning_skills_counts_until_threshold_then_runs_constrained_same_core_child(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _builtin_package_manager(app).install(
+        core_id="assistant",
+        package_id="self_learning_skills",
+        option_answers={"interval": "2", "history_limit": "4", "notify": False},
+    )
+    provider = RecordingProvider(responses=["parent one", "parent two", "child review"])
+    app.runner.provider = provider
+
+    first = await app.runner.run_turn("first")
+
+    assert _delivery_texts(first) == ["parent one"]
+    assert len(provider.requests) == 1
+    session_store = StateStore.session(app.home, core_id="assistant", session_id=app.runner.session_id)
+    assert session_store.read()["self_learning_skills"]["counter"] == 1
+
+    second = await app.runner.run_turn("second")
+
+    assert _delivery_texts(second) == ["parent two"]
+    assert len(provider.requests) == 3
+    assert session_store.read()["self_learning_skills"]["counter"] == 0
+    child_request = provider.requests[2]
+    assert [tool.name for tool in child_request.tools] == ["skills_list", "skill_view", "skill_manage"]
+    child_request_text = "\n".join(message.content for message in child_request.messages)
+    assert "Self-learning skill review policy:" in child_request_text
+    assert "Review the supplied recent conversation" in child_request_text
+    assert "<recent_transcript inert=\"true\">" in child_request_text
+    assert "Session environment:" in child_request_text
+    completed = [event for event in app.runner.event_log.tail(100) if event["type"] == "agent_run.completed"]
+    assert len(completed) == 1
+    child_session = app.session_runtime.get_session(completed[0]["child_session_id"])
+    assert child_session.core_id == "assistant"
+    assert child_session.metadata["child_agent_slots"] == {
+        "input_slots": {"serial": ["base_input"], "parallel": []},
+        "output_slots": {"serial": ["base_output"], "parallel": []},
+        "use_bootstrap": True,
+    }
+    assert child_session.metadata["child_agent_tools"] == {
+        "requested": ["skills_list", "skill_view", "skill_manage"],
+        "resolved": ["skills_list", "skill_view", "skill_manage"],
+    }
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
+    assert [message.content for message in parent_messages if message.role == "assistant"] == ["parent one", "parent two"]
+
+
+@pytest.mark.asyncio
+async def test_self_learning_skills_child_skill_manage_updates_current_core_skills_root(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _builtin_package_manager(app).install(
+        core_id="assistant",
+        package_id="self_learning_skills",
+        option_answers={"interval": "1", "notify": False},
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    skill_content = (
+        "---\n"
+        "name: learned-workflow\n"
+        "description: Remember durable workflow lessons.\n"
+        "---\n\n"
+        "# Learned Workflow\n\n"
+        "Use this durable note for recurring workflow improvements.\n"
+    )
+    provider = RecordingProvider(
+        responses=[
+            "parent",
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="skill_1",
+                        name="skill_manage",
+                        arguments={"action": "create", "name": "learned-workflow", "content": skill_content},
+                    )
+                ]
+            ),
+            "child final",
+        ]
+    )
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("learn this")
+
+    assert _delivery_texts(result) == ["parent"]
+    core_path = app.version_store.active_core_path("assistant")
+    skill_path = core_path / "agent" / "skills" / "learned-workflow" / "SKILL.md"
+    assert skill_path.read_text(encoding="utf-8") == skill_content
+    assert len(provider.requests) == 3
+    assert [tool.name for tool in provider.requests[1].tools] == ["skills_list", "skill_view", "skill_manage"]
+    assert any(
+        message.role == "tool" and "skill created: learned-workflow" in message.content
+        for message in provider.requests[2].messages
+    )
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
+    assert [message.content for message in parent_messages if message.role == "assistant"] == ["parent"]
+
+
+@pytest.mark.asyncio
+async def test_self_learning_skills_approval_denied_does_not_block_main_reply(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _builtin_package_manager(app).install(
+        core_id="assistant",
+        package_id="self_learning_skills",
+        option_answers={"interval": "1", "notify": False},
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    provider = RecordingProvider(
+        responses=[
+            "parent",
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="skill_1",
+                        name="skill_manage",
+                        arguments={
+                            "action": "create",
+                            "name": "denied-workflow",
+                            "content": "# Denied Workflow\n",
+                        },
+                    )
+                ]
+            ),
+            "child final",
+        ]
+    )
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("learn this")
+
+    assert _delivery_texts(result) == ["parent"]
+    core_path = app.version_store.active_core_path("assistant")
+    assert not (core_path / "agent" / "skills" / "denied-workflow").exists()
+    assert len(provider.requests) == 3
+    assert any(
+        message.role == "tool" and "approval denied: create skill" in message.content
+        for message in provider.requests[2].messages
+    )
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
+    assert [message.content for message in parent_messages if message.role == "assistant"] == ["parent"]
+
+
+@pytest.mark.asyncio
+async def test_self_learning_skills_review_exception_is_soft_for_main_reply(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _builtin_package_manager(app).install(
+        core_id="assistant",
+        package_id="self_learning_skills",
+        option_answers={"interval": "1", "notify": True},
+    )
+
+    class FailingChildProvider(RecordingProvider):
+        async def complete(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return LLMResponse(content="parent")
+            raise RuntimeError("child review failed")
+
+    provider = FailingChildProvider()
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("learn this")
+
+    assert _delivery_texts(result) == ["parent"]
+    assert len(provider.requests) == 2
+    parent_messages = app.session_runtime.read_messages(app.runner.session_id)
+    assert [message.content for message in parent_messages if message.role == "assistant"] == ["parent"]
 
 
 @pytest.mark.asyncio
