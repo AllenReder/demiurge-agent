@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import contextvars
 import http.client
-import json
 import logging
 import os
 import re
@@ -36,6 +35,15 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.approvals import (
+    approval_button_rows,
+    approval_callback_answer,
+    approval_decision_for_action,
+    approval_resolution,
+    format_approval_request_text,
+    format_resolved_approval_text,
+    parse_approval_callback_data,
+)
 from demiurge.runtime.outbound_delivery import text_delivery_steps
 from demiurge.runtime.prompts import PromptChoiceRuntime, choice_button_rows, format_prompt_text
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
@@ -491,9 +499,9 @@ class TelegramInteractionBridge:
         )
         sent = await self._send_text(
             inbound.source,
-            self._approval_text(request),
+            format_approval_request_text(request),
             reply_to=inbound.reply_to,
-            reply_markup=self._approval_reply_markup(approval_id),
+            reply_markup={"inline_keyboard": approval_button_rows(approval_id)},
         )
         pending.message_id = _telegram_message_id(sent)
         self._pending_approvals[approval_id] = pending
@@ -948,83 +956,31 @@ class TelegramInteractionBridge:
         self._approval_counter += 1
         return str(self._approval_counter)
 
-    def _approval_reply_markup(self, approval_id: str) -> dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [{"text": "Allow once", "callback_data": f"approval:{approval_id}:allow"}],
-                [{"text": "Allow for session", "callback_data": f"approval:{approval_id}:session"}],
-                [{"text": "Deny", "callback_data": f"approval:{approval_id}:deny"}],
-            ]
-        }
-
-    def _approval_text(self, request: ApprovalRequest) -> str:
-        lines = [
-            "## Approval required",
-            "",
-            f"**Summary:** {request.summary}",
-            f"**Tool:** `{request.tool_name}`",
-            f"**Risk:** `{request.risk}`",
-            f"**Capability:** `{request.capability}`",
-            f"**Action:** `{request.action}`",
-        ]
-        if request.target:
-            lines.append(f"**Target:** `{request.target}`")
-        if request.command:
-            lines.extend(["", "**Command**", "```", self._shorten(request.command, limit=1000), "```"])
-        if request.arguments_preview:
-            preview = json.dumps(request.arguments_preview, ensure_ascii=False, sort_keys=True, indent=2)
-            lines.extend(["", "**Arguments**", "```json", self._shorten(preview, limit=1000), "```"])
-        lines.extend(["", "This request expires in 10 minutes.", "Choose **Allow once**, **Allow for session**, or **Deny**."])
-        return "\n".join(lines)
-
-    def _resolved_approval_text(self, request: ApprovalRequest, *, title: str, detail: str) -> str:
-        lines = [
-            f"## {title}",
-            "",
-            detail,
-            "",
-            f"**Summary:** {request.summary}",
-            f"**Tool:** `{request.tool_name}`",
-        ]
-        if request.command:
-            lines.extend(["", "**Command**", "```", self._shorten(request.command, limit=1000), "```"])
-        return "\n".join(lines)
-
     async def _handle_approval_callback(self, callback: dict[str, Any]) -> None:
         callback_id = callback.get("id")
         data = str(callback.get("data") or "")
-        parts = data.split(":")
-        if len(parts) != 3:
+        parsed = parse_approval_callback_data(data)
+        if parsed is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        _, approval_id, action = parts
-        decisions = {
-            "allow": ApprovalDecision("allow", "approved by Telegram user"),
-            "session": ApprovalDecision("always_allow_for_session", "approved by Telegram user for this session"),
-            "deny": ApprovalDecision("deny", "denied by Telegram user"),
-        }
-        labels = {
-            "allow": ("Approved once", "The command was approved for this request."),
-            "session": ("Approved for session", "Matching requests are allowed for this session."),
-            "deny": ("Denied", "The command was not executed."),
-        }
-        decision = decisions.get(action)
+        decision = approval_decision_for_action(parsed.action, actor="Telegram user")
         if decision is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        if approval_id not in self._pending_approvals:
+        if parsed.approval_id not in self._pending_approvals:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Approval expired.")
             await self._edit_expired_callback_message(callback)
             return
-        pending = self._resolve_pending_approval(approval_id, decision)
+        pending = self._resolve_pending_approval(parsed.approval_id, decision)
         if callback_id:
-            await self._answer_callback_query(str(callback_id), text="Approved." if decision.allowed else "Denied.")
+            await self._answer_callback_query(str(callback_id), text=approval_callback_answer(decision))
         if pending is not None:
-            title, detail = labels[action]
-            await self._edit_approval_message(pending, title, detail)
+            resolution = approval_resolution(parsed.action)
+            if resolution is not None:
+                await self._edit_approval_message(pending, resolution.title, resolution.detail)
 
     def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> TelegramPendingApproval | None:
         pending = self._pending_approvals.pop(approval_id, None)
@@ -1048,7 +1004,7 @@ class TelegramInteractionBridge:
     async def _edit_approval_message(self, pending: TelegramPendingApproval, title: str, detail: str) -> None:
         if pending.message_id is None or not hasattr(self.api, "edit_message_text"):
             return
-        text = self._resolved_approval_text(pending.request, title=title, detail=detail)
+        text = format_resolved_approval_text(pending.request, title=title, detail=detail)
         formatted = format_telegram_markdown_v2(text)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(

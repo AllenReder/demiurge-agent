@@ -23,6 +23,7 @@ from demiurge.channels.telegram import (
     utf16_len,
 )
 from demiurge.core import CoreLoader, TelegramChannelConfig
+from demiurge.runtime.approvals import approval_button_rows, approval_callback_data
 from demiurge.runtime.interactions import (
     BridgeApprovalProvider,
     InteractionDelivery,
@@ -1733,15 +1734,11 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     assert task is not None and not task.done()
     assert "Approval required" in api.sent[0]["text"]
     assert "whoami" in api.sent[0]["text"]
-    assert api.sent[0]["reply_markup"] == {
-        "inline_keyboard": [
-            [{"text": "Allow once", "callback_data": f"approval:{approval_id}:allow"}],
-            [{"text": "Allow for session", "callback_data": f"approval:{approval_id}:session"}],
-            [{"text": "Deny", "callback_data": f"approval:{approval_id}:deny"}],
-        ]
-    }
+    assert api.sent[0]["reply_markup"] == {"inline_keyboard": approval_button_rows(approval_id)}
 
-    await bridge.handle_update(_callback(f"approval:{approval_id}:{action}", chat_id=123, message_id=456, callback_id="cb_approval"))
+    await bridge.handle_update(
+        _callback(approval_callback_data(approval_id, action), chat_id=123, message_id=456, callback_id="cb_approval")
+    )
     await asyncio.wait_for(task, timeout=1)
 
     assert runner.decision.value == expected

@@ -24,6 +24,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.approvals import parse_approval_response
 from demiurge.runtime.outbound_delivery import ui_delivery_steps
 from demiurge.runtime.prompts import normalize_prompt_answer
 from demiurge.runtime.session_commands import (
@@ -55,17 +56,6 @@ class PendingPrompt:
     future: asyncio.Future[str] | None = None
     records: list[SessionRecord] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def parse_approval_response(text: str) -> ApprovalDecision:
-    normalized = text.strip().lower()
-    if normalized in {"1", "y", "yes", "allow", "approve", "once"}:
-        return ApprovalDecision("allow", "approved by TUI user")
-    if normalized in {"2", "a", "always", "session", "always_allow_for_session"}:
-        return ApprovalDecision("always_allow_for_session", "approved by TUI user for this session")
-    if normalized in {"3", "n", "no", "deny", ""}:
-        return ApprovalDecision("deny", "denied by TUI user")
-    return ApprovalDecision("deny", f"invalid approval input: {text}")
 
 
 def parse_tool_display_level(text: str) -> str | None:
@@ -225,7 +215,7 @@ class TuiInteractionBridge:
         future = self._pending_approvals.get(approval_id)
         if future is None or future.done():
             return {"accepted": False, "reason": "approval not pending"}
-        decision = parse_approval_response(value)
+        decision = parse_approval_response(value, actor="TUI user")
         future.set_result(decision)
         return {"accepted": True, "decision": decision.value}
 
