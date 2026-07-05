@@ -7,6 +7,7 @@ import json
 import logging
 from typing import Any, Callable, Protocol
 
+from demiurge.channels.commands import ChannelCommandRuntime
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.interactions import (
@@ -21,7 +22,6 @@ from demiurge.runtime.interactions import (
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
-from demiurge.slash import SlashCommand, parse_slash_command
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
@@ -46,6 +46,10 @@ class GatewayBridge(Protocol):
 
 TextConversationState = ConversationIngressState
 
+TEXT_CHANNEL_COMMAND_NAMES = frozenset(
+    {"help", "status", "new", "stop", "queue", "busy", "sessions", "resume", "tools", "skills", "skill"}
+)
+
 
 class TextChannelBridgeBase:
     def __init__(
@@ -63,6 +67,11 @@ class TextChannelBridgeBase:
         self._runtime_factory = runtime_factory or (lambda _conversation_key: runtime)  # type: ignore[return-value]
         self.default_busy_mode = busy_mode if busy_mode in {"interrupt", "queue"} else "interrupt"
         self.tool_display = _normalize_tool_display(tool_display)
+        self._command_runtime = ChannelCommandRuntime(
+            command_names=TEXT_CHANNEL_COMMAND_NAMES,
+            unavailable_template="Command not available: /{name}",
+            unknown_template="Unknown command: /{name}",
+        )
         self._pending_choices: dict[str, list[str]] = {}
         self._conversations: dict[str, TextConversationState] = {}
         self._task_worker: RuntimeTaskWorker | None = None
@@ -78,23 +87,10 @@ class TextChannelBridgeBase:
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"{self.channel_name}:{inbound.source}")
         self._remember_route(state, inbound)
-        command = parse_slash_command(inbound.text)
-        if command:
-            if command.name == "ask" and command.args:
-                inbound = InteractionInbound(
-                    channel=inbound.channel,
-                    text=command.args,
-                    source=inbound.source,
-                    reply_to=inbound.reply_to,
-                    conversation_key=inbound.conversation_key,
-                    metadata=dict(inbound.metadata),
-                )
-            elif command.name in {"help", "status", "new", "stop", "queue", "busy", "sessions", "resume", "tools", "skills", "skill"}:
-                await self._handle_command(command, inbound, state)
-                return
-            else:
-                await self._send_text(inbound.source, f"Unknown command: /{command.name}", reply_to=inbound.reply_to, metadata=inbound.metadata)
-                return
+        command_outcome = await self._handle_command(inbound, state)
+        if command_outcome.handled:
+            return
+        inbound = command_outcome.inbound
 
         if inbound.conversation_key:
             inbound = self._consume_inbound_pending_choice(inbound)
@@ -320,8 +316,19 @@ class TextChannelBridgeBase:
             lambda next_inbound: self._run_inbound(state, next_inbound)
         )
 
-    async def _handle_command(self, command: SlashCommand, inbound: InteractionInbound, state: TextConversationState) -> None:
-        handlers = {
+    async def _handle_command(self, inbound: InteractionInbound, state: TextConversationState):
+        async def send_notice(text: str) -> None:
+            await self._send_text(inbound.source, text, reply_to=inbound.reply_to, metadata=inbound.metadata)
+
+        return await self._command_runtime.handle(
+            inbound,
+            state,
+            handlers=self._command_handlers(),
+            send_notice=send_notice,
+        )
+
+    def _command_handlers(self):
+        return {
             "help": self._command_help,
             "status": self._command_status,
             "new": self._command_new,
@@ -334,11 +341,6 @@ class TextChannelBridgeBase:
             "skills": self._command_skills,
             "skill": self._command_skill,
         }
-        handler = handlers.get(command.name)
-        if handler is None:
-            await self._send_text(inbound.source, f"Command not available: /{command.name}", reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        await handler(command.args, inbound, state)
 
     async def _command_help(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
         await self._send_text(

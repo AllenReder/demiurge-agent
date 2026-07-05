@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from demiurge.channels.commands import ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
@@ -38,7 +39,7 @@ from demiurge.runtime.interactions import (
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.providers import ToolCall
 from demiurge.sdk import AgentInput, TurnContext
-from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
+from demiurge.slash import parse_slash_command, specs_for_surface, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
     _needs_rich_telegram_rendering,
@@ -156,6 +157,11 @@ class TelegramInteractionBridge:
         self.unauthorized_response = unauthorized_response
         self.approval_timeout_seconds = approval_timeout_seconds
         self.tool_display = _normalize_tool_display(tool_display)
+        self._command_runtime = ChannelCommandRuntime(
+            command_names={spec.name for spec in specs_for_surface("telegram")},
+            unavailable_template="Command not available on Telegram: /{name}",
+            unknown_template="Unknown command: /{name}",
+        )
         self._polling_network_error_count = 0
         self._polling_conflict_count = 0
         self._polling_network_base_delay = TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS
@@ -454,23 +460,10 @@ class TelegramInteractionBridge:
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"telegram:{inbound.source}")
         self._remember_route(state, inbound)
-        command = parse_slash_command(inbound.text)
-        if command:
-            if command.name == "ask" and command.args:
-                inbound = InteractionInbound(
-                    channel=inbound.channel,
-                    text=command.args,
-                    source=inbound.source,
-                    reply_to=inbound.reply_to,
-                    conversation_key=inbound.conversation_key,
-                    metadata=dict(inbound.metadata),
-                )
-            elif command.name in {spec.name for spec in specs_for_surface("telegram")}:
-                await self._handle_telegram_command(command, inbound, state)
-                return
-            else:
-                await self._send_text(inbound.source, f"Unknown command: /{command.name}", reply_to=inbound.reply_to)
-                return
+        command_outcome = await self._handle_telegram_command(inbound, state)
+        if command_outcome.handled:
+            return
+        inbound = command_outcome.inbound
 
         if not is_background_completion(inbound):
             inbound = self._merge_stored_task_completions(state, inbound)
@@ -893,11 +886,21 @@ class TelegramInteractionBridge:
 
     async def _handle_telegram_command(
         self,
-        command: SlashCommand,
         inbound: InteractionInbound,
         state: TelegramConversationState,
-    ) -> None:
-        handlers = {
+    ):
+        async def send_notice(text: str) -> None:
+            await self._send_text(inbound.source, text, reply_to=inbound.reply_to)
+
+        return await self._command_runtime.handle(
+            inbound,
+            state,
+            handlers=self._telegram_command_handlers(),
+            send_notice=send_notice,
+        )
+
+    def _telegram_command_handlers(self):
+        return {
             "help": self._command_help,
             "status": self._command_status,
             "new": self._command_new,
@@ -911,11 +914,6 @@ class TelegramInteractionBridge:
             "skills": self._command_skills,
             "skill": self._command_skill,
         }
-        handler = handlers.get(command.name)
-        if handler is None:
-            await self._send_text(inbound.source, f"Command not available on Telegram: /{command.name}", reply_to=inbound.reply_to)
-            return
-        await handler(command.args, inbound, state)
 
     async def _command_help(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
         lines = ["# Commands"]
