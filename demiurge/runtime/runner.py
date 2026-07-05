@@ -88,9 +88,12 @@ DELEGATION_TOOL_NAMES = {"delegate_task", "task_status", "task_control", "yield_
 CHILD_AGENT_DEFAULT_INPUT_SLOTS = ("base_input",)
 CHILD_AGENT_DEFAULT_OUTPUT_SLOTS = ("base_output",)
 CHILD_AGENT_ALL_SLOTS = "all"
+CHILD_AGENT_ALL_TOOLS = "all"
+CHILD_AGENT_NO_TOOLS = "none"
 
 
 ChildSlotRequest = str | Sequence[str] | None
+ChildToolRequest = str | Sequence[str] | None
 
 
 @dataclass(slots=True)
@@ -117,6 +120,13 @@ class ResolvedChildAgentSlots:
             "output_slots": self.output.to_metadata(),
             "use_bootstrap": self.use_bootstrap,
         }
+
+
+@dataclass(slots=True)
+class ResolvedChildAgentTools:
+    requested: str | list[str]
+    resolved: list[str]
+    tool_policy: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -322,6 +332,7 @@ class ModuleAgentsClient:
         input_slots: ChildSlotRequest = None,
         output_slots: ChildSlotRequest = None,
         use_bootstrap: bool = False,
+        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
     ) -> AgentRunResult:
         self.capability.require(f"agents.run:{core_id}", slot_path=self.slot_path)
         run_id = utc_id("agent_run_")
@@ -341,6 +352,7 @@ class ModuleAgentsClient:
             input_slots=input_slots,
             output_slots=output_slots,
             use_bootstrap=use_bootstrap,
+            tools=tools,
         )
         self.emit_event(
             "agent_run.completed",
@@ -363,6 +375,7 @@ class ModuleAgentsClient:
         input_slots: ChildSlotRequest = None,
         output_slots: ChildSlotRequest = None,
         use_bootstrap: bool = False,
+        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
     ) -> AgentSpawnHandle:
         self.capability.require(f"agents.spawn:{core_id}", slot_path=self.slot_path)
         return self.parent._spawn_child_agent(
@@ -374,6 +387,7 @@ class ModuleAgentsClient:
             input_slots=input_slots,
             output_slots=output_slots,
             use_bootstrap=use_bootstrap,
+            tools=tools,
         )
 
     def _normalize_context(self, context: str | list[str] | None) -> list[str]:
@@ -2313,6 +2327,107 @@ class SessionTurnStepRunner:
             return CHILD_AGENT_ALL_SLOTS
         return list(normalized)
 
+    def _resolve_child_agent_tools(self, core: LoadedCore, requested: ChildToolRequest) -> ResolvedChildAgentTools:
+        requested_tools = self._normalize_child_tool_request(requested)
+        registry_entries = self.tool_runtime.registry_for(core)
+        available_tool_ids = [entry.name for entry in registry_entries]
+        available_tool_id_set = set(available_tool_ids)
+        if requested_tools == CHILD_AGENT_ALL_TOOLS:
+            return ResolvedChildAgentTools(
+                requested=CHILD_AGENT_ALL_TOOLS,
+                resolved=available_tool_ids,
+            )
+        if requested_tools == CHILD_AGENT_NO_TOOLS:
+            return ResolvedChildAgentTools(
+                requested=CHILD_AGENT_NO_TOOLS,
+                resolved=[],
+                tool_policy={"allow_exact": []},
+            )
+
+        for tool_id in requested_tools:
+            if tool_id not in available_tool_id_set:
+                raise ValueError(f"unknown child tool id: {tool_id}")
+        selected = set(requested_tools)
+        resolved = [tool_id for tool_id in available_tool_ids if tool_id in selected]
+        return ResolvedChildAgentTools(
+            requested=list(requested_tools),
+            resolved=resolved,
+            tool_policy={"allow_exact": resolved},
+        )
+
+    async def _resolve_child_agent_tools_for_core_id_prepared(
+        self,
+        core_id: str,
+        requested: ChildToolRequest,
+        *,
+        session_id: str,
+    ) -> ResolvedChildAgentTools:
+        core = self.core_loader.load(self.version_store.active_core_path(core_id))
+        return await self._resolve_child_agent_tools_prepared(core, requested, session_id=session_id)
+
+    async def _resolve_child_agent_tools_prepared(
+        self,
+        core: LoadedCore,
+        requested: ChildToolRequest,
+        *,
+        session_id: str,
+    ) -> ResolvedChildAgentTools:
+        normalized = self._normalize_child_tool_request(requested)
+        if normalized != CHILD_AGENT_NO_TOOLS:
+            await self._prepare_child_agent_tool_registry(core, session_id=session_id)
+        return self._resolve_child_agent_tools(core, normalized)
+
+    async def _prepare_child_agent_tool_registry(self, core: LoadedCore, *, session_id: str) -> None:
+        if not core.mcp_servers:
+            return
+        turn = TurnContext(
+            session_id=session_id,
+            turn_id=utc_id("turn_child_tools_"),
+            core_id=core.core_id,
+            core_revision=self._core_revision(core),
+            user_input=AgentInput(content=""),
+            metadata={},
+        )
+        await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
+
+    def _requested_child_agent_tools_for_core_id(self, core_id: str, requested: ChildToolRequest) -> str | list[str]:
+        normalized = self._normalize_child_tool_request(requested)
+        if isinstance(normalized, str):
+            return normalized
+        core = self.core_loader.load(self.version_store.active_core_path(core_id))
+        available_tool_ids = {entry.name for entry in self.tool_runtime.registry_for(core)}
+        missing = [tool_id for tool_id in normalized if tool_id not in available_tool_ids]
+        if missing:
+            unresolved_without_mcp_shape = [tool_id for tool_id in missing if "__" not in tool_id]
+            if not core.mcp_servers or unresolved_without_mcp_shape:
+                raise ValueError(f"unknown child tool id: {(unresolved_without_mcp_shape or missing)[0]}")
+        return list(normalized)
+
+    def _normalize_child_tool_request(self, requested: ChildToolRequest) -> tuple[str, ...] | str:
+        if requested is None:
+            return CHILD_AGENT_ALL_TOOLS
+        if isinstance(requested, str):
+            if requested in {CHILD_AGENT_ALL_TOOLS, CHILD_AGENT_NO_TOOLS}:
+                return requested
+            raise ValueError("tools must be 'all', 'none', or a list of tool ids")
+        if not isinstance(requested, Sequence):
+            raise ValueError("tools must be 'all', 'none', or a list of tool ids")
+        if not requested:
+            return CHILD_AGENT_NO_TOOLS
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_id in requested:
+            if not isinstance(raw_id, str):
+                raise ValueError("tools items must be strings")
+            tool_id = raw_id.strip()
+            if not tool_id:
+                raise ValueError("tool id must not be empty")
+            if tool_id in seen:
+                raise ValueError(f"duplicate tool id: {tool_id}")
+            seen.add(tool_id)
+            normalized.append(tool_id)
+        return tuple(normalized)
+
     def _tool_result_model_content(self, result: ToolResult) -> str:
         return result.model_output if result.model_output is not None else result.content
 
@@ -2488,7 +2603,7 @@ class SessionTurnStepRunner:
         input_slots: ChildSlotRequest = None,
         output_slots: ChildSlotRequest = None,
         use_bootstrap: bool = False,
-        tool_policy: Mapping[str, Any] | None = None,
+        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
         session_id: str | None = None,
     ) -> AgentRunResult:
         child_session_id = session_id or utc_id("session_child_")
@@ -2520,6 +2635,11 @@ class SessionTurnStepRunner:
             output_slots=output_slots,
             use_bootstrap=use_bootstrap,
         )
+        child_tools = await child_runner._resolve_child_agent_tools_prepared(
+            child_core,
+            tools,
+            session_id=child_runner.session_id,
+        )
         child_runner.session_runtime.update_session(
             child_runner.session_id,
             core_id=child_core.core_id,
@@ -2529,15 +2649,17 @@ class SessionTurnStepRunner:
             touch=False,
         )
         child_slot_metadata = child_slots.to_metadata()
+        child_tool_metadata = {"requested": child_tools.requested, "resolved": child_tools.resolved}
         child_metadata = {
             "delegation_depth": int(parent_turn.metadata.get("delegation_depth") or 0) + 1,
             "parent_session_id": parent_turn.session_id,
             "parent_turn_id": parent_turn.turn_id,
             "parent_slot": parent_slot_path,
             "child_agent_slots": child_slot_metadata,
+            "child_agent_tools": child_tool_metadata,
         }
-        if tool_policy:
-            child_metadata["tool_policy"] = dict(tool_policy)
+        if child_tools.tool_policy:
+            child_metadata["tool_policy"] = child_tools.tool_policy
         result = await child_runner.run_turn(
             raw_input,
             core_path=child_core_path,
@@ -2581,6 +2703,7 @@ class SessionTurnStepRunner:
                 "parent_slot": parent_slot_path,
                 "needs_user": needs_user,
                 "child_agent_slots": child_slot_metadata,
+                "child_agent_tools": child_tool_metadata,
             },
         )
 
@@ -2595,14 +2718,21 @@ class SessionTurnStepRunner:
         input_slots: ChildSlotRequest = None,
         output_slots: ChildSlotRequest = None,
         use_bootstrap: bool = False,
-        tool_policy: Mapping[str, Any] | None = None,
+        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
         notify_on_complete: bool = True,
+        session_id: str | None = None,
+        resolved_child_tools: ResolvedChildAgentTools | None = None,
     ) -> AgentSpawnHandle:
         self._resolve_child_agent_slots_for_core_id(
             core_id,
             input_slots=input_slots,
             output_slots=output_slots,
             use_bootstrap=use_bootstrap,
+        )
+        requested_tools = (
+            resolved_child_tools.requested
+            if resolved_child_tools is not None
+            else self._requested_child_agent_tools_for_core_id(core_id, tools)
         )
         requested_slot_metadata = {
             "input_slots": self._child_slot_request_metadata(
@@ -2617,7 +2747,7 @@ class SessionTurnStepRunner:
             ),
             "use_bootstrap": use_bootstrap,
         }
-        session_id = utc_id("session_child_")
+        session_id = session_id or utc_id("session_child_")
 
         async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.event_log.emit(
@@ -2638,10 +2768,11 @@ class SessionTurnStepRunner:
                     input_slots=input_slots,
                     output_slots=output_slots,
                     use_bootstrap=use_bootstrap,
-                    tool_policy=tool_policy,
+                    tools=tools,
                     session_id=session_id,
                 )
                 child_slot_metadata = result.metadata.get("child_agent_slots")
+                child_tool_metadata = result.metadata.get("child_agent_tools")
                 summary = result.content or f"child agent {core_id} completed"
                 ctx.update_metadata(
                     {
@@ -2650,6 +2781,7 @@ class SessionTurnStepRunner:
                         "child_turn_id": result.turn_id,
                         "needs_user": bool(result.metadata.get("needs_user")),
                         "resolved_child_agent_slots": child_slot_metadata,
+                        "resolved_child_agent_tools": child_tool_metadata,
                     }
                 )
                 needs_user = bool(result.metadata.get("needs_user"))
@@ -2675,6 +2807,7 @@ class SessionTurnStepRunner:
                         "child_turn_id": result.turn_id,
                         "needs_user": needs_user,
                         "resolved_child_agent_slots": child_slot_metadata,
+                        "resolved_child_agent_tools": child_tool_metadata,
                     },
                 )
             except Exception as exc:
@@ -2703,7 +2836,7 @@ class SessionTurnStepRunner:
                     "child_session_id": session_id,
                     "parent_slot": parent_slot_path,
                     "requested_child_agent_slots": requested_slot_metadata,
-                    **({"tool_policy": dict(tool_policy)} if tool_policy else {}),
+                    "requested_child_agent_tools": requested_tools,
                 },
             )
         except RuntimeTaskConflictError as exc:
@@ -2766,7 +2899,7 @@ class SessionTurnStepRunner:
             if call.name not in visible_tools:
                 return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
             if call.name == "delegate_task":
-                return self._delegate_task(call, core=core, turn=turn, capability=capability)
+                return await self._delegate_task(call, core=core, turn=turn, capability=capability)
             if call.name == "task_status":
                 capability.require("task.control")
                 return self._task_status(call)
@@ -2780,7 +2913,7 @@ class SessionTurnStepRunner:
         except CapabilityDenied as exc:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
 
-    def _delegate_task(
+    async def _delegate_task(
         self,
         call: ToolCall,
         *,
@@ -2791,10 +2924,8 @@ class SessionTurnStepRunner:
         goal = str(call.arguments.get("goal") or "").strip()
         if not goal:
             return ToolResult(content="goal is required", is_error=True)
-        raw_tool_policy = call.arguments.get("tool_policy")
-        if raw_tool_policy is not None and not isinstance(raw_tool_policy, Mapping):
-            return ToolResult(content="delegate_task tool_policy must be an object", is_error=True)
-        tool_policy = dict(raw_tool_policy or {})
+        if "tool_policy" in call.arguments:
+            return ToolResult(content="delegate_task tool_policy is not supported; use tools", is_error=True)
         child_core_id = str(call.arguments.get("core_id") or core.core_id).strip()
         capability.require(f"agents.spawn:{child_core_id}")
         context_mode = str(call.arguments.get("context_mode") or "isolated").strip()
@@ -2824,7 +2955,14 @@ class SessionTurnStepRunner:
         raw_use_bootstrap = call.arguments.get("use_bootstrap", False)
         use_bootstrap = False if raw_use_bootstrap is None else raw_use_bootstrap
         context = self._delegation_context(context_mode)
+        child_tools_request = call.arguments.get("tools", CHILD_AGENT_ALL_TOOLS)
+        child_session_id = utc_id("session_child_")
         try:
+            child_tools = await self._resolve_child_agent_tools_for_core_id_prepared(
+                child_core_id,
+                child_tools_request,
+                session_id=child_session_id,
+            )
             handle = self._spawn_child_agent(
                 core_id=child_core_id,
                 raw_input=goal,
@@ -2834,8 +2972,10 @@ class SessionTurnStepRunner:
                 input_slots=call.arguments.get("input_slots"),
                 output_slots=call.arguments.get("output_slots"),
                 use_bootstrap=use_bootstrap,
-                tool_policy=tool_policy,
+                tools=child_tools_request,
                 notify_on_complete=notify_policy == "return_to_parent",
+                session_id=child_session_id,
+                resolved_child_tools=child_tools,
             )
         except ValueError as exc:
             return ToolResult(content=str(exc), is_error=True)

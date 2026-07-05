@@ -140,11 +140,15 @@ Input and output slot code can call child agents through `ctx.agents`.
 `ctx.agents.run(...)` waits for the child turn; `ctx.agents.spawn(...)` starts
 an `agent.spawn` background task.
 
-Both calls accept `input_slots`, `output_slots`, and `use_bootstrap`.
+Both calls accept `input_slots`, `output_slots`, `tools`, and `use_bootstrap`.
 Omitting a slot list, passing `None`, or passing `[]` runs only `base_input` or
 `base_output` in the child core. Passing `"all"` runs the child core's full
 configured pipeline. Passing a non-empty list filters the child core's active
 pipeline by slot id while preserving pipeline order and serial/parallel groups.
+
+`tools` defaults to `"all"`, which keeps the child core's configured tools.
+Passing `"none"` or `[]` runs the child without tools. Passing a non-empty list
+allows only those configured child tool ids.
 
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots and does not inject a bootstrap snapshot.

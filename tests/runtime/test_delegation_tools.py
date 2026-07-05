@@ -10,6 +10,7 @@ from demiurge.runtime.delegation import subagents_command_text
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.slash import specs_for_surface
+from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
 
 
 CHILD_AGENT_COMPLETION_TIMEOUT = 20
@@ -17,6 +18,21 @@ CHILD_AGENT_COMPLETION_TIMEOUT = 20
 
 class StaticProvider:
     async def complete(self, request):
+        return LLMResponse(content="child done")
+
+
+class RecordingProvider:
+    def __init__(self, responses=None):
+        self.responses = list(responses or [])
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        if self.responses:
+            item = self.responses.pop(0)
+            if isinstance(item, LLMResponse):
+                return item
+            return LLMResponse(content=str(item))
         return LLMResponse(content="child done")
 
 
@@ -164,6 +180,8 @@ async def test_delegate_task_defaults_to_base_slots_and_records_metadata(tmp_pat
         "output_slots": {"serial": ["base_output"], "parallel": []},
         "use_bootstrap": False,
     }
+    assert record.metadata["requested_child_agent_tools"] == "all"
+    assert "read_file" in record.metadata["resolved_child_agent_tools"]["resolved"]
 
 
 @pytest.mark.asyncio
@@ -232,6 +250,94 @@ async def test_delegate_task_returns_tool_error_for_invalid_child_slot_selection
 
     assert result.is_error is True
     assert "unknown input slot id: missing" in result.content
+
+
+def test_delegate_task_schema_exposes_tools_selection_not_tool_policy():
+    schema = BUILTIN_TOOL_DEFINITIONS["delegate_task"].input_schema
+    properties = schema["properties"]
+
+    assert "tool_policy" not in properties
+    assert properties["tools"] == {
+        "anyOf": [
+            {"type": "string", "enum": ["all", "none"]},
+            {"type": "array", "items": {"type": "string"}},
+        ],
+        "default": "all",
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_returns_tool_error_for_invalid_child_tool_selection(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    result = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do child work", "core_id": "evolver", "tools": ["missing"]},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert "unknown child tool id: missing" in result.content
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_rejects_legacy_tool_policy_argument(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    result = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do child work", "core_id": "evolver", "tool_policy": {"deny": ["read_file"]}},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert "tool_policy is not supported; use tools" in result.content
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_passes_child_tool_selection_to_spawned_task(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = RecordingProvider()
+    app.runner.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(app, core)
+    capability = CapabilityFacade(core)
+
+    delegated = await app.runner.execute_tool(
+        ToolCall(
+            name="delegate_task",
+            arguments={"goal": "do child work", "core_id": "evolver", "tools": ["read_file"]},
+        ),
+        core=core,
+        turn=turn,
+        capability=capability,
+        emit_event=app.runner.event_log.emit,
+    )
+    await app.task_worker.wait(delegated.data["task_id"], timeout_seconds=CHILD_AGENT_COMPLETION_TIMEOUT)
+
+    record = app.task_worker.get(delegated.data["task_id"])
+    assert record.metadata["requested_child_agent_tools"] == ["read_file"]
+    assert record.metadata["resolved_child_agent_tools"] == {
+        "requested": ["read_file"],
+        "resolved": ["read_file"],
+    }
+    assert [tool.name for tool in provider.requests[0].tools] == ["read_file"]
 
 
 @pytest.mark.asyncio
@@ -480,7 +586,7 @@ async def test_terminal_background_true_returns_runtime_task(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delegate_task_rejects_depth_excess_and_accepts_tool_policy(tmp_path):
+async def test_delegate_task_rejects_depth_excess_and_accepts_tool_selection(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     turn = _turn(app, core)
@@ -494,10 +600,10 @@ async def test_delegate_task_rejects_depth_excess_and_accepts_tool_policy(tmp_pa
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    tool_policy = await app.runner.execute_tool(
+    tool_selection = await app.runner.execute_tool(
         ToolCall(
             name="delegate_task",
-            arguments={"goal": "nested", "core_id": "evolver", "tool_policy": {"deny": ["terminal"]}},
+            arguments={"goal": "nested", "core_id": "evolver", "tools": "none"},
         ),
         core=core,
         turn=_turn(app, core),
@@ -507,9 +613,9 @@ async def test_delegate_task_rejects_depth_excess_and_accepts_tool_policy(tmp_pa
 
     assert too_deep.is_error is True
     assert "max_depth=2" in too_deep.content
-    assert tool_policy.is_error is False
-    record = app.task_worker.get(tool_policy.data["task_id"])
-    assert record.metadata["tool_policy"] == {"deny": ["terminal"]}
+    assert tool_selection.is_error is False
+    record = app.task_worker.get(tool_selection.data["task_id"])
+    assert record.metadata["requested_child_agent_tools"] == "none"
 
 
 @pytest.mark.asyncio
@@ -517,11 +623,11 @@ async def test_tool_policy_denies_child_tool_execution(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     turn = _turn(app, core)
-    turn.metadata["tool_policy"] = {"deny": ["tools_list"]}
+    turn.metadata["tool_policy"] = {"deny": ["read_file"]}
     capability = CapabilityFacade(core)
 
     result = await app.tool_runtime.execute(
-        ToolCall(name="tools_list", arguments={}),
+        ToolCall(name="read_file", arguments={}),
         core=core,
         turn=turn,
         capability=capability,

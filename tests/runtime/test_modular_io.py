@@ -35,6 +35,30 @@ class RecordingProvider:
         return LLMResponse(content=self.default)
 
 
+class FakeMcpTool:
+    def __init__(self, name: str, *, description: str = "Fake MCP tool"):
+        self.name = name
+        self.description = description
+        self.inputSchema = {"type": "object", "properties": {}}
+
+
+class FakeMcpConnection:
+    def __init__(self, tools):
+        self.tools = list(tools)
+        self.list_count = 0
+        self.closed = False
+
+    async def list_tools(self):
+        self.list_count += 1
+        return self.tools
+
+    async def call_tool(self, name, arguments, *, timeout_seconds):
+        return LLMResponse(content=f"{name}:ok")
+
+    async def close(self):
+        self.closed = True
+
+
 class ToolCallingProvider(RecordingProvider):
     async def complete(self, request):
         self.requests.append(request)
@@ -1461,6 +1485,232 @@ async def test_agents_run_returns_child_result_without_auto_mirroring_delivery(t
 
 
 @pytest.mark.asyncio
+async def test_agents_run_tools_default_all_preserves_child_tools(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw')\n"
+        "    ctx.output.send_text(result.metadata['child_agent_tools']['requested'], history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    child_tool_names = {tool.name for tool in provider.requests[1].tools}
+    assert "read_file" in child_tool_names
+    assert _delivery_texts(result) == ["parent", "all"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_filters_child_tools_by_allowlist(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', tools=['read_file'])\n"
+        "    resolved = ','.join(result.metadata['child_agent_tools']['resolved'])\n"
+        "    ctx.output.send_text(resolved, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert [tool.name for tool in provider.requests[1].tools] == ["read_file"]
+    assert _delivery_texts(result) == ["parent", "read_file"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_tool_allowlist_uses_exact_tool_ids(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "evolver/agent/tools/fs/module.py",
+        "from demiurge.sdk import ToolResult\n"
+        "def execute(ctx, args):\n"
+        "    return ToolResult(content='fs exact')\n",
+    )
+    _write_slot(
+        agents,
+        "evolver/agent/tools/fs/slot.yaml",
+        "entrypoint: module:execute\n"
+        "description: Exact fs tool.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "  additionalProperties: false\n"
+        "capabilities: []\n",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', tools=['fs'])\n"
+        "    resolved = ','.join(result.metadata['child_agent_tools']['resolved'])\n"
+        "    ctx.output.send_text(resolved, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert [tool.name for tool in provider.requests[1].tools] == ["fs"]
+    assert _delivery_texts(result) == ["parent", "fs"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
+    agents = _copy_agents(tmp_path)
+    mcp_dir = agents / "evolver" / "agent" / "mcp"
+    mcp_dir.mkdir(parents=True, exist_ok=True)
+    (mcp_dir / "docs.yaml").write_text(
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'child raw', tools=['docs__lookup'])\n"
+        "    resolved = ','.join(result.metadata['child_agent_tools']['resolved'])\n"
+        "    ctx.output.send_text(resolved, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    connection = FakeMcpConnection([FakeMcpTool("lookup")])
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert [tool.name for tool in provider.requests[1].tools] == ["docs__lookup"]
+    assert _delivery_texts(result) == ["parent", "docs__lookup"]
+    assert connection.list_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_argument", ["tools='none'", "tools=[]"])
+async def test_agents_run_can_hide_all_child_tools(tmp_path, tools_argument):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        f"    result = await ctx.agents.run('evolver', 'child raw', {tools_argument})\n"
+        "    ctx.output.send_text(str(len(result.metadata['child_agent_tools']['resolved'])), history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert provider.requests[1].tools == []
+    assert _delivery_texts(result) == ["parent", "0"]
+
+
+@pytest.mark.asyncio
+async def test_agents_run_rejects_child_tool_call_when_tools_are_hidden(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        "    result = await ctx.agents.run('evolver', 'read_file', tools='none')\n"
+        "    ctx.output.send_text(result.tools[0].content, history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(
+        responses=[
+            "parent",
+            LLMResponse(tool_calls=[ToolCall(id="tools_1", name="read_file", arguments={})]),
+            "child",
+        ]
+    )
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("hello")
+
+    assert "builtin tool is not allowed: read_file" in _delivery_texts(result)[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ("tools='read_file'", "tools must be 'all', 'none', or a list of tool ids"),
+        ("tools=['read_file', 'read_file']", "duplicate tool id: read_file"),
+        ("tools=['']", "tool id must not be empty"),
+        ("tools=['missing']", "unknown child tool id: missing"),
+    ],
+)
+async def test_agents_run_rejects_invalid_child_tool_selection(tmp_path, argument, message):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/agent_probe/module.py",
+        "async def process(ctx):\n"
+        f"    await ctx.agents.run('evolver', 'child raw', {argument})\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/agent_probe/slot.yaml",
+        _slot_text(failure_policy="hard", capabilities=["agents.run:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "agent_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    app.runner.provider = RecordingProvider(responses=["parent"])
+
+    with pytest.raises(ValueError, match=message):
+        await app.runner.run_turn("hello")
+
+
+@pytest.mark.asyncio
 async def test_agents_run_prepares_child_core_once(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
@@ -1827,6 +2077,41 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
         "spawn:running:evolver",
     ]
     assert any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
+
+
+@pytest.mark.asyncio
+async def test_agents_spawn_records_and_applies_child_tool_selection(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_module(
+        agents,
+        "assistant/agent/output/spawn_probe/module.py",
+        "def process(ctx):\n"
+        "    handle = ctx.agents.spawn('evolver', 'spawn raw', tools=['read_file'])\n"
+        "    ctx.output.send_text(f'spawn:{handle.status}:{handle.core_id}', history_policy='model_hidden')\n",
+    )
+    _write_slot(
+        agents,
+        "assistant/agent/output/spawn_probe/slot.yaml",
+        _slot_text(capabilities=["agents.spawn:evolver"]),
+    )
+    _write_pipeline(agents, "output", serial=["base_output", "spawn_probe"])
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
+    provider = RecordingProvider(responses=["parent", "child"])
+    app.runner.provider = provider
+
+    await app.runner.run_turn("hello")
+    agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
+    assert len(agent_tasks) == 1
+    assert agent_tasks[0].metadata["requested_child_agent_tools"] == ["read_file"]
+
+    await app.runner.drain_background_tasks()
+
+    agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
+    assert agent_tasks[0].metadata["resolved_child_agent_tools"] == {
+        "requested": ["read_file"],
+        "resolved": ["read_file"],
+    }
+    assert [tool.name for tool in provider.requests[1].tools] == ["read_file"]
 
 
 @pytest.mark.asyncio

@@ -187,7 +187,7 @@ does not hot-reload the active core.
 creates a new rollback commit for the live Agent Core tree; the new revision
 takes effect on the next turn.
 
-## Child Agent Slot Controls
+## Child Agent Controls
 
 Authored slots can call child agents synchronously or in the background:
 
@@ -197,6 +197,7 @@ result = await ctx.agents.run(
     "child prompt",
     input_slots=["base_input"],
     output_slots=["base_output"],
+    tools="all",
     use_bootstrap=False,
 )
 
@@ -205,6 +206,7 @@ handle = ctx.agents.spawn(
     "child prompt",
     input_slots="all",
     output_slots="all",
+    tools=["tools_list"],
     use_bootstrap=True,
 )
 ```
@@ -224,12 +226,24 @@ handle = ctx.agents.spawn(
 Slot ids must exist and must already be present in the child core's active
 pipeline. Invalid ids raise `ValueError` from authored `ctx.agents` calls.
 
+`tools` controls the child turn's visible and executable tool set:
+
+| Value | Meaning |
+| --- | --- |
+| omitted, `None`, or `"all"` | Use the child core's configured tools. |
+| `"none"` or `[]` | Run the child turn without tools. |
+| non-empty list | Allow only the listed tool ids from the child core's configured tools. |
+
+Tool selection only narrows the child core's configured tools; it does not grant
+missing tools or bypass capabilities and approval policy. Invalid tool ids raise
+`ValueError` from authored `ctx.agents` calls.
+
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots, create a bootstrap snapshot, or inject an existing bootstrap
 snapshot into the provider request. Set `use_bootstrap=True` to use the child
 core's normal bootstrap pipeline.
 
-`delegate_task(...)` exposes the same child slot controls to the model:
+`delegate_task(...)` exposes the same child controls to the model:
 
 ```text
 delegate_task(
@@ -237,16 +251,16 @@ delegate_task(
   core_id=None,
   context_mode="isolated",
   notify_policy="return_to_parent",
-  tool_policy=None,
   max_depth=None,
+  tools="all",
   input_slots=["base_input"],
   output_slots=["base_output"],
   use_bootstrap=False,
 )
 ```
 
-For `delegate_task`, invalid child slot selection returns a tool error result
-instead of raising into authored slot code.
+For `delegate_task`, invalid child slot or tool selection returns a tool error
+result instead of raising into authored slot code.
 
 ## Background Runtime Tasks
 

@@ -46,8 +46,8 @@ live worker for active work:
 - `ctx.agents.spawn(...)` is routed by the runner into an `agent.spawn` task.
 - `delegate_task(...)` is executed by the active runner context and creates an
   `agent.spawn` task with child output returned as parent evidence.
-  Both paths record requested and resolved child input/output slot selection in
-  task metadata.
+  Both paths record requested and resolved child input/output slot and tool
+  selection in task metadata.
 
 `task_list`, `task_status`, `task_control`, and `yield_until` are the
 model-facing runtime-task controls. `task_control` supports only

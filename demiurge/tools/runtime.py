@@ -341,6 +341,9 @@ class ToolRuntime:
         deny = self._policy_patterns(policy.get("deny"))
         if any(self._policy_pattern_matches(entry, pattern) for pattern in deny):
             return False
+        allow_exact = self._policy_exact_ids(policy.get("allow_exact"))
+        if allow_exact is not None and entry.name not in allow_exact:
+            return False
         allow = self._policy_patterns(policy.get("allow"))
         if allow and not any(self._policy_pattern_matches(entry, pattern) for pattern in allow):
             return False
@@ -359,6 +362,16 @@ class ToolRuntime:
         if isinstance(value, list | tuple | set):
             return [str(item) for item in value if str(item).strip()]
         return []
+
+    def _policy_exact_ids(self, value: Any) -> set[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return {text} if text else set()
+        if isinstance(value, list | tuple | set):
+            return {str(item).strip() for item in value if str(item).strip()}
+        return set()
 
     def _policy_pattern_matches(self, entry: ToolRegistryEntry, pattern: str) -> bool:
         normalized = pattern.strip()
