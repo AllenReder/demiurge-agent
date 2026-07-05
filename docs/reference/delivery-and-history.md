@@ -5,9 +5,9 @@ description: Reference for authored delivery requests and session history writes
 
 # Delivery and History
 
-Authored output modules and authored tools request delivery through host-owned
-SDK clients. The module does not write channel messages or session records
-directly.
+Authored input slots, output slots, and authored tools request delivery through
+host-owned SDK clients. Authored code does not write channel messages or
+session records directly.
 
 The host turns delivery requests into:
 
@@ -17,7 +17,9 @@ The host turns delivery requests into:
 - TUI or gateway deliveries routed by session
 - model-visible or model-hidden history
 
-## Delivery Calls
+For the full slot `ctx` object, see [Slot Context SDK](slot-context-sdk.md).
+
+## Delivery Methods
 
 Common output methods:
 
@@ -31,7 +33,107 @@ ctx.output.send_video("clip.mp4", summary="Demo clip", history_text="Sent a demo
 ctx.output.send_file("report.pdf", summary="Report PDF", history_text="Sent a report.")
 ```
 
-Artifact paths must be inside the workspace or the session artifact root.
+`ctx.input` exposes the same delivery methods for input-phase status or
+artifacts. Input deliveries default to transient history because input slots run
+before the assistant response.
+
+## `send_text`
+
+```python
+ctx.output.send_text(
+    text,
+    write_history=None,
+    history_policy=None,
+    visible=True,
+    history_text=None,
+    failure_history_text=None,
+    delivery_metadata=None,
+)
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `text` | Text block to deliver. |
+| `write_history` | `True` maps to `persist`; `False` maps to `transient` unless `history_policy` is supplied. |
+| `history_policy` | One of `persist`, `model_hidden`, or `transient`. |
+| `visible` | Whether the delivery is user-visible. |
+| `history_text` | Text written to history; defaults to `text`. |
+| `failure_history_text` | Text available for failure history handling. |
+| `delivery_metadata` | Extra metadata attached to the host delivery request. |
+
+`send_text(...)` returns a `DeliveryHandle` with a stable `delivery_id`.
+
+## Artifact Sends
+
+`send_image`, `send_audio`, `send_video`, and `send_file` share one parameter
+shape:
+
+```python
+ctx.output.send_file(
+    source,
+    caption=None,
+    media_type=None,
+    summary=None,
+    artifact_metadata=None,
+    write_history=None,
+    history_policy=None,
+    visible=True,
+    history_text=None,
+    failure_history_text=None,
+    delivery_metadata=None,
+)
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `source` | Workspace/session path, URL, or `ArtifactRef`. |
+| `caption` | Text rendered with the artifact block. |
+| `media_type` | MIME type hint such as `audio/mpeg` or `application/pdf`. |
+| `summary` | Artifact summary stored by the host. |
+| `artifact_metadata` | Metadata stored with the artifact. |
+| `write_history`, `history_policy`, `visible`, `history_text`, `failure_history_text`, `delivery_metadata` | Same controls as `send_text`. |
+
+Local artifact paths must be inside the resolved workspace or the current
+session artifact root. URLs are accepted as artifact sources. Passing raw
+artifact dictionaries to `send_image/audio/video/file` is rejected; use
+`summary=...` and `artifact_metadata=...`, or pass an `ArtifactRef`.
+
+Non-text sends that write history should provide `history_text`:
+
+```python
+ctx.output.send_image(
+    "chart.png",
+    caption="Trend chart",
+    history_text="Sent a trend chart.",
+)
+```
+
+If a non-text delivery writes history without usable history text, later model
+context has no text representation for that delivery.
+
+## Status Sends
+
+```python
+ctx.output.progress("Working...")
+ctx.output.notice("Skipped optional step")
+```
+
+| Method | Meaning |
+| --- | --- |
+| `progress(text, visible=True, delivery_metadata=None)` | Emit transient progress. |
+| `notice(text, visible=True, delivery_metadata=None)` | Emit a transient notice. |
+
+`progress` and `notice` always use transient history and do not accept
+`history_policy`.
+
+## Low-Level `send`
+
+`ctx.input.send(...)` and `ctx.output.send(...)` accept one content block, a
+string, a mapping compatible with `ContentBlock`, or a list of those values.
+Most slot code should prefer the typed helpers above.
+
+Valid content block types are `text`, `image`, `audio`, `video`, `file`, and
+`control`. Valid delivery kinds are `message`, `progress`, and `notice`.
 
 ## History Policies
 
@@ -41,7 +143,7 @@ Valid delivery history policies are:
 | --- | --- |
 | `persist` | Write assistant history and include it in later model context. |
 | `model_hidden` | Write assistant history but hide it from later model context. |
-| `transient` | Deliver or queue live output without writing assistant history. |
+| `transient` | Deliver output without writing assistant history. |
 
 `write_history=True` maps to `persist`. `write_history=False` maps to
 `transient` unless `history_policy` is explicitly supplied.
@@ -52,35 +154,14 @@ Valid delivery history policies are:
 | --- | --- |
 | `visible=True, history_policy="persist"` | User-visible assistant history and model-visible context. |
 | `visible=True, history_policy="model_hidden"` | User-visible history that later model context does not see. |
-| `visible=True, history_policy="transient"` | Live delivery only. |
+| `visible=True, history_policy="transient"` | Delivery only. |
 | `visible=False, history_policy="persist"` | Hidden assistant history for later model context. |
 | `visible=False, history_policy="model_hidden"` | Hidden durable history. |
 
 `visible=False` with transient delivery has no user or history effect and is
 rejected.
 
-## Text and Artifact History
-
-Text-only sends can infer history text:
-
-```python
-ctx.output.send_text(ctx.output.response_text)
-```
-
-Non-text sends that write history need `history_text`:
-
-```python
-ctx.output.send_image(
-    "chart.png",
-    caption="Trend chart",
-    history_text="Sent a trend chart.",
-)
-```
-
-If a non-text delivery writes history without `history_text`, the host rejects
-the request because later context would have no usable text representation.
-
-## Slot Defaults
+## Slot Defaults and Parallel Limits
 
 `slot.yaml` can set:
 
@@ -91,17 +172,18 @@ history_policy: persist
 The delivery request can override that default with `history_policy=...`.
 
 Serial output slots default to writing history. Parallel output slots and
-background output paths cannot write session history.
+background output paths cannot write session history. If a parallel output slot
+requests a non-transient history policy, the runtime raises `RuntimeError`.
 
 Input slots default their `ctx.input.send_*` history writes to transient, since
 input slots run before the assistant response.
 
 ## Delivery Timing
 
-Author-facing delivery timing options are not part of the current SDK. `send_*`
-submits an immediate host delivery request. The host owns session route lookup,
-artifact storage, dispatch status, retry/degradation events, and final session
-records.
+The current authored SDK does not expose `live` or delayed-delivery parameters.
+`send_*`, `progress`, and `notice` submit immediate host delivery requests. The
+host owns session route lookup, artifact storage, dispatch status,
+retry/degradation events, and final session records.
 
 ## Dispatch Status
 
@@ -123,8 +205,8 @@ Durable outbox rows use `queued`, `sending`, `sent`, `failed`, `unknown`, and
 `unrouted`. `unknown` is reserved for recovery after a crash between claiming
 delivery work and recording a platform result.
 
-Child agent sessions do not inherit the parent's route. Their live deliveries
-are sent only to a route explicitly bound for the child session; otherwise they
+Child agent sessions do not inherit the parent's route. Their deliveries are
+sent only to a route explicitly bound for the child session; otherwise they
 become `unrouted`.
 
 ## Channel Fallback
@@ -135,5 +217,6 @@ channel cannot render the richer block type.
 
 ## Boundary
 
-Authored modules request delivery. The host owns persistence, artifacts, session
-route lookup, channel dispatch, delivery status, and history visibility.
+Authored modules request delivery. The host owns persistence, artifacts,
+session route lookup, channel dispatch, delivery status, and history
+visibility.

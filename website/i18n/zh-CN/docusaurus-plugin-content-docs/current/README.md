@@ -45,7 +45,7 @@ declarations 和本地 libraries。
 | --- | --- |
 | 首次用户 | [快速开始](tutorials/quick-start.md), [配置 provider](how-to/configure-provider.md), [选择 workspace](how-to/choose-workspace.md) |
 | 本地运行者 | [故障排查](how-to/troubleshoot.md), [配置 channels](how-to/configure-channels.md), [安装 packages](how-to/install-packages.md) |
-| Agent Core 作者 | [Host 和 Agent Core](explanation/host-and-agent-core.md), [修改 Agent Core](tutorials/customize-agent-core.md), [编写 Agent Slot](how-to/write-slot-module.md), [Authored surface contract](reference/contracts/authored-surface.md) |
+| Agent Core 作者 | [Host 和 Agent Core](explanation/host-and-agent-core.md), [修改 Agent Core](tutorials/customize-agent-core.md), [编写 Agent Slot](how-to/write-slot-module.md), [Slot Context SDK](reference/slot-context-sdk.md), [Authored surface contract](reference/contracts/authored-surface.md) |
 | Package 作者 | [Package 模型](explanation/package-model.md), [编写 Package Recipe](how-to/write-package-recipe.md), [创建外部 package repository](tutorials/external-package-repository.md), [发布 package repository](how-to/publish-package-repository.md), [Package Recipe 参考](reference/package-recipes.md) |
 | 贡献者 | [Architecture](developer-guide/architecture.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
 

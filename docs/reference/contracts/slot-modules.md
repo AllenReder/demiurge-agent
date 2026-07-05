@@ -9,6 +9,9 @@ Agent Slots are governed extension points loaded from an Agent Core's authored
 surface. They let core-authored code run at specific points in the host-owned
 agent loop.
 
+This page defines the stable file and pipeline contract. For the full `ctx`
+API passed to slot code, see [Slot Context SDK](../slot-context-sdk.md).
+
 ## Directory Contract
 
 With `runtime.surface_root: agent`, slot directories are:
@@ -102,6 +105,10 @@ def process(ctx):
 Bootstrap return values are ignored. Use `ctx.bootstrap.add(...)` to add
 session-stable context.
 
+Bootstrap receives session metadata, slot metadata, `ctx.capability`, and
+`ctx.bootstrap`. It does not receive turn-time clients such as `ctx.history`,
+`ctx.state`, `ctx.tools`, `ctx.agents`, `ctx.skills`, or `ctx.result`.
+
 ## Input Context
 
 Input slots run before the provider call:
@@ -116,7 +123,9 @@ The seed `base_input` slot appends the raw user text. If no input slot produces
 user text, the turn fails.
 
 Serial input slots can modify the prompt. Parallel input slots cannot modify the
-current prompt.
+current prompt. Input slots can also read `ctx.history`, use `ctx.state`, call
+visible tools with `ctx.tools`, run child agents with `ctx.agents`, and activate
+skills with `ctx.skills` when the slot has the required capabilities.
 
 ## Output Context
 
@@ -132,7 +141,9 @@ delivers or records the response, the raw provider response remains only in
 runtime records.
 
 Serial output slots can write history and result data. Parallel output slots
-cannot write session history or modify the current result.
+cannot write session history or modify the current result. Output slots can
+read `ctx.history`, use `ctx.state`, call visible tools with `ctx.tools`, and
+run child agents with `ctx.agents` when the slot has the required capabilities.
 
 ## Child Agent Calls
 
@@ -152,6 +163,9 @@ allows only those configured child tool ids.
 
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots and does not inject a bootstrap snapshot.
+
+For return shapes, parameters, and capability names, see
+[Slot Context SDK](../slot-context-sdk.md).
 
 ## Capability Rule
 

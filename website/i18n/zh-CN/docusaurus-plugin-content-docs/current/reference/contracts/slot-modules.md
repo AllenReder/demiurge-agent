@@ -7,6 +7,9 @@ description: Bootstrap、input 和 output slots 的稳定规则。
 
 Agent Slots 是从 Agent Core 的 authored surface 加载的受治理 extension points。它们让 core-authored code 在 host-owned agent loop 的特定位置运行。
 
+本页定义稳定的文件和 pipeline contract。Slot code 收到的完整 `ctx` API 见
+[Slot Context SDK](../slot-context-sdk.md)。
+
 ## Directory Contract
 
 使用 `runtime.surface_root: agent` 时，slot directories 是：
@@ -96,6 +99,10 @@ def process(ctx):
 
 Bootstrap return values 会被忽略。使用 `ctx.bootstrap.add(...)` 添加 session-stable context。
 
+Bootstrap 会收到 session metadata、slot metadata、`ctx.capability` 和
+`ctx.bootstrap`。它不会收到 `ctx.history`、`ctx.state`、`ctx.tools`、
+`ctx.agents`、`ctx.skills` 或 `ctx.result` 这些 turn-time clients。
+
 ## Input Context
 
 Input slots 在 provider call 之前运行：
@@ -109,6 +116,9 @@ def process(ctx):
 Seed `base_input` slot 会追加原始用户文本。如果没有 input slot 生成 user text，turn 会失败。
 
 Serial input slots 可以修改 prompt。Parallel input slots 不能修改当前 prompt。
+Input slots 也可以在具备所需 capabilities 时读取 `ctx.history`、使用
+`ctx.state`、通过 `ctx.tools` 调用 visible tools、通过 `ctx.agents` 运行 child
+agents，并通过 `ctx.skills` 激活 skills。
 
 ## Output Context
 
@@ -121,7 +131,27 @@ def process(ctx):
 
 Seed `base_output` slot 会发送 model response。如果没有 output slot 发送或记录 response，原始 provider response 只会保留在 runtime records 中。
 
-Serial output slots 可以写入 history 和 result data。Parallel output slots 不能写入 session history，也不能修改当前 result。
+Serial output slots 可以写入 history 和 result data。Parallel output slots 不能写入 session history，也不能修改当前 result。Output slots 也可以在具备所需 capabilities 时读取 `ctx.history`、使用 `ctx.state`、通过 `ctx.tools` 调用 visible tools，并通过 `ctx.agents` 运行 child agents。
+
+## Child Agent Calls
+
+Input 和 output slot code 可以通过 `ctx.agents` 调用 child agents。
+`ctx.agents.run(...)` 会等待 child turn；`ctx.agents.spawn(...)` 会启动一个
+`agent.spawn` background task。
+
+两个调用都接受 `input_slots`、`output_slots`、`tools` 和 `use_bootstrap`。省略
+slot list、传 `None` 或传 `[]` 时，child core 只运行 `base_input` 或
+`base_output`。传 `"all"` 会运行 child core 的完整 configured pipeline。传非空
+列表会按 slot id 过滤 child core 的 active pipeline，并保留 pipeline order 和
+serial/parallel groups。
+
+`tools` 默认是 `"all"`，即保留 child core 的 configured tools。传 `"none"` 或
+`[]` 时 child 不使用 tools。传非空列表时，只允许这些 configured child tool ids。
+
+`use_bootstrap` 默认是 `False`。为 false 时，child turn 不运行 bootstrap slots，也不
+注入 bootstrap snapshot。
+
+返回值、参数和 capability 名称见 [Slot Context SDK](../slot-context-sdk.md)。
 
 ## Capability Rule
 
