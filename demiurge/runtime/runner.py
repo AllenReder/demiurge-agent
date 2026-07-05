@@ -18,15 +18,7 @@ from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
 from demiurge.runtime.control import ActionSource, ActionSpec
-from demiurge.runtime.delivery import (
-    CONTENT_BLOCK_TYPES,
-    DELIVERY_MODES,
-    ArtifactRef,
-    ContentBlock,
-    DeliveryRequest,
-    DeliveryRouteContext,
-    artifact_input_to_dict,
-)
+from demiurge.runtime.delivery import DeliveryRequest, DeliveryRouteContext
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -35,8 +27,8 @@ from demiurge.runtime.interactions import (
     SessionInteractionRouter,
     SessionRouteBinding,
 )
-from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
+from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slot_context import (
@@ -67,7 +59,6 @@ from demiurge.sdk import (
     AgentRunResult,
     AgentSpawnHandle,
     AgentToolSummary,
-    ArtifactRef,
     BootstrapContext,
     ContextContribution,
     DeliverEffect,
@@ -78,7 +69,7 @@ from demiurge.sdk import (
     ToolResult,
     TurnContext,
 )
-from demiurge.storage import ArtifactStore, EventLog, SessionMessage, StateStore, VersionStore
+from demiurge.storage import EventLog, SessionMessage, StateStore, VersionStore
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import utc_id
@@ -243,6 +234,7 @@ class SessionTurnStepRunner:
             event_log=self.event_log,
             router=self.interaction_router,
         )
+        self.module_delivery = ModuleDeliveryRuntime(RunnerModuleDeliveryHost(self))
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
@@ -2381,248 +2373,12 @@ class SessionTurnStepRunner:
         slot: SlotDefinition,
         interaction_metadata: dict[str, Any],
     ) -> InteractionDelivery | None:
-        history_policy = request.history_policy or slot.history_policy
-        if history_policy not in {"persist", "model_hidden", "transient"}:
-            raise ValueError(f"invalid history_policy: {history_policy}")
-        if request.delivery not in DELIVERY_MODES:
-            raise ValueError(f"invalid delivery mode: {request.delivery}")
-        if request.kind not in {"message", "progress", "notice"}:
-            raise ValueError(f"invalid delivery kind: {request.kind}")
-        if request.target != "current":
-            raise ValueError(f"unsupported delivery target: {request.target}")
-
-        artifact_store = ArtifactStore(self.home, self.session_id)
-        history_blocks: list[dict[str, Any]] = []
-        delivery_blocks: list[dict[str, Any]] = []
-        artifacts: list[ArtifactRef] = []
-        delivery_artifacts: list[dict[str, Any]] = []
-        fallback_lines: list[str] = []
-        unsupported_blocks = 0
-
-        for raw_block in request.blocks:
-            block = raw_block if isinstance(raw_block, ContentBlock) else ContentBlock(**dict(raw_block))
-            if block.type not in CONTENT_BLOCK_TYPES:
-                unsupported_blocks += 1
-                continue
-            if block.type == "text":
-                text = str(block.text or "")
-                if text:
-                    fallback_lines.append(text)
-                block_dict = {"type": "text", "text": text, "metadata": dict(block.metadata)}
-                history_blocks.append(block_dict)
-                delivery_blocks.append(block_dict)
-                continue
-            if block.type == "control":
-                unsupported_blocks += 1
-                history_blocks.append({"type": "control", "text": block.text, "metadata": dict(block.metadata)})
-                delivery_blocks.append({"type": "control", "text": block.text, "metadata": dict(block.metadata)})
-                continue
-            if block.artifact is None:
-                unsupported_blocks += 1
-                continue
-            artifact = artifact_store.store(artifact_input_to_dict(block.artifact))
-            artifacts.append(artifact)
-            history_artifact = asdict(artifact)
-            delivery_artifact = self._delivery_artifact_dict(artifact)
-            delivery_artifacts.append(delivery_artifact)
-            if block.text:
-                fallback_lines.append(str(block.text))
-            history_blocks.append(
-                {
-                    "type": block.type,
-                    "text": block.text,
-                    "artifact": history_artifact,
-                    "metadata": dict(block.metadata),
-                }
-            )
-            delivery_blocks.append(
-                {
-                    "type": block.type,
-                    "text": block.text,
-                    "artifact": delivery_artifact,
-                    "metadata": dict(block.metadata),
-                }
-            )
-            self._append_runtime_event(
-                RuntimeEvent(
-                    type="artifact.stored",
-                    aggregate_type="artifact",
-                    aggregate_id=artifact.artifact_id,
-                    payload={
-                        "task_id": turn.turn_id,
-                        "kind": artifact.kind,
-                        "uri": artifact.path or artifact.url or "",
-                        "metadata": {
-                            "session_id": self.session_id,
-                            "turn_id": turn.turn_id,
-                            "media_type": artifact.media_type,
-                            "summary": artifact.summary,
-                            **dict(artifact.metadata),
-                        },
-                    },
-                )
-            )
-
-        fallback_text = "\n\n".join(line for line in fallback_lines if line).strip()
-        writes_history = history_policy != "transient"
-        has_non_text_history = any(block.get("type") != "text" for block in history_blocks)
-        history_text = request.history_text
-        if history_text is None and not has_non_text_history:
-            history_text = fallback_text
-        if writes_history and has_non_text_history and not (history_text or "").strip():
-            raise ValueError("non-text send_* with write_history=True requires history_text")
-        failure_history_text = request.failure_history_text if request.failure_history_text is not None else history_text
-        metadata = {
-            "slot": slot.relative_path,
-            "phase": slot.kind,
-            "delivery_id": request.delivery_id,
-            "kind": request.kind,
-            "blocks": history_blocks,
-            "history_policy": history_policy,
-            "delivery": request.delivery,
-            "delivery_status": "pending",
-            "artifacts": [asdict(artifact) for artifact in artifacts],
-            "history_text": history_text,
-            "failure_history_text": failure_history_text,
-            **dict(request.metadata),
-        }
-        content = history_text or ""
-        message_id = None
-        delivery_payload = {
-            "kind": request.kind,
-            "visible": request.visible,
-            "history_policy": history_policy,
-            "message_id": None,
-            "history_text": history_text,
-            "failure_history_text": failure_history_text,
-            "fallback_text": fallback_text,
-            "blocks": delivery_blocks,
-            "artifacts": delivery_artifacts,
-        }
-        delivery_target = {
-            "conversation_key": interaction_metadata.get("conversation_key"),
-            "source": interaction_metadata.get("source"),
-            "reply_to": interaction_metadata.get("reply_to"),
-        }
-        if writes_history:
-            message = self.session_runtime.append_delivery_message(
-                self.session_id,
-                role="assistant",
-                content=content,
-                delivery_id=request.delivery_id,
-                task_id=turn.turn_id,
-                channel=interaction_metadata.get("channel"),
-                target=delivery_target,
-                delivery_payload=delivery_payload,
-                delivery_idempotency_key=request.delivery_id,
-                turn_id=turn.turn_id,
-                visible=request.visible,
-                model_visible=history_policy == "persist",
-                interaction_metadata=interaction_metadata,
-                metadata=metadata,
-            )
-            message_id = message.id
-            metadata["message_id"] = message_id
-            delivery_payload["message_id"] = message_id
-            self.event_log.emit(
-                "message.persisted",
-                turn_id=turn.turn_id,
-                message_id=message.id,
-                role=message.role,
-                kind=message.kind,
-                **interaction_metadata,
-            )
-        else:
-            self._append_runtime_events(
-                [
-                    RuntimeEvent(
-                        type="delivery.queued",
-                        aggregate_type="delivery",
-                        aggregate_id=request.delivery_id,
-                        payload={
-                            "task_id": turn.turn_id,
-                            "channel": interaction_metadata.get("channel"),
-                            "target": delivery_target,
-                            "status": "queued",
-                            "idempotency_key": request.delivery_id,
-                            "payload": delivery_payload,
-                        },
-                    ),
-                    durable_work_enqueued_event(
-                        DurableWorkSpec(
-                            work_id=request.delivery_id,
-                            kind="delivery.send",
-                            owner_session_id=self.session_id,
-                            owner_turn_id=turn.turn_id,
-                            parent_work_id=turn.turn_id,
-                            payload={
-                                "task_id": turn.turn_id,
-                                "channel": interaction_metadata.get("channel"),
-                                "target": delivery_target,
-                                "idempotency_key": request.delivery_id,
-                                **delivery_payload,
-                            },
-                        )
-                    ),
-                ]
-            )
-        self.event_log.emit(
-            "delivery.completed",
-            turn_id=turn.turn_id,
-            slot=slot.relative_path,
-            delivery_id=request.delivery_id,
-            kind=request.kind,
-            message_id=message_id,
-            visible=request.visible,
-            history_policy=history_policy,
-            artifacts=[artifact.artifact_id for artifact in artifacts],
-            **interaction_metadata,
+        return self.module_delivery.apply_request(
+            request,
+            turn=turn,
+            slot=slot,
+            interaction_metadata=interaction_metadata,
         )
-        if unsupported_blocks:
-            self.event_log.emit(
-                "delivery.degraded",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                delivery_id=request.delivery_id,
-                reason="unsupported_blocks",
-                count=unsupported_blocks,
-                **interaction_metadata,
-            )
-        if interaction_metadata.get("channel") == "tui" and any(block.get("type") not in {"text"} for block in delivery_blocks):
-            self.event_log.emit(
-                "delivery.degraded",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                delivery_id=request.delivery_id,
-                reason="channel_text_fallback",
-                channel="tui",
-            )
-        if request.visible and (fallback_text or delivery_artifacts or delivery_blocks):
-            first_type = next((block.get("type") for block in delivery_blocks if block.get("type") != "text"), "text")
-            return InteractionDelivery(
-                type=str(first_type or "text"),
-                kind=request.kind,
-                text=fallback_text,
-                fallback_text=fallback_text,
-                blocks=delivery_blocks,
-                payload={"type": "blocks", "blocks": delivery_blocks},
-                artifacts=delivery_artifacts,
-                visible=request.visible,
-                history_policy=history_policy,
-                metadata=metadata,
-            )
-        return None
-
-    def _delivery_artifact_dict(self, artifact: ArtifactRef) -> dict[str, Any]:
-        data = asdict(artifact)
-        path = artifact.path
-        if path:
-            raw_path = Path(path)
-            if raw_path.is_absolute():
-                data["resolved_path"] = str(raw_path)
-            else:
-                data["resolved_path"] = str((self.home / "runtime" / "artifacts" / self.session_id / path).resolve())
-        return data
 
     def _apply_deliver_effect(
         self,
@@ -2632,24 +2388,7 @@ class SessionTurnStepRunner:
         slot: SlotDefinition,
         interaction_metadata: dict[str, Any],
     ) -> InteractionDelivery | None:
-        payload = effect.payload if effect.payload is not None else {"type": "text", "text": effect.content or ""}
-        text = self._payload_text(payload)
-        blocks: list[ContentBlock] = []
-        if text:
-            blocks.append(ContentBlock(type="text", text=text))
-        for attachment in effect.attachments:
-            kind = "file"
-            if isinstance(attachment, Mapping):
-                kind = str(attachment.get("kind") or kind)
-            blocks.append(ContentBlock(type=kind if kind in CONTENT_BLOCK_TYPES else "file", artifact=attachment))
-        request = DeliveryRequest(
-            delivery_id=utc_id("delivery_"),
-            blocks=blocks,
-            history_policy=effect.history_policy or slot.history_policy,
-            visible=effect.visible,
-            target=effect.target or "current",
-            metadata={"payload": payload, "legacy_effect": True},
-        )
+        request = self.module_delivery.request_from_deliver_effect(effect, slot=slot)
         item = self.runtime_io.send_module_output(
             request,
             turn=turn,
@@ -2657,25 +2396,6 @@ class SessionTurnStepRunner:
             interaction_metadata=interaction_metadata,
         )
         return item.delivery if item is not None else None
-
-    def _payload_text(self, payload: Any) -> str:
-        if isinstance(payload, str):
-            return payload
-        if isinstance(payload, dict):
-            if payload.get("type") == "text":
-                return str(payload.get("text") or "")
-            if "text" in payload:
-                return str(payload.get("text") or "")
-            if "content" in payload:
-                return str(payload.get("content") or "")
-        return ""
-
-    def _delivery_history_content(self, text: str, artifacts: list[ArtifactRef]) -> str:
-        lines = [text] if text else []
-        for artifact in artifacts:
-            summary = artifact.summary or artifact.media_type or artifact.kind
-            lines.append(f"[artifact:{artifact.artifact_id} {artifact.kind} {summary}]")
-        return "\n\n".join(line for line in lines if line).strip()
 
     async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
         while self._background_tasks:
