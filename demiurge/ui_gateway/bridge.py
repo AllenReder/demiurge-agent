@@ -14,6 +14,7 @@ from demiurge.providers import ToolCall
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.event_commands import build_events_command_text, build_trace_command_text
+from demiurge.runtime.history_display import build_history_items
 from demiurge.runtime.interactions import (
     InteractionInbound,
     InteractionOutbound,
@@ -31,7 +32,7 @@ from demiurge.runtime.session_commands import (
 )
 from demiurge.runtime.status_commands import RuntimeStatusView, build_runtime_status_view, runtime_status_key_values
 from demiurge.runtime.text_format import format_key_values, format_table, json_safe, shorten_text
-from demiurge.runtime.tool_display import historical_tool_item, tool_call_item
+from demiurge.runtime.tool_display import tool_call_item
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -458,33 +459,11 @@ class TuiInteractionBridge:
         )
 
     def _history_items(self, session_id: str) -> list[dict[str, Any]]:
-        tool_events = _tool_history_events(EventLog(self.app.home, session_id).read_all())
-        items: list[dict[str, Any]] = []
-        for message in self.app.session_runtime.read_messages(session_id):
-            if message.visible and message.role in {"user", "assistant", "system"}:
-                if message.content:
-                    items.append(
-                        {
-                            "id": f"history_message_{message.id}",
-                            "type": "message",
-                            "role": message.role,
-                            "text": message.content,
-                            "metadata": json_safe(
-                                {
-                                    **(message.metadata or {}),
-                                    "message_id": message.id,
-                                    "turn_id": message.turn_id,
-                                    "historical": True,
-                                }
-                            ),
-                        }
-                    )
-                continue
-            if message.role == "tool" and self.tool_display != "quiet":
-                tool = historical_tool_item(message, tool_events, full=self.tool_display == "full")
-                if tool is not None:
-                    items.append(tool)
-        return items[-500:]
+        return build_history_items(
+            self.app.session_runtime.read_messages(session_id),
+            EventLog(self.app.home, session_id).read_all(),
+            tool_display=self.tool_display,
+        )
 
     def _status_payload(self) -> dict[str, Any]:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
@@ -995,43 +974,6 @@ def _delivery_dict(delivery: Any) -> dict[str, Any]:
         "history_policy": delivery.history_policy,
         "metadata": json_safe(delivery.metadata),
     }
-
-
-def _tool_history_events(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    by_id: dict[str, dict[str, Any]] = {}
-    for event in events:
-        if event.get("type") == "actions.requested":
-            for action in event.get("actions") or []:
-                if not isinstance(action, dict):
-                    continue
-                call_id = str(action.get("id") or "")
-                if not call_id:
-                    continue
-                by_id.setdefault(call_id, {}).update(
-                    {
-                        "id": call_id,
-                        "name": str(action.get("name") or ""),
-                        "arguments": action.get("arguments") if isinstance(action.get("arguments"), dict) else {},
-                    }
-                )
-            continue
-        if event.get("type") != "action.result":
-            continue
-        call_id = str(event.get("tool_call_id") or "")
-        if not call_id:
-            continue
-        by_id.setdefault(call_id, {}).update(
-            {
-                "id": call_id,
-                "name": str(event.get("tool_name") or ""),
-                "content": str(event.get("content") or ""),
-                "display_output": str(event.get("display_output") or ""),
-                "model_output": event.get("model_output"),
-                "is_error": bool(event.get("is_error")),
-                "data": event.get("data"),
-            }
-        )
-    return by_id
 
 
 def _slash_spec_dict(spec: SlashCommandSpec) -> dict[str, Any]:
