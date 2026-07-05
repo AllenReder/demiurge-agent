@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
-from demiurge.channels.commands import ChannelCommandRuntime
+from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
+from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.runtime.interactions import InteractionInbound
 
 
@@ -28,6 +31,35 @@ def _notice_sink(notices):
         notices.append(text)
 
     return send_notice
+
+
+def _state(*, runner=None, busy_mode: str = "interrupt"):
+    runtime = SimpleNamespace(
+        runner=runner
+        or SimpleNamespace(
+            core_id="assistant",
+            session_id="session_1",
+            provider_name="fake",
+        ),
+        session_runtime=None,
+    )
+    return ConversationIngressState(runtime=runtime, busy_mode=busy_mode, route_binding=object())
+
+
+def _executor(sent, ran, **kwargs) -> ChannelCommandExecutor:
+    async def send_text(inbound, text):
+        sent.append((inbound.source, inbound.reply_to, text))
+
+    async def run_inbound(_state, inbound):
+        ran.append(inbound)
+
+    return ChannelCommandExecutor(
+        channel_name=kwargs.pop("channel_name", "test"),
+        surface=kwargs.pop("surface", "text"),
+        send_text=send_text,
+        run_inbound=run_inbound,
+        **kwargs,
+    )
 
 
 @pytest.mark.asyncio
@@ -105,3 +137,82 @@ async def test_channel_command_runtime_reports_unknown_command():
 
     assert outcome.handled is True
     assert notices == ["Unknown command: /missing"]
+
+
+@pytest.mark.asyncio
+async def test_channel_command_executor_sets_busy_mode_through_shared_handler():
+    sent = []
+    ran = []
+    executor = _executor(sent, ran)
+    state = _state()
+
+    await executor.handlers()["busy"]("queue", _inbound("/busy queue"), state)
+
+    assert state.busy_mode == "queue"
+    assert sent == [("source_1", "reply_1", "Busy mode: `queue`")]
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_channel_command_executor_queue_runs_prompt_as_inbound():
+    sent = []
+    ran = []
+    executor = _executor(sent, ran)
+    state = _state()
+
+    await executor.handlers()["queue"]("queued prompt", _inbound("/queue queued prompt"), state)
+    if state.active_task is not None:
+        await state.active_task
+
+    assert [inbound.text for inbound in ran] == ["queued prompt"]
+    assert sent == [("source_1", "reply_1", "Queued: queued prompt")]
+
+
+@pytest.mark.asyncio
+async def test_channel_command_executor_formats_status_with_adapter_extras():
+    sent = []
+    ran = []
+    executor = _executor(
+        sent,
+        ran,
+        surface="telegram",
+        channel_name="telegram",
+        include_status_channel=False,
+        status_extra_lines=lambda _inbound: ("- access: `restricted`",),
+    )
+    state = _state(busy_mode="queue")
+
+    await executor.handlers()["status"]("", _inbound("/status"), state)
+
+    text = sent[0][2]
+    assert "# Status" in text
+    assert "- channel:" not in text
+    assert "- core: `assistant`" in text
+    assert "- busy mode: `queue`" in text
+    assert "- access: `restricted`" in text
+
+
+@pytest.mark.asyncio
+async def test_channel_command_executor_lists_tools_from_runner_registry():
+    sent = []
+    ran = []
+    core = SimpleNamespace(core_id="assistant")
+    tool = SimpleNamespace(name="tools_list", source="builtin", approval_policy="never")
+
+    class Runner:
+        core_id = "assistant"
+        session_id = "session_1"
+        provider_name = "fake"
+
+        def __init__(self):
+            self.tool_runtime = SimpleNamespace(registry_for=lambda loaded_core: [tool])
+
+        async def load_active_core(self):
+            return core
+
+    executor = _executor(sent, ran)
+    state = _state(runner=Runner())
+
+    await executor.handlers()["tools"]("", _inbound("/tools"), state)
+
+    assert sent == [("source_1", "reply_1", "# Tools\n- `tools_list` - builtin - never")]

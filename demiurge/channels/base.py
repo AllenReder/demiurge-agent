@@ -6,7 +6,7 @@ import contextvars
 import logging
 from typing import Any, Callable, Protocol
 
-from demiurge.channels.commands import ChannelCommandRuntime
+from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 from demiurge.runtime.interactions import (
@@ -20,15 +20,10 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import text_delivery_steps
-from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice, resume_bound_session, start_bound_session
-from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
-from demiurge.providers import ToolCall
-from demiurge.sdk import AgentInput, TurnContext
-from demiurge.security.capabilities import CapabilityFacade
-from demiurge.slash import command_names_for_surface, help_text_for_surface
+from demiurge.slash import command_names_for_surface
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +68,13 @@ class TextChannelBridgeBase:
             command_names=TEXT_CHANNEL_COMMAND_NAMES,
             unavailable_template="Command not available: /{name}",
             unknown_template="Unknown command: /{name}",
+        )
+        self._command_executor = ChannelCommandExecutor(
+            channel_name=channel_name,
+            surface="text",
+            send_text=self._send_command_text,
+            run_inbound=self._run_inbound,
+            help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
         self._pending_choices: dict[str, list[str]] = {}
         self._conversations: dict[str, TextConversationState] = {}
@@ -273,219 +275,19 @@ class TextChannelBridgeBase:
             controller.finish(task)
             await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
-    async def _drain_next_queued_input(self, state: TextConversationState) -> None:
-        await ConversationTurnController(state).drain_next(
-            lambda next_inbound: self._run_inbound(state, next_inbound)
-        )
-
     async def _handle_command(self, inbound: InteractionInbound, state: TextConversationState):
         async def send_notice(text: str) -> None:
-            await self._send_text(inbound.source, text, reply_to=inbound.reply_to, metadata=inbound.metadata)
+            await self._send_command_text(inbound, text)
 
         return await self._command_runtime.handle(
             inbound,
             state,
-            handlers=self._command_handlers(),
+            handlers=self._command_executor.handlers(),
             send_notice=send_notice,
         )
 
-    def _command_handlers(self):
-        return {
-            "help": self._command_help,
-            "status": self._command_status,
-            "new": self._command_new,
-            "stop": self._command_stop,
-            "queue": self._command_queue,
-            "busy": self._command_busy,
-            "sessions": self._command_sessions,
-            "resume": self._command_resume,
-            "tools": self._command_tools,
-            "skills": self._command_skills,
-            "skill": self._command_skill,
-        }
-
-    async def _command_help(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        await self._send_text(
-            inbound.source,
-            help_text_for_surface("text", extra_lines=("- `/ask <prompt>` - send a prompt",)),
-            reply_to=inbound.reply_to,
-            metadata=inbound.metadata,
-        )
-
-    async def _command_status(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        session_runtime = getattr(state.runtime, "session_runtime", None) or getattr(
-            state.runtime.runner,
-            "session_runtime",
-            None,
-        )
-        view = build_runtime_status_view(
-            state.runtime.runner,
-            session_runtime,
-            running=ConversationTurnController(state).running,
-            busy_mode=state.busy_mode,
-            queued_inputs=state.queue.qsize(),
-            channel=self.channel_name,
-        )
-        await self._send_text(
-            inbound.source,
-            format_runtime_status_markdown(view),
-            reply_to=inbound.reply_to,
-            metadata=inbound.metadata,
-        )
-
-    async def _command_new(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        await self._cancel_active(state)
-        self._clear_queue(state, preserve_completions=False)
-        runner = state.runtime.runner
-        result = await start_bound_session(
-            runner,
-            state.route_binding,
-            channel=self.channel_name,
-            conversation_key=inbound.conversation_key,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            replace_conversation_binding=True,
-        )
-        if not result.ok:
-            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        await self._send_text(inbound.source, f"New session: `{result.session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_stop(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        running = ConversationTurnController(state).running
-        queued = self._clear_queue(state, preserve_completions=True)
-        if running:
-            await self._cancel_active(state)
-            await self._send_text(
-                inbound.source,
-                f"Stopped current turn; cleared {queued} queued message(s).",
-                reply_to=inbound.reply_to,
-                metadata=inbound.metadata,
-            )
-            return
-        await self._send_text(inbound.source, f"No running turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to, metadata=inbound.metadata)
-        await self._drain_next_queued_input(state)
-
-    async def _command_queue(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        text = args.strip()
-        if not text:
-            await self._send_text(inbound.source, "Usage: `/queue <prompt>`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        await ConversationTurnController(state).queue_and_drain_if_idle(
-            InteractionInbound(
-                channel=inbound.channel,
-                text=text,
-                source=inbound.source,
-                reply_to=inbound.reply_to,
-                conversation_key=inbound.conversation_key,
-                metadata=dict(inbound.metadata),
-            ),
-            lambda next_inbound: self._run_inbound(state, next_inbound),
-        )
-        await self._send_text(inbound.source, f"Queued: {self._shorten(text)}", reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_busy(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        mode = args.strip().lower()
-        if not mode:
-            await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        if mode not in {"interrupt", "queue"}:
-            await self._send_text(inbound.source, "Usage: `/busy interrupt|queue`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        state.busy_mode = mode
-        await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_sessions(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        limit = int(args.strip()) if args.strip().isdigit() else 10
-        view = build_session_list_view(
-            state.runtime.session_runtime,
-            core_id=state.runtime.runner.core_id,
-            active_session_id=state.runtime.runner.session_id,
-            limit=limit,
-        )
-        await self._send_text(inbound.source, view.text(), reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_resume(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        raw = args.strip()
-        view = build_session_list_view(
-            state.runtime.session_runtime,
-            core_id=state.runtime.runner.core_id,
-            active_session_id=state.runtime.runner.session_id,
-            limit=20,
-        )
-        if not raw:
-            await self._send_text(
-                inbound.source,
-                view.text() + "\n\nUse `/resume <number|session_id>`.",
-                reply_to=inbound.reply_to,
-                metadata=inbound.metadata,
-            )
-            return
-        resolution = resolve_session_choice(raw, view)
-        if not resolution.ok:
-            await self._send_text(
-                inbound.source,
-                resolution.message or "Invalid session selection.",
-                reply_to=inbound.reply_to,
-                metadata=inbound.metadata,
-            )
-            return
-        assert resolution.session_id is not None
-        result = resume_bound_session(state.runtime.runner, state.route_binding, resolution.session_id)
-        if not result.ok:
-            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        await self._send_text(inbound.source, f"Resumed session: `{result.session_id}`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_tools(self, _: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        lines = ["# Tools"]
-        for entry in runner.tool_runtime.registry_for(core):
-            lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_skills(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        category = args.strip() or None
-        skills = [skill for skill in core.skills if category is None or skill.category == category]
-        lines = ["# Skills"]
-        for skill in skills:
-            lines.append(f"- `{skill.name}` - {skill.category} - {skill.description}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _command_skill(self, args: str, inbound: InteractionInbound, state: TextConversationState) -> None:
-        parts = args.split(maxsplit=1)
-        if not parts:
-            await self._send_text(inbound.source, "Usage: `/skill <name>`", reply_to=inbound.reply_to, metadata=inbound.metadata)
-            return
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        result = await runner.tool_runtime.execute(
-            ToolCall(name="skill_view", arguments={"name": parts[0]}, id=f"{self.channel_name}_skill_view"),
-            core=core,
-            turn=TurnContext(
-                session_id=runner.session_id,
-                turn_id=f"{self.channel_name}_slash",
-                core_id=core.core_id,
-                core_revision=runner.version_store.active_pointer(core.core_id).active_revision,
-                user_input=AgentInput(content=inbound.text, metadata=dict(inbound.metadata)),
-                metadata=dict(inbound.metadata),
-            ),
-            capability=CapabilityFacade(core),
-            emit_event=runner.event_log.emit,
-        )
-        content = result.content
-        if isinstance(result.data, dict) and result.data.get("content"):
-            content = str(result.data["content"])
-        await self._send_text(inbound.source, content[:3800], reply_to=inbound.reply_to, metadata=inbound.metadata)
-
-    async def _cancel_active(self, state: TextConversationState) -> None:
-        await ConversationTurnController(state).cancel_active()
-
-    def _clear_queue(self, state: TextConversationState, *, preserve_completions: bool) -> int:
-        return ConversationTurnController(state).clear_queue(preserve_completions=preserve_completions)
+    async def _send_command_text(self, inbound: InteractionInbound, text: str) -> None:
+        await self._send_text(inbound.source, text, reply_to=inbound.reply_to, metadata=inbound.metadata)
 
     def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)

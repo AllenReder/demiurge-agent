@@ -19,13 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from demiurge.channels.commands import ChannelCommandRuntime
+from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
-from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.completions import is_background_completion
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
-from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
@@ -39,11 +37,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import text_delivery_steps
-from demiurge.runtime.session_commands import build_session_list_view, resolve_session_choice, resume_bound_session, start_bound_session
-from demiurge.runtime.status_commands import build_runtime_status_view, format_runtime_status_markdown
-from demiurge.providers import ToolCall
-from demiurge.sdk import AgentInput, TurnContext
-from demiurge.slash import command_names_for_surface, help_text_for_surface, parse_slash_command, telegram_command_specs
+from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
     _needs_rich_telegram_rendering,
@@ -124,6 +118,16 @@ class TelegramInteractionBridge:
             command_names=command_names_for_surface("telegram"),
             unavailable_template="Command not available on Telegram: /{name}",
             unknown_template="Unknown command: /{name}",
+        )
+        self._command_executor = ChannelCommandExecutor(
+            channel_name="telegram",
+            surface="telegram",
+            send_text=self._send_command_text,
+            run_inbound=self._run_inbound,
+            cancel_active=self._cancel_active,
+            include_status_channel=False,
+            status_extra_lines=self._status_extra_lines,
+            include_subagents=True,
         )
         self._polling_network_error_count = 0
         self._polling_conflict_count = 0
@@ -772,229 +776,36 @@ class TelegramInteractionBridge:
             controller.finish(task)
             await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
-    async def _drain_next_queued_input(self, state: TelegramConversationState) -> None:
-        await ConversationTurnController(state).drain_next(
-            lambda next_inbound: self._run_inbound(state, next_inbound)
-        )
-
     async def _handle_telegram_command(
         self,
         inbound: InteractionInbound,
         state: TelegramConversationState,
     ):
         async def send_notice(text: str) -> None:
-            await self._send_text(inbound.source, text, reply_to=inbound.reply_to)
+            await self._send_command_text(inbound, text)
 
         return await self._command_runtime.handle(
             inbound,
             state,
-            handlers=self._telegram_command_handlers(),
+            handlers=self._command_executor.handlers(),
             send_notice=send_notice,
         )
 
-    def _telegram_command_handlers(self):
-        return {
-            "help": self._command_help,
-            "status": self._command_status,
-            "new": self._command_new,
-            "stop": self._command_stop,
-            "queue": self._command_queue,
-            "busy": self._command_busy,
-            "sessions": self._command_sessions,
-            "subagents": self._command_subagents,
-            "resume": self._command_resume,
-            "tools": self._command_tools,
-            "skills": self._command_skills,
-            "skill": self._command_skill,
-        }
+    async def _send_command_text(self, inbound: InteractionInbound, text: str) -> None:
+        await self._send_text(inbound.source, text, reply_to=inbound.reply_to)
 
-    async def _command_help(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        await self._send_text(inbound.source, help_text_for_surface("telegram"), reply_to=inbound.reply_to)
-
-    async def _command_status(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        session_runtime = getattr(state.runtime, "session_runtime", None) or getattr(
-            state.runtime.runner,
-            "session_runtime",
-            None,
+    def _status_extra_lines(self, inbound: InteractionInbound) -> tuple[str, ...]:
+        return (
+            "- access: `restricted`",
+            f"- allowed users: `{len(self.allowed_users)}`",
+            f"- allowed chats: `{len(self.allowed_chats)}`",
+            f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
         )
-        view = build_runtime_status_view(
-            state.runtime.runner,
-            session_runtime,
-            running=ConversationTurnController(state).running,
-            busy_mode=state.busy_mode,
-            queued_inputs=state.queue.qsize(),
-        )
-        await self._send_text(
-            inbound.source,
-            format_runtime_status_markdown(
-                view,
-                extra_lines=(
-                    "- access: `restricted`",
-                    f"- allowed users: `{len(self.allowed_users)}`",
-                    f"- allowed chats: `{len(self.allowed_chats)}`",
-                    f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
-                ),
-            ),
-            reply_to=inbound.reply_to,
-        )
-
-    async def _command_new(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        await self._cancel_active(state)
-        self._clear_queue(state, preserve_completions=False)
-        runner = state.runtime.runner
-        result = await start_bound_session(
-            runner,
-            state.route_binding,
-            channel="telegram",
-            conversation_key=inbound.conversation_key,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            replace_conversation_binding=True,
-        )
-        if not result.ok:
-            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to)
-            return
-        await self._send_text(inbound.source, f"New session: `{result.session_id}`", reply_to=inbound.reply_to)
-
-    async def _command_stop(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        running = ConversationTurnController(state).running
-        queued = self._clear_queue(state, preserve_completions=True)
-        if running:
-            await self._cancel_active(state)
-            await self._send_text(inbound.source, f"Stopped current turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to)
-            return
-        await self._send_text(inbound.source, f"No running turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to)
-        await self._drain_next_queued_input(state)
-
-    async def _command_queue(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        text = args.strip()
-        if not text:
-            await self._send_text(inbound.source, "Usage: `/queue <prompt>`", reply_to=inbound.reply_to)
-            return
-        queued = InteractionInbound(
-            channel=inbound.channel,
-            text=text,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            conversation_key=inbound.conversation_key,
-            metadata=dict(inbound.metadata),
-        )
-        await ConversationTurnController(state).queue_and_drain_if_idle(
-            queued,
-            lambda next_inbound: self._run_inbound(state, next_inbound),
-        )
-        await self._send_text(inbound.source, f"Queued: {self._shorten(text)}", reply_to=inbound.reply_to)
-
-    async def _command_busy(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        mode = args.strip().lower()
-        if not mode:
-            await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to)
-            return
-        if mode not in {"interrupt", "queue"}:
-            await self._send_text(inbound.source, "Usage: `/busy interrupt|queue`", reply_to=inbound.reply_to)
-            return
-        state.busy_mode = mode
-        await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to)
-
-    async def _command_sessions(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        limit = int(args.strip()) if args.strip().isdigit() else 10
-        view = build_session_list_view(
-            state.runtime.session_runtime,
-            core_id=state.runtime.runner.core_id,
-            active_session_id=state.runtime.runner.session_id,
-            limit=limit,
-        )
-        await self._send_text(inbound.source, view.text(), reply_to=inbound.reply_to)
-
-    async def _command_subagents(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        text = await subagents_command_text(
-            state.runtime.runner.task_worker,
-            session_id=state.runtime.runner.session_id,
-            args=args,
-        )
-        await self._send_text(inbound.source, text[:3800], reply_to=inbound.reply_to)
-
-    async def _command_resume(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        raw = args.strip()
-        view = build_session_list_view(
-            state.runtime.session_runtime,
-            core_id=state.runtime.runner.core_id,
-            active_session_id=state.runtime.runner.session_id,
-            limit=20,
-        )
-        if not raw:
-            await self._send_text(
-                inbound.source,
-                view.text() + "\n\nUse `/resume <number|session_id>`.",
-                reply_to=inbound.reply_to,
-            )
-            return
-        resolution = resolve_session_choice(raw, view)
-        if not resolution.ok:
-            await self._send_text(
-                inbound.source,
-                resolution.message or "Invalid session selection.",
-                reply_to=inbound.reply_to,
-            )
-            return
-        assert resolution.session_id is not None
-        result = resume_bound_session(state.runtime.runner, state.route_binding, resolution.session_id)
-        if not result.ok:
-            await self._send_text(inbound.source, result.message, reply_to=inbound.reply_to)
-            return
-        await self._send_text(inbound.source, f"Resumed session: `{result.session_id}`", reply_to=inbound.reply_to)
-
-    async def _command_tools(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        lines = ["# Tools"]
-        for entry in runner.tool_runtime.registry_for(core):
-            lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
-
-    async def _command_skills(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        category = args.strip() or None
-        skills = [skill for skill in core.skills if category is None or skill.category == category]
-        lines = ["# Skills"]
-        for skill in skills:
-            lines.append(f"- `{skill.name}` - {skill.category} - {skill.description}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
-
-    async def _command_skill(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        parts = args.split(maxsplit=1)
-        if not parts:
-            await self._send_text(inbound.source, "Usage: `/skill <name>`", reply_to=inbound.reply_to)
-            return
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        result = await runner.tool_runtime.execute(
-            ToolCall(name="skill_view", arguments={"name": parts[0]}, id="telegram_skill_view"),
-            core=core,
-            turn=TurnContext(
-                session_id=runner.session_id,
-                turn_id="telegram_slash",
-                core_id=core.core_id,
-                core_revision=runner.version_store.active_pointer(core.core_id).active_revision,
-                user_input=AgentInput(content=inbound.text, metadata=dict(inbound.metadata)),
-                metadata=dict(inbound.metadata),
-            ),
-            capability=CapabilityFacade(core),
-            emit_event=runner.event_log.emit,
-        )
-        content = result.content
-        if isinstance(result.data, dict) and result.data.get("content"):
-            content = str(result.data["content"])
-        await self._send_text(inbound.source, content[:3800], reply_to=inbound.reply_to)
 
     async def _cancel_active(self, state: TelegramConversationState) -> None:
         await ConversationTurnController(state).cancel_active(
             before_cancel=lambda: self._cancel_pending_approval(state, reason="telegram turn stopped")
         )
-
-    def _clear_queue(self, state: TelegramConversationState, *, preserve_completions: bool) -> int:
-        return ConversationTurnController(state).clear_queue(preserve_completions=preserve_completions)
 
     def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
