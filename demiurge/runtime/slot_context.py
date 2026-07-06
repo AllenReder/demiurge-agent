@@ -70,25 +70,6 @@ class SlotContextHost(Protocol):
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         ...
 
-    def commit_module_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem | None:
-        ...
-
-    def schedule_interaction_item(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        ...
-
     async def execute_tool(
         self,
         call: ToolCall,
@@ -156,34 +137,6 @@ class RunnerSlotContextHost:
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         return self.runner.event_log.emit(event_type, **payload)
-
-    def commit_module_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem | None:
-        return self.runner.commit_module_delivery_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-
-    def schedule_interaction_item(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        self.runner.schedule_interaction_item(
-            item,
-            turn=turn,
-            interaction_metadata=interaction_metadata,
-        )
 
     async def execute_tool(
         self,
@@ -1146,8 +1099,9 @@ class ModuleResultClient:
 class SlotContextRuntime:
     """Builds authored input/output slot SDK contexts behind a small Interface."""
 
-    def __init__(self, host: SlotContextHost):
+    def __init__(self, host: SlotContextHost, *, effects: Any):
         self.host = host
+        self.effects = effects
 
     def build_input_context(self, request: InputSlotRunRequest, *, items: list[InteractionItem]) -> SlotContextBuild:
         io_client = self.module_io_client(
@@ -1255,12 +1209,7 @@ class SlotContextRuntime:
         return SlotContextBuild(context=ctx, io_client=io_client)
 
     def result_client(self, *, writable: bool) -> ModuleResultClient:
-        return ModuleResultClient(
-            home=self.host.home,
-            session_id=self.host.session_id,
-            workspace=self.host.workspace,
-            writable=writable,
-        )
+        return self.effects.result_client(writable=writable)
 
     def module_io_client(
         self,
@@ -1272,52 +1221,10 @@ class SlotContextRuntime:
         background: bool = False,
         items: list[InteractionItem] | None = None,
     ) -> ModuleIOClient:
-        route = self._delivery_route_context(turn, slot, interaction_metadata)
-        commit = lambda request: self.host.commit_module_delivery_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-        schedule = lambda item: self.host.schedule_interaction_item(
-            item,
+        return self.effects.module_io_client(
+            slot,
             turn=turn,
             interaction_metadata=interaction_metadata,
-        )
-        default_write_history = slot.history_policy != "transient"
-        allow_write_history = True
-        if slot.kind == "input":
-            default_write_history = False
-        elif slot.kind == "output":
-            default_write_history = not background
-            allow_write_history = not background
-        return ModuleIOClient(
-            home=self.host.home,
-            session_id=self.host.session_id,
-            workspace=self.host.workspace,
-            default_history_policy=slot.history_policy,
-            default_write_history=default_write_history,
-            allow_write_history=allow_write_history,
-            commit=commit,
-            schedule=schedule,
-            route=route,
             background=background,
             items=items,
-        )
-
-    def _delivery_route_context(
-        self,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> DeliveryRouteContext:
-        return DeliveryRouteContext(
-            session_id=self.host.session_id,
-            turn_id=turn.turn_id,
-            channel=interaction_metadata.get("channel"),
-            conversation_key=interaction_metadata.get("conversation_key"),
-            source=interaction_metadata.get("source"),
-            reply_to=interaction_metadata.get("reply_to"),
-            slot=slot.relative_path,
-            metadata=dict(interaction_metadata),
         )

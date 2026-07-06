@@ -3,9 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Protocol
 
-from demiurge.core import SlotDefinition
 from demiurge.providers import ToolCall
-from demiurge.runtime.delivery import DeliveryRequest
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, ToolInteractionRecord
 from demiurge.runtime.session import SessionRuntime
 from demiurge.sdk import ToolResult, TurnContext
@@ -49,16 +47,6 @@ class TurnIOHost(Protocol):
     ) -> None:
         ...
 
-    def apply_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionDelivery | None:
-        ...
-
 
 class RunnerTurnIOHost:
     """Adapter from SessionTurnStepRunner to TurnIOHost."""
@@ -90,7 +78,7 @@ class RunnerTurnIOHost:
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
     ) -> None:
-        self.runner._schedule_interaction_item(
+        self.runner.interaction_dispatch.schedule(
             item,
             turn=turn,
             interaction_metadata=interaction_metadata,
@@ -103,24 +91,9 @@ class RunnerTurnIOHost:
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
     ) -> None:
-        await self.runner._dispatch_interaction_item_now(
+        await self.runner.interaction_dispatch.dispatch_now(
             item,
             turn=turn,
-            interaction_metadata=interaction_metadata,
-        )
-
-    def apply_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionDelivery | None:
-        return self.runner._apply_delivery_request(
-            request,
-            turn=turn,
-            slot=slot,
             interaction_metadata=interaction_metadata,
         )
 
@@ -335,22 +308,6 @@ class TurnIO:
             **interaction_metadata,
         )
         return message
-
-    def send_module_output(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem | None:
-        delivery = self.host.apply_delivery_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-        return InteractionItem.delivery_item(delivery) if delivery is not None else None
 
     def _assistant_interim_item(
         self,

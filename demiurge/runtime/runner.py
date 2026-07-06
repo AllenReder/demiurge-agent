@@ -22,7 +22,7 @@ from demiurge.runtime.child_agents import (
     ResolvedPhaseSlots,
     RunnerChildAgentHost,
 )
-from demiurge.runtime.delivery import DeliveryRequest, DeliveryRouteContext
+from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -35,6 +35,7 @@ from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
     ModuleIOClient,
     ModuleResultClient,
@@ -184,13 +185,16 @@ class SessionTurnStepRunner:
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
         self.child_agents = ChildAgentRuntime(RunnerChildAgentHost(self))
-        self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self))
         self.slot_pipeline = SlotPipelineRuntime(RunnerSlotPipelineHost(self))
         self.turn_engine = turn_engine or TurnEngine(RunnerTurnEngineHost(self))
         self.interaction_router = interaction_router or SessionInteractionRouter()
         self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
+        self.history: list[LLMMessage] = []
+        self.display_turns: list[dict[str, Any]] = []
+        self._session_started_ids: set[str] = set()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self.turn_lifecycle = TurnLifecycleRuntime(
             home=self.home,
             session_runtime=self.session_runtime,
@@ -203,11 +207,21 @@ class SessionTurnStepRunner:
             router=self.interaction_router,
         )
         self.module_delivery = ModuleDeliveryRuntime(RunnerModuleDeliveryHost(self))
+        self.interaction_dispatch = InteractionDispatchRuntime(
+            session_id=lambda: self.session_id,
+            delivery_runtime=self.delivery_runtime,
+            track_background_task=self.track_slot_background_task,
+        )
+        self.slot_effects = SlotEffectRuntime(
+            home=self.home,
+            session_id=lambda: self.session_id,
+            workspace=self.workspace,
+            module_delivery=self.module_delivery,
+            dispatch=self.interaction_dispatch,
+            on_history_changed=self._refresh_history,
+        )
+        self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
-        self.history: list[LLMMessage] = []
-        self.display_turns: list[dict[str, Any]] = []
-        self._session_started_ids: set[str] = set()
-        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
@@ -1028,6 +1042,9 @@ class SessionTurnStepRunner:
                 messages.append(llm_message)
         return messages
 
+    def _refresh_history(self) -> None:
+        self.history = self._session_history_messages()
+
     def _module_io_client(
         self,
         slot: SlotDefinition,
@@ -1110,123 +1127,6 @@ class SessionTurnStepRunner:
             record=record,
             interaction_metadata=interaction_metadata,
         )
-
-    def commit_module_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem | None:
-        item = self.runtime_io.send_module_output(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-        self.history = self._session_history_messages()
-        return item
-
-    def _commit_module_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem | None:
-        return self.commit_module_delivery_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-
-    def schedule_interaction_item(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        if item.dispatch_status != "pending":
-            return
-        metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-        channel = metadata.get("channel") or interaction_metadata.get("channel")
-        if not channel:
-            item.set_dispatch_status("unrouted")
-            return
-        item.set_dispatch_status("scheduled")
-        self._enqueue_interaction_item(
-            item,
-            turn=turn,
-            metadata=metadata,
-            channel=str(channel),
-        )
-
-    def _schedule_interaction_item(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        self.schedule_interaction_item(
-            item,
-            turn=turn,
-            interaction_metadata=interaction_metadata,
-        )
-
-    async def _dispatch_interaction_item_now(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        if item.dispatch_status != "pending":
-            return
-        metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-        channel = metadata.get("channel") or interaction_metadata.get("channel")
-        if not channel:
-            item.set_dispatch_status("unrouted")
-            return
-        item.set_dispatch_status("scheduled")
-        await self.delivery_runtime.dispatch_item(
-            item,
-            session_id=self.session_id,
-            turn_id=turn.turn_id,
-            channel=str(channel),
-            metadata=metadata,
-            event_metadata=self._delivery_event_metadata(metadata),
-        )
-
-    def _schedule_slot_end_delivery_items(
-        self,
-        items: list[InteractionItem],
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        for item in items:
-            self._schedule_interaction_item(
-                item,
-                turn=turn,
-                interaction_metadata=interaction_metadata,
-            )
-
-    def _mark_slot_end_delivery_failed(self, items: list[InteractionItem], *, reason: str) -> None:
-        for item in items:
-            if item.delivery is None or item.dispatch_status != "pending":
-                continue
-            item.metadata["delivery_failed_reason"] = reason
-            if item.delivery is not None:
-                item.delivery.metadata = {
-                    **dict(item.delivery.metadata),
-                    "delivery_failed_reason": reason,
-                }
-            item.set_dispatch_status("failed")
 
     def _module_result_client(self, *, writable: bool) -> ModuleResultClient:
         return self.slot_context.result_client(writable=writable)
@@ -1530,7 +1430,7 @@ class SessionTurnStepRunner:
                     ContextContribution(type="skill", key=skill.name, content=skill.content, placement="system_context")
                 )
                 self.event_log.emit("skill.activated", turn_id=turn.turn_id, slot=slot.relative_path, skill=skill.name)
-            self._schedule_slot_end_delivery_items(
+            self.slot_effects.schedule_slot_end_delivery_items(
                 io_client.slot_end_items,
                 turn=turn,
                 interaction_metadata=interaction_metadata,
@@ -1538,7 +1438,7 @@ class SessionTurnStepRunner:
             self.event_log.emit("module.completed", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
             return io_client.items
         except Exception as exc:
-            self._mark_slot_end_delivery_failed(io_client.slot_end_items, reason="slot_failed")
+            self.slot_effects.mark_pending_failed(io_client.slot_end_items, reason="slot_failed")
             self.event_log.emit(
                 "module.failed",
                 turn_id=turn.turn_id,
@@ -1645,7 +1545,7 @@ class SessionTurnStepRunner:
             value = await self._call_slot(slot, ctx)
             if value is not None:
                 self.event_log.emit("module.return_ignored", turn_id=turn.turn_id, slot=slot.relative_path, kind="output")
-            self._schedule_slot_end_delivery_items(
+            self.slot_effects.schedule_slot_end_delivery_items(
                 io_client.slot_end_items,
                 turn=turn,
                 interaction_metadata=interaction_metadata,
@@ -1659,7 +1559,7 @@ class SessionTurnStepRunner:
             )
             return io_client.items
         except Exception as exc:
-            self._mark_slot_end_delivery_failed(io_client.slot_end_items, reason="slot_failed")
+            self.slot_effects.mark_pending_failed(io_client.slot_end_items, reason="slot_failed")
             self.event_log.emit(
                 "module.failed",
                 turn_id=turn.turn_id,
@@ -1678,74 +1578,11 @@ class SessionTurnStepRunner:
         turn: TurnContext,
         interaction_metadata: dict[str, Any],
     ) -> None:
-        await self._flush_pending_background_items(
+        await self.slot_effects.flush_background_items(
             items,
             turn=turn,
             interaction_metadata=interaction_metadata,
         )
-
-    def _delivery_route_context(
-        self,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> DeliveryRouteContext:
-        return DeliveryRouteContext(
-            session_id=self.session_id,
-            turn_id=turn.turn_id,
-            channel=interaction_metadata.get("channel"),
-            conversation_key=interaction_metadata.get("conversation_key"),
-            source=interaction_metadata.get("source"),
-            reply_to=interaction_metadata.get("reply_to"),
-            slot=slot.relative_path,
-            metadata=dict(interaction_metadata),
-        )
-
-    def _enqueue_interaction_item(
-        self,
-        item: InteractionItem,
-        *,
-        turn: TurnContext,
-        metadata: dict[str, Any],
-        channel: str,
-    ) -> None:
-        task = asyncio.create_task(
-            self.delivery_runtime.dispatch_item(
-                item,
-                session_id=self.session_id,
-                turn_id=turn.turn_id,
-                channel=channel,
-                metadata=metadata,
-                event_metadata=self._delivery_event_metadata(metadata),
-            )
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _flush_pending_background_items(
-        self,
-        items: list[InteractionItem],
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        for item in items:
-            if item.dispatch_status != "pending":
-                continue
-            metadata = self._interaction_item_outbound_metadata(interaction_metadata, item)
-            channel = metadata.get("channel") or interaction_metadata.get("channel")
-            if not channel:
-                item.set_dispatch_status("unrouted")
-                continue
-            item.set_dispatch_status("scheduled")
-            await self.delivery_runtime.dispatch_item(
-                item,
-                session_id=self.session_id,
-                turn_id=turn.turn_id,
-                channel=str(channel),
-                metadata=metadata,
-                event_metadata=self._delivery_event_metadata(metadata),
-            )
 
     async def _handle_effects(
         self,
@@ -1769,7 +1606,7 @@ class SessionTurnStepRunner:
                         history_policy=effect.history_policy,
                     )
                 if effect.type == "deliver":
-                    delivery = self._apply_deliver_effect(
+                    delivery = self.slot_effects.apply_deliver_effect(
                         effect,
                         turn=turn,
                         slot=slot,
@@ -1839,38 +1676,6 @@ class SessionTurnStepRunner:
                 )
         return deliveries
 
-    def _apply_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionDelivery | None:
-        return self.module_delivery.apply_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-
-    def _apply_deliver_effect(
-        self,
-        effect: EffectRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionDelivery | None:
-        request = self.module_delivery.request_from_deliver_effect(effect, slot=slot)
-        item = self.runtime_io.send_module_output(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-        return item.delivery if item is not None else None
-
     async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
         while self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
@@ -1897,41 +1702,6 @@ class SessionTurnStepRunner:
         if len(message) > 500:
             message = f"{message[:500]}... [truncated]"
         return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
-
-    def _interaction_item_outbound_metadata(
-        self,
-        interaction_metadata: dict[str, Any],
-        item: InteractionItem,
-    ) -> dict[str, Any]:
-        if item.delivery is not None:
-            return self._background_outbound_metadata(interaction_metadata, [item.delivery])
-        metadata = dict(interaction_metadata)
-        for key in ("phase", "step_id", "tool_name", "tool_call_id", "is_error", "dispatch_status"):
-            if item.metadata.get(key) is not None:
-                metadata[key] = item.metadata[key]
-        return metadata
-
-    def _background_outbound_metadata(
-        self,
-        interaction_metadata: dict[str, Any],
-        deliveries: list[InteractionDelivery],
-    ) -> dict[str, Any]:
-        metadata = dict(interaction_metadata)
-        if not deliveries:
-            return metadata
-        delivery_metadata = deliveries[0].metadata
-        route = delivery_metadata.get("route")
-        if isinstance(route, dict):
-            for key in ("session_id", "turn_id", "channel", "conversation_key", "source", "reply_to"):
-                if route.get(key) is not None:
-                    metadata.setdefault(key, route.get(key))
-        for key in ("slot", "phase", "delivery_id", "kind", "history_policy", "delivery", "delivery_status", "background"):
-            if delivery_metadata.get(key) is not None:
-                metadata[key] = delivery_metadata[key]
-        return metadata
-
-    def _delivery_event_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        return {key: value for key, value in metadata.items() if key != "turn_id"}
 
     async def _call_slot(self, slot: SlotDefinition, ctx: Any) -> Any:
         outcome = await self.slot_runtime.invoke(SlotInvocation(slot=slot, context=ctx, phase=slot.kind))

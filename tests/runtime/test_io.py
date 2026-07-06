@@ -5,11 +5,9 @@ from typing import Any
 
 import pytest
 
-from demiurge.core import SlotDefinition
 from demiurge.providers import ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
-from demiurge.runtime.delivery import ContentBlock, DeliveryRequest
-from demiurge.runtime.interactions import InteractionDelivery, InteractionItem
+from demiurge.runtime.interactions import InteractionItem
 from demiurge.runtime.io import TurnIO
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
@@ -34,18 +32,6 @@ def _turn() -> TurnContext:
     )
 
 
-def _slot(tmp_path: Path) -> SlotDefinition:
-    root = tmp_path / "slot"
-    root.mkdir(exist_ok=True)
-    return SlotDefinition(
-        kind="output",
-        slot_id="summary",
-        path=root,
-        relative_path="agent/output/summary",
-        manifest={},
-    )
-
-
 class _Host:
     def __init__(self, tmp_path: Path):
         self.session_id = "session_1"
@@ -53,15 +39,6 @@ class _Host:
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.scheduled: list[InteractionItem] = []
         self.dispatched: list[InteractionItem] = []
-        self.applied_requests: list[DeliveryRequest] = []
-        self.delivery: InteractionDelivery | None = InteractionDelivery(
-            type="text",
-            kind="message",
-            text="delivered",
-            fallback_text="delivered",
-            metadata={"delivery_id": "delivery_1"},
-        )
-
     def emit_event(self, event_type: str, **payload) -> dict:
         self.events.append((event_type, dict(payload)))
         return {"type": event_type, **payload}
@@ -84,17 +61,6 @@ class _Host:
     ) -> None:
         item.set_dispatch_status("delivered")
         self.dispatched.append(item)
-
-    def apply_delivery_request(
-        self,
-        request: DeliveryRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict,
-    ) -> InteractionDelivery | None:
-        self.applied_requests.append(request)
-        return self.delivery
 
 
 def test_turn_io_send_user_persists_message_and_emits_event(tmp_path):
@@ -215,32 +181,3 @@ async def test_turn_io_dispatches_tool_call_lifecycle_items(tmp_path):
     assert started.dispatch_status == "delivered"
     assert finished.dispatch_status == "delivered"
     assert host.session_runtime.read_messages("session_1")[-1].content == "model:ok"
-
-
-def test_turn_io_send_module_output_delegates_delivery_request_and_wraps_visible_delivery(tmp_path):
-    host = _Host(tmp_path)
-    runtime = TurnIO(host)
-    request = DeliveryRequest(
-        delivery_id="delivery_1",
-        blocks=[ContentBlock(type="text", text="hello")],
-    )
-
-    item = runtime.send_module_output(
-        request,
-        turn=_turn(),
-        slot=_slot(tmp_path),
-        interaction_metadata={"channel": "tui"},
-    )
-
-    assert host.applied_requests == [request]
-    assert item is not None
-    assert item.kind == "delivery"
-    assert item.delivery is host.delivery
-
-    host.delivery = None
-    assert runtime.send_module_output(
-        request,
-        turn=_turn(),
-        slot=_slot(tmp_path),
-        interaction_metadata={"channel": "tui"},
-    ) is None

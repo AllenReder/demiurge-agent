@@ -7,9 +7,10 @@ import pytest
 
 from demiurge.core import AgentInfo, CoreManifest, LoadedCore, SlotDefinition
 from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.delivery import DeliveryRouteContext
 from demiurge.runtime.interactions import InteractionItem
 from demiurge.runtime.session import SessionRuntime
-from demiurge.runtime.slot_context import ModuleStateStores, SlotContextRuntime
+from demiurge.runtime.slot_context import ModuleIOClient, ModuleResultClient, ModuleStateStores, SlotContextRuntime
 from demiurge.runtime.slots import InputSlotRunRequest, ModuleInputBuilder, OutputSlotRunRequest
 from demiurge.runtime.store import RuntimeStore
 from demiurge.sdk import (
@@ -115,19 +116,10 @@ class _Host:
         Path(self.workspace).mkdir()
         self.sessions = _sessions(tmp_path)
         self.events: list[tuple[str, dict[str, Any]]] = []
-        self.committed: list[Any] = []
-        self.scheduled: list[InteractionItem] = []
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         self.events.append((event_type, payload))
         return {"type": event_type, **payload}
-
-    def commit_module_delivery_request(self, request, *, turn, slot, interaction_metadata):
-        self.committed.append((request, turn, slot, interaction_metadata))
-        return InteractionItem(kind=f"delivery:{request.kind}", metadata=dict(request.metadata))
-
-    def schedule_interaction_item(self, item: InteractionItem, *, turn, interaction_metadata) -> None:
-        self.scheduled.append(item)
 
     async def execute_tool(self, *args, **kwargs) -> ToolResult:
         return ToolResult(content="tool result")
@@ -139,13 +131,83 @@ class _Host:
         return AgentSpawnHandle(task_id="task_1", core_id="assistant", session_id="child_session")
 
 
+class _Effects:
+    def __init__(self, host: _Host):
+        self.host = host
+        self.committed: list[Any] = []
+        self.scheduled: list[InteractionItem] = []
+
+    def result_client(self, *, writable: bool) -> ModuleResultClient:
+        return ModuleResultClient(
+            home=self.host.home,
+            session_id=self.host.session_id,
+            workspace=self.host.workspace,
+            writable=writable,
+        )
+
+    def module_io_client(
+        self,
+        slot: SlotDefinition,
+        *,
+        turn: TurnContext,
+        interaction_metadata: dict[str, Any],
+        background: bool = False,
+        items: list[InteractionItem] | None = None,
+    ) -> ModuleIOClient:
+        default_write_history = slot.history_policy != "transient"
+        allow_write_history = True
+        if slot.kind == "input":
+            default_write_history = False
+        elif slot.kind == "output":
+            default_write_history = not background
+            allow_write_history = not background
+        return ModuleIOClient(
+            home=self.host.home,
+            session_id=self.host.session_id,
+            workspace=self.host.workspace,
+            default_history_policy=slot.history_policy,
+            default_write_history=default_write_history,
+            allow_write_history=allow_write_history,
+            commit=lambda request: self._commit(
+                request,
+                turn=turn,
+                slot=slot,
+                interaction_metadata=interaction_metadata,
+            ),
+            schedule=lambda item: self._schedule(
+                item,
+                turn=turn,
+                interaction_metadata=interaction_metadata,
+            ),
+            route=DeliveryRouteContext(
+                session_id=self.host.session_id,
+                turn_id=turn.turn_id,
+                channel=interaction_metadata.get("channel"),
+                conversation_key=interaction_metadata.get("conversation_key"),
+                source=interaction_metadata.get("source"),
+                reply_to=interaction_metadata.get("reply_to"),
+                slot=slot.relative_path,
+                metadata=dict(interaction_metadata),
+            ),
+            background=background,
+            items=items,
+        )
+
+    def _commit(self, request, *, turn, slot, interaction_metadata):
+        self.committed.append((request, turn, slot, interaction_metadata))
+        return InteractionItem(kind=f"delivery:{request.kind}", metadata=dict(request.metadata))
+
+    def _schedule(self, item: InteractionItem, *, turn, interaction_metadata) -> None:
+        self.scheduled.append(item)
+
+
 def _capability(core: LoadedCore) -> CapabilityFacade:
     return CapabilityFacade(core)
 
 
 def test_build_input_context_exposes_authored_slot_context_and_state(tmp_path):
     host = _Host(tmp_path)
-    runtime = SlotContextRuntime(host)
+    runtime = SlotContextRuntime(host, effects=_Effects(host))
     core = _core(tmp_path)
     slot = _slot(tmp_path, "prefix")
     builder = ModuleInputBuilder()
@@ -191,7 +253,7 @@ def test_build_input_context_exposes_authored_slot_context_and_state(tmp_path):
 
 def test_build_output_context_exposes_output_and_result_clients(tmp_path):
     host = _Host(tmp_path)
-    runtime = SlotContextRuntime(host)
+    runtime = SlotContextRuntime(host, effects=_Effects(host))
     core = _core(tmp_path)
     slot = _slot(tmp_path, "summary", kind="output")
     result_client = runtime.result_client(writable=True)
@@ -225,7 +287,8 @@ def test_build_output_context_exposes_output_and_result_clients(tmp_path):
 
 def test_parallel_output_context_can_emit_transient_updates_but_cannot_write_history_or_result(tmp_path):
     host = _Host(tmp_path)
-    runtime = SlotContextRuntime(host)
+    effects = _Effects(host)
+    runtime = SlotContextRuntime(host, effects=effects)
     core = _core(tmp_path)
     slot = _slot(tmp_path, "background", kind="output")
     result_client = runtime.result_client(writable=False)
@@ -251,7 +314,7 @@ def test_parallel_output_context_can_emit_transient_updates_but_cannot_write_his
     ctx.output.send_text("background update")
     assert [item.kind for item in items] == ["delivery:message"]
     assert items[0].metadata["background"] is True
-    assert host.scheduled == items
+    assert effects.scheduled == items
 
     with pytest.raises(RuntimeError, match="parallel output modules cannot write session history"):
         ctx.output.send_text("persist me", write_history=True)
