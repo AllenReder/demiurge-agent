@@ -24,7 +24,7 @@ from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
 from demiurge.runtime.conversation_states import ConversationStateStore
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
-from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -1124,39 +1124,10 @@ def build_telegram_gateway_bridge(app: Any, config: TelegramChannelConfig) -> Te
     return TelegramInteractionBridge.from_config(
         None,
         config,
-        runtime_factory=_runtime_factory_for_app(app),
+        runtime_factory=runtime_factory_for_app(app),
         tool_display=getattr(app, "tool_display", "summary"),
         busy_mode=getattr(app, "channel_busy_mode", "interrupt"),
     )
-
-
-def _runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
-    if not all(hasattr(app, name) for name in ("home", "version_store", "core_loader", "tool_runtime")):
-        runtime = InteractionRuntime(app.runner)
-        return lambda _conversation_key: runtime
-
-    def make_runtime(_conversation_key: str) -> InteractionRuntime:
-        runner = SessionTurnStepRunner(
-            home=app.home,
-            version_store=app.version_store,
-            core_loader=app.core_loader,
-            provider=app.runner.provider,
-            tool_runtime=app.tool_runtime,
-            core_id=app.runner.core_id,
-            model_override=app.runner.model_override,
-            model_resolver=app.runner.model_resolver,
-            provider_name=app.runner.provider_name,
-            workspace=app.runner.workspace,
-            show_system_prompt=app.runner.show_system_prompt,
-            runtime_timezone=app.runtime_timezone,
-            task_worker=app.task_worker,
-            session_runtime=app.session_runtime,
-            interaction_router=app.runner.interaction_router,
-            prepare_live_core=app.prepare_live_core,
-        )
-        return InteractionRuntime(runner)
-
-    return make_runtime
 
 
 def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
