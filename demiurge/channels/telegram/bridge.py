@@ -47,7 +47,13 @@ from demiurge.runtime.approvals import (
     format_resolved_approval_text,
     parse_approval_callback_data,
 )
-from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime, media_block_fallback, text_outbound_target
+from demiurge.runtime.outbound_delivery import (
+    NativeDeliveryRuntime,
+    NativeMediaRequest,
+    TextOutboundTarget,
+    TextOutboundDeliveryRuntime,
+    text_outbound_target,
+)
 from demiurge.runtime.prompts import PromptDeliveryRuntime, choice_button_rows
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
@@ -505,15 +511,6 @@ class TelegramInteractionBridge:
             )
             raise
 
-    async def _deliver_text(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
-        text = delivery.text or delivery.fallback_text
-        if not delivery.visible or not text:
-            return
-        target = text_outbound_target(outbound)
-        if target is None:
-            return
-        await self._send_text(target.source, text, reply_to=target.reply_to)
-
     async def _deliver_tool_results(self, records, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet" or not records:
             return
@@ -583,77 +580,55 @@ class TelegramInteractionBridge:
     async def _deliver_delivery(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
         if not delivery.visible:
             return
-        blocks = delivery.blocks or []
-        if not blocks:
-            await self._deliver_text(delivery, outbound=outbound)
-            return
         target = text_outbound_target(outbound)
         if target is None:
             return
-        fallback_lines: list[str] = []
-        for index, block in enumerate(blocks):
-            block_type = str(block.get("type") or "text")
-            if block_type == "text":
-                text = str(block.get("text") or "")
-                if text:
-                    await self._send_text(
-                        target.source,
-                        text,
-                        reply_to=target.reply_to if index == 0 else None,
-                    )
-                continue
-            delivered = await self._deliver_media_block(
-                target.source,
-                block,
-                reply_to=target.reply_to if index == 0 else None,
-            )
-            if not delivered:
-                fallback = media_block_fallback(block)
-                if fallback:
-                    fallback_lines.append(fallback)
-        if fallback_lines:
-            await self._send_text(target.source, "\n\n".join(fallback_lines), reply_to=target.reply_to)
+        await self._native_delivery_runtime().deliver(delivery, target=target)
 
-    async def _deliver_media_block(self, chat_id: str, block: dict[str, Any], *, reply_to: str | None = None) -> bool:
-        artifact = block.get("artifact")
-        if not isinstance(artifact, dict):
-            return False
-        source = self._artifact_send_source(artifact)
-        if not source:
-            return False
+    def _native_delivery_runtime(self) -> NativeDeliveryRuntime:
+        return NativeDeliveryRuntime(
+            send_text=self._send_text,
+            send_media=self._send_native_media,
+        )
+
+    async def _send_native_media(
+        self,
+        request: NativeMediaRequest,
+        *,
+        target: TextOutboundTarget,
+        reply_to: str | None = None,
+    ) -> bool:
         reply_to_id = int(reply_to) if isinstance(reply_to, str) and reply_to.isdigit() else None
-        caption = str(block.get("text") or artifact.get("summary") or "") or None
-        block_type = str(block.get("type") or artifact.get("kind") or "file")
         try:
-            if block_type == "image":
+            if request.kind == "image":
                 await asyncio.to_thread(
                     self.api.send_photo,
-                    chat_id=chat_id,
-                    photo=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    photo=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
-            elif block_type == "audio":
+            elif request.kind == "audio":
                 await self._deliver_voice_block(
-                    chat_id=chat_id,
-                    source=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    source=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
-            elif block_type == "video":
+            elif request.kind == "video":
                 await asyncio.to_thread(
                     self.api.send_video,
-                    chat_id=chat_id,
-                    video=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    video=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
             else:
                 await asyncio.to_thread(
                     self.api.send_document,
-                    chat_id=chat_id,
-                    document=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    document=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
             return True
@@ -689,15 +664,6 @@ class TelegramInteractionBridge:
             caption=caption,
             reply_to_message_id=reply_to_message_id,
         )
-
-    def _artifact_send_source(self, artifact: dict[str, Any]) -> str | None:
-        url = artifact.get("url")
-        if url:
-            return str(url)
-        path = artifact.get("resolved_path") or artifact.get("path")
-        if not path:
-            return None
-        return str(path)
 
     def _conversation_state(self, conversation_key: str) -> TelegramConversationState:
         return self._conversation_states.state_for_key(conversation_key)

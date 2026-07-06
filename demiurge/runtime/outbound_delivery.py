@@ -12,6 +12,7 @@ from demiurge.runtime.interactions import (
 from demiurge.tools.records import ToolExecutionRecord
 
 OutboundDeliveryKind = Literal["delivery", "deliveries", "tool_call", "tool_calls", "tool_results", "prompt"]
+NativeDeliveryItemKind = Literal["text", "media"]
 
 
 class TextToolCallDelivery(Protocol):
@@ -34,11 +35,44 @@ class TextPromptDelivery(Protocol):
         ...
 
 
+class NativeTextDelivery(Protocol):
+    def __call__(self, source: str, text: str, *, reply_to: str | None = None) -> Awaitable[None]:
+        ...
+
+
+class NativeMediaDelivery(Protocol):
+    def __call__(
+        self,
+        request: "NativeMediaRequest",
+        *,
+        target: "TextOutboundTarget",
+        reply_to: str | None = None,
+    ) -> Awaitable[bool]:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class TextOutboundTarget:
     source: str
     reply_to: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeMediaRequest:
+    kind: str
+    source: str
+    caption: str | None = None
+    fallback_text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeDeliveryItem:
+    kind: NativeDeliveryItemKind
+    text: str = ""
+    media: NativeMediaRequest | None = None
+    fallback_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +108,30 @@ class TextOutboundDeliveryRuntime:
                     await self.prompt_user(step.prompt)
         finally:
             outbound.mark_delivered()
+
+
+@dataclass(frozen=True, slots=True)
+class NativeDeliveryRuntime:
+    send_text: NativeTextDelivery
+    send_media: NativeMediaDelivery
+
+    async def deliver(self, delivery: InteractionDelivery, *, target: TextOutboundTarget) -> None:
+        if not delivery.visible:
+            return
+        fallback_lines: list[str] = []
+        for index, item in enumerate(native_delivery_items(delivery)):
+            reply_to = target.reply_to if index == 0 else None
+            if item.kind == "text":
+                if item.text:
+                    await self.send_text(target.source, item.text, reply_to=reply_to)
+                continue
+            delivered = False
+            if item.media is not None:
+                delivered = await self.send_media(item.media, target=target, reply_to=reply_to)
+            if not delivered and item.fallback_text:
+                fallback_lines.append(item.fallback_text)
+        if fallback_lines:
+            await self.send_text(target.source, "\n\n".join(fallback_lines), reply_to=target.reply_to)
 
 
 def text_delivery_steps(outbound: InteractionOutbound) -> list[OutboundDeliveryStep]:
@@ -173,6 +231,46 @@ def delivery_text_chunks(delivery: InteractionDelivery) -> list[str]:
     return chunks
 
 
+def native_delivery_items(delivery: InteractionDelivery) -> list[NativeDeliveryItem]:
+    if not delivery.blocks:
+        return [NativeDeliveryItem(kind="text", text=chunk) for chunk in delivery_text_chunks(delivery)]
+
+    items: list[NativeDeliveryItem] = []
+    for block in delivery.blocks:
+        block_type = str(block.get("type") or "text")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                items.append(NativeDeliveryItem(kind="text", text=text))
+            continue
+
+        request = native_media_request(block)
+        fallback = request.fallback_text if request is not None else media_block_fallback(block)
+        items.append(NativeDeliveryItem(kind="media", media=request, fallback_text=fallback))
+
+    if not items and (delivery.text or delivery.fallback_text):
+        items.append(NativeDeliveryItem(kind="text", text=delivery.text or delivery.fallback_text))
+    return items
+
+
+def native_media_request(block: dict[str, Any]) -> NativeMediaRequest | None:
+    artifact = block.get("artifact")
+    if not isinstance(artifact, dict):
+        return None
+    source = _artifact_send_source(artifact)
+    if not source:
+        return None
+    caption = str(block.get("text") or artifact.get("summary") or "") or None
+    metadata = block.get("metadata")
+    return NativeMediaRequest(
+        kind=str(block.get("type") or artifact.get("kind") or "file"),
+        source=source,
+        caption=caption,
+        fallback_text=media_block_fallback(block),
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+    )
+
+
 def media_block_fallback(block: dict[str, Any]) -> str:
     artifact = block.get("artifact")
     if not isinstance(artifact, dict):
@@ -182,3 +280,13 @@ def media_block_fallback(block: dict[str, Any]) -> str:
     caption = block.get("text")
     prefix = f"{caption}\n" if caption else ""
     return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
+
+
+def _artifact_send_source(artifact: dict[str, Any]) -> str | None:
+    url = artifact.get("url")
+    if url:
+        return str(url)
+    path = artifact.get("resolved_path") or artifact.get("path")
+    if not path:
+        return None
+    return str(path)
