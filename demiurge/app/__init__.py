@@ -17,6 +17,7 @@ from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelIn
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
 from demiurge.runtime.tasks import RuntimeTaskWorker
+from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.mcp import McpRuntime
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInteractionRouter
@@ -224,6 +225,7 @@ class DemiurgeApp:
     evolution_runtime: EvolutionRuntime
     runtime_store: RuntimeStore
     control_plane: RuntimeControlPlane
+    host_work: HostWorkLifecycleRuntime
     session_runtime: SessionRuntime
     interaction_router: SessionInteractionRouter
     task_worker: RuntimeTaskWorker
@@ -552,6 +554,7 @@ def create_app(
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
     runtime_store = RuntimeStore.default(home)
     control_plane = RuntimeControlPlane(runtime_store)
+    host_work = HostWorkLifecycleRuntime(store=runtime_store)
     session_runtime = SessionRuntime(control_plane=control_plane)
     if resume_required and session_id and not session_runtime.exists(session_id):
         raise FileNotFoundError(f"session not found: {session_id}")
@@ -582,7 +585,7 @@ def create_app(
     )
     gate_runner = GateRunner(project_root=project_root)
     mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
-    task_worker = RuntimeTaskWorker(control_plane=control_plane)
+    task_worker = RuntimeTaskWorker(control_plane=control_plane, host_work=host_work)
     tool_runtime = ToolRuntime(
         version_store,
         workspace=workspace_scope,
@@ -641,6 +644,7 @@ def create_app(
         evolution_runtime=evolution_runtime,
         runtime_store=runtime_store,
         control_plane=control_plane,
+        host_work=host_work,
         session_runtime=session_runtime,
         interaction_router=interaction_router,
         task_worker=task_worker,

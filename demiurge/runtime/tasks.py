@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
-from demiurge.runtime.durable_work import DurableClaim, DurableWorkRuntime
+from demiurge.runtime.durable_work import DurableClaim
+from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.store import RuntimeQuery
 from demiurge.util import utc_id
 
@@ -200,6 +201,7 @@ class RuntimeTaskWorker:
         log_tail_lines: int = 40,
         log_tail_chars: int = 8000,
         control_plane: RuntimeControlPlane,
+        host_work: HostWorkLifecycleRuntime | None = None,
     ):
         self.max_log_lines = max_log_lines
         self.log_tail_lines = log_tail_lines
@@ -211,7 +213,7 @@ class RuntimeTaskWorker:
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
         self._completion_consumers: dict[str, int] = {}
-        self._work = DurableWorkRuntime(control_plane.store)
+        self.host_work = host_work or HostWorkLifecycleRuntime(store=control_plane.store)
 
     def start_task(
         self,
@@ -315,34 +317,17 @@ class RuntimeTaskWorker:
         return [event for event in self._pending_completion_events() if event.owner_session_id == session_id]
 
     def claim_pending_event(self, event_id: str, *, owner_id: str) -> DurableClaim | None:
-        return self._work.claim(event_id, owner_id=owner_id)
+        return self.host_work.claim(event_id, owner_id=owner_id)
 
     def ack_pending_event(self, claim: DurableClaim) -> bool:
         try:
-            self._work.acknowledge(claim)
+            self.host_work.acknowledge(claim)
         except Exception:
             return False
-        self.control_plane.ack_completion(claim.work_id)
         return True
 
     def ack_pending_event_id(self, event_id: str, *, claim_id: str) -> bool:
-        rows = self.control_plane.store.query(
-            RuntimeQuery(table="runtime_work_items", where={"work_id": event_id}, limit=1)
-        ).rows
-        if not rows:
-            return False
-        row = rows[0]
-        if str(row.get("claim_id") or "") != claim_id:
-            return False
-        claim = DurableClaim(
-            work_id=event_id,
-            kind=str(row.get("kind") or "task.completion"),
-            claim_id=claim_id,
-            owner_id=str(row.get("owner_id") or "host.task_worker"),
-            lease_expires_at=str(row.get("lease_expires_at") or ""),
-            attempt=int(row.get("attempts") or 0),
-        )
-        return self.ack_pending_event(claim)
+        return self.host_work.acknowledge_by_id(event_id, claim_id=claim_id)
 
     def ack_pending_event_for_task(self, task_id: str) -> bool:
         acknowledged = False

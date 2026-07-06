@@ -11,7 +11,8 @@ from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
-from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
+from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkSpec
+from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
@@ -99,11 +100,12 @@ class SchedulerRuntime:
         core_id: str,
         *,
         runtime_timezone: RuntimeTimezone | None = None,
+        work_lifecycle: HostWorkLifecycleRuntime | None = None,
     ):
         self.control_plane = control_plane
         self.core_id = core_id
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self.work = DurableWorkRuntime(control_plane.store)
+        self.work = work_lifecycle or HostWorkLifecycleRuntime(store=control_plane.store)
 
     def set_next_run(self, schedule: ScheduleDefinition, next_run_at: datetime) -> None:
         work_id = self._work_id(schedule, next_run_at.astimezone(UTC))
@@ -213,7 +215,7 @@ class SchedulerRuntime:
         )
         try:
             if status == "completed":
-                self.work.succeed(durable_claim)
+                self.work.complete(durable_claim)
             else:
                 self.work.fail(durable_claim, error=error or "scheduled task failed")
         except DurableClaimConflict as exc:
@@ -597,7 +599,12 @@ class SchedulerService:
     ):
         self.app = app
         self.poll_interval_seconds = poll_interval_seconds
-        self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+        self.store = SchedulerRuntime(
+            app.control_plane,
+            app.runner.core_id,
+            runtime_timezone=app.runtime_timezone,
+            work_lifecycle=getattr(app, "host_work", None),
+        )
         self.fire_runtime = ScheduleFireRuntime(app, self.store, delivery_route=delivery_route)
         self._task: asyncio.Task[None] | None = None
 

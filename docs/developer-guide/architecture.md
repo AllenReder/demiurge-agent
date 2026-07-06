@@ -23,6 +23,7 @@ SessionTurnStepRunner
         +--> ToolRuntime
         +--> CoreRepository / EvolutionRuntime / GateRunner
         +--> RuntimeControlPlane / RuntimeStore
+        +--> HostWorkLifecycleRuntime
         +--> RuntimeTaskWorker
         +--> DeliveryRuntime
         +--> SessionRuntime
@@ -43,6 +44,7 @@ SessionTurnStepRunner
 | Evolution runtime | Start, review, promote, and discard isolated agents-tree change sets through the core repository and gates. |
 | Gate runner | Run host-owned checks for path safety, artifacts, dependency files, core loading, package provenance, drift warnings, and cross-core references. |
 | Runtime control plane | Submit detached task specs, project task events, and expose task/session/scheduler/outbox state from SQLite. |
+| Host work lifecycle | Claim, complete, fail, cancel, acknowledge, and observe host-managed work across durable work items, detached tasks, delivery, schedules, and completion inboxes. |
 | Runtime task worker | Hold active process handles and live completion subscribers; pending completions are recovered from SQLite events. |
 | Delivery runtime | Dispatch authored delivery intents and update outbox status. |
 | Session runtime | Read and write session, turn, message, bootstrap, and compaction projections. |
@@ -58,6 +60,7 @@ SessionTurnStepRunner
 - `demiurge/evolution/__init__.py`
 - `demiurge/gates/__init__.py`
 - `demiurge/runtime/control.py`
+- `demiurge/runtime/host_work.py`
 - `demiurge/runtime/store.py`
 - `demiurge/runtime/tasks.py`
 - `demiurge/runtime/outbox.py`

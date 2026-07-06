@@ -16,6 +16,9 @@ The new deep Modules are:
 - `RuntimeStore`: SQLite event store and projection surface.
 - `RuntimeControlPlane`: host-owned detached task seam.
 - `DurableWorkRuntime`: lease/ack/terminal-state seam for unfinished host work.
+- `HostWorkLifecycleRuntime`: unified lifecycle and observation seam for
+  durable work, detached tasks, delivery, schedule fires, and task-completion
+  notifications.
 - `SessionRuntime`: session admission and session/turn/message projections.
 - `TurnEngine`: foreground provider/tool loop for one Agent Core turn.
 - `SlotRuntime`: phase-specific authored slot callable execution.
@@ -48,6 +51,27 @@ writing ad hoc `queued`, `running`, `sending`, `sent`, or `acknowledged` state.
 Expired `running` or `claimed` work can be reclaimed by a new claim token.
 Expired `sending` work is marked `unknown`; the host must not blindly replay an
 external send after a crash.
+
+Runtime modules that need a cross-subsystem view use
+`HostWorkLifecycleRuntime`. It wraps `DurableWorkRuntime` for claim, running,
+sending, complete, fail, cancel, acknowledge, and recovery actions, and it
+projects operator-readable status from `runtime_work_items`, `tasks`,
+`task_logs`, `outbox`, `scheduler_instances`, and task-completion events. This
+is an observation and lifecycle facade, not a replacement for the specialized
+owners:
+
+- `RuntimeTaskWorker` still owns active process handles, live task objects,
+  cancel callbacks, wait, and live completion subscribers.
+- `DeliveryRuntime` still owns channel dispatch, item dispatch status, message
+  failure updates, and delivery event-log records.
+- `SchedulerRuntime` still owns cron calculation, due-instance records, and
+  fresh scheduled sessions.
+- `DurableWorkRuntime` still owns the low-level claim token state machine.
+
+Foreground Agent Core turns are not host work items and must not be promoted
+into task ids. Memory review, background review, curator behavior, and learning
+loops are also not harness modules; those capabilities belong in Agent
+Slot-driven packages using host-mediated tools and capabilities.
 
 ## Agent Slot Layout
 
@@ -105,6 +129,9 @@ evolver, and child-agent work. It keeps only non-durable process handles,
 cancel callbacks, and live completion subscribers in memory. Public task reads,
 lists, logs, waits, cancellation results, and pending completion notifications
 are rebuilt from `RuntimeControlPlane` / SQLite projections and runtime events.
+Task-completion claim and acknowledgement flow through
+`HostWorkLifecycleRuntime`, so bridges and operator surfaces share the same
+claim/ack vocabulary.
 
 `BackgroundWorkRuntime` tracks in-process background coroutines created by
 parallel slots and delivery dispatch. It composes those local tasks with the

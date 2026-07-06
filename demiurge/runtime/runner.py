@@ -158,6 +158,7 @@ class SessionTurnStepRunner:
             store=self.session_runtime.store,
             event_log=self.event_log,
             router=self.interaction_router,
+            work_lifecycle=self.task_worker.host_work,
         )
         self.module_delivery = ModuleDeliveryRuntime(RunnerModuleDeliveryHost(self))
         self.interaction_dispatch = InteractionDispatchRuntime(

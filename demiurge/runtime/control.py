@@ -258,19 +258,6 @@ class RuntimeControlPlane:
         )
         return dict(result.events[0])
 
-    def ack_completion(self, event_id: str) -> None:
-        self.store.append(
-            [
-                RuntimeEvent(
-                    type="task.completion_acknowledged",
-                    aggregate_type="task_completion",
-                    aggregate_id=event_id,
-                    payload={"event_id": event_id, "status": "acknowledged"},
-                )
-            ],
-            idempotency_key=f"task_completion:{event_id}:acknowledged",
-        )
-
     def query(self, filter: TaskFilter) -> list[TaskRecord]:
         where: dict[str, Any] = {}
         if filter.status:

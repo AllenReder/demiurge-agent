@@ -3,7 +3,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Mapping
 
-from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
+from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkSpec
+from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.interactions import InteractionItem, InteractionOutbound, SessionInteractionRouter
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 from demiurge.storage import EventLog
@@ -12,11 +13,18 @@ from demiurge.storage import EventLog
 class DeliveryRuntime:
     """Dispatches delivery intents and projects outbox status."""
 
-    def __init__(self, *, store: RuntimeStore, event_log: EventLog, router: SessionInteractionRouter):
+    def __init__(
+        self,
+        *,
+        store: RuntimeStore,
+        event_log: EventLog,
+        router: SessionInteractionRouter,
+        work_lifecycle: HostWorkLifecycleRuntime | None = None,
+    ):
         self.store = store
         self.event_log = event_log
         self.router = router
-        self.work = DurableWorkRuntime(store)
+        self.work = work_lifecycle or HostWorkLifecycleRuntime(store=store)
 
     async def dispatch_item(
         self,
@@ -34,7 +42,7 @@ class DeliveryRuntime:
             item.set_dispatch_status("unknown")
             return
         if claim is not None:
-            self.work.mark_sending(claim)
+            self.work.sending(claim)
             self._append(
                 RuntimeEvent(
                     type="delivery.sending",
@@ -60,12 +68,12 @@ class DeliveryRuntime:
                     attempts=claim.attempt if claim is not None else None,
                 )
                 if claim is not None:
-                    self.work.succeed(claim)
+                    self.work.complete(claim)
                 return
             item.set_dispatch_status("delivered")
             if delivery_id:
                 if claim is not None:
-                    self.work.succeed(claim)
+                    self.work.complete(claim)
                 self._append(
                     RuntimeEvent(
                         type="delivery.sent",
@@ -220,9 +228,7 @@ class DeliveryRuntime:
     def _claim_delivery(self, delivery_id: str | None) -> DurableClaim | None:
         if not delivery_id:
             return None
-        rows = self.store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": delivery_id}, limit=1)).rows
-        if not rows:
-            self.work.enqueue(DurableWorkSpec(work_id=delivery_id, kind="delivery.send"))
+        self.work.ensure(DurableWorkSpec(work_id=delivery_id, kind="delivery.send"))
         return self.work.claim(delivery_id, owner_id="host.delivery_runtime")
 
     def _append(self, event: RuntimeEvent) -> None:
