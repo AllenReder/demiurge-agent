@@ -112,8 +112,10 @@ class InputPipelineRequest:
     state_stores: Any
     interaction_metadata: dict[str, Any]
     injected_system_context: list[str] = field(default_factory=list)
-    serial_slots: list[SlotDefinition] = field(default_factory=list)
-    parallel_slots: list[SlotDefinition] = field(default_factory=list)
+    slot_ids: list[str] | tuple[str, ...] | None = None
+    serial_slots: list[SlotDefinition] | None = None
+    parallel_slots: list[SlotDefinition] | None = None
+    phase_slots: "ResolvedPhaseSlots | None" = None
 
 
 @dataclass(slots=True)
@@ -134,8 +136,22 @@ class OutputPipelineRequest:
     state_stores: Any
     interaction_metadata: dict[str, Any]
     result_client: Any
-    serial_slots: list[SlotDefinition] = field(default_factory=list)
-    parallel_slots: list[SlotDefinition] = field(default_factory=list)
+    slot_ids: list[str] | tuple[str, ...] | None = None
+    serial_slots: list[SlotDefinition] | None = None
+    parallel_slots: list[SlotDefinition] | None = None
+    phase_slots: "ResolvedPhaseSlots | None" = None
+
+
+@dataclass(slots=True)
+class ResolvedPhaseSlots:
+    serial: list[SlotDefinition]
+    parallel: list[SlotDefinition]
+
+    def to_metadata(self) -> dict[str, list[str]]:
+        return {
+            "serial": [slot.slot_id for slot in self.serial],
+            "parallel": [slot.slot_id for slot in self.parallel],
+        }
 
 
 @dataclass(slots=True)
@@ -191,6 +207,7 @@ class SlotPipelineRuntime:
         self.refresh_history = refresh_history
 
     async def run_input(self, request: InputPipelineRequest) -> InputPipelineResult:
+        phase_slots = self._resolve_input_phase(request)
         builder = ModuleInputBuilder()
         raw_input = RawInput(
             text=request.envelope.raw_text,
@@ -205,7 +222,7 @@ class SlotPipelineRuntime:
         items: list[InteractionItem] = []
         activated: set[str] = set()
         parallel_tasks: list[asyncio.Task[Any]] = []
-        for slot in request.parallel_slots:
+        for slot in phase_slots.parallel:
             parallel_envelope = InputEnvelope(
                 raw_text=request.envelope.raw_text,
                 metadata=dict(request.envelope.metadata),
@@ -223,7 +240,7 @@ class SlotPipelineRuntime:
             parallel_tasks.append(task)
             self.track_background_task(task)
             self.emit_event("module.async_scheduled", turn_id=request.turn.turn_id, slot=slot.relative_path, kind="input")
-        for slot in request.serial_slots:
+        for slot in phase_slots.serial:
             items.extend(
                 await self._run_input_slot(
                     InputSlotRunRequest(
@@ -290,10 +307,11 @@ class SlotPipelineRuntime:
         )
 
     async def run_output(self, request: OutputPipelineRequest) -> list[InteractionItem]:
+        phase_slots = self._resolve_output_phase(request)
         items: list[InteractionItem] = []
         envelope = OutputEnvelope(content=request.current_output, metadata=request.interaction_metadata)
         parallel_tasks: list[asyncio.Task[Any]] = []
-        for slot in request.parallel_slots:
+        for slot in phase_slots.parallel:
             task = asyncio.create_task(
                 self._run_background_output_slot(
                     slot,
@@ -309,7 +327,7 @@ class SlotPipelineRuntime:
                 slot=slot.relative_path,
                 kind="output",
             )
-        for slot in request.serial_slots:
+        for slot in phase_slots.serial:
             items.extend(
                 await self._run_output_slot(
                     OutputSlotRunRequest(
@@ -357,6 +375,79 @@ class SlotPipelineRuntime:
             turn=request.turn,
             interaction_metadata=request.interaction_metadata,
         )
+
+    def _resolve_input_phase(self, request: InputPipelineRequest) -> ResolvedPhaseSlots:
+        return self._resolve_phase(
+            core=request.core,
+            kind="input",
+            phase_slots=request.phase_slots,
+            slot_ids=request.slot_ids,
+            serial_slots=request.serial_slots,
+            parallel_slots=request.parallel_slots,
+        )
+
+    def _resolve_output_phase(self, request: OutputPipelineRequest) -> ResolvedPhaseSlots:
+        return self._resolve_phase(
+            core=request.core,
+            kind="output",
+            phase_slots=request.phase_slots,
+            slot_ids=request.slot_ids,
+            serial_slots=request.serial_slots,
+            parallel_slots=request.parallel_slots,
+        )
+
+    def _resolve_phase(
+        self,
+        *,
+        core: Any,
+        kind: Literal["input", "output"],
+        phase_slots: ResolvedPhaseSlots | None,
+        slot_ids: list[str] | tuple[str, ...] | None,
+        serial_slots: list[SlotDefinition] | None,
+        parallel_slots: list[SlotDefinition] | None,
+    ) -> ResolvedPhaseSlots:
+        if phase_slots is not None:
+            if slot_ids is not None or serial_slots is not None or parallel_slots is not None:
+                raise ValueError(f"{kind} phase_slots cannot be combined with slot_ids, serial_slots, or parallel_slots")
+            return phase_slots
+        if slot_ids is not None:
+            if serial_slots is not None or parallel_slots is not None:
+                raise ValueError(f"{kind} slot_ids cannot be combined with serial_slots or parallel_slots")
+            return ResolvedPhaseSlots(serial=self._resolve_slot_ids(core, kind, slot_ids), parallel=[])
+        pipeline = core.input_pipeline if kind == "input" else core.output_pipeline
+        serial = list(serial_slots) if serial_slots is not None else list(pipeline.serial)
+        if parallel_slots is not None:
+            parallel = list(parallel_slots)
+        elif serial_slots is not None:
+            parallel = []
+        else:
+            parallel = list(pipeline.parallel)
+        return ResolvedPhaseSlots(serial=serial, parallel=parallel)
+
+    def _resolve_slot_ids(
+        self,
+        core: Any,
+        kind: Literal["input", "output"],
+        slot_ids: list[str] | tuple[str, ...],
+    ) -> list[SlotDefinition]:
+        slots = core.input_slots if kind == "input" else core.output_slots
+        by_id = {slot.slot_id: slot for slot in slots}
+        resolved: list[SlotDefinition] = []
+        seen: set[str] = set()
+        for raw_id in slot_ids:
+            slot_id = str(raw_id).strip()
+            if not slot_id:
+                raise ValueError(f"{kind} slot id must not be empty")
+            if slot_id in seen:
+                raise ValueError(f"duplicate {kind} slot id: {slot_id}")
+            seen.add(slot_id)
+            slot = by_id.get(slot_id)
+            if slot is None:
+                raise ValueError(f"unknown {kind} slot id: {slot_id}")
+            resolved.append(slot)
+        if not resolved:
+            raise ValueError(f"{kind} slot list must not be empty")
+        return resolved
 
     async def _run_input_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
         slot = request.slot

@@ -5,16 +5,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from demiurge.core import LoadedCore, SlotDefinition
+from demiurge.core import LoadedCore
 from demiurge.providers import LLMMessage
 from demiurge.runtime.bootstrap import BootstrapSlotRequest
-from demiurge.runtime.child_agents import ResolvedPhaseSlots
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionItem, SessionRouteBinding
 from demiurge.runtime.slot_context import ModuleResultClient
+from demiurge.runtime.slots import InputPipelineRequest, InputPipelineResult, OutputPipelineRequest, ResolvedPhaseSlots
 from demiurge.runtime.turn import TurnEngineRequest, TurnEngineResult
 from demiurge.runtime.turn_lifecycle import TurnLifecycle, TurnLifecycleCompletion, TurnLifecycleRequest
 from demiurge.security.capabilities import CapabilityFacade
-from demiurge.sdk import AgentInput, ContextContribution, TurnContext
+from demiurge.sdk import AgentInput, TurnContext
 from demiurge.tools.records import ToolExecutionRecord
 
 
@@ -88,14 +88,6 @@ class TurnPipelineHost(Protocol):
     def update_active_session_core(self, core: LoadedCore) -> None:
         ...
 
-    def resolve_phase_slots(
-        self,
-        core: LoadedCore,
-        kind: str,
-        slot_ids: list[str] | tuple[str, ...] | None,
-    ) -> list[SlotDefinition] | None:
-        ...
-
     def core_revision(self, core: LoadedCore) -> str:
         ...
 
@@ -114,18 +106,7 @@ class TurnPipelineHost(Protocol):
     def interrupt_turn(self, lifecycle: TurnLifecycle, *, status: str, error: str) -> None:
         ...
 
-    async def run_input_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        lifecycle: TurnLifecycle,
-        *,
-        interaction_metadata: dict[str, Any],
-        injected_system_context: list[str],
-        serial_slots: list[SlotDefinition] | None,
-        phase_slots: ResolvedPhaseSlots | None,
-    ) -> tuple[str, str, list[ContextContribution], list[InteractionItem]]:
+    async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
         ...
 
     def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]) -> None:
@@ -143,20 +124,7 @@ class TurnPipelineHost(Protocol):
     def result_client(self, *, writable: bool) -> ModuleResultClient:
         ...
 
-    async def run_output_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        *,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        lifecycle: TurnLifecycle,
-        interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
-        serial_slots: list[SlotDefinition] | None,
-        phase_slots: ResolvedPhaseSlots | None,
-    ) -> list[InteractionItem]:
+    async def run_output_slots(self, request: OutputPipelineRequest) -> list[InteractionItem]:
         ...
 
     def refresh_history(self) -> None:
@@ -224,14 +192,6 @@ class RunnerTurnPipelineHost:
             touch=False,
         )
 
-    def resolve_phase_slots(
-        self,
-        core: LoadedCore,
-        kind: str,
-        slot_ids: list[str] | tuple[str, ...] | None,
-    ) -> list[SlotDefinition] | None:
-        return self.runner._resolve_phase_slots(core, kind, slot_ids)
-
     def core_revision(self, core: LoadedCore) -> str:
         return self.runner._core_revision(core)
 
@@ -250,29 +210,8 @@ class RunnerTurnPipelineHost:
     def interrupt_turn(self, lifecycle: TurnLifecycle, *, status: str, error: str) -> None:
         self.runner.turn_lifecycle.interrupt(lifecycle, status=status, error=error)
 
-    async def run_input_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        lifecycle: TurnLifecycle,
-        *,
-        interaction_metadata: dict[str, Any],
-        injected_system_context: list[str],
-        serial_slots: list[SlotDefinition] | None,
-        phase_slots: ResolvedPhaseSlots | None,
-    ) -> tuple[str, str, list[ContextContribution], list[InteractionItem]]:
-        return await self.runner._run_input_slots(
-            core,
-            turn,
-            capability,
-            lifecycle.input_envelope,
-            lifecycle.state_stores,
-            interaction_metadata=interaction_metadata,
-            injected_system_context=injected_system_context,
-            serial_slots=serial_slots,
-            phase_slots=phase_slots,
-        )
+    async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
+        return await self.runner.slot_pipeline.run_input(request)
 
     def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]) -> None:
         self.runner.runtime_io.send_user(
@@ -293,32 +232,8 @@ class RunnerTurnPipelineHost:
     def result_client(self, *, writable: bool) -> ModuleResultClient:
         return self.runner._module_result_client(writable=writable)
 
-    async def run_output_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        *,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        lifecycle: TurnLifecycle,
-        interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
-        serial_slots: list[SlotDefinition] | None,
-        phase_slots: ResolvedPhaseSlots | None,
-    ) -> list[InteractionItem]:
-        return await self.runner._run_output_slots(
-            core,
-            turn,
-            capability,
-            current_output=current_output,
-            tool_records=tool_records,
-            state_stores=lifecycle.state_stores,
-            interaction_metadata=interaction_metadata,
-            result_client=result_client,
-            serial_slots=serial_slots,
-            phase_slots=phase_slots,
-        )
+    async def run_output_slots(self, request: OutputPipelineRequest) -> list[InteractionItem]:
+        return await self.runner.slot_pipeline.run_output(request)
 
     def refresh_history(self) -> None:
         self.runner._refresh_history()
@@ -374,8 +289,6 @@ class TurnPipelineRuntime:
         if request.output_slot_ids is not None and request.output_phase_slots is not None:
             raise ValueError("output_slot_ids and output_phase_slots cannot both be set")
 
-        input_slots_override = self.host.resolve_phase_slots(core, "input", request.input_slot_ids)
-        output_slots_override = self.host.resolve_phase_slots(core, "output", request.output_slot_ids)
         core_revision = self.host.core_revision(core)
         capability = CapabilityFacade(core)
         if not self.host.session_started:
@@ -412,15 +325,18 @@ class TurnPipelineRuntime:
         turn = lifecycle.turn
 
         try:
-            user_text, persisted_user_text, context, input_items = await self.host.run_input_slots(
-                core,
-                turn,
-                capability,
-                lifecycle,
-                interaction_metadata=interaction_metadata,
-                injected_system_context=request.injected_system_context or [],
-                serial_slots=input_slots_override,
-                phase_slots=request.input_phase_slots,
+            input_result = await self.host.run_input_slots(
+                InputPipelineRequest(
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    envelope=lifecycle.input_envelope,
+                    state_stores=lifecycle.state_stores,
+                    interaction_metadata=interaction_metadata,
+                    injected_system_context=request.injected_system_context or [],
+                    slot_ids=request.input_slot_ids,
+                    phase_slots=request.input_phase_slots,
+                )
             )
         except asyncio.CancelledError:
             self.host.interrupt_turn(lifecycle, status="cancelled", error="turn cancelled")
@@ -429,6 +345,10 @@ class TurnPipelineRuntime:
             self.host.interrupt_turn(lifecycle, status="failed", error=self.host.sanitize_runtime_error(exc))
             raise
 
+        user_text = input_result.user_text
+        persisted_user_text = input_result.persisted_user_text
+        context = input_result.context
+        input_items = input_result.items
         turn.user_input = AgentInput(content=user_text, metadata=interaction_metadata)
         self.host.emit_event("message.received", turn_id=turn_id, content=user_text, **interaction_metadata)
         if persisted_user_text:
@@ -469,16 +389,18 @@ class TurnPipelineRuntime:
         result_client = self.host.result_client(writable=True)
         try:
             output_items = await self.host.run_output_slots(
-                core,
-                turn,
-                capability,
-                current_output=final_output,
-                tool_records=tool_records,
-                lifecycle=lifecycle,
-                interaction_metadata=interaction_metadata,
-                result_client=result_client,
-                serial_slots=output_slots_override,
-                phase_slots=request.output_phase_slots,
+                OutputPipelineRequest(
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    current_output=final_output,
+                    tool_records=tool_records,
+                    state_stores=lifecycle.state_stores,
+                    interaction_metadata=interaction_metadata,
+                    result_client=result_client,
+                    slot_ids=request.output_slot_ids,
+                    phase_slots=request.output_phase_slots,
+                )
             )
         except asyncio.CancelledError:
             self.host.interrupt_turn(lifecycle, status="cancelled", error="turn cancelled")

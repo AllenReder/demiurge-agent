@@ -276,6 +276,33 @@ async def test_input_pipeline_requires_user_message(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_input_pipeline_resolves_slot_id_override_inside_slot_runtime(tmp_path):
+    harness = _Harness()
+    core = _core(tmp_path)
+    selected = _slot("selected")
+    default_parallel = _slot("default_parallel")
+    core.input_slots = [selected, default_parallel]
+    core.input_pipeline = PhasePipeline(serial=[], parallel=[default_parallel])
+
+    result = await harness.runtime.run_input(
+        InputPipelineRequest(
+            core=core,
+            turn=_turn(),
+            capability=CapabilityFacade(core),
+            envelope=InputEnvelope(raw_text="hello"),
+            state_stores=object(),
+            interaction_metadata={},
+            slot_ids=["selected"],
+        )
+    )
+
+    assert result.user_text == "selected:hello"
+    assert [(request.slot.slot_id, request.background) for request in harness.context.input_requests] == [
+        ("selected", False)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_output_pipeline_runs_serial_slots_and_flushes_parallel_with_forked_result_client(tmp_path):
     harness = _Harness()
     result_client = _ResultClient()

@@ -8,6 +8,7 @@ import pytest
 
 from demiurge.providers import LLMMessage
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem
+from demiurge.runtime.slots import InputPipelineResult
 from demiurge.runtime.turn import TurnEngineRequest, TurnEngineResult
 from demiurge.runtime.turn_lifecycle import TurnLifecycle, TurnLifecycleCompletion, TurnLifecycleRequest
 from demiurge.runtime.turn_pipeline import TurnPipelineRequest, TurnPipelineRuntime
@@ -57,6 +58,8 @@ class _FakeTurnPipelineHost:
         self.events: list[dict[str, Any]] = []
         self.bootstrap_requests: list[Any] = []
         self.sent_users: list[dict[str, Any]] = []
+        self.input_requests: list[Any] = []
+        self.output_requests: list[Any] = []
         self.engine_requests: list[TurnEngineRequest] = []
         self.completed: TurnLifecycleCompletion | None = None
         self.interrupts: list[dict[str, str]] = []
@@ -77,9 +80,6 @@ class _FakeTurnPipelineHost:
 
     def update_active_session_core(self, core):
         self.updated_core = core.core_id
-
-    def resolve_phase_slots(self, core, kind, slot_ids):
-        return None
 
     def core_revision(self, core):
         return "rev_1"
@@ -119,20 +119,15 @@ class _FakeTurnPipelineHost:
     def interrupt_turn(self, lifecycle, *, status: str, error: str):
         self.interrupts.append({"turn_id": lifecycle.turn_id, "status": status, "error": error})
 
-    async def run_input_slots(
-        self,
-        core,
-        turn,
-        capability,
-        lifecycle,
-        *,
-        interaction_metadata,
-        injected_system_context,
-        serial_slots,
-        phase_slots,
-    ):
-        context = [ContextContribution(type="instruction", content=item) for item in injected_system_context]
-        return "normalized hello", "persisted hello", context, [InteractionItem(kind="input_slot")]
+    async def run_input_slots(self, request):
+        self.input_requests.append(request)
+        context = [ContextContribution(type="instruction", content=item) for item in request.injected_system_context]
+        return InputPipelineResult(
+            user_text="normalized hello",
+            persisted_user_text="persisted hello",
+            context=context,
+            items=[InteractionItem(kind="input_slot")],
+        )
 
     def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]):
         self.sent_users.append({"turn_id": turn_id, "content": content, "metadata": dict(interaction_metadata)})
@@ -152,20 +147,8 @@ class _FakeTurnPipelineHost:
     def result_client(self, *, writable: bool):
         return SimpleNamespace(value={"ok": True})
 
-    async def run_output_slots(
-        self,
-        core,
-        turn,
-        capability,
-        *,
-        current_output,
-        tool_records,
-        lifecycle,
-        interaction_metadata,
-        result_client,
-        serial_slots,
-        phase_slots,
-    ):
+    async def run_output_slots(self, request):
+        self.output_requests.append(request)
         return [InteractionItem.delivery_item(InteractionDelivery(text="visible output"))]
 
     def refresh_history(self):
@@ -208,8 +191,11 @@ async def test_turn_pipeline_runs_full_host_lifecycle():
     assert [event["type"] for event in host.events] == ["session.started", "message.received"]
     assert host.session_started is True
     assert host.bootstrap_requests[0].workspace == "/workspace"
+    assert host.input_requests[0].envelope.raw_text == "hello"
+    assert host.input_requests[0].state_stores is not None
     assert host.sent_users == [{"turn_id": "turn_1", "content": "persisted hello", "metadata": {"timezone": "UTC"}}]
     assert host.engine_requests[0].context[0].content == "extra context"
+    assert host.output_requests[0].current_output == "model answer"
     assert host.completed is not None
     assert host.completed.agent_result == {"ok": True}
     assert host.history_refreshed is True

@@ -13,7 +13,6 @@ from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
 from demiurge.runtime.child_agents import (
     ChildAgentRuntime,
-    ResolvedPhaseSlots,
     RunnerChildAgentHost,
 )
 from demiurge.runtime.delegation_tools import DelegationToolRuntime, RunnerDelegationToolHost
@@ -35,13 +34,11 @@ from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
     ModuleIOClient,
     ModuleResultClient,
-    ModuleStateStores,
     RunnerSlotContextHost,
     SlotContextRuntime,
 )
 from demiurge.runtime.slots import (
-    InputPipelineRequest,
-    OutputPipelineRequest,
+    ResolvedPhaseSlots,
     SlotPipelineRuntime,
     SlotRuntime,
 )
@@ -53,7 +50,6 @@ from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
     ContextContribution,
-    InputEnvelope,
     ToolResult,
     TurnContext,
 )
@@ -347,33 +343,6 @@ class SessionTurnStepRunner:
         self._bind_event_log()
         self.history = self._session_history_messages()
 
-    def _resolve_phase_slots(
-        self,
-        core: LoadedCore,
-        kind: str,
-        slot_ids: list[str] | tuple[str, ...] | None,
-    ) -> list[SlotDefinition] | None:
-        if slot_ids is None:
-            return None
-        slots = core.input_slots if kind == "input" else core.output_slots
-        by_id = {slot.slot_id: slot for slot in slots}
-        resolved: list[SlotDefinition] = []
-        seen: set[str] = set()
-        for raw_id in slot_ids:
-            slot_id = str(raw_id).strip()
-            if not slot_id:
-                raise ValueError(f"{kind} slot id must not be empty")
-            if slot_id in seen:
-                raise ValueError(f"duplicate {kind} slot id: {slot_id}")
-            seen.add(slot_id)
-            slot = by_id.get(slot_id)
-            if slot is None:
-                raise ValueError(f"unknown {kind} slot id: {slot_id}")
-            resolved.append(slot)
-        if not resolved:
-            raise ValueError(f"{kind} slot list must not be empty")
-        return resolved
-
     def _tool_result_model_content(self, result: ToolResult) -> str:
         return result.model_output if result.model_output is not None else result.content
 
@@ -539,75 +508,6 @@ class SessionTurnStepRunner:
             turn=turn,
             capability=capability,
             emit_event=self.event_log.emit,
-        )
-
-    async def _run_input_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: InputEnvelope,
-        state_stores: ModuleStateStores,
-        *,
-        interaction_metadata: dict[str, Any],
-        injected_system_context: list[str],
-        serial_slots: list[SlotDefinition] | None = None,
-        phase_slots: ResolvedPhaseSlots | None = None,
-    ) -> tuple[str, str, list[ContextContribution], list[InteractionItem]]:
-        if phase_slots is not None:
-            parallel_slots = phase_slots.parallel
-            current_serial_slots = phase_slots.serial
-        else:
-            parallel_slots = [] if serial_slots is not None else core.input_pipeline.parallel
-            current_serial_slots = serial_slots or core.input_pipeline.serial
-        result = await self.slot_pipeline.run_input(
-            InputPipelineRequest(
-                core=core,
-                turn=turn,
-                capability=capability,
-                envelope=envelope,
-                state_stores=state_stores,
-                interaction_metadata=interaction_metadata,
-                injected_system_context=injected_system_context,
-                serial_slots=current_serial_slots,
-                parallel_slots=parallel_slots,
-            )
-        )
-        return result.user_text, result.persisted_user_text, result.context, result.items
-
-    async def _run_output_slots(
-        self,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        *,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: ModuleStateStores,
-        interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
-        serial_slots: list[SlotDefinition] | None = None,
-        phase_slots: ResolvedPhaseSlots | None = None,
-    ) -> list[InteractionItem]:
-        if phase_slots is not None:
-            parallel_slots = phase_slots.parallel
-            current_serial_slots = phase_slots.serial
-        else:
-            parallel_slots = [] if serial_slots is not None else core.output_pipeline.parallel
-            current_serial_slots = serial_slots or core.output_pipeline.serial
-        return await self.slot_pipeline.run_output(
-            OutputPipelineRequest(
-                core=core,
-                turn=turn,
-                capability=capability,
-                current_output=current_output,
-                tool_records=tool_records,
-                state_stores=state_stores,
-                interaction_metadata=interaction_metadata,
-                result_client=result_client,
-                serial_slots=current_serial_slots,
-                parallel_slots=parallel_slots,
-            )
         )
 
     async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:

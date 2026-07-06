@@ -13,6 +13,7 @@ from demiurge.runtime.tasks import (
     RuntimeTaskContext,
     RuntimeTaskOutcome,
 )
+from demiurge.runtime.slots import ResolvedPhaseSlots
 from demiurge.sdk import (
     AgentDeliverySummary,
     AgentInput,
@@ -64,18 +65,6 @@ class ChildAgentSpawnRequest:
     notify_on_complete: bool = True
     session_id: str | None = None
     resolved_child_tools: "ResolvedChildAgentTools | None" = None
-
-
-@dataclass(slots=True)
-class ResolvedPhaseSlots:
-    serial: list[SlotDefinition]
-    parallel: list[SlotDefinition]
-
-    def to_metadata(self) -> dict[str, list[str]]:
-        return {
-            "serial": [slot.slot_id for slot in self.serial],
-            "parallel": [slot.slot_id for slot in self.parallel],
-        }
 
 
 @dataclass(slots=True)
