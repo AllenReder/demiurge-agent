@@ -36,6 +36,7 @@ from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.slot_execution import SlotExecutionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
     ModuleIOClient,
@@ -47,11 +48,9 @@ from demiurge.runtime.slot_context import (
 from demiurge.runtime.slots import (
     InputPipelineRequest,
     InputSlotRunRequest,
-    ModuleInputBuilder,
     OutputPipelineRequest,
     OutputSlotRunRequest,
     RunnerSlotPipelineHost,
-    SlotInvocation,
     SlotPipelineRuntime,
     SlotRuntime,
 )
@@ -68,8 +67,6 @@ from demiurge.sdk import (
     DeliverEffect,
     EffectRequest,
     InputEnvelope,
-    OutputEnvelope,
-    RawInput,
     ToolResult,
     TurnContext,
 )
@@ -184,6 +181,13 @@ class SessionTurnStepRunner:
             on_history_changed=self._refresh_history,
         )
         self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
+        self.slot_execution = SlotExecutionRuntime(
+            slot_runtime=self.slot_runtime,
+            slot_context=self.slot_context,
+            slot_effects=self.slot_effects,
+            emit_event=self.event_log.emit,
+            refresh_history=self._refresh_history,
+        )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
         self.turn_pipeline = TurnPipelineRuntime(RunnerTurnPipelineHost(self))
         self._ensure_current_session()
@@ -976,105 +980,7 @@ class SessionTurnStepRunner:
         return result.user_text, result.persisted_user_text, result.context, result.items
 
     async def run_input_pipeline_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
-        return await self._run_input_slot(
-            request.slot,
-            core=request.core,
-            turn=request.turn,
-            capability=request.capability,
-            envelope=request.envelope,
-            raw_input=request.raw_input,
-            builder=request.builder,
-            builder_writable=request.builder_writable,
-            state_stores=request.state_stores,
-            interaction_metadata=request.interaction_metadata,
-            activated=request.activated,
-            contributions=request.contributions,
-            background=request.background,
-        )
-
-    async def _run_input_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: InputEnvelope,
-        raw_input: RawInput,
-        builder: ModuleInputBuilder,
-        builder_writable: bool,
-        state_stores: ModuleStateStores,
-        interaction_metadata: dict[str, Any],
-        activated: set[str],
-        contributions: list[ContextContribution],
-        background: bool = False,
-    ) -> list[InteractionItem]:
-        items: list[InteractionItem] = []
-        context_build = self.slot_context.build_input_context(
-            InputSlotRunRequest(
-                slot=slot,
-                core=core,
-                turn=turn,
-                capability=capability,
-                envelope=envelope,
-                raw_input=raw_input,
-                builder=builder,
-                builder_writable=builder_writable,
-                state_stores=state_stores,
-                interaction_metadata=interaction_metadata,
-                activated=activated,
-                contributions=contributions,
-                background=background,
-            ),
-            items=items,
-        )
-        ctx = context_build.context
-        io_client = context_build.io_client
-        try:
-            prior_envelope_activations = set(envelope.activated_skills)
-            value = await self._call_slot(slot, ctx)
-            if value is not None:
-                self.event_log.emit("module.return_ignored", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
-            for name in [name for name in envelope.activated_skills if name not in prior_envelope_activations]:
-                if name in activated:
-                    continue
-                self._require_skill_activation(capability, slot.relative_path, name)
-                skill = core.skill_by_id(name)
-                if skill is None:
-                    activated.add(name)
-                    self.event_log.emit("skill.activation_ignored", turn_id=turn.turn_id, slot=slot.relative_path, skill=name)
-                    continue
-                activated.add(name)
-                contributions.append(
-                    ContextContribution(type="skill", key=skill.name, content=skill.content, placement="system_context")
-                )
-                self.event_log.emit("skill.activated", turn_id=turn.turn_id, slot=slot.relative_path, skill=skill.name)
-            self.slot_effects.schedule_slot_end_delivery_items(
-                io_client.slot_end_items,
-                turn=turn,
-                interaction_metadata=interaction_metadata,
-            )
-            self.event_log.emit("module.completed", turn_id=turn.turn_id, slot=slot.relative_path, kind="input")
-            return io_client.items
-        except Exception as exc:
-            self.slot_effects.mark_pending_failed(io_client.slot_end_items, reason="slot_failed")
-            self.event_log.emit(
-                "module.failed",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                kind="input",
-                error=str(exc),
-            )
-            if slot.failure_policy == "hard":
-                raise
-            return io_client.items
-
-    def _require_skill_activation(self, capability: CapabilityFacade, slot_path: str, name: str) -> None:
-        scoped = f"skill.activate:{name}"
-        if capability.can(scoped, slot_path=slot_path):
-            capability.require(scoped, slot_path=slot_path)
-            return
-        capability.require("skill.activate", slot_path=slot_path)
+        return await self.slot_execution.run_input(request)
 
     async def _run_output_slots(
         self,
@@ -1112,83 +1018,7 @@ class SessionTurnStepRunner:
         )
 
     async def run_output_pipeline_slot(self, request: OutputSlotRunRequest) -> list[InteractionItem]:
-        return await self._run_output_slot(
-            request.slot,
-            core=request.core,
-            turn=request.turn,
-            capability=request.capability,
-            envelope=request.envelope,
-            current_output=request.current_output,
-            tool_records=request.tool_records,
-            state_stores=request.state_stores,
-            interaction_metadata=request.interaction_metadata,
-            result_client=request.result_client,
-            background=request.background,
-        )
-
-    async def _run_output_slot(
-        self,
-        slot: SlotDefinition,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        envelope: OutputEnvelope,
-        current_output: str,
-        tool_records: list[ToolExecutionRecord],
-        state_stores: ModuleStateStores,
-        interaction_metadata: dict[str, Any],
-        result_client: ModuleResultClient,
-        background: bool = False,
-    ) -> list[InteractionItem]:
-        items: list[InteractionItem] = []
-        context_build = self.slot_context.build_output_context(
-            OutputSlotRunRequest(
-                slot=slot,
-                core=core,
-                turn=turn,
-                capability=capability,
-                envelope=envelope,
-                current_output=current_output,
-                tool_records=tool_records,
-                state_stores=state_stores,
-                interaction_metadata=interaction_metadata,
-                result_client=result_client,
-                background=background,
-            ),
-            items=items,
-        )
-        ctx = context_build.context
-        io_client = context_build.io_client
-        try:
-            value = await self._call_slot(slot, ctx)
-            if value is not None:
-                self.event_log.emit("module.return_ignored", turn_id=turn.turn_id, slot=slot.relative_path, kind="output")
-            self.slot_effects.schedule_slot_end_delivery_items(
-                io_client.slot_end_items,
-                turn=turn,
-                interaction_metadata=interaction_metadata,
-            )
-            self.history = self._session_history_messages()
-            self.event_log.emit(
-                "module.completed",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                kind="output",
-            )
-            return io_client.items
-        except Exception as exc:
-            self.slot_effects.mark_pending_failed(io_client.slot_end_items, reason="slot_failed")
-            self.event_log.emit(
-                "module.failed",
-                turn_id=turn.turn_id,
-                slot=slot.relative_path,
-                kind="output",
-                error=str(exc),
-            )
-            if slot.failure_policy == "hard":
-                raise
-            return io_client.items
+        return await self.slot_execution.run_output(request)
 
     async def flush_slot_background_items(
         self,
@@ -1321,11 +1151,6 @@ class SessionTurnStepRunner:
         if len(message) > 500:
             message = f"{message[:500]}... [truncated]"
         return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
-
-    async def _call_slot(self, slot: SlotDefinition, ctx: Any) -> Any:
-        outcome = await self.slot_runtime.invoke(SlotInvocation(slot=slot, context=ctx, phase=slot.kind))
-        outcome.raise_for_error()
-        return outcome.value
 
     def _normalize_context_items(
         self,
