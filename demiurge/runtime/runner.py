@@ -35,7 +35,6 @@ from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRun
 from demiurge.runtime.session_compaction import CompactionResult, SessionCompactionRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
-from demiurge.runtime.slot_execution import SlotExecutionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
     ModuleIOClient,
@@ -46,10 +45,7 @@ from demiurge.runtime.slot_context import (
 )
 from demiurge.runtime.slots import (
     InputPipelineRequest,
-    InputSlotRunRequest,
     OutputPipelineRequest,
-    OutputSlotRunRequest,
-    RunnerSlotPipelineHost,
     SlotPipelineRuntime,
     SlotRuntime,
 )
@@ -123,7 +119,6 @@ class SessionTurnStepRunner:
         self.child_agents = ChildAgentRuntime(RunnerChildAgentHost(self))
         self.delegation_tools = DelegationToolRuntime(RunnerDelegationToolHost(self))
         self.bootstrap_slots = BootstrapSlotRuntime(RunnerBootstrapSlotHost(self))
-        self.slot_pipeline = SlotPipelineRuntime(RunnerSlotPipelineHost(self))
         self.turn_engine = turn_engine or TurnEngine(RunnerTurnEngineHost(self))
         self.interaction_router = interaction_router or SessionInteractionRouter()
         self.prepare_live_core_callback = prepare_live_core
@@ -185,11 +180,12 @@ class SessionTurnStepRunner:
             emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
         )
         self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
-        self.slot_execution = SlotExecutionRuntime(
+        self.slot_pipeline = SlotPipelineRuntime(
             slot_runtime=self.slot_runtime,
             slot_context=self.slot_context,
             slot_effects=self.slot_effects,
-            emit_event=self.event_log.emit,
+            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            track_background_task=self.track_slot_background_task,
             refresh_history=self._refresh_history,
         )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
@@ -643,9 +639,6 @@ class SessionTurnStepRunner:
         )
         return result.user_text, result.persisted_user_text, result.context, result.items
 
-    async def run_input_pipeline_slot(self, request: InputSlotRunRequest) -> list[InteractionItem]:
-        return await self.slot_execution.run_input(request)
-
     async def _run_output_slots(
         self,
         core: LoadedCore,
@@ -679,22 +672,6 @@ class SessionTurnStepRunner:
                 serial_slots=current_serial_slots,
                 parallel_slots=parallel_slots,
             )
-        )
-
-    async def run_output_pipeline_slot(self, request: OutputSlotRunRequest) -> list[InteractionItem]:
-        return await self.slot_execution.run_output(request)
-
-    async def flush_slot_background_items(
-        self,
-        items: list[InteractionItem],
-        *,
-        turn: TurnContext,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        await self.slot_effects.flush_background_items(
-            items,
-            turn=turn,
-            interaction_metadata=interaction_metadata,
         )
 
     async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
