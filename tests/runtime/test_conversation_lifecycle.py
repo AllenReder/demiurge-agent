@@ -160,6 +160,85 @@ async def test_lifecycle_runtime_starts_finishes_and_drains_next_inbound():
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_runtime_submit_inbound_starts_idle_turn():
+    seen: list[str] = []
+    runtime = _runtime(None, seen)
+    state = runtime.state_for_key("chat")
+
+    result = await runtime.submit_inbound(state, _inbound("hello"))
+    await _wait_idle(state)
+
+    assert result.accepted is True
+    assert result.queued is False
+    assert result.busy_decision is None
+    assert seen == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_runtime_submit_inbound_merges_pending_completions():
+    event = _event()
+    worker = FakeTaskWorker([event])
+    seen: list[str] = []
+    runtime = _runtime(worker, seen)
+    state = runtime.state_for_key("chat")
+
+    result = await runtime.submit_inbound(state, _inbound("hello"))
+    await _wait_idle(state)
+
+    assert result.queued is False
+    assert "Pending background task events" in seen[0]
+    assert "done" in seen[0]
+    assert worker.claimed == {"event_1": "merge-owner"}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_runtime_submit_inbound_can_wait_for_interruption():
+    seen: list[str] = []
+    notices: list[tuple[str, str]] = []
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def run_turn(state: ConversationIngressState, inbound: InteractionInbound) -> None:
+        seen.append(inbound.text)
+        if inbound.text != "first":
+            return
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def notify_busy(state, inbound, decision) -> None:
+        notices.append((inbound.text, decision.kind))
+
+    runtime = ConversationLifecycleRuntime(
+        config=ConversationLifecycleConfig(
+            channel="test",
+            merge_owner_id="merge-owner",
+            enqueue_owner_id="enqueue-owner",
+        ),
+        state_factory=lambda key: _state(key),
+        run_turn=run_turn,
+        notify_busy=notify_busy,
+    )
+    state = runtime.state_for_key("chat")
+
+    await runtime.submit_inbound(state, _inbound("first"))
+    await started.wait()
+    result = await runtime.submit_inbound(state, _inbound("second"), wait_for_interruption=True)
+    await _wait_idle(state)
+
+    assert result.queued is True
+    assert result.interrupted is True
+    assert result.busy_decision is not None
+    assert result.busy_decision.kind == "interrupt"
+    assert cancelled.is_set()
+    assert notices == [("second", "interrupt")]
+    assert seen == ["first", "second"]
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_runtime_can_skip_drain_when_adapter_is_closing():
     seen: list[str] = []
     turn_finished: list[bool] = []

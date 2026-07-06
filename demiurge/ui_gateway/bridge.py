@@ -139,20 +139,15 @@ class TuiInteractionBridge:
         if not text:
             return {"accepted": False, "reason": "empty"}
         inbound = self._user_inbound(text)
-        self._conversation_lifecycle.remember_route(self._ingress_state, inbound)
-        if self.running:
-            task = self._ingress_state.active_task
-            decision = await self._conversation_lifecycle.handle_busy(self._ingress_state, inbound)
-            if decision.cancel_active and task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                await self._emit_notice("turn interrupted")
-            await self._emit_status()
-            return {"accepted": True, "queued": True}
-        inbound = self._conversation_lifecycle.merge_pending(self._ingress_state, inbound)
-        await self._conversation_lifecycle.accept_inbound(self._ingress_state, inbound)
+        result = await self._conversation_lifecycle.submit_inbound(
+            self._ingress_state,
+            inbound,
+            wait_for_interruption=True,
+        )
+        if result.interrupted:
+            await self._emit_notice("turn interrupted")
         await self._emit_status()
-        return {"accepted": True, "queued": False}
+        return {"accepted": result.accepted, "queued": result.queued}
 
     async def _notify_busy_inbound(
         self,

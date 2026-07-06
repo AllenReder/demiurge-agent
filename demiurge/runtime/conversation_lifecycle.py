@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Generic, TypeVar
 
@@ -33,6 +34,14 @@ class ConversationLifecycleConfig:
     enqueue_owner_id: str
     require_source: bool = False
     fallback_source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationSubmitResult:
+    accepted: bool
+    queued: bool
+    busy_decision: BusyInboundDecision | None = None
+    interrupted: bool = False
 
 
 class _ConversationStateStore(Generic[StateT]):
@@ -191,6 +200,34 @@ class ConversationLifecycleRuntime(Generic[StateT]):
             inbound,
             fallback_source=fallback_source,
         )
+
+    async def submit_inbound(
+        self,
+        state: StateT,
+        inbound: InteractionInbound,
+        *,
+        fallback_source: str | None = None,
+        wait_for_interruption: bool = False,
+    ) -> ConversationSubmitResult:
+        self.remember_route(state, inbound)
+        if self.running(state):
+            active_task = state.active_task
+            decision = await self.handle_busy(state, inbound)
+            interrupted = False
+            if wait_for_interruption and decision.cancel_active and active_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await active_task
+                interrupted = True
+            return ConversationSubmitResult(
+                accepted=True,
+                queued=True,
+                busy_decision=decision,
+                interrupted=interrupted,
+            )
+
+        inbound = self.merge_pending(state, inbound, fallback_source=fallback_source)
+        await self.accept_inbound(state, inbound)
+        return ConversationSubmitResult(accepted=True, queued=False)
 
     async def accept_inbound(self, state: StateT, inbound: InteractionInbound) -> bool:
         if self.running(state):

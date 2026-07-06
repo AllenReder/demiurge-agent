@@ -106,12 +106,11 @@ class TextChannelBridgeBase:
         inbound = command_outcome.inbound
 
         inbound = self._prompt_delivery.resolve_inbound(inbound)
-        inbound = self._conversation_lifecycle.merge_pending(
+        await self._conversation_lifecycle.submit_inbound(
             state,
             inbound,
             fallback_source=inbound.source,
         )
-        await self._conversation_lifecycle.accept_inbound(state, inbound)
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
         await self._text_outbound_delivery_runtime().deliver(outbound)
