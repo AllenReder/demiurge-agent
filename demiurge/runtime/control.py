@@ -8,32 +8,32 @@ from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 from demiurge.util import utc_id
 
 
-ActionKind = Literal[
+TASK_KINDS = frozenset({"agent.spawn", "terminal.exec", "evolver.run", "schedule.fire"})
+
+
+TaskKind = Literal[
     "agent.spawn",
-    "tool.call",
-    "authored_tool.call",
-    "mcp.call",
     "terminal.exec",
     "evolver.run",
     "schedule.fire",
-    "delivery.send",
-    "approval.request",
-    "state.patch",
-    "artifact.write",
 ]
 
 TaskCommand = Literal["cancel"]
 
 
 @dataclass(frozen=True, slots=True)
-class ActionSpec:
-    kind: ActionKind
+class TaskSpec:
+    kind: TaskKind
     payload: dict[str, Any] = field(default_factory=dict)
     idempotency_key: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.kind not in TASK_KINDS:
+            raise ValueError(f"unsupported task kind: {self.kind}")
+
 
 @dataclass(frozen=True, slots=True)
-class ActionSource:
+class TaskSource:
     actor: str
     session_id: str | None = None
     turn_id: str | None = None
@@ -47,13 +47,6 @@ class TaskHandle:
     task_id: str
     kind: str
     status: str
-
-
-@dataclass(frozen=True, slots=True)
-class ActionResult:
-    task_id: str | None
-    status: str
-    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,12 +82,12 @@ TaskView = dict[str, Any]
 
 
 class RuntimeControlPlane:
-    """Host-owned action and task control plane."""
+    """Host-owned detached task control plane."""
 
     def __init__(self, store: RuntimeStore):
         self.store = store
 
-    def submit(self, spec: ActionSpec, *, source: ActionSource) -> TaskHandle | ActionResult:
+    def submit_task(self, spec: TaskSpec, *, source: TaskSource) -> TaskHandle:
         task_id = spec.payload.get("task_id") or utc_id("task_")
         root_task_id = spec.payload.get("root_task_id") or source.task_id or task_id
         event = RuntimeEvent(
@@ -124,7 +117,7 @@ class RuntimeControlPlane:
             raise ValueError(f"unsupported task control command: {command}")
         return self.cancel(task_id)
 
-    def mark_started(self, task_id: str, *, source: ActionSource | None = None) -> TaskRecord:
+    def mark_started(self, task_id: str, *, source: TaskSource | None = None) -> TaskRecord:
         self._append_task_event(
             "task.started",
             task_id,
@@ -140,7 +133,7 @@ class RuntimeControlPlane:
         result_ref: str | None = None,
         summary: str | None = None,
         metadata: dict[str, Any] | None = None,
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
     ) -> TaskRecord:
         payload: dict[str, Any] = {"status": "succeeded"}
         if result_ref is not None:
@@ -159,7 +152,7 @@ class RuntimeControlPlane:
         error: str,
         summary: str | None = None,
         metadata: dict[str, Any] | None = None,
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
     ) -> TaskRecord:
         payload: dict[str, Any] = {
             "status": "failed",
@@ -177,7 +170,7 @@ class RuntimeControlPlane:
         *,
         summary: str = "task cancelled",
         metadata: dict[str, Any] | None = None,
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
     ) -> TaskRecord:
         payload: dict[str, Any] = {
             "status": "cancelled",
@@ -195,7 +188,7 @@ class RuntimeControlPlane:
         *,
         summary: str,
         metadata: dict[str, Any] | None = None,
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
     ) -> TaskRecord:
         payload: dict[str, Any] = {"status": "blocked_needs_user", "summary": summary}
         if metadata:
@@ -209,7 +202,7 @@ class RuntimeControlPlane:
         text: str,
         *,
         stream: str = "stdout",
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
     ) -> None:
         lines = str(text).splitlines() or [str(text)]
         self.store.append(
@@ -237,7 +230,7 @@ class RuntimeControlPlane:
         event_id: str,
         task_id: str,
         payload: dict[str, Any],
-        source: ActionSource | None = None,
+        source: TaskSource | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         result = self.store.append(
@@ -329,7 +322,7 @@ class RuntimeControlPlane:
         task_id: str,
         *,
         payload: dict[str, Any],
-        source: ActionSource | None,
+        source: TaskSource | None,
     ) -> None:
         self.store.append(
             [
@@ -343,7 +336,7 @@ class RuntimeControlPlane:
             ]
         )
 
-    def _source_actor(self, source: ActionSource) -> dict[str, Any]:
+    def _source_actor(self, source: TaskSource) -> dict[str, Any]:
         return {
             "actor": source.actor,
             "session_id": source.session_id,

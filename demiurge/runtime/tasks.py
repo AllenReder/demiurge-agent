@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
-from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
+from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
 from demiurge.runtime.durable_work import DurableClaim, DurableWorkRuntime
 from demiurge.runtime.store import RuntimeQuery
 from demiurge.util import utc_id
@@ -513,13 +513,13 @@ class RuntimeTaskWorker:
             "write_scope": record.write_scope,
             "metadata": dict(record.metadata),
         }
-        self.control_plane.submit(
-            ActionSpec(
+        self.control_plane.submit_task(
+            TaskSpec(
                 kind=record.kind,
                 payload=payload,
                 idempotency_key=f"task:{record.task_id}:submitted",
             ),
-            source=ActionSource(
+            source=TaskSource(
                 actor="host.task_worker",
                 session_id=record.owner_session_id,
                 turn_id=record.owner_turn_id,
@@ -577,8 +577,8 @@ class RuntimeTaskWorker:
         else:
             raise ValueError(f"unsupported task lifecycle event: {event_type}")
 
-    def _runtime_source(self, record: RuntimeTaskRecord) -> ActionSource:
-        return ActionSource(
+    def _runtime_source(self, record: RuntimeTaskRecord) -> TaskSource:
+        return TaskSource(
             actor="host.task_worker",
             session_id=record.owner_session_id,
             turn_id=record.owner_turn_id,

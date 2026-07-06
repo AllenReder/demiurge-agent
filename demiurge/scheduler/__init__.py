@@ -10,7 +10,7 @@ from typing import Any
 from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
-from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
+from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
 from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
 from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
@@ -466,8 +466,8 @@ class ScheduleFireRuntime:
         if control_plane is None:
             return
         idempotency_key = f"schedule:{core.core_id}:{schedule.schedule_id}:{format_instant(claim.due_at)}"
-        control_plane.submit(
-            ActionSpec(
+        control_plane.submit_task(
+            TaskSpec(
                 kind="schedule.fire",
                 payload={
                     "task_id": task_id,
@@ -480,11 +480,11 @@ class ScheduleFireRuntime:
                 },
                 idempotency_key=idempotency_key,
             ),
-            source=ActionSource(actor="host.scheduler", core_id=core.core_id),
+            source=TaskSource(actor="host.scheduler", core_id=core.core_id),
         )
         control_plane.mark_started(
             task_id,
-            source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+            source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
         )
 
     def _record_claim_completed(
@@ -505,13 +505,13 @@ class ScheduleFireRuntime:
             control_plane.succeed(
                 task_id,
                 result_ref=result_ref,
-                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+                source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
             )
         else:
             control_plane.fail(
                 task_id,
                 error=error or "scheduled task failed",
-                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+                source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
             )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:

@@ -13,7 +13,7 @@ description: Host-owned action、task、event、projection 和 Agent Slot v2 设
 新的 deep modules 是：
 
 - `RuntimeStore`：SQLite event store 和 projection surface。
-- `RuntimeControlPlane`：host-owned action 和 task seam。
+- `RuntimeControlPlane`：host-owned detached task seam。
 - `SessionRuntime`：session admission 和 session/turn/message projections。
 - `TurnEngine`：一个 Agent Core foreground turn 的 provider/tool loop。
 - `SlotRuntime`：按 phase 执行 authored slot callable。
@@ -21,13 +21,15 @@ description: Host-owned action、task、event、projection 和 Agent Slot v2 设
 detached-work task ledger 模型是：
 
 ```text
-ActionSpec -> Task -> Event -> Projection
+TaskSpec -> Task -> Event -> Projection
 ```
 
-subagent spawn、terminal command、evolver run、scheduled fire、delivery、
-approval、MCP call、authored tool call、state patch 和 artifact write 等
-detached host work 应该通过 `RuntimeControlPlane` 进入。Foreground Agent Core
-turn 不会成为 task row；它们通过 `SessionRuntime` 投影为 turns 和 messages。
+可作为 task 观察的 detached host work 通过
+`RuntimeControlPlane.submit_task()` 进入。当前 task-ledger kinds 是
+`agent.spawn`、`terminal.exec`、`evolver.run` 和 `schedule.fire`。Foreground
+Agent Core turn 不会成为 task row；它们通过 `SessionRuntime` 投影为 turns 和
+messages。Delivery、approval、tool-call、MCP、state 和 artifact facts 应该使用
+自己的 projections 或 runtime events，而不是伪装成 task submission。
 
 ## Storage
 

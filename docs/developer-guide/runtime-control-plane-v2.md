@@ -14,7 +14,7 @@ refactor. The host owns the harness. Agent Cores own authored files under
 The new deep Modules are:
 
 - `RuntimeStore`: SQLite event store and projection surface.
-- `RuntimeControlPlane`: host-owned action and task seam.
+- `RuntimeControlPlane`: host-owned detached task seam.
 - `DurableWorkRuntime`: lease/ack/terminal-state seam for unfinished host work.
 - `SessionRuntime`: session admission and session/turn/message projections.
 - `TurnEngine`: foreground provider/tool loop for one Agent Core turn.
@@ -23,14 +23,16 @@ The new deep Modules are:
 The detached-work task ledger model is:
 
 ```text
-ActionSpec -> Task -> Event -> Projection
+TaskSpec -> Task -> Event -> Projection
 ```
 
-Detached host work such as subagent spawns, terminal commands, evolver runs,
-scheduled fires, delivery, approval, MCP calls, authored tool calls, state
-patches, and artifact writes should enter through `RuntimeControlPlane`.
-Foreground Agent Core turns do not become task rows; they are projected through
-`SessionRuntime` as turns and messages.
+Detached host work that is observable as a task enters through
+`RuntimeControlPlane.submit_task()`. The current task-ledger kinds are
+`agent.spawn`, `terminal.exec`, `evolver.run`, and `schedule.fire`. Foreground
+Agent Core turns do not become task rows; they are projected through
+`SessionRuntime` as turns and messages. Delivery, approval, tool-call, MCP,
+state, and artifact facts should use their own projections or runtime events
+rather than fake task submissions.
 
 ## Storage
 
