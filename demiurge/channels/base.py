@@ -20,7 +20,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
-from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
+from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime, delivery_text_chunks, text_outbound_target
 from demiurge.runtime.prompts import PromptDeliveryRuntime
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
@@ -147,68 +147,46 @@ class TextChannelBridgeBase:
     async def _deliver_delivery(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
         if not delivery.visible:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
-        chunks = self._delivery_text_chunks(delivery)
+        chunks = delivery_text_chunks(delivery)
         for index, chunk in enumerate(chunks):
             await self._send_text(
-                str(source),
+                target.source,
                 chunk,
-                reply_to=str(reply_to) if reply_to is not None and index == 0 else None,
-                metadata=outbound.metadata,
+                reply_to=target.reply_to if target.reply_to is not None and index == 0 else None,
+                metadata=target.metadata,
             )
-
-    def _delivery_text_chunks(self, delivery: InteractionDelivery) -> list[str]:
-        if not delivery.blocks:
-            text = delivery.text or delivery.fallback_text
-            return [text] if text else []
-        chunks: list[str] = []
-        for block in delivery.blocks:
-            block_type = str(block.get("type") or "text")
-            if block_type == "text":
-                text = str(block.get("text") or "")
-                if text:
-                    chunks.append(text)
-                continue
-            fallback = _media_block_fallback(block)
-            if fallback:
-                chunks.append(fallback)
-        if not chunks and (delivery.text or delivery.fallback_text):
-            chunks.append(delivery.text or delivery.fallback_text)
-        return chunks
 
     async def _deliver_tool_results(self, records: list[Any], *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet" or not records:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_results_text(records)
         if text:
             await self._send_text(
-                str(source),
+                target.source,
                 text,
-                reply_to=str(reply_to) if reply_to is not None else None,
-                metadata=outbound.metadata,
+                reply_to=target.reply_to,
+                metadata=target.metadata,
             )
 
     async def _deliver_tool_call(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet":
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_call_text(record)
         if text:
             await self._send_text(
-                str(source),
+                target.source,
                 text,
-                reply_to=str(reply_to) if reply_to is not None else None,
-                metadata=outbound.metadata,
+                reply_to=target.reply_to,
+                metadata=target.metadata,
             )
 
     def _tool_call_text(self, record: ToolInteractionRecord) -> str:
@@ -371,14 +349,3 @@ def resolve_env_value(env_name: str | None, inline_value: str | None) -> str | N
         if value:
             return value
     return inline_value
-
-
-def _media_block_fallback(block: dict[str, Any]) -> str:
-    artifact = block.get("artifact")
-    if not isinstance(artifact, dict):
-        return ""
-    summary = artifact.get("summary") or artifact.get("media_type") or artifact.get("kind") or block.get("type")
-    artifact_id = artifact.get("artifact_id") or "artifact"
-    caption = block.get("text")
-    prefix = f"{caption}\n" if caption else ""
-    return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"

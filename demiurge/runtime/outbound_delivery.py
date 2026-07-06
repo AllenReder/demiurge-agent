@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Awaitable, Literal, Protocol
+from typing import Any, Awaitable, Literal, Protocol
 
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -32,6 +32,13 @@ class TextDeliveryDelivery(Protocol):
 class TextPromptDelivery(Protocol):
     def __call__(self, prompt: UserPromptRequest) -> Awaitable[str]:
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class TextOutboundTarget:
+    source: str
+    reply_to: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,3 +139,46 @@ def ui_delivery_steps(outbound: InteractionOutbound) -> list[OutboundDeliverySte
 def _append_prompt_step(steps: list[OutboundDeliveryStep], outbound: InteractionOutbound) -> None:
     if outbound.prompt is not None:
         steps.append(OutboundDeliveryStep(kind="prompt", prompt=outbound.prompt))
+
+
+def text_outbound_target(outbound: InteractionOutbound) -> TextOutboundTarget | None:
+    source = outbound.metadata.get("source")
+    if source is None:
+        return None
+    reply_to = outbound.metadata.get("reply_to")
+    return TextOutboundTarget(
+        source=str(source),
+        reply_to=str(reply_to) if reply_to is not None else None,
+        metadata=dict(outbound.metadata),
+    )
+
+
+def delivery_text_chunks(delivery: InteractionDelivery) -> list[str]:
+    if not delivery.blocks:
+        text = delivery.text or delivery.fallback_text
+        return [text] if text else []
+    chunks: list[str] = []
+    for block in delivery.blocks:
+        block_type = str(block.get("type") or "text")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                chunks.append(text)
+            continue
+        fallback = media_block_fallback(block)
+        if fallback:
+            chunks.append(fallback)
+    if not chunks and (delivery.text or delivery.fallback_text):
+        chunks.append(delivery.text or delivery.fallback_text)
+    return chunks
+
+
+def media_block_fallback(block: dict[str, Any]) -> str:
+    artifact = block.get("artifact")
+    if not isinstance(artifact, dict):
+        return ""
+    summary = artifact.get("summary") or artifact.get("media_type") or artifact.get("kind") or block.get("type")
+    artifact_id = artifact.get("artifact_id") or "artifact"
+    caption = block.get("text")
+    prefix = f"{caption}\n" if caption else ""
+    return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"

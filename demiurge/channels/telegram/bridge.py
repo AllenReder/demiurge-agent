@@ -47,7 +47,7 @@ from demiurge.runtime.approvals import (
     format_resolved_approval_text,
     parse_approval_callback_data,
 )
-from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
+from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime, media_block_fallback, text_outbound_target
 from demiurge.runtime.prompts import PromptDeliveryRuntime, choice_button_rows
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
@@ -509,42 +509,39 @@ class TelegramInteractionBridge:
         text = delivery.text or delivery.fallback_text
         if not delivery.visible or not text:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
-        await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+        await self._send_text(target.source, text, reply_to=target.reply_to)
 
     async def _deliver_tool_results(self, records, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet" or not records:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_results_text(records)
         if text:
-            await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+            await self._send_text(target.source, text, reply_to=target.reply_to)
 
     async def _deliver_tool_call(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet":
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_call_text(record)
         if not text:
             return
         key = self._tool_message_key(record, outbound)
         if record.phase == "finish":
-            target = self._tool_message_ids.pop(key, None)
-            if target is not None and await self._edit_tool_call_message(target[0], target[1], text):
+            edit_target = self._tool_message_ids.pop(key, None)
+            if edit_target is not None and await self._edit_tool_call_message(edit_target[0], edit_target[1], text):
                 return
-        sent = await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+        sent = await self._send_text(target.source, text, reply_to=target.reply_to)
         message_id = _telegram_message_id(sent)
         if record.phase == "start" and message_id is not None:
-            self._tool_message_ids[key] = (str(source), message_id)
+            self._tool_message_ids[key] = (target.source, message_id)
 
     async def _edit_tool_call_message(self, chat_id: str, message_id: int, text: str) -> bool:
         if not hasattr(self.api, "edit_message_text"):
@@ -590,11 +587,9 @@ class TelegramInteractionBridge:
         if not blocks:
             await self._deliver_text(delivery, outbound=outbound)
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
-        reply_to_text = str(reply_to) if reply_to is not None else None
         fallback_lines: list[str] = []
         for index, block in enumerate(blocks):
             block_type = str(block.get("type") or "text")
@@ -602,22 +597,22 @@ class TelegramInteractionBridge:
                 text = str(block.get("text") or "")
                 if text:
                     await self._send_text(
-                        str(source),
+                        target.source,
                         text,
-                        reply_to=reply_to_text if index == 0 else None,
+                        reply_to=target.reply_to if index == 0 else None,
                     )
                 continue
             delivered = await self._deliver_media_block(
-                str(source),
+                target.source,
                 block,
-                reply_to=reply_to_text if index == 0 else None,
+                reply_to=target.reply_to if index == 0 else None,
             )
             if not delivered:
-                fallback = self._media_block_fallback(block)
+                fallback = media_block_fallback(block)
                 if fallback:
                     fallback_lines.append(fallback)
         if fallback_lines:
-            await self._send_text(str(source), "\n\n".join(fallback_lines), reply_to=reply_to_text)
+            await self._send_text(target.source, "\n\n".join(fallback_lines), reply_to=target.reply_to)
 
     async def _deliver_media_block(self, chat_id: str, block: dict[str, Any], *, reply_to: str | None = None) -> bool:
         artifact = block.get("artifact")
@@ -703,16 +698,6 @@ class TelegramInteractionBridge:
         if not path:
             return None
         return str(path)
-
-    def _media_block_fallback(self, block: dict[str, Any]) -> str:
-        artifact = block.get("artifact")
-        if not isinstance(artifact, dict):
-            return ""
-        summary = artifact.get("summary") or artifact.get("media_type") or artifact.get("kind") or block.get("type")
-        artifact_id = artifact.get("artifact_id") or "artifact"
-        caption = block.get("text")
-        prefix = f"{caption}\n" if caption else ""
-        return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
 
     def _conversation_state(self, conversation_key: str) -> TelegramConversationState:
         return self._conversation_states.state_for_key(conversation_key)

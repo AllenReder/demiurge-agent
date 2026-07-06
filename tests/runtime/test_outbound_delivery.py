@@ -10,14 +10,31 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.outbound_delivery import text_delivery_steps, ui_delivery_steps
+from demiurge.runtime.outbound_delivery import (
+    delivery_text_chunks,
+    media_block_fallback,
+    text_delivery_steps,
+    text_outbound_target,
+    ui_delivery_steps,
+)
 from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
 
-def _outbound(*items: InteractionItem, prompt: UserPromptRequest | None = None) -> InteractionOutbound:
-    return InteractionOutbound("test", session_id="session_1", turn_id="turn_1", items=list(items), prompt=prompt)
+def _outbound(
+    *items: InteractionItem,
+    prompt: UserPromptRequest | None = None,
+    metadata: dict | None = None,
+) -> InteractionOutbound:
+    return InteractionOutbound(
+        "test",
+        session_id="session_1",
+        turn_id="turn_1",
+        items=list(items),
+        prompt=prompt,
+        metadata=metadata,
+    )
 
 
 def _delivery(text: str) -> InteractionDelivery:
@@ -72,6 +89,47 @@ def test_text_delivery_steps_ignores_items_without_matching_payload():
     )
 
     assert steps == []
+
+
+def test_text_outbound_target_stringifies_route_metadata():
+    outbound = _outbound(metadata={"source": 123, "reply_to": 456, "conversation_key": "chat"})
+
+    target = text_outbound_target(outbound)
+
+    assert target is not None
+    assert target.source == "123"
+    assert target.reply_to == "456"
+    assert target.metadata == {"source": 123, "reply_to": 456, "conversation_key": "chat"}
+    assert target.metadata is not outbound.metadata
+
+
+def test_text_outbound_target_returns_none_without_source():
+    assert text_outbound_target(_outbound(metadata={"reply_to": 456})) is None
+
+
+def test_media_block_fallback_renders_artifact_summary():
+    assert (
+        media_block_fallback(
+            {
+                "type": "image",
+                "text": "preview",
+                "artifact": {"artifact_id": "a1", "kind": "image", "summary": "plot"},
+            }
+        )
+        == "preview\n[artifact:a1 image plot]"
+    )
+
+
+def test_delivery_text_chunks_renders_text_blocks_and_media_fallbacks():
+    delivery = InteractionDelivery(
+        text="fallback",
+        blocks=[
+            {"type": "text", "text": "intro"},
+            {"type": "image", "artifact": {"artifact_id": "a1", "kind": "image", "summary": "plot"}},
+        ],
+    )
+
+    assert delivery_text_chunks(delivery) == ["intro", "[artifact:a1 image plot]"]
 
 
 async def _noop_prompt(_prompt: UserPromptRequest) -> str:
