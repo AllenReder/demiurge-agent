@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from demiurge.core import SlotDefinition
 from demiurge.runtime.delivery import DeliveryRequest, DeliveryRouteContext
@@ -9,7 +9,12 @@ from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime
 from demiurge.runtime.slot_context import ModuleIOClient, ModuleResultClient
-from demiurge.sdk import EffectRequest, TurnContext
+from demiurge.providers import ToolCall
+from demiurge.sdk import ContextContribution, DeliverEffect, EffectRequest, ToolResult, TurnContext
+from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+
+
+ToolEffectExecutor = Callable[[ToolCall, Any, TurnContext, CapabilityFacade], Awaitable[ToolResult]]
 
 
 class SlotEffectRuntime:
@@ -24,6 +29,8 @@ class SlotEffectRuntime:
         module_delivery: ModuleDeliveryRuntime,
         dispatch: InteractionDispatchRuntime,
         on_history_changed: Callable[[], None] | None = None,
+        execute_tool_effect: ToolEffectExecutor | None = None,
+        emit_event: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.home = home
         self._session_id = session_id
@@ -31,6 +38,8 @@ class SlotEffectRuntime:
         self.module_delivery = module_delivery
         self.dispatch = dispatch
         self.on_history_changed = on_history_changed
+        self.execute_tool_effect = execute_tool_effect
+        self.emit_event = emit_event or self._noop_event
 
     def result_client(self, *, writable: bool) -> ModuleResultClient:
         return ModuleResultClient(
@@ -114,6 +123,83 @@ class SlotEffectRuntime:
         )
         return item.delivery if item is not None else None
 
+    async def handle_effects(
+        self,
+        effects: list[EffectRequest | DeliverEffect | dict[str, Any]],
+        *,
+        core: Any,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        slot: SlotDefinition,
+        interaction_metadata: dict[str, Any],
+    ) -> list[InteractionDelivery]:
+        deliveries: list[InteractionDelivery] = []
+        for raw_effect in effects:
+            effect = self.normalize_effect(raw_effect)
+            try:
+                if effect.type == "append_assistant_message" and effect.content:
+                    effect = EffectRequest(
+                        type="deliver",
+                        payload={"type": "text", "text": effect.content},
+                        visible=effect.visible,
+                        history_policy=effect.history_policy,
+                    )
+                if effect.type == "deliver":
+                    delivery = self.apply_deliver_effect(
+                        effect,
+                        turn=turn,
+                        slot=slot,
+                        interaction_metadata=interaction_metadata,
+                    )
+                    if delivery:
+                        deliveries.append(delivery)
+                elif effect.type == "append_assistant_message" and effect.content:
+                    if effect.visible:
+                        deliveries.append(
+                            InteractionDelivery(
+                                type="text",
+                                text=effect.content,
+                                payload={"type": "text", "text": effect.content},
+                                visible=True,
+                                history_policy=effect.history_policy or slot.history_policy,
+                                metadata={"slot": slot.relative_path},
+                            )
+                        )
+                elif effect.type == "evolve_core":
+                    capability.require("tool.call:evolve_core", slot_path=slot.relative_path)
+                    result = await self._execute_tool_effect(
+                        ToolCall(name="evolve_core", arguments={"goal": effect.goal or effect.reason or ""}),
+                        core=core,
+                        turn=turn,
+                        capability=capability,
+                    )
+                    deliveries.append(self._tool_effect_delivery(result, slot=slot, effect_type=effect.type))
+                elif effect.type == "tool_call" and effect.tool_name:
+                    capability.require(f"tool.call:{effect.tool_name}", slot_path=slot.relative_path)
+                    result = await self._execute_tool_effect(
+                        ToolCall(name=effect.tool_name, arguments=dict(effect.arguments or {})),
+                        core=core,
+                        turn=turn,
+                        capability=capability,
+                    )
+                    if result.content:
+                        deliveries.append(self._tool_effect_delivery(result, slot=slot, effect_type=effect.type))
+                else:
+                    self.emit_event(
+                        "effect.ignored",
+                        turn_id=turn.turn_id,
+                        slot=slot.relative_path,
+                        effect_type=effect.type,
+                    )
+            except CapabilityDenied as exc:
+                self.emit_event(
+                    "capability.denied",
+                    turn_id=turn.turn_id,
+                    slot=slot.relative_path,
+                    error=str(exc),
+                )
+        return deliveries
+
     def schedule_interaction_item(
         self,
         item: InteractionItem,
@@ -154,6 +240,38 @@ class SlotEffectRuntime:
     def mark_pending_failed(self, items: list[InteractionItem], *, reason: str) -> None:
         self.dispatch.mark_pending_failed(items, reason=reason)
 
+    def normalize_context_items(
+        self,
+        items: list[ContextContribution | dict[str, Any]],
+        *,
+        default_placement: str = "pre_current_user",
+    ) -> list[ContextContribution]:
+        result: list[ContextContribution] = []
+        for item in items:
+            if isinstance(item, ContextContribution):
+                if not item.placement:
+                    item.placement = default_placement
+                result.append(item)
+            elif isinstance(item, dict):
+                data = dict(item)
+                data.setdefault("placement", default_placement)
+                result.append(ContextContribution(**data))
+        return result
+
+    def normalize_effect(self, value: EffectRequest | DeliverEffect | dict[str, Any]) -> EffectRequest:
+        if isinstance(value, DeliverEffect):
+            return EffectRequest(
+                type="deliver",
+                payload=value.payload,
+                attachments=list(value.attachments),
+                visible=value.visible,
+                history_policy=value.history_policy,
+                target=value.target,
+            )
+        if isinstance(value, EffectRequest):
+            return value
+        return EffectRequest(**value)
+
     def _delivery_route_context(
         self,
         turn: TurnContext,
@@ -170,3 +288,28 @@ class SlotEffectRuntime:
             slot=slot.relative_path,
             metadata=dict(interaction_metadata),
         )
+
+    async def _execute_tool_effect(
+        self,
+        call: ToolCall,
+        *,
+        core: Any,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+    ) -> ToolResult:
+        if self.execute_tool_effect is None:
+            raise RuntimeError("slot effect tool execution is not configured")
+        return await self.execute_tool_effect(call, core, turn, capability)
+
+    @staticmethod
+    def _tool_effect_delivery(result: ToolResult, *, slot: SlotDefinition, effect_type: str) -> InteractionDelivery:
+        return InteractionDelivery(
+            type="text",
+            text=result.content,
+            payload={"type": "text", "text": result.content},
+            metadata={"slot": slot.relative_path, "effect": effect_type},
+        )
+
+    @staticmethod
+    def _noop_event(event_type: str, **payload: Any) -> dict[str, Any]:
+        return {"type": event_type, **payload}

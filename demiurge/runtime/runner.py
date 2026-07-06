@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
-from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.security.capabilities import CapabilityFacade
 from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
@@ -23,7 +23,6 @@ from demiurge.runtime.child_agents import (
 from demiurge.runtime.delegation_tools import DelegationToolRuntime, RunnerDelegationToolHost
 from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import (
-    InteractionDelivery,
     InteractionInbound,
     InteractionItem,
     SessionInteractionRouter,
@@ -64,8 +63,6 @@ from demiurge.sdk import (
     AgentRunResult,
     AgentSpawnHandle,
     ContextContribution,
-    DeliverEffect,
-    EffectRequest,
     InputEnvelope,
     ToolResult,
     TurnContext,
@@ -184,6 +181,8 @@ class SessionTurnStepRunner:
             module_delivery=self.module_delivery,
             dispatch=self.interaction_dispatch,
             on_history_changed=self._refresh_history,
+            execute_tool_effect=self._execute_slot_effect_tool,
+            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
         )
         self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
         self.slot_execution = SlotExecutionRuntime(
@@ -593,6 +592,23 @@ class SessionTurnStepRunner:
             output_factory=output_factory,
         )
 
+    async def _execute_slot_effect_tool(
+        self,
+        call: ToolCall,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+    ) -> ToolResult:
+        if call.name == "evolve_core":
+            return await self.tool_runtime._execute_builtin(call, core=core, turn=turn, capability=capability)
+        return await self.execute_tool(
+            call,
+            core=core,
+            turn=turn,
+            capability=capability,
+            emit_event=self.event_log.emit,
+        )
+
     async def _run_input_slots(
         self,
         core: LoadedCore,
@@ -681,98 +697,6 @@ class SessionTurnStepRunner:
             interaction_metadata=interaction_metadata,
         )
 
-    async def _handle_effects(
-        self,
-        effects: list[EffectRequest | dict[str, Any]],
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> list[InteractionDelivery]:
-        deliveries: list[InteractionDelivery] = []
-        for raw_effect in effects:
-            effect = self._normalize_effect(raw_effect)
-            try:
-                if effect.type == "append_assistant_message" and effect.content:
-                    effect = EffectRequest(
-                        type="deliver",
-                        payload={"type": "text", "text": effect.content},
-                        visible=effect.visible,
-                        history_policy=effect.history_policy,
-                    )
-                if effect.type == "deliver":
-                    delivery = self.slot_effects.apply_deliver_effect(
-                        effect,
-                        turn=turn,
-                        slot=slot,
-                        interaction_metadata=interaction_metadata,
-                    )
-                    if delivery:
-                        deliveries.append(delivery)
-                elif effect.type == "append_assistant_message" and effect.content:
-                    if effect.visible:
-                        deliveries.append(
-                            InteractionDelivery(
-                                type="text",
-                                text=effect.content,
-                                payload={"type": "text", "text": effect.content},
-                                visible=True,
-                                history_policy=effect.history_policy or slot.history_policy,
-                                metadata={"slot": slot.relative_path},
-                            )
-                        )
-                elif effect.type == "evolve_core":
-                    capability.require("tool.call:evolve_core", slot_path=slot.relative_path)
-                    result = await self.tool_runtime._execute_builtin(
-                        ToolCall(name="evolve_core", arguments={"goal": effect.goal or effect.reason or ""}),
-                        core=core,
-                        turn=turn,
-                        capability=capability,
-                    )
-                    deliveries.append(
-                        InteractionDelivery(
-                            type="text",
-                            text=result.content,
-                            payload={"type": "text", "text": result.content},
-                            metadata={"slot": slot.relative_path, "effect": effect.type},
-                        )
-                    )
-                elif effect.type == "tool_call" and effect.tool_name:
-                    capability.require(f"tool.call:{effect.tool_name}", slot_path=slot.relative_path)
-                    result = await self.execute_tool(
-                        ToolCall(name=effect.tool_name, arguments=dict(effect.arguments or {})),
-                        core=core,
-                        turn=turn,
-                        capability=capability,
-                        emit_event=self.event_log.emit,
-                    )
-                    if result.content:
-                        deliveries.append(
-                            InteractionDelivery(
-                                type="text",
-                                text=result.content,
-                                payload={"type": "text", "text": result.content},
-                                metadata={"slot": slot.relative_path, "effect": effect.type},
-                            )
-                        )
-                else:
-                    self.event_log.emit(
-                        "effect.ignored",
-                        turn_id=turn.turn_id,
-                        slot=slot.relative_path,
-                        effect_type=effect.type,
-                    )
-            except CapabilityDenied as exc:
-                self.event_log.emit(
-                    "capability.denied",
-                    turn_id=turn.turn_id,
-                    slot=slot.relative_path,
-                    error=str(exc),
-                )
-        return deliveries
-
     async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
         while self._background_tasks:
             await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
@@ -799,35 +723,3 @@ class SessionTurnStepRunner:
         if len(message) > 500:
             message = f"{message[:500]}... [truncated]"
         return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
-
-    def _normalize_context_items(
-        self,
-        items: list[ContextContribution | dict[str, Any]],
-        *,
-        default_placement: str = "pre_current_user",
-    ) -> list[ContextContribution]:
-        result: list[ContextContribution] = []
-        for item in items:
-            if isinstance(item, ContextContribution):
-                if not item.placement:
-                    item.placement = default_placement
-                result.append(item)
-            elif isinstance(item, dict):
-                data = dict(item)
-                data.setdefault("placement", default_placement)
-                result.append(ContextContribution(**data))
-        return result
-
-    def _normalize_effect(self, value: EffectRequest | dict[str, Any]) -> EffectRequest:
-        if isinstance(value, DeliverEffect):
-            return EffectRequest(
-                type="deliver",
-                payload=value.payload,
-                attachments=list(value.attachments),
-                visible=value.visible,
-                history_policy=value.history_policy,
-                target=value.target,
-            )
-        if isinstance(value, EffectRequest):
-            return value
-        return EffectRequest(**value)

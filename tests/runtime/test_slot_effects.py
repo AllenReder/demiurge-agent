@@ -1,9 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from demiurge.core import SlotDefinition
+from demiurge.providers import ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.delivery import ContentBlock, DeliveryRequest
 from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
@@ -12,7 +14,8 @@ from demiurge.runtime.module_delivery import ModuleDeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
-from demiurge.sdk import AgentInput, EffectRequest, TurnContext
+from demiurge.sdk import AgentInput, ContextContribution, EffectRequest, ToolResult, TurnContext
+from demiurge.security.capabilities import CapabilityFacade
 
 
 def _turn() -> TurnContext:
@@ -94,7 +97,17 @@ class _Dispatch:
             item.set_dispatch_status("failed")
 
 
-def _runtime(tmp_path: Path):
+def _core(*, capabilities: dict[str, Any] | None = None):
+    return SimpleNamespace(
+        raw_manifest={"capabilities": capabilities or {"defaults": {}}},
+        bootstrap_slots=[],
+        input_slots=[],
+        output_slots=[],
+        tool_slots=[],
+    )
+
+
+def _runtime(tmp_path: Path, *, execute_tool_effect=None):
     host = _EffectHost(tmp_path)
     module_delivery = ModuleDeliveryRuntime(host)
     runtime = SlotEffectRuntime(
@@ -103,6 +116,8 @@ def _runtime(tmp_path: Path):
         workspace=str(tmp_path),
         module_delivery=module_delivery,
         dispatch=_Dispatch(host),
+        execute_tool_effect=execute_tool_effect,
+        emit_event=host.emit_event,
     )
     return host, runtime
 
@@ -148,6 +163,112 @@ def test_apply_deliver_effect_uses_same_commit_path(tmp_path):
     assert delivery is not None
     assert delivery.text == "legacy"
     assert host.session_runtime.read_messages("session_1")[0].model_visible is False
+
+
+@pytest.mark.asyncio
+async def test_handle_effects_converts_append_assistant_message_to_delivery(tmp_path):
+    host, runtime = _runtime(tmp_path)
+
+    deliveries = await runtime.handle_effects(
+        [
+            EffectRequest(
+                type="append_assistant_message",
+                content="legacy output",
+                history_policy="model_hidden",
+            )
+        ],
+        core=_core(),
+        turn=_turn(),
+        capability=CapabilityFacade(_core()),
+        slot=_slot(tmp_path),
+        interaction_metadata={"channel": "tui"},
+    )
+
+    assert [delivery.text for delivery in deliveries] == ["legacy output"]
+    assert host.session_runtime.read_messages("session_1")[0].model_visible is False
+
+
+@pytest.mark.asyncio
+async def test_handle_effects_executes_tool_effect_through_host_adapter(tmp_path):
+    calls: list[ToolCall] = []
+
+    async def execute_tool_effect(call, core, turn, capability):
+        calls.append(call)
+        return ToolResult(content="tool output")
+
+    _, runtime = _runtime(tmp_path, execute_tool_effect=execute_tool_effect)
+    core = _core(capabilities={"defaults": {"tool.call:tools_list": True}})
+
+    deliveries = await runtime.handle_effects(
+        [{"type": "tool_call", "tool_name": "tools_list", "arguments": {"limit": 1}}],
+        core=core,
+        turn=_turn(),
+        capability=CapabilityFacade(core),
+        slot=_slot(tmp_path),
+        interaction_metadata={},
+    )
+
+    assert [(call.name, call.arguments) for call in calls] == [("tools_list", {"limit": 1})]
+    assert [delivery.text for delivery in deliveries] == ["tool output"]
+
+
+@pytest.mark.asyncio
+async def test_handle_effects_records_capability_denied_without_executing_tool(tmp_path):
+    called = False
+
+    async def execute_tool_effect(call, core, turn, capability):
+        nonlocal called
+        called = True
+        return ToolResult(content="should not run")
+
+    host, runtime = _runtime(tmp_path, execute_tool_effect=execute_tool_effect)
+    core = _core()
+
+    deliveries = await runtime.handle_effects(
+        [{"type": "tool_call", "tool_name": "tools_list"}],
+        core=core,
+        turn=_turn(),
+        capability=CapabilityFacade(core),
+        slot=_slot(tmp_path),
+        interaction_metadata={},
+    )
+
+    assert deliveries == []
+    assert called is False
+    assert host.events == [
+        (
+            "capability.denied",
+            {
+                "turn_id": "turn_1",
+                "slot": "agent/output/summary",
+                "error": (
+                    "capability denied: tool.call:tools_list "
+                    "for agent/output/summary"
+                ),
+            },
+        )
+    ]
+
+
+def test_normalize_context_items_applies_default_placement(tmp_path):
+    _, runtime = _runtime(tmp_path)
+
+    items = runtime.normalize_context_items(
+        [
+            {"type": "instruction", "content": "from dict"},
+            ContextContribution(
+                type="instruction",
+                content="from object",
+                placement="",
+            ),
+        ],
+        default_placement="system_context",
+    )
+
+    assert [(item.content, item.placement) for item in items] == [
+        ("from dict", "system_context"),
+        ("from object", "system_context"),
+    ]
 
 
 def test_module_io_client_send_text_commits_and_schedules_through_effect_runtime(tmp_path):

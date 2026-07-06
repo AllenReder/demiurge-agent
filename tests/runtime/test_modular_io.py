@@ -1262,7 +1262,7 @@ async def test_legacy_state_proposal_effect_is_ignored(tmp_path):
         metadata={},
     )
 
-    deliveries = await app.runner._handle_effects(
+    deliveries = await app.runner.slot_effects.handle_effects(
         [
             {
                 "type": "state_proposal",
