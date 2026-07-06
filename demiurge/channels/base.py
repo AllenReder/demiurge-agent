@@ -21,7 +21,7 @@ from demiurge.runtime.interactions import (
 )
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
 from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
-from demiurge.runtime.prompts import PromptChoiceRuntime, format_prompt_text
+from demiurge.runtime.prompts import PromptDeliveryRuntime
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.slash import command_names_for_surface
@@ -77,7 +77,7 @@ class TextChannelBridgeBase:
             run_inbound=self._run_inbound,
             help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
-        self._pending_choices = PromptChoiceRuntime()
+        self._prompt_delivery = PromptDeliveryRuntime()
         self._conversation_states = ConversationStateStore(
             state_factory=self._new_conversation_state,
             on_task_completion=self._on_task_completion,
@@ -99,8 +99,7 @@ class TextChannelBridgeBase:
             return
         inbound = command_outcome.inbound
 
-        if inbound.conversation_key:
-            inbound = self._consume_inbound_pending_choice(inbound)
+        inbound = self._prompt_delivery.resolve_inbound(inbound)
         inbound = self._completion_delivery_runtime().merge_pending_into(
             state,
             inbound,
@@ -123,16 +122,14 @@ class TextChannelBridgeBase:
         )
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
-        self._pending_choices.remember(prompt.conversation_key, prompt.choices)
-        source = prompt.metadata.get("source")
-        if source is None:
+        delivery = self._prompt_delivery.prepare(prompt)
+        if delivery is None:
             return ""
-        reply_to = prompt.metadata.get("reply_to")
         await self._send_text(
-            str(source),
-            format_prompt_text(prompt.question, prompt.choices),
-            reply_to=str(reply_to) if reply_to is not None else None,
-            metadata=prompt.metadata,
+            delivery.source,
+            delivery.text,
+            reply_to=delivery.reply_to,
+            metadata=delivery.metadata,
         )
         return ""
 
@@ -315,21 +312,6 @@ class TextChannelBridgeBase:
 
     def _state_for_session(self, session_id: str) -> TextConversationState | None:
         return self._conversation_states.state_for_session(session_id)
-
-    def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
-        if not inbound.conversation_key:
-            return inbound
-        text = self._pending_choices.consume_text(inbound.conversation_key, inbound.text.strip()).text
-        if text == inbound.text:
-            return inbound
-        return InteractionInbound(
-            channel=inbound.channel,
-            text=text,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            conversation_key=inbound.conversation_key,
-            metadata=dict(inbound.metadata),
-        )
 
     async def _send_typing(self, inbound: InteractionInbound) -> None:
         return None

@@ -862,7 +862,7 @@ async def test_telegram_access_policy_unauthorized_choice_callback_does_not_cons
 
     await bridge.handle_update(_callback("choice:1", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
 
-    assert bridge._pending_choices.get("telegram:123") == ["fast", "careful"]
+    assert bridge._prompt_delivery.pending_choices("telegram:123") == ["fast", "careful"]
     assert runner.texts == []
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
 
@@ -1650,8 +1650,6 @@ async def test_telegram_prompt_sends_choices_and_maps_next_number():
             metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
         )
     )
-    answer = bridge.normalize_update(_message("2", chat_id=123, message_id=457))
-
     assert api.sent == [
         {
             "chat_id": "123",
@@ -1666,7 +1664,11 @@ async def test_telegram_prompt_sends_choices_and_maps_next_number():
             },
         }
     ]
-    assert answer.text == "careful"
+    await bridge.handle_update(_message("2", chat_id=123, message_id=457))
+    state = bridge._conversations["telegram:123"]
+
+    await state.active_task
+    assert state.runtime.runner.texts == ["careful"]
 
 
 @pytest.mark.asyncio

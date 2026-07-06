@@ -48,7 +48,7 @@ from demiurge.runtime.approvals import (
     parse_approval_callback_data,
 )
 from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
-from demiurge.runtime.prompts import PromptChoiceRuntime, choice_button_rows, format_prompt_text
+from demiurge.runtime.prompts import PromptDeliveryRuntime, choice_button_rows
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
@@ -148,7 +148,7 @@ class TelegramInteractionBridge:
         self._polling_conflict_max_retries = TELEGRAM_POLL_CONFLICT_MAX_RETRIES
         self._rich_messages_disabled = False
         self.offset: int | None = None
-        self._pending_choices = PromptChoiceRuntime()
+        self._prompt_delivery = PromptDeliveryRuntime()
         self._pending_approvals = ApprovalPromptRuntime()
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             "demiurge_telegram_active_inbound",
@@ -299,7 +299,7 @@ class TelegramInteractionBridge:
             return
         if not await self._authorize_inbound(inbound):
             return
-        inbound = self._consume_inbound_pending_choice(inbound)
+        inbound = self._prompt_delivery.resolve_inbound(inbound)
         await self.handle_inbound(inbound)
 
     def normalize_update(self, update: dict[str, Any]) -> InteractionInbound | None:
@@ -321,8 +321,6 @@ class TelegramInteractionBridge:
         if normalized is None or not normalized.strip():
             return None
         conversation_key = f"telegram:{chat_id}"
-        if self._telegram_access_allowed(chat_id=chat_id, chat_type=str(chat_type), user_id=user_id):
-            normalized = self._pending_choices.consume_text(conversation_key, normalized.strip()).text
         return InteractionInbound(
             channel="telegram",
             text=normalized.strip(),
@@ -335,21 +333,6 @@ class TelegramInteractionBridge:
                 "telegram_user_id": user_id,
                 "telegram_update_id": update.get("update_id"),
             },
-        )
-
-    def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
-        if not inbound.conversation_key:
-            return inbound
-        text = self._pending_choices.consume_text(inbound.conversation_key, inbound.text.strip()).text
-        if text == inbound.text:
-            return inbound
-        return InteractionInbound(
-            channel=inbound.channel,
-            text=text,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            conversation_key=inbound.conversation_key,
-            metadata=dict(inbound.metadata),
         )
 
     async def _authorize_callback(self, callback: dict[str, Any]) -> bool:
@@ -409,7 +392,7 @@ class TelegramInteractionBridge:
         chat_type = chat.get("type") or "private"
         user_id = (callback.get("from") or {}).get("id")
         conversation_key = f"telegram:{chat_id}"
-        resolution = self._pending_choices.consume_callback_data(conversation_key, data)
+        resolution = self._prompt_delivery.consume_callback_data(conversation_key, data)
         if resolution is None:
             return None
         message_id = message.get("message_id")
@@ -459,16 +442,14 @@ class TelegramInteractionBridge:
         )
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
-        self._pending_choices.remember(prompt.conversation_key, prompt.choices)
-        source = prompt.metadata.get("source")
-        if source is None:
+        delivery = self._prompt_delivery.prepare(prompt)
+        if delivery is None:
             return ""
-        reply_to = prompt.metadata.get("reply_to")
         await self._send_text(
-            str(source),
-            format_prompt_text(prompt.question, prompt.choices),
-            reply_to=str(reply_to) if reply_to is not None else None,
-            reply_markup={"inline_keyboard": choice_button_rows(prompt.choices)} if prompt.choices else None,
+            delivery.source,
+            delivery.text,
+            reply_to=delivery.reply_to,
+            reply_markup={"inline_keyboard": choice_button_rows(delivery.choices)} if delivery.choices else None,
         )
         return ""
 

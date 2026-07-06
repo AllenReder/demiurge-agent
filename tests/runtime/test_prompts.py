@@ -1,11 +1,13 @@
 from demiurge.runtime.prompts import (
     PromptChoiceRuntime,
+    PromptDeliveryRuntime,
     choice_button_rows,
     choice_callback_data,
     format_prompt_text,
     normalize_prompt_answer,
     parse_choice_callback_data,
 )
+from demiurge.runtime.interactions import InteractionInbound, UserPromptRequest
 
 
 def test_normalize_prompt_answer_maps_number_to_choice():
@@ -108,3 +110,90 @@ def test_prompt_choice_runtime_keeps_choices_for_invalid_callback_data():
     assert runtime.get("conversation") == ["fast", "careful"]
     assert runtime.consume_callback_data("conversation", "choice:9") is None
     assert runtime.get("conversation") == ["fast", "careful"]
+
+
+def test_prompt_delivery_runtime_prepares_delivery_and_remembers_choices():
+    runtime = PromptDeliveryRuntime()
+
+    delivery = runtime.prepare(
+        UserPromptRequest(
+            question="Which path?",
+            choices=["fast", "careful"],
+            conversation_key="conversation",
+            metadata={"source": 123, "reply_to": 456, "channel": "telegram"},
+        )
+    )
+
+    assert delivery is not None
+    assert delivery.source == "123"
+    assert delivery.reply_to == "456"
+    assert delivery.text == "Which path?\n1. fast\n2. careful"
+    assert delivery.metadata == {"source": 123, "reply_to": 456, "channel": "telegram"}
+    assert delivery.choices == ("fast", "careful")
+    assert runtime.pending_choices("conversation") == ["fast", "careful"]
+
+
+def test_prompt_delivery_runtime_returns_none_without_source_but_keeps_choice_state():
+    runtime = PromptDeliveryRuntime()
+
+    delivery = runtime.prepare(
+        UserPromptRequest(
+            question="Which path?",
+            choices=["fast", "careful"],
+            conversation_key="conversation",
+        )
+    )
+
+    assert delivery is None
+    assert runtime.pending_choices("conversation") == ["fast", "careful"]
+
+
+def test_prompt_delivery_runtime_resolves_inbound_choice_and_preserves_shape():
+    runtime = PromptDeliveryRuntime()
+    runtime.prepare(
+        UserPromptRequest(
+            question="Which path?",
+            choices=["fast", "careful"],
+            conversation_key="conversation",
+            metadata={"source": "chat"},
+        )
+    )
+    inbound = InteractionInbound(
+        channel="telegram",
+        text="2",
+        source="chat",
+        reply_to="msg",
+        conversation_key="conversation",
+        metadata={"telegram_chat_id": 123},
+        attachments=["attachment"],
+    )
+
+    resolved = runtime.resolve_inbound(inbound)
+
+    assert resolved.text == "careful"
+    assert resolved.channel == inbound.channel
+    assert resolved.source == inbound.source
+    assert resolved.reply_to == inbound.reply_to
+    assert resolved.conversation_key == inbound.conversation_key
+    assert resolved.metadata == inbound.metadata
+    assert resolved.attachments == inbound.attachments
+    assert runtime.pending_choices("conversation") is None
+
+
+def test_prompt_delivery_runtime_consumes_callback_data():
+    runtime = PromptDeliveryRuntime()
+    runtime.prepare(
+        UserPromptRequest(
+            question="Which path?",
+            choices=["fast", "careful"],
+            conversation_key="conversation",
+            metadata={"source": "chat"},
+        )
+    )
+
+    result = runtime.consume_callback_data("conversation", "choice:1")
+
+    assert result is not None
+    assert result.text == "careful"
+    assert result.index == 1
+    assert runtime.pending_choices("conversation") is None

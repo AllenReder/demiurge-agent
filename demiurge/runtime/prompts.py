@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from demiurge.runtime.interactions import InteractionInbound, UserPromptRequest
+
 
 @dataclass(frozen=True, slots=True)
 class PromptChoiceResolution:
@@ -10,6 +12,15 @@ class PromptChoiceResolution:
     consumed: bool = False
     matched_choice: bool = False
     index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptDelivery:
+    source: str
+    text: str
+    reply_to: str | None
+    metadata: dict[str, Any]
+    choices: tuple[str, ...] = field(default_factory=tuple)
 
 
 def normalize_prompt_answer(
@@ -127,6 +138,54 @@ class PromptChoiceRuntime:
         if index is None:
             return None
         return self.consume_index(conversation_key, index)
+
+
+@dataclass(slots=True)
+class PromptDeliveryRuntime:
+    choices: PromptChoiceRuntime = field(default_factory=PromptChoiceRuntime)
+
+    def prepare(self, prompt: UserPromptRequest) -> PromptDelivery | None:
+        prompt_choices = tuple(str(choice) for choice in prompt.choices)
+        self.choices.remember(prompt.conversation_key, prompt_choices)
+        source = prompt.metadata.get("source")
+        if source is None:
+            return None
+        reply_to = prompt.metadata.get("reply_to")
+        return PromptDelivery(
+            source=str(source),
+            text=format_prompt_text(prompt.question, prompt_choices),
+            reply_to=str(reply_to) if reply_to is not None else None,
+            metadata=dict(prompt.metadata),
+            choices=prompt_choices,
+        )
+
+    def resolve_inbound(self, inbound: InteractionInbound) -> InteractionInbound:
+        if not inbound.conversation_key:
+            return inbound
+        text = self.choices.consume_text(inbound.conversation_key, inbound.text.strip()).text
+        if text == inbound.text:
+            return inbound
+        return InteractionInbound(
+            channel=inbound.channel,
+            text=text,
+            source=inbound.source,
+            reply_to=inbound.reply_to,
+            conversation_key=inbound.conversation_key,
+            metadata=dict(inbound.metadata),
+            attachments=list(inbound.attachments),
+        )
+
+    def consume_callback_data(
+        self,
+        conversation_key: str | None,
+        data: Any,
+        *,
+        prefix: str = "choice",
+    ) -> PromptChoiceResolution | None:
+        return self.choices.consume_callback_data(conversation_key, data, prefix=prefix)
+
+    def pending_choices(self, conversation_key: str, default: Any = None) -> list[str] | Any:
+        return self.choices.get(conversation_key, default)
 
 
 def _shorten(value: Any, *, limit: int) -> str:
