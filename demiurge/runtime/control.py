@@ -9,7 +9,6 @@ from demiurge.util import utc_id
 
 
 ActionKind = Literal[
-    "agent.turn",
     "agent.spawn",
     "tool.call",
     "authored_tool.call",

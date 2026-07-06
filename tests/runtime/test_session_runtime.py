@@ -206,11 +206,11 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     outbox_rows = app.runtime_store.query(RuntimeQuery(table="outbox", where={"task_id": result.turn_id}, limit=10)).rows
 
     assert session_rows[0]["core_id"] == "assistant"
-    assert app.control_plane.read(result.turn_id)["kind"] == "agent.turn"
-    assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(result.turn_id)
     assert app.task_worker.list_tasks(owner_session_id=result.session_id) == []
     assert turn_rows[0]["status"] == "completed"
-    assert turn_rows[0]["task_id"] == result.turn_id
+    assert turn_rows[0]["task_id"] is None
     assert [row["role"] for row in message_rows] == ["user", "assistant"]
     assert message_rows[0]["content"]["text"] == "hello"
     assert message_rows[1]["content"]["text"] == "assistant reply"
@@ -244,11 +244,12 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     assert control.is_error is True
     assert "background task not found" in status.content
     assert "background task not found" in control.content
-    assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(result.turn_id)
 
 
 @pytest.mark.asyncio
-async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
+async def test_runner_marks_turn_failed_when_provider_raises(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     app.runner.provider = RaisingProvider()
 
@@ -257,15 +258,14 @@ async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
 
     turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
     failed_turn = turns[-1]
-    task = app.control_plane.read(failed_turn["turn_id"])
 
     assert failed_turn["status"] == "failed"
-    assert task["status"] == "failed"
-    assert task["error"]["message"] == "RuntimeError: provider exploded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(failed_turn["turn_id"])
 
 
 @pytest.mark.asyncio
-async def test_runner_marks_turn_and_task_cancelled_when_provider_turn_is_cancelled(tmp_path):
+async def test_runner_marks_turn_cancelled_when_provider_turn_is_cancelled(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     provider = BlockingProvider()
     app.runner.provider = provider
@@ -278,11 +278,10 @@ async def test_runner_marks_turn_and_task_cancelled_when_provider_turn_is_cancel
 
     turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
     cancelled_turn = turns[-1]
-    task_record = app.control_plane.read(cancelled_turn["turn_id"])
 
     assert cancelled_turn["status"] == "cancelled"
-    assert task_record["status"] == "cancelled"
-    assert task_record["error"]["message"] == "turn cancelled"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(cancelled_turn["turn_id"])
 
 
 @pytest.mark.asyncio

@@ -108,7 +108,6 @@ class _FakeTurnPipelineHost:
         return TurnLifecycle(
             session_id=request.session_id,
             turn_id="turn_1",
-            task_id="turn_1",
             input_envelope=InputEnvelope(raw_text=request.raw_text, metadata=dict(request.metadata)),
             user_input=user_input,
             turn=turn,

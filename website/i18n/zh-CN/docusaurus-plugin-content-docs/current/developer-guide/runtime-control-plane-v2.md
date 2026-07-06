@@ -15,18 +15,19 @@ description: Host-owned action、task、event、projection 和 Agent Slot v2 设
 - `RuntimeStore`：SQLite event store 和 projection surface。
 - `RuntimeControlPlane`：host-owned action 和 task seam。
 - `SessionRuntime`：session admission 和 session/turn/message projections。
-- `TurnEngine`：一个 `agent.turn` task 的 provider/tool loop。
+- `TurnEngine`：一个 Agent Core foreground turn 的 provider/tool loop。
 - `SlotRuntime`：按 phase 执行 authored slot callable。
 
-control-plane 模型是：
+detached-work task ledger 模型是：
 
 ```text
 ActionSpec -> Task -> Event -> Projection
 ```
 
-每个 turn、subagent、terminal command、evolver run、scheduled fire、
-delivery、approval、MCP call、authored tool call、state patch 和 artifact
-write 都应该通过 `RuntimeControlPlane` 进入。
+subagent spawn、terminal command、evolver run、scheduled fire、delivery、
+approval、MCP call、authored tool call、state patch 和 artifact write 等
+detached host work 应该通过 `RuntimeControlPlane` 进入。Foreground Agent Core
+turn 不会成为 task row；它们通过 `SessionRuntime` 投影为 turns 和 messages。
 
 ## Storage
 
@@ -118,3 +119,9 @@ child-count limits，并在 visible-tool construction 和 dispatch 阶段应用 
 `tool_policy` filters。`notify_policy` 只接受 `return_to_parent` 和 `silent`；
 前者会发出 completion event，后者会抑制它。Child output 默认作为 parent 的
 evidence。
+
+Foreground turn 不能通过 control-plane projection 按 task id 读取。它们通过
+session、turn、message、event-log 和 runtime-event projections 保持可追踪。
+面向 model 的 task tools 只操作 detached background task kinds，所以普通 turn
+不会出现在 `task_list` 中，也不支持 `task_status`、`task_control` 或
+`yield_until`。

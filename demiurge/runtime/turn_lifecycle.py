@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from demiurge.runtime.completions import CompletionInbox
-from demiurge.runtime.control import ActionSource, ActionSpec
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slot_context import ModuleStateStores
 from demiurge.runtime.tasks import RuntimeTaskWorker
@@ -31,7 +30,6 @@ class TurnLifecycleRequest:
 class TurnLifecycle:
     session_id: str
     turn_id: str
-    task_id: str | None
     input_envelope: InputEnvelope
     user_input: AgentInput
     turn: TurnContext
@@ -48,7 +46,7 @@ class TurnLifecycleCompletion:
 
 
 class TurnLifecycleRuntime:
-    """Owns host turn lifecycle across event log, session store, and task ledger."""
+    """Owns foreground turn lifecycle across event log and session store."""
 
     def __init__(
         self,
@@ -92,14 +90,12 @@ class TurnLifecycleRuntime:
             core_revision=request.core_revision,
             **metadata,
         )
-        task_id = self._submit_turn_task(request=request, turn_id=turn_id, metadata=metadata)
-        self.session_runtime.start_turn(session_id=request.session_id, turn_id=turn_id, task_id=task_id)
+        self.session_runtime.start_turn(session_id=request.session_id, turn_id=turn_id, task_id=None)
         self.event_log.emit("message.inbound", turn_id=turn_id, content=request.raw_text, **metadata)
 
         return TurnLifecycle(
             session_id=request.session_id,
             turn_id=turn_id,
-            task_id=task_id,
             input_envelope=input_envelope,
             user_input=user_input,
             turn=turn,
@@ -117,8 +113,6 @@ class TurnLifecycleRuntime:
             needs_user=completion.needs_user,
             **lifecycle.metadata,
         )
-        if lifecycle.task_id is not None:
-            self.session_runtime.control_plane.succeed(lifecycle.task_id, result_ref=result_ref)
         self.session_runtime.complete_turn(
             session_id=lifecycle.session_id,
             turn_id=lifecycle.turn_id,
@@ -134,54 +128,6 @@ class TurnLifecycleRuntime:
             status=status,
             result_ref=lifecycle.turn_id,
         )
-        if lifecycle.task_id is None:
-            return
-        source = ActionSource(
-            actor="host.session_runtime",
-            session_id=lifecycle.session_id,
-            turn_id=lifecycle.turn_id,
-            core_id=lifecycle.turn.core_id,
-            metadata=dict(lifecycle.metadata),
-        )
-        if status == "cancelled":
-            self.session_runtime.control_plane.cancel(lifecycle.task_id, summary=error, source=source)
-        else:
-            self.session_runtime.control_plane.fail(lifecycle.task_id, error=error, summary=error, source=source)
-
-    def _submit_turn_task(
-        self,
-        *,
-        request: TurnLifecycleRequest,
-        turn_id: str,
-        metadata: Mapping[str, Any],
-    ) -> str | None:
-        control_plane = getattr(self.session_runtime, "control_plane", None)
-        if control_plane is None:
-            return None
-        source = ActionSource(
-            actor="host.session_runtime",
-            session_id=request.session_id,
-            turn_id=turn_id,
-            core_id=request.core_id,
-            metadata=dict(metadata),
-        )
-        control_plane.submit(
-            ActionSpec(
-                kind="agent.turn",
-                payload={
-                    "task_id": turn_id,
-                    "owner_session_id": request.session_id,
-                    "owner_turn_id": turn_id,
-                    "core_id": request.core_id,
-                    "notify_policy": "session",
-                    "metadata": dict(metadata),
-                },
-                idempotency_key=f"turn:{turn_id}:submitted",
-            ),
-            source=source,
-        )
-        control_plane.mark_started(turn_id, source=source)
-        return turn_id
 
 
 def _serialize_item(item: Any) -> Any:

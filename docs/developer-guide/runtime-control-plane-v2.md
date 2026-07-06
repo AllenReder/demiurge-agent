@@ -17,18 +17,20 @@ The new deep Modules are:
 - `RuntimeControlPlane`: host-owned action and task seam.
 - `DurableWorkRuntime`: lease/ack/terminal-state seam for unfinished host work.
 - `SessionRuntime`: session admission and session/turn/message projections.
-- `TurnEngine`: one `agent.turn` task's provider/tool loop.
+- `TurnEngine`: foreground provider/tool loop for one Agent Core turn.
 - `SlotRuntime`: phase-specific authored slot callable execution.
 
-The control-plane model is:
+The detached-work task ledger model is:
 
 ```text
 ActionSpec -> Task -> Event -> Projection
 ```
 
-Every turn, subagent, terminal command, evolver run, scheduled fire, delivery,
-approval, MCP call, authored tool call, state patch, and artifact write should
-enter through `RuntimeControlPlane`.
+Detached host work such as subagent spawns, terminal commands, evolver runs,
+scheduled fires, delivery, approval, MCP calls, authored tool calls, state
+patches, and artifact writes should enter through `RuntimeControlPlane`.
+Foreground Agent Core turns do not become task rows; they are projected through
+`SessionRuntime` as turns and messages.
 
 ## Storage
 
@@ -137,6 +139,8 @@ Child input/output selection defaults to `base_input` and `base_output`;
 active pipeline while preserving order and serial/parallel groups. Bootstrap is
 off by default for delegated child turns.
 
-Foreground `agent.turn` rows remain readable through the control-plane
-projection for tracing, but model-facing task tools only operate on detached
-background task kinds. Ordinary turns do not reappear in `task_list`.
+Foreground turns are not readable as task ids through the control-plane
+projection. They remain traceable through the session, turn, message, event-log,
+and runtime-event projections. Model-facing task tools only operate on detached
+background task kinds, so ordinary turns neither appear in `task_list` nor
+support `task_status`, `task_control`, or `yield_until`.

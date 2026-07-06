@@ -270,7 +270,7 @@ class RunnerTurnEngineHost:
 
 
 class TurnEngine:
-    """Runs the provider/tool loop for one agent.turn task."""
+    """Runs the foreground provider/tool loop for one agent turn."""
 
     def __init__(self, host: TurnEngineHost):
         self.host = host

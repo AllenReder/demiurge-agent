@@ -57,14 +57,13 @@ async def _complete_background_task(worker: RuntimeTaskWorker, *, summary: str):
     return next(event for event in worker.pending_events_for_session("session_1") if event.task_id == record.task_id)
 
 
-def test_begin_projects_turn_task_and_inbound_event(tmp_path):
+def test_begin_projects_foreground_turn_and_inbound_event(tmp_path):
     _, store, control_plane, _, _, event_log, runtime = _runtime(tmp_path)
 
     lifecycle = runtime.begin(_request(channel="test", source="user_1"))
 
     assert lifecycle.session_id == "session_1"
     assert lifecycle.turn_id.startswith("turn_")
-    assert lifecycle.task_id == lifecycle.turn_id
     assert lifecycle.input_envelope.raw_text == "hello"
     assert lifecycle.input_envelope.attachments == [{"kind": "file", "path": "a.txt"}]
     assert lifecycle.turn.core_id == "assistant"
@@ -76,17 +75,15 @@ def test_begin_projects_turn_task_and_inbound_event(tmp_path):
     assert events[0]["channel"] == "test"
     assert events[1]["content"] == "hello"
 
-    task = control_plane.read(lifecycle.turn_id)
-    assert task["kind"] == "agent.turn"
-    assert task["status"] == "running"
-    assert task["owner_session_id"] == "session_1"
+    with pytest.raises(KeyError, match="task not found"):
+        control_plane.read(lifecycle.turn_id)
     turns = store.query(RuntimeQuery(table="turns", where={"turn_id": lifecycle.turn_id}, limit=1)).rows
     assert turns[0]["status"] == "running"
-    assert turns[0]["task_id"] == lifecycle.turn_id
+    assert turns[0]["task_id"] is None
 
 
 @pytest.mark.asyncio
-async def test_complete_succeeds_task_completes_turn_and_acks_claims(tmp_path):
+async def test_complete_completes_turn_and_acks_claims(tmp_path):
     _, store, control_plane, _, task_worker, event_log, runtime = _runtime(tmp_path)
     direct_event = await _complete_background_task(task_worker, summary="direct")
     merged_event = await _complete_background_task(task_worker, summary="merged")
@@ -117,14 +114,15 @@ async def test_complete_succeeds_task_completes_turn_and_acks_claims(tmp_path):
     assert completed["items"] == [{"kind": "delivery", "text": "done"}]
     assert completed["agent_result"] == {"ok": True}
     assert completed["needs_user"] is True
-    assert control_plane.read(lifecycle.turn_id)["status"] == "succeeded"
+    with pytest.raises(KeyError, match="task not found"):
+        control_plane.read(lifecycle.turn_id)
     turns = store.query(RuntimeQuery(table="turns", where={"turn_id": lifecycle.turn_id}, limit=1)).rows
     assert turns[0]["status"] == "completed"
     assert turns[0]["result_ref"] == "result:1"
     assert CompletionInbox(task_worker).ack_from_metadata(lifecycle.metadata) == 0
 
 
-def test_interrupt_failed_marks_event_session_and_task(tmp_path):
+def test_interrupt_failed_marks_event_and_session(tmp_path):
     _, store, control_plane, _, _, event_log, runtime = _runtime(tmp_path)
     lifecycle = runtime.begin(_request())
 
@@ -133,15 +131,14 @@ def test_interrupt_failed_marks_event_session_and_task(tmp_path):
     failed = event_log.for_turn(lifecycle.turn_id)[-1]
     assert failed["type"] == "turn.failed"
     assert failed["error"] == "RuntimeError: boom"
-    task = control_plane.read(lifecycle.turn_id)
-    assert task["status"] == "failed"
-    assert task["error"]["message"] == "RuntimeError: boom"
+    with pytest.raises(KeyError, match="task not found"):
+        control_plane.read(lifecycle.turn_id)
     turns = store.query(RuntimeQuery(table="turns", where={"turn_id": lifecycle.turn_id}, limit=1)).rows
     assert turns[0]["status"] == "failed"
     assert turns[0]["result_ref"] == lifecycle.turn_id
 
 
-def test_interrupt_cancelled_marks_event_session_and_task(tmp_path):
+def test_interrupt_cancelled_marks_event_and_session(tmp_path):
     _, store, control_plane, _, _, event_log, runtime = _runtime(tmp_path)
     lifecycle = runtime.begin(_request())
 
@@ -150,9 +147,8 @@ def test_interrupt_cancelled_marks_event_session_and_task(tmp_path):
     cancelled = event_log.for_turn(lifecycle.turn_id)[-1]
     assert cancelled["type"] == "turn.cancelled"
     assert cancelled["error"] == "turn cancelled"
-    task = control_plane.read(lifecycle.turn_id)
-    assert task["status"] == "cancelled"
-    assert task["error"]["message"] == "turn cancelled"
+    with pytest.raises(KeyError, match="task not found"):
+        control_plane.read(lifecycle.turn_id)
     turns = store.query(RuntimeQuery(table="turns", where={"turn_id": lifecycle.turn_id}, limit=1)).rows
     assert turns[0]["status"] == "cancelled"
     assert turns[0]["result_ref"] == lifecycle.turn_id
