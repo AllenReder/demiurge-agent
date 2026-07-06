@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -10,7 +10,7 @@ from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
-from demiurge.runtime.bootstrap import BootstrapSlotRequest, BootstrapSlotRuntime, RunnerBootstrapSlotHost
+from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
 from demiurge.runtime.child_agents import (
@@ -56,12 +56,12 @@ from demiurge.runtime.slots import (
     SlotRuntime,
 )
 from demiurge.runtime.store import RuntimeEvent
-from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine, TurnEngineRequest
-from demiurge.runtime.turn_lifecycle import TurnLifecycleCompletion, TurnLifecycleRequest, TurnLifecycleRuntime
+from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine
+from demiurge.runtime.turn_lifecycle import TurnLifecycleRuntime
+from demiurge.runtime.turn_pipeline import RunnerTurnPipelineHost, TurnPipelineRequest, TurnPipelineRuntime, TurnResult
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
-    AgentInput,
     AgentRunResult,
     AgentSpawnHandle,
     ContextContribution,
@@ -85,34 +85,6 @@ SUMMARY_PREFIX = (
     "message that appears after this summary; the latest user message wins if there is any conflict."
 )
 SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY - respond to the message below, not the summary above ---"
-
-
-@dataclass(slots=True)
-class TurnResult:
-    session_id: str
-    turn_id: str
-    core_id: str
-    core_revision: str
-    items: list[InteractionItem]
-    agent_result: Any = None
-    needs_user: bool = False
-
-    @property
-    def deliveries(self) -> list[InteractionDelivery]:
-        return [item.delivery for item in self.items if item.kind == "delivery" and item.delivery is not None]
-
-    @property
-    def tool_results(self) -> list[ToolExecutionRecord]:
-        results: list[ToolExecutionRecord] = []
-        for item in self.items:
-            if item.kind == "tool_result" and item.tool_result is not None:
-                results.append(item.tool_result)
-                continue
-            if item.kind == "tool_call" and item.tool_call is not None:
-                record = item.tool_call.execution_record()
-                if record is not None:
-                    results.append(record)
-        return results
 
 
 @dataclass(slots=True)
@@ -213,6 +185,7 @@ class SessionTurnStepRunner:
         )
         self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
+        self.turn_pipeline = TurnPipelineRuntime(RunnerTurnPipelineHost(self))
         self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
@@ -246,184 +219,19 @@ class SessionTurnStepRunner:
         use_bootstrap: bool = True,
         route_binding: SessionRouteBinding | None = None,
     ) -> TurnResult:
-        core = self.core_loader.load(core_path) if core_path is not None else await self.load_active_core()
-        interaction_metadata = self._interaction_metadata(interaction)
-        self._resolve_session_for_interaction(core, interaction_metadata)
-        if route_binding is not None:
-            route_binding.bind(self.interaction_router, self.session_id)
-        if core_path is None:
-            self.session_runtime.update_session(
-                self.session_id,
-                core_id=core.core_id,
-                core_revision=self._core_revision(core),
-                provider=self.provider_name,
-                model=self._resolve_model_name(core),
-                touch=False,
+        return await self.turn_pipeline.run(
+            TurnPipelineRequest(
+                text=text,
+                core_path=core_path,
+                interaction=interaction,
+                injected_system_context=injected_system_context,
+                input_slot_ids=input_slot_ids,
+                output_slot_ids=output_slot_ids,
+                input_phase_slots=input_phase_slots,
+                output_phase_slots=output_phase_slots,
+                use_bootstrap=use_bootstrap,
+                route_binding=route_binding,
             )
-        if input_slot_ids is not None and input_phase_slots is not None:
-            raise ValueError("input_slot_ids and input_phase_slots cannot both be set")
-        if output_slot_ids is not None and output_phase_slots is not None:
-            raise ValueError("output_slot_ids and output_phase_slots cannot both be set")
-        input_slots_override = self._resolve_phase_slots(core, "input", input_slot_ids)
-        output_slots_override = self._resolve_phase_slots(core, "output", output_slot_ids)
-        capability = CapabilityFacade(core)
-        if not self._session_started:
-            self.event_log.emit("session.started", core_id=core.core_id, core_revision=self._core_revision(core), **interaction_metadata)
-            self._session_started_ids.add(self.session_id)
-        if use_bootstrap:
-            await self.bootstrap_slots.ensure(
-                BootstrapSlotRequest(
-                    session_id=self.session_id,
-                    core=core,
-                    core_revision=self._core_revision(core),
-                    capability=capability,
-                    workspace=self.workspace,
-                    interaction_metadata=interaction_metadata,
-                )
-            )
-
-        lifecycle = self.turn_lifecycle.begin(
-            TurnLifecycleRequest(
-                session_id=self.session_id,
-                core_id=core.core_id,
-                core_revision=self._core_revision(core),
-                raw_text=text,
-                metadata=interaction_metadata,
-                attachments=tuple(interaction.attachments) if interaction is not None else (),
-            )
-        )
-        turn_id = lifecycle.turn_id
-        input_envelope = lifecycle.input_envelope
-        state_stores = lifecycle.state_stores
-        turn = lifecycle.turn
-
-        try:
-            user_text, persisted_user_text, context, input_items = await self._run_input_slots(
-                core,
-                turn,
-                capability,
-                input_envelope,
-                state_stores,
-                interaction_metadata=interaction_metadata,
-                injected_system_context=injected_system_context or [],
-                serial_slots=input_slots_override,
-                phase_slots=input_phase_slots,
-            )
-        except asyncio.CancelledError:
-            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
-            raise
-        except Exception as exc:
-            self.turn_lifecycle.interrupt(
-                lifecycle,
-                status="failed",
-                error=self._sanitize_runtime_error(exc),
-            )
-            raise
-        turn.user_input = AgentInput(content=user_text, metadata=interaction_metadata)
-        self.event_log.emit("message.received", turn_id=turn_id, content=user_text, **interaction_metadata)
-        if persisted_user_text:
-            self.runtime_io.send_user(
-                turn_id=turn_id,
-                content=persisted_user_text,
-                interaction_metadata=interaction_metadata,
-            )
-        items: list[InteractionItem] = list(input_items)
-        await self.tool_runtime.prepare_for_turn(core, turn, emit_event=self.event_log.emit)
-        available_tools = self.tool_runtime.definitions_for(core, turn=turn)
-        try:
-            engine_result = await self.turn_engine.run(
-                TurnEngineRequest(
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    context=context,
-                    available_tools=available_tools,
-                    interaction_metadata=interaction_metadata,
-                    use_bootstrap_context=use_bootstrap,
-                )
-            )
-        except asyncio.CancelledError:
-            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
-            raise
-        except Exception as exc:
-            self.turn_lifecycle.interrupt(
-                lifecycle,
-                status="failed",
-                error=self._sanitize_runtime_error(exc),
-            )
-            raise
-        final_output = engine_result.final_output
-        needs_user = engine_result.needs_user
-        tool_records = engine_result.tool_records
-        turn_messages = engine_result.turn_messages
-        items.extend(engine_result.items)
-
-        result_client = self._module_result_client(writable=True)
-        try:
-            output_items = await self._run_output_slots(
-                core,
-                turn,
-                capability,
-                current_output=final_output,
-                tool_records=tool_records,
-                state_stores=state_stores,
-                interaction_metadata=interaction_metadata,
-                result_client=result_client,
-                serial_slots=output_slots_override,
-                phase_slots=output_phase_slots,
-            )
-        except asyncio.CancelledError:
-            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
-            raise
-        except Exception as exc:
-            self.turn_lifecycle.interrupt(
-                lifecycle,
-                status="failed",
-                error=self._sanitize_runtime_error(exc),
-            )
-            raise
-        items.extend(output_items)
-        delivered_texts = [
-            item.delivery.text
-            for item in items
-            if item.kind == "delivery" and item.delivery is not None and item.delivery.visible and item.delivery.text
-        ]
-        for text in delivered_texts:
-            turn_messages.append(LLMMessage(role="assistant", content=text))
-        self.history = self._session_history_messages()
-        self.display_turns.append(
-            {
-                "turn_id": turn_id,
-                "user": user_text,
-                "assistant": delivered_texts,
-                "tools": [
-                    {
-                        "name": record.call.name,
-                        "content": record.result.content,
-                        "display_output": record.result.display_output,
-                        "is_error": record.result.is_error,
-                    }
-                    for record in tool_records
-                ],
-            }
-        )
-        self.turn_lifecycle.complete(
-            lifecycle,
-            TurnLifecycleCompletion(
-                items=tuple(items),
-                agent_result=result_client.value,
-                needs_user=needs_user,
-                result_ref=turn_id,
-            ),
-        )
-        return TurnResult(
-            session_id=self.session_id,
-            turn_id=turn_id,
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            items=items,
-            agent_result=result_client.value,
-            needs_user=needs_user,
         )
 
     @property
