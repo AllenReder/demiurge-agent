@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.runtime.interactions import InteractionInbound
 
@@ -53,11 +54,23 @@ def _executor(sent, ran, **kwargs) -> ChannelCommandExecutor:
     async def run_inbound(_state, inbound):
         ran.append(inbound)
 
+    lifecycle = kwargs.pop(
+        "lifecycle",
+        ConversationLifecycleRuntime(
+            config=ConversationLifecycleConfig(
+                channel=kwargs.get("channel_name", "test"),
+                merge_owner_id="test:merge",
+                enqueue_owner_id="test:enqueue",
+            ),
+            state_factory=lambda _key: _state(),
+            run_turn=run_inbound,
+        ),
+    )
     return ChannelCommandExecutor(
         channel_name=kwargs.pop("channel_name", "test"),
         surface=kwargs.pop("surface", "text"),
         send_text=send_text,
-        run_inbound=run_inbound,
+        lifecycle=lifecycle,
         **kwargs,
     )
 

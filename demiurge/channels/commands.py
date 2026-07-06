@@ -6,7 +6,7 @@ from typing import Any
 
 from demiurge.providers import ToolCall
 from demiurge.runtime.delegation import subagents_command_text
-from demiurge.runtime.ingress import ConversationTurnController
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleRuntime
 from demiurge.runtime.interactions import InteractionInbound
 from demiurge.runtime.session_commands import (
     build_session_list_view,
@@ -23,7 +23,6 @@ from demiurge.slash import SlashCommand, help_text_for_surface, parse_slash_comm
 CommandHandler = Callable[[str, InteractionInbound, Any], Awaitable[None]]
 NoticeSender = Callable[[str], Awaitable[None]]
 CommandTextSender = Callable[[InteractionInbound, str], Awaitable[None]]
-CommandRunInbound = Callable[[Any, InteractionInbound], Awaitable[None]]
 CommandCancelActive = Callable[[Any], Awaitable[None]]
 CommandStatusExtraLines = Callable[[InteractionInbound], Iterable[str]]
 
@@ -35,10 +34,6 @@ class ChannelCommandOutcome:
     command: SlashCommand | None = None
 
 
-async def _default_cancel_active(state: Any) -> None:
-    await ConversationTurnController(state).cancel_active()
-
-
 @dataclass(slots=True)
 class ChannelCommandExecutor:
     """Shared runtime command implementation for external channel adapters."""
@@ -46,8 +41,8 @@ class ChannelCommandExecutor:
     channel_name: str
     surface: str
     send_text: CommandTextSender
-    run_inbound: CommandRunInbound
-    cancel_active: CommandCancelActive = _default_cancel_active
+    lifecycle: ConversationLifecycleRuntime
+    cancel_active: CommandCancelActive | None = None
     help_extra_lines: tuple[str, ...] = ()
     include_status_channel: bool = True
     status_extra_lines: CommandStatusExtraLines | None = None
@@ -97,16 +92,16 @@ class ChannelCommandExecutor:
         view = build_runtime_status_view(
             state.runtime.runner,
             session_runtime,
-            running=ConversationTurnController(state).running,
+            running=self.lifecycle.running(state),
             busy_mode=state.busy_mode,
-            queued_inputs=state.queue.qsize(),
+            queued_inputs=self.lifecycle.queued_count(state),
             channel=self.channel_name if self.include_status_channel else None,
         )
         await self._send(inbound, format_runtime_status_markdown(view, extra_lines=extra_lines))
 
     async def _command_new(self, _: str, inbound: InteractionInbound, state: Any) -> None:
-        await self.cancel_active(state)
-        ConversationTurnController(state).clear_queue(preserve_completions=False)
+        await self._cancel_active(state)
+        self.lifecycle.clear_queue(state, preserve_completions=False)
         result = await start_bound_session(
             state.runtime.runner,
             state.route_binding,
@@ -122,22 +117,22 @@ class ChannelCommandExecutor:
         await self._send(inbound, f"New session: `{result.session_id}`")
 
     async def _command_stop(self, _: str, inbound: InteractionInbound, state: Any) -> None:
-        controller = ConversationTurnController(state)
-        running = controller.running
-        queued = controller.clear_queue(preserve_completions=True)
+        running = self.lifecycle.running(state)
+        queued = self.lifecycle.clear_queue(state, preserve_completions=True)
         if running:
-            await self.cancel_active(state)
+            await self._cancel_active(state)
             await self._send(inbound, f"Stopped current turn; cleared {queued} queued message(s).")
             return
         await self._send(inbound, f"No running turn; cleared {queued} queued message(s).")
-        await controller.drain_next(lambda next_inbound: self.run_inbound(state, next_inbound))
+        await self.lifecycle.drain_next(state)
 
     async def _command_queue(self, args: str, inbound: InteractionInbound, state: Any) -> None:
         text = args.strip()
         if not text:
             await self._send(inbound, "Usage: `/queue <prompt>`")
             return
-        await ConversationTurnController(state).queue_and_drain_if_idle(
+        await self.lifecycle.queue_and_drain_if_idle(
+            state,
             InteractionInbound(
                 channel=inbound.channel,
                 text=text,
@@ -146,7 +141,6 @@ class ChannelCommandExecutor:
                 conversation_key=inbound.conversation_key,
                 metadata=dict(inbound.metadata),
             ),
-            lambda next_inbound: self.run_inbound(state, next_inbound),
         )
         await self._send(inbound, f"Queued: {_shorten(text)}")
 
@@ -244,6 +238,12 @@ class ChannelCommandExecutor:
             args=args,
         )
         await self._send(inbound, text, limit=True)
+
+    async def _cancel_active(self, state: Any) -> None:
+        if self.cancel_active is not None:
+            await self.cancel_active(state)
+            return
+        await self.lifecycle.cancel_active(state)
 
 
 class ChannelCommandRuntime:

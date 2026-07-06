@@ -68,14 +68,6 @@ class TextChannelBridgeBase:
             unavailable_template="Command not available: /{name}",
             unknown_template="Unknown command: /{name}",
         )
-        self._command_executor = ChannelCommandExecutor(
-            channel_name=channel_name,
-            surface="text",
-            send_text=self._send_command_text,
-            run_inbound=self._run_lifecycle_turn,
-            cancel_active=self._cancel_active,
-            help_extra_lines=("- `/ask <prompt>` - send a prompt",),
-        )
         self._prompt_delivery = PromptDeliveryRuntime()
         self._conversation_lifecycle = ConversationLifecycleRuntime(
             config=ConversationLifecycleConfig(
@@ -87,6 +79,14 @@ class TextChannelBridgeBase:
             state_factory=self._new_conversation_state,
             run_turn=self._run_inbound,
             notify_busy=self._notify_busy_inbound,
+        )
+        self._command_executor = ChannelCommandExecutor(
+            channel_name=channel_name,
+            surface="text",
+            send_text=self._send_command_text,
+            lifecycle=self._conversation_lifecycle,
+            cancel_active=self._cancel_active,
+            help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
         self._conversations = self._conversation_lifecycle.states
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
@@ -230,9 +230,6 @@ class TextChannelBridgeBase:
                 reply_to=inbound.reply_to,
                 metadata=inbound.metadata,
             )
-
-    async def _run_lifecycle_turn(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        await self._conversation_lifecycle.run_state_turn(state, inbound)
 
     async def _run_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         token = self._active_inbound.set(inbound)

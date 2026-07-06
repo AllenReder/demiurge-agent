@@ -133,16 +133,6 @@ class TelegramInteractionBridge:
             unavailable_template="Command not available on Telegram: /{name}",
             unknown_template="Unknown command: /{name}",
         )
-        self._command_executor = ChannelCommandExecutor(
-            channel_name="telegram",
-            surface="telegram",
-            send_text=self._send_command_text,
-            run_inbound=self._run_lifecycle_turn,
-            cancel_active=self._cancel_active,
-            include_status_channel=False,
-            status_extra_lines=self._status_extra_lines,
-            include_subagents=True,
-        )
         self._polling_network_error_count = 0
         self._polling_conflict_count = 0
         self._polling_network_base_delay = TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS
@@ -168,6 +158,16 @@ class TelegramInteractionBridge:
             state_factory=self._new_conversation_state,
             run_turn=self._run_inbound,
             notify_busy=self._notify_busy_inbound,
+        )
+        self._command_executor = ChannelCommandExecutor(
+            channel_name="telegram",
+            surface="telegram",
+            send_text=self._send_command_text,
+            lifecycle=self._conversation_lifecycle,
+            cancel_active=self._cancel_active,
+            include_status_channel=False,
+            status_extra_lines=self._status_extra_lines,
+            include_subagents=True,
         )
         self._conversations = self._conversation_lifecycle.states
         self._tool_message_ids: dict[tuple[str, str], tuple[str, int]] = {}
@@ -693,9 +693,6 @@ class TelegramInteractionBridge:
                 f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
                 reply_to=inbound.reply_to,
             )
-
-    async def _run_lifecycle_turn(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        await self._conversation_lifecycle.run_state_turn(state, inbound)
 
     async def _run_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         token = self._active_inbound.set(inbound)

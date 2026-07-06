@@ -233,6 +233,25 @@ class ConversationLifecycleRuntime(Generic[StateT]):
     ) -> bool:
         return await ConversationTurnController(state).cancel_active(before_cancel=before_cancel)
 
+    @staticmethod
+    def queued_count(state: ConversationIngressState) -> int:
+        return state.queue.qsize()
+
+    @staticmethod
+    def clear_queue(state: ConversationIngressState, *, preserve_completions: bool) -> int:
+        return ConversationTurnController(state).clear_queue(preserve_completions=preserve_completions)
+
+    async def drain_next(self, state: StateT) -> bool:
+        return await ConversationTurnController(state).drain_next(
+            lambda next_inbound: self.run_state_turn(state, next_inbound)
+        )
+
+    async def queue_and_drain_if_idle(self, state: StateT, inbound: InteractionInbound) -> bool:
+        return await ConversationTurnController(state).queue_and_drain_if_idle(
+            inbound,
+            lambda next_inbound: self.run_state_turn(state, next_inbound),
+        )
+
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
         state = self.state_for_session(event.owner_session_id)
         if state is None:
