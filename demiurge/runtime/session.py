@@ -552,7 +552,6 @@ class SessionRuntime:
         *,
         session_id: str,
         turn_id: str,
-        task_id: str | None = None,
         input_ref: str | None = None,
     ) -> None:
         self._append_runtime_event(
@@ -562,7 +561,6 @@ class SessionRuntime:
                 aggregate_id=turn_id,
                 payload={
                     "session_id": session_id,
-                    "task_id": task_id,
                     "status": "running",
                     "input_ref": input_ref,
                 },

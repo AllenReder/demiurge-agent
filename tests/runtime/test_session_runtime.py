@@ -210,8 +210,8 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     with pytest.raises(KeyError, match="task not found"):
         app.control_plane.read(result.turn_id)
     assert app.task_worker.list_tasks(owner_session_id=result.session_id) == []
+    assert turn_rows[0]["session_id"] == result.session_id
     assert turn_rows[0]["status"] == "completed"
-    assert turn_rows[0]["task_id"] is None
     assert [row["role"] for row in message_rows] == ["user", "assistant"]
     assert message_rows[0]["content"]["text"] == "hello"
     assert message_rows[1]["content"]["text"] == "assistant reply"

@@ -90,7 +90,7 @@ class TurnLifecycleRuntime:
             core_revision=request.core_revision,
             **metadata,
         )
-        self.session_runtime.start_turn(session_id=request.session_id, turn_id=turn_id, task_id=None)
+        self.session_runtime.start_turn(session_id=request.session_id, turn_id=turn_id)
         self.event_log.emit("message.inbound", turn_id=turn_id, content=request.raw_text, **metadata)
 
         return TurnLifecycle(

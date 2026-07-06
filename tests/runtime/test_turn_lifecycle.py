@@ -78,8 +78,8 @@ def test_begin_projects_foreground_turn_and_inbound_event(tmp_path):
     with pytest.raises(KeyError, match="task not found"):
         control_plane.read(lifecycle.turn_id)
     turns = store.query(RuntimeQuery(table="turns", where={"turn_id": lifecycle.turn_id}, limit=1)).rows
+    assert turns[0]["session_id"] == "session_1"
     assert turns[0]["status"] == "running"
-    assert turns[0]["task_id"] is None
 
 
 @pytest.mark.asyncio

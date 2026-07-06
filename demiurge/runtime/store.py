@@ -464,14 +464,13 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO turns (
-                    turn_id, session_id, task_id, status, input_ref, result_ref, created_at, completed_at
+                    turn_id, session_id, status, input_ref, result_ref, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
                     payload.get("session_id"),
-                    payload.get("task_id"),
                     payload.get("status", "running"),
                     payload.get("input_ref"),
                     payload.get("result_ref"),
@@ -902,7 +901,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS turns (
     turn_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
-    task_id TEXT,
     status TEXT NOT NULL,
     input_ref TEXT,
     result_ref TEXT,
