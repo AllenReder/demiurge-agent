@@ -19,7 +19,6 @@ from demiurge.runtime.delegation_tools import DelegationToolRuntime, RunnerDeleg
 from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import (
     InteractionInbound,
-    InteractionItem,
     SessionInteractionRouter,
     SessionRouteBinding,
 )
@@ -32,7 +31,6 @@ from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
-    ModuleIOClient,
     ModuleResultClient,
     RunnerSlotContextHost,
     SlotContextRuntime,
@@ -53,8 +51,7 @@ from demiurge.sdk import (
     ToolResult,
     TurnContext,
 )
-from demiurge.storage import EventLog, SessionMessage, VersionStore
-from demiurge.tools.records import ToolExecutionRecord
+from demiurge.storage import EventLog, VersionStore
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import utc_id
 
@@ -367,89 +364,6 @@ class SessionTurnStepRunner:
 
     def _refresh_history(self) -> None:
         self.history = self._session_history_messages()
-
-    def _module_io_client(
-        self,
-        slot: SlotDefinition,
-        *,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        interaction_metadata: dict[str, Any],
-        background: bool = False,
-        items: list[InteractionItem] | None = None,
-    ) -> ModuleIOClient:
-        return self.slot_context.module_io_client(
-            slot,
-            turn=turn,
-            capability=capability,
-            interaction_metadata=interaction_metadata,
-            background=background,
-            items=items,
-        )
-
-    def turn_output_client(
-        self,
-        slot: SlotDefinition,
-        *,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-        interaction_metadata: dict[str, Any],
-        items: list[InteractionItem],
-    ) -> ModuleIOClient:
-        return self._module_io_client(
-            slot,
-            turn=turn,
-            capability=capability,
-            interaction_metadata=interaction_metadata,
-            items=items,
-        )
-
-    async def send_turn_assistant_step(
-        self,
-        *,
-        turn: TurnContext,
-        step_id: str,
-        content: str,
-        tool_calls: list[ToolCall],
-        interaction_metadata: dict[str, Any],
-    ) -> tuple[SessionMessage | None, list[InteractionItem]]:
-        return await self.runtime_io.send_assistant_step(
-            turn=turn,
-            step_id=step_id,
-            content=content,
-            tool_calls=tool_calls,
-            interaction_metadata=interaction_metadata,
-        )
-
-    async def send_turn_tool_call_started(
-        self,
-        *,
-        turn: TurnContext,
-        step_id: str,
-        call: ToolCall,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem:
-        return await self.runtime_io.send_tool_call_started(
-            turn=turn,
-            step_id=step_id,
-            call=call,
-            interaction_metadata=interaction_metadata,
-        )
-
-    async def send_turn_tool_call_finished(
-        self,
-        *,
-        turn: TurnContext,
-        step_id: str,
-        record: ToolExecutionRecord,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionItem:
-        return await self.runtime_io.send_tool_call_finished(
-            turn=turn,
-            step_id=step_id,
-            record=record,
-            interaction_metadata=interaction_metadata,
-        )
 
     def _module_result_client(self, *, writable: bool) -> ModuleResultClient:
         return self.slot_context.result_client(writable=writable)

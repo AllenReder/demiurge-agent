@@ -187,7 +187,7 @@ class RunnerTurnEngineHost:
         tool_calls: list[ToolCall],
         interaction_metadata: dict[str, Any],
     ) -> tuple[Any, list[InteractionItem]]:
-        return await self.runner.send_turn_assistant_step(
+        return await self.runner.runtime_io.send_assistant_step(
             turn=turn,
             step_id=step_id,
             content=content,
@@ -203,7 +203,7 @@ class RunnerTurnEngineHost:
         call: ToolCall,
         interaction_metadata: dict[str, Any],
     ) -> InteractionItem:
-        return await self.runner.send_turn_tool_call_started(
+        return await self.runner.runtime_io.send_tool_call_started(
             turn=turn,
             step_id=step_id,
             call=call,
@@ -236,7 +236,7 @@ class RunnerTurnEngineHost:
         interaction_metadata: dict[str, Any],
         items: list[InteractionItem],
     ) -> Any:
-        return self.runner.turn_output_client(
+        return self.runner.slot_context.module_io_client(
             slot,
             turn=turn,
             capability=capability,
@@ -252,7 +252,7 @@ class RunnerTurnEngineHost:
         record: ToolExecutionRecord,
         interaction_metadata: dict[str, Any],
     ) -> InteractionItem:
-        return await self.runner.send_turn_tool_call_finished(
+        return await self.runner.runtime_io.send_tool_call_finished(
             turn=turn,
             step_id=step_id,
             record=record,
