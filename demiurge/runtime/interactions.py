@@ -322,42 +322,53 @@ class BridgeApprovalProvider:
         return decision
 
 
-class InteractionRuntime:
-    def __init__(self, runner, *, router: SessionInteractionRouter | None = None):
-        self.runner = runner
-        self.router = router or getattr(runner, "interaction_router", None) or SessionInteractionRouter()
-        setattr(runner, "interaction_router", self.router)
+class InteractionExecutionRuntime:
+    """Runs the foreground turn for one inbound interaction."""
 
-    async def handle(
+    def __init__(self, runner):
+        self.runner = runner
+
+    async def run(
         self,
         inbound: InteractionInbound,
         *,
         route_binding: SessionRouteBinding | None = None,
         route: SessionInteractionRoute | None = None,
-    ) -> InteractionOutbound:
+    ):
         if route_binding is None and route is not None:
             route_binding = SessionRouteBinding(route=route)
         result = await self.runner.run_turn(inbound.text, interaction=inbound, route_binding=route_binding)
         background_tasks = getattr(self.runner, "background_tasks", None)
         if background_tasks is not None:
             await background_tasks.drain(include_runtime_tasks=False)
-        prompt = self._prompt_from_tool_results(result, inbound)
-        pending_items = [item for item in result.items if item.dispatch_status == "pending"]
+        return result
+
+
+class InteractionResponseRuntime:
+    """Projects a completed turn into adapter-facing interaction output."""
+
+    def build(self, result, inbound: InteractionInbound) -> InteractionOutbound:
         return InteractionOutbound(
             channel=inbound.channel,
             session_id=result.session_id,
-            items=pending_items,
-            prompt=prompt,
+            items=self.pending_items(result),
+            prompt=self.prompt_from_result(result, inbound),
             turn_id=result.turn_id,
-            metadata={
-                "source": inbound.source,
-                "reply_to": inbound.reply_to,
-                "conversation_key": inbound.conversation_key,
-                **dict(inbound.metadata or {}),
-            },
+            metadata=self.outbound_metadata(inbound),
         )
 
-    def _prompt_from_tool_results(self, result, inbound: InteractionInbound) -> UserPromptRequest | None:
+    def pending_items(self, result) -> list[InteractionItem]:
+        return [item for item in result.items if item.dispatch_status == "pending"]
+
+    def outbound_metadata(self, inbound: InteractionInbound) -> dict[str, Any]:
+        return {
+            "source": inbound.source,
+            "reply_to": inbound.reply_to,
+            "conversation_key": inbound.conversation_key,
+            **dict(inbound.metadata or {}),
+        }
+
+    def prompt_from_result(self, result, inbound: InteractionInbound) -> UserPromptRequest | None:
         if not result.needs_user:
             return None
         for record in reversed(result.tool_results):
@@ -380,3 +391,26 @@ class InteractionRuntime:
                 },
             )
         return None
+
+
+class InteractionRuntime:
+    def __init__(self, runner, *, router: SessionInteractionRouter | None = None):
+        self.runner = runner
+        self.router = router or getattr(runner, "interaction_router", None) or SessionInteractionRouter()
+        setattr(runner, "interaction_router", self.router)
+        self.execution = InteractionExecutionRuntime(runner)
+        self.response = InteractionResponseRuntime()
+
+    async def handle(
+        self,
+        inbound: InteractionInbound,
+        *,
+        route_binding: SessionRouteBinding | None = None,
+        route: SessionInteractionRoute | None = None,
+    ) -> InteractionOutbound:
+        result = await self.execution.run(
+            inbound,
+            route_binding=route_binding,
+            route=route,
+        )
+        return self.response.build(result, inbound)
