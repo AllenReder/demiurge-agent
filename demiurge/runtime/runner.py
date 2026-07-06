@@ -28,13 +28,13 @@ from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
     InteractionItem,
-    InteractionOutbound,
     SessionInteractionRouter,
     SessionRouteBinding,
 )
 from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
+from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRuntime, PromptDebugRequest
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slot_execution import SlotExecutionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
@@ -151,6 +151,14 @@ class SessionTurnStepRunner:
         self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
+        self.prompt_context = PromptContextRuntime(
+            assembler=self.context_assembler,
+            sessions=self.sessions,
+            interaction_router=self.interaction_router,
+            session_id=lambda: self.session_id,
+            show_system_prompt=lambda: self.show_system_prompt,
+            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+        )
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
         self._session_started_ids: set[str] = set()
@@ -242,38 +250,6 @@ class SessionTurnStepRunner:
     def _session_started(self) -> bool:
         return self.session_id in self._session_started_ids
 
-    def _build_messages(
-        self,
-        core: LoadedCore,
-        context: list[ContextContribution],
-        turn_messages: list[LLMMessage],
-        *,
-        turn_id: str,
-        step_id: str,
-        use_bootstrap_context: bool = True,
-    ) -> list[LLMMessage]:
-        assembled = self.context_assembler.assemble(
-            core=core,
-            context=context,
-            session_history=[
-                message
-                for message in self.sessions.history_for_context(self.session_id)
-                if message.turn_id != turn_id
-            ],
-            current_turn_messages=turn_messages,
-            bootstrap_context=self.sessions.read_bootstrap_context(self.session_id) if use_bootstrap_context else None,
-            compaction_summary=self.sessions.latest_compaction_summary(self.session_id),
-        )
-        self.event_log.emit(
-            "context.assembled",
-            turn_id=turn_id,
-            step_id=step_id,
-            layers=assembled.layer_summaries(),
-            total_messages=len(assembled.messages),
-            total_chars=sum(len(message.content or "") for message in assembled.messages),
-        )
-        return assembled.messages
-
     def build_turn_messages(
         self,
         core: LoadedCore,
@@ -284,103 +260,16 @@ class SessionTurnStepRunner:
         step_id: str,
         use_bootstrap_context: bool = True,
     ) -> list[LLMMessage]:
-        return self._build_messages(
-            core,
-            context,
-            turn_messages,
-            turn_id=turn_id,
-            step_id=step_id,
-            use_bootstrap_context=use_bootstrap_context,
+        return self.prompt_context.build_messages(
+            PromptBuildRequest(
+                core=core,
+                context=context,
+                turn_messages=turn_messages,
+                turn_id=turn_id,
+                step_id=step_id,
+                use_bootstrap_context=use_bootstrap_context,
+            )
         )
-
-    async def _maybe_deliver_system_prompt_debug(
-        self,
-        messages: list[LLMMessage],
-        *,
-        turn: TurnContext,
-        step_id: str,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        if not self.show_system_prompt:
-            return
-        system_messages = [
-            message
-            for message in messages
-            if message.role == "system" and (message.content or "").strip()
-        ]
-        if not system_messages:
-            self.event_log.emit(
-                "debug.system_prompt.skipped",
-                turn_id=turn.turn_id,
-                step_id=step_id,
-                reason="no_system_messages",
-                **interaction_metadata,
-            )
-            return
-
-        channel = interaction_metadata.get("channel")
-        if not channel:
-            self.event_log.emit(
-                "debug.system_prompt.skipped",
-                turn_id=turn.turn_id,
-                step_id=step_id,
-                reason="no_channel",
-                system_messages=len(system_messages),
-                total_chars=sum(len(message.content or "") for message in system_messages),
-                **interaction_metadata,
-            )
-            return
-
-        text = self._format_system_prompt_debug(system_messages, turn_id=turn.turn_id, step_id=step_id)
-        metadata = {
-            "role": "system",
-            "debug": "system_prompt",
-            "level": "info",
-            "history_policy": "transient",
-            "delivery": "immediate",
-            "delivery_status": "pending",
-            "system_messages": len(system_messages),
-        }
-        delivery = InteractionDelivery(
-            type="text",
-            kind="notice",
-            text=text,
-            fallback_text=text,
-            blocks=[{"type": "text", "text": text, "metadata": {"debug": "system_prompt"}}],
-            payload={"type": "text", "text": text},
-            visible=True,
-            history_policy="transient",
-            metadata=metadata,
-        )
-        item = InteractionItem.delivery_item(delivery)
-        outbound = InteractionOutbound(
-            channel=str(channel),
-            items=[item],
-            session_id=self.session_id,
-            turn_id=turn.turn_id,
-            metadata=dict(interaction_metadata),
-        )
-        try:
-            result = await self.interaction_router.deliver(outbound)
-            self.event_log.emit(
-                "debug.system_prompt.unrouted" if result.status == "unrouted" else "debug.system_prompt.delivered",
-                turn_id=turn.turn_id,
-                step_id=step_id,
-                system_messages=len(system_messages),
-                total_chars=sum(len(message.content or "") for message in system_messages),
-                **interaction_metadata,
-            )
-        except Exception as exc:
-            item.set_dispatch_status("failed")
-            self.event_log.emit(
-                "debug.system_prompt.failed",
-                turn_id=turn.turn_id,
-                step_id=step_id,
-                error=str(exc),
-                system_messages=len(system_messages),
-                total_chars=sum(len(message.content or "") for message in system_messages),
-                **interaction_metadata,
-            )
 
     async def deliver_turn_system_prompt_debug(
         self,
@@ -390,32 +279,14 @@ class SessionTurnStepRunner:
         step_id: str,
         interaction_metadata: dict[str, Any],
     ) -> None:
-        await self._maybe_deliver_system_prompt_debug(
-            messages,
-            turn=turn,
-            step_id=step_id,
-            interaction_metadata=interaction_metadata,
+        await self.prompt_context.deliver_system_prompt_debug(
+            PromptDebugRequest(
+                messages=messages,
+                turn=turn,
+                step_id=step_id,
+                interaction_metadata=interaction_metadata,
+            )
         )
-
-    def _format_system_prompt_debug(self, messages: list[LLMMessage], *, turn_id: str, step_id: str) -> str:
-        sections = [
-            "# System prompt debug",
-            "",
-            f"turn: {turn_id}",
-            f"step: {step_id}",
-        ]
-        sections.extend(
-            [
-                "",
-                "## Final system prompt",
-                "",
-                "\n\n".join(message.content or "" for message in messages),
-            ]
-        )
-        return "\n".join(sections).strip()
-
-    def _build_skill_index(self, core: LoadedCore) -> str:
-        return self.context_assembler._build_skill_index(core)
 
     def _core_revision(self, core: LoadedCore) -> str:
         try:
