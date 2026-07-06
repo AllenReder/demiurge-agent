@@ -4,9 +4,10 @@ import asyncio
 import email.utils
 from typing import Any
 
-from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value, runtime_factory_for_app
+from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.email.client import EmailClient, EmailInboundMessage
 from demiurge.core import EmailChannelConfig
+from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
 

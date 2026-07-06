@@ -43,7 +43,7 @@ class NdjsonRpcEndpoint:
                 payload = json.loads(stripped)
             except json.JSONDecodeError as exc:
                 await self.write_event(
-                    "interaction.error",
+                    "operator.error",
                     {"message": f"malformed json-rpc line: {exc}", "source": "gateway"},
                 )
                 continue

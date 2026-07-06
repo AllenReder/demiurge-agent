@@ -63,7 +63,9 @@ def process(ctx):
 | `ctx.bootstrap.add(text)` | Adds non-empty text to the bootstrap snapshot. |
 
 Bootstrap return values are ignored. Store all bootstrap text through
-`ctx.bootstrap.add(...)`.
+`ctx.bootstrap.add(...)`. Slot return values are not interpreted as host effect
+requests; use the documented `ctx.input`, `ctx.output`, `ctx.state`,
+`ctx.tools`, `ctx.agents`, and `ctx.result` clients instead.
 
 ## Input Client
 

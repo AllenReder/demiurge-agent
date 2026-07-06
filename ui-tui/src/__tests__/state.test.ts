@@ -2,9 +2,62 @@ import { describe, expect, it } from "vitest"
 import { clearPrompt, createInitialState, reduceGatewayEvent, selectPromptChoice } from "../app/state"
 
 describe("interaction reducer", () => {
+  it("tracks operator product events", () => {
+    let state = reduceGatewayEvent(createInitialState(), {
+      event: "operator.ready",
+      payload: {
+        core_id: "assistant",
+        core_revision: "0002",
+        session_id: "session_2",
+        slash_commands: [{ name: "status", description: "Show status", group: "Core" }],
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.status",
+      payload: {
+        core_id: "assistant",
+        core_revision: "0002",
+        session_id: "session_2",
+        status: "running",
+        queued_inputs: 2,
+        pending_prompts: 1,
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.prompt.opened",
+      payload: { prompt_id: "prompt_2", kind: "resume", question: "Resume?", choices: ["session_1"] },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.approval.opened",
+      payload: { approval_id: "approval_1", request: { tool_name: "terminal", risk: "critical", action: "exec" } },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.history",
+      payload: { items: [{ id: "history_1", type: "message", role: "assistant", text: "old answer" }] },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.error",
+      payload: { message: "boom" },
+    })
+
+    expect(state.ready).toBe(true)
+    expect(state.status).toMatchObject({
+      core_id: "assistant",
+      core_revision: "0002",
+      session_id: "session_2",
+      status: "running",
+      queued_inputs: 2,
+      pending_prompts: 1,
+      last_error: "boom",
+    })
+    expect(state.slashCommands[0]).toMatchObject({ name: "status" })
+    expect(state.transcript).toContainEqual(expect.objectContaining({ type: "message", role: "assistant", text: "old answer" }))
+    expect(state.transcript).toContainEqual(expect.objectContaining({ type: "notice", text: "boom", level: "error" }))
+  })
+
   it("tracks core revision from ready events", () => {
     const state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.ready",
+      event: "operator.ready",
       payload: { core_id: "assistant", core_revision: "0001", session_id: "session_1" },
     })
 
@@ -13,9 +66,9 @@ describe("interaction reducer", () => {
 
   it("renders user and assistant messages as separate transcript blocks", () => {
     let state = createInitialState()
-    state = reduceGatewayEvent(state, { event: "interaction.message", payload: { role: "user", text: "hello" } })
+    state = reduceGatewayEvent(state, { event: "operator.message", payload: { role: "user", text: "hello" } })
     state = reduceGatewayEvent(state, {
-      event: "interaction.deliver",
+      event: "operator.deliver",
       payload: { deliveries: [{ kind: "message", text: "hi", visible: true, metadata: {} }] },
     })
 
@@ -27,7 +80,7 @@ describe("interaction reducer", () => {
 
   it("keeps tool display quiet/summary/full semantics in state", () => {
     const state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.deliver",
+      event: "operator.deliver",
       payload: {
         tool_display: "full",
         tool_calls: [{ index: 1, name: "tools_list", id: "call_1", phase: "finish", status: "ok", summary: "done", arguments: {} }],
@@ -39,14 +92,14 @@ describe("interaction reducer", () => {
 
   it("updates an existing tool block when a finish event arrives", () => {
     let state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.deliver",
+      event: "operator.deliver",
       payload: {
         tool_display: "summary",
         tool_calls: [{ index: 1, name: "terminal", id: "call_1", phase: "start", status: "running", summary: "$ whoami" }],
       },
     })
     state = reduceGatewayEvent(state, {
-      event: "interaction.deliver",
+      event: "operator.deliver",
       payload: {
         tool_display: "summary",
         tool_calls: [{ index: 1, name: "terminal", id: "call_1", phase: "finish", status: "ok", summary: "$ whoami cwd: . exit_code: 0" }],
@@ -59,7 +112,7 @@ describe("interaction reducer", () => {
 
   it("keeps progress deliveries separate from assistant messages", () => {
     const state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.deliver",
+      event: "operator.deliver",
       payload: {
         deliveries: [{ kind: "progress", text: "Running tests", visible: true, metadata: { step: "test" } }],
       },
@@ -70,11 +123,11 @@ describe("interaction reducer", () => {
 
   it("replaces transcript from history snapshots", () => {
     let state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.message",
+      event: "operator.message",
       payload: { role: "user", text: "new session text" },
     })
     state = reduceGatewayEvent(state, {
-      event: "interaction.history",
+      event: "operator.history",
       payload: {
         session_id: "session_1",
         items: [
@@ -110,7 +163,7 @@ describe("interaction reducer", () => {
 
   it("tracks prompt selection", () => {
     let state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.prompt.request",
+      event: "operator.prompt.opened",
       payload: { prompt_id: "prompt_1", kind: "clarify", question: "Which?", choices: ["a", "b"] },
     })
     state = selectPromptChoice(state, 1)
@@ -121,7 +174,7 @@ describe("interaction reducer", () => {
 
   it("tracks approval prompts", () => {
     const state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.approval.request",
+      event: "operator.approval.opened",
       payload: { approval_id: "approval_1", request: { tool_name: "terminal", risk: "critical", action: "exec" } },
     })
     expect(state.prompt).toMatchObject({ type: "approval", approval_id: "approval_1", selected: 0 })
@@ -129,7 +182,7 @@ describe("interaction reducer", () => {
 
   it("stores slash commands from ready payload", () => {
     const state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.ready",
+      event: "operator.ready",
       payload: {
         slash_commands: [
           { name: "status", description: "Show runtime status", group: "Core", usage: null },
@@ -145,19 +198,19 @@ describe("interaction reducer", () => {
 
   it("stores user message alignment from ready and status payloads", () => {
     let state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.ready",
+      event: "operator.ready",
       payload: { user_message_align: "right" },
     })
     expect(state.status.user_message_align).toBe("right")
 
     state = reduceGatewayEvent(state, {
-      event: "interaction.status",
+      event: "operator.status",
       payload: { user_message_align: "left" },
     })
     expect(state.status.user_message_align).toBe("left")
 
     state = reduceGatewayEvent(state, {
-      event: "interaction.status",
+      event: "operator.status",
       payload: { user_message_align: "center" },
     })
     expect(state.status.user_message_align).toBe("left")
@@ -165,21 +218,21 @@ describe("interaction reducer", () => {
 
   it("stores theme colors from ready and status payloads", () => {
     let state = reduceGatewayEvent(createInitialState(), {
-      event: "interaction.ready",
+      event: "operator.ready",
       payload: { demiurge_theme_color: "fac", user_theme_color: "#abc" },
     })
     expect(state.status.demiurge_theme_color).toBe("#ffaacc")
     expect(state.status.user_theme_color).toBe("#aabbcc")
 
     state = reduceGatewayEvent(state, {
-      event: "interaction.status",
+      event: "operator.status",
       payload: { demiurge_theme_color: "#ff9afc", user_theme_color: "9cc9ff" },
     })
     expect(state.status.demiurge_theme_color).toBe("#ff9afc")
     expect(state.status.user_theme_color).toBe("#9cc9ff")
 
     state = reduceGatewayEvent(state, {
-      event: "interaction.status",
+      event: "operator.status",
       payload: { demiurge_theme_color: "pink", user_theme_color: "#12" },
     })
     expect(state.status.demiurge_theme_color).toBe("#ff9afc")

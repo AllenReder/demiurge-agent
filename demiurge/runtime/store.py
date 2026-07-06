@@ -326,14 +326,14 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO outbox (
-                    delivery_id, task_id, channel, target_json, status, idempotency_key,
+                    delivery_id, owner_turn_id, channel, target_json, status, idempotency_key,
                     payload_json, attempts, last_error, created_at, sent_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
+                    payload.get("owner_turn_id"),
                     payload.get("channel"),
                     json.dumps(payload.get("target") or {}, ensure_ascii=False, sort_keys=True),
                     payload.get("status", "queued"),
@@ -464,14 +464,13 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO turns (
-                    turn_id, session_id, task_id, status, input_ref, result_ref, created_at, completed_at
+                    turn_id, session_id, status, input_ref, result_ref, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
                     payload.get("session_id"),
-                    payload.get("task_id"),
                     payload.get("status", "running"),
                     payload.get("input_ref"),
                     payload.get("result_ref"),
@@ -536,13 +535,13 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO artifacts (
-                    artifact_id, task_id, kind, uri, metadata_json, created_at
+                    artifact_id, owner_turn_id, kind, uri, metadata_json, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
+                    payload.get("owner_turn_id"),
                     payload.get("kind") or "file",
                     payload.get("uri") or "",
                     json.dumps(payload.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
@@ -553,14 +552,14 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO tool_calls (
-                    call_id, task_id, turn_id, tool_name, status, args_json, result_json, created_at, completed_at
+                    call_id, turn_id, step_id, tool_name, status, args_json, result_json, created_at, completed_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
                     payload.get("turn_id"),
+                    payload.get("step_id"),
                     payload.get("tool_name"),
                     payload.get("status", "running"),
                     json.dumps(payload.get("args") or {}, ensure_ascii=False, sort_keys=True),
@@ -877,7 +876,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 
 CREATE TABLE IF NOT EXISTS outbox (
     delivery_id TEXT PRIMARY KEY,
-    task_id TEXT,
+    owner_turn_id TEXT,
     channel TEXT,
     target_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL,
@@ -902,7 +901,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS turns (
     turn_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
-    task_id TEXT,
     status TEXT NOT NULL,
     input_ref TEXT,
     result_ref TEXT,
@@ -924,8 +922,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, runtime
 
 CREATE TABLE IF NOT EXISTS tool_calls (
     call_id TEXT PRIMARY KEY,
-    task_id TEXT,
     turn_id TEXT,
+    step_id TEXT,
     tool_name TEXT NOT NULL,
     status TEXT NOT NULL,
     args_json TEXT NOT NULL DEFAULT '{}',
@@ -936,7 +934,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,
-    task_id TEXT,
+    owner_turn_id TEXT,
     kind TEXT NOT NULL,
     uri TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}',

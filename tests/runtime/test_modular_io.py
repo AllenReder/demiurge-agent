@@ -10,9 +10,10 @@ pytestmark = pytest.mark.slow_integration
 from demiurge.app import create_app, source_agents_root
 from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
+from demiurge.runtime.child_agents import ChildAgentRunRequest
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
-from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.security.capabilities import CapabilityDenied
 from demiurge.sdk import AgentInput, OutputContext, TurnContext
 from demiurge.storage import StateStore
 
@@ -217,7 +218,7 @@ async def test_system_prompt_debug_disabled_by_default(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     deliveries = _bridge_deliveries(bridge)
     assert all(delivery.metadata.get("debug") != "system_prompt" for delivery in deliveries)
@@ -252,7 +253,7 @@ async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     deliveries = _bridge_deliveries(bridge)
     debug_delivery = next(delivery for delivery in deliveries if delivery.metadata.get("debug") == "system_prompt")
@@ -286,7 +287,7 @@ async def test_system_prompt_debug_delivers_once_per_model_step(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="tools_list", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     debug_deliveries = [delivery for delivery in _bridge_deliveries(bridge) if delivery.metadata.get("debug") == "system_prompt"]
     assert len(debug_deliveries) == 2
@@ -349,7 +350,7 @@ async def test_parallel_input_cannot_modify_current_prompt(tmp_path):
     app.runner.provider = provider
 
     await app.runner.run_turn("hello")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     request_text = "\n".join(message.content for message in provider.requests[0].messages)
     assert "hello" in request_text
@@ -425,7 +426,7 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == [
@@ -713,7 +714,7 @@ async def test_tool_delivery_schedules_immediately_after_tool_returns(tmp_path):
         InteractionInbound(channel="tui", text="slot end", source="local", conversation_key="local:slot-end"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     delivered = [
         delivery.text
@@ -845,7 +846,7 @@ async def test_parallel_output_runs_in_background_and_uses_active_bridge(tmp_pat
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == ["main", "async extra"]
@@ -879,7 +880,7 @@ async def test_progress_flushes_immediately_without_persisting_history(tmp_path)
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     delivered = [(delivery.kind, delivery.text) for outbound in bridge.outbounds for delivery in outbound.deliveries]
@@ -904,7 +905,7 @@ async def test_immediate_delivery_failure_is_nonfatal_and_keeps_history(tmp_path
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
         route=FailingBridge(),
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     messages = app.session_runtime.read_messages(app.runner.session_id)
@@ -945,7 +946,7 @@ async def test_output_send_commits_history_and_schedules_delivery_immediately(tm
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == ["main", "slot-end"]
@@ -977,7 +978,7 @@ async def test_parallel_output_without_bridge_writes_delivery_failed_event(tmp_p
     outbound = await runtime.handle(
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert any(
@@ -1013,7 +1014,7 @@ async def test_parallel_output_bridge_failure_writes_delivery_failed_event(tmp_p
         route=FailingBridge(),
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert any(
@@ -1250,41 +1251,6 @@ def test_turn_and_output_context_remove_legacy_state_snapshot_fields():
 
 
 @pytest.mark.asyncio
-async def test_legacy_state_proposal_effect_is_ignored(tmp_path):
-    app = create_app(home=tmp_path / "home", provider_name="fake")
-    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    turn = TurnContext(
-        session_id=app.runner.session_id,
-        turn_id="turn_legacy_effect",
-        core_id=core.core_id,
-        core_revision=core.revision,
-        user_input=AgentInput(content="legacy", metadata={}),
-        metadata={},
-    )
-
-    deliveries = await app.runner._handle_effects(
-        [
-            {
-                "type": "state_proposal",
-                "proposal": {"target": "legacy.value", "operation": "set", "patch": "bad"},
-            }
-        ],
-        core=core,
-        turn=turn,
-        capability=CapabilityFacade(core),
-        slot=core.output_slots[0],
-        interaction_metadata={},
-    )
-
-    assert deliveries == []
-    assert StateStore.core(app.home, "assistant").read_target("legacy.value") is None
-    assert any(
-        event["type"] == "effect.ignored" and event.get("effect_type") == "state_proposal"
-        for event in app.runner.event_log.tail(20)
-    )
-
-
-@pytest.mark.asyncio
 async def test_history_recent_messages_returns_message_order_with_tool_summary(tmp_path):
     agents = _copy_agents(tmp_path)
     _write_module(
@@ -1337,7 +1303,7 @@ async def test_tool_result_dispatches_before_slow_output_delivery(tmp_path):
         InteractionInbound(channel="tui", text="tools_list", source="local", conversation_key="local:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.items == []
     ordered = [
@@ -1542,13 +1508,15 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
         metadata={},
     )
 
-    result = await app.runner._run_child_agent(
-        core_id="evolver",
-        raw_input="child raw",
-        parent_turn=parent_turn,
-        parent_slot_path="test",
-        context=[],
-        session_id=child_session_id,
+    result = await app.runner.child_agents.run_child(
+        ChildAgentRunRequest(
+            core_id="evolver",
+            raw_input="child raw",
+            parent_turn=parent_turn,
+            parent_slot_path="test",
+            context=[],
+            session_id=child_session_id,
+        )
     )
 
     child_texts = [delivery.text for outbound in child_bridge.outbounds for delivery in outbound.deliveries]
@@ -2321,7 +2289,7 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     await asyncio.wait_for(provider.child_started.wait(), timeout=0.2)
     assert not any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
     provider.release_child.set()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert len(agent_tasks) == 1
     assert agent_tasks[0].status == "succeeded"
@@ -2369,7 +2337,7 @@ async def test_agents_spawn_records_and_applies_child_tool_selection(tmp_path):
     assert len(agent_tasks) == 1
     assert agent_tasks[0].metadata["requested_child_agent_tools"] == ["read_file"]
 
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert agent_tasks[0].metadata["resolved_child_agent_tools"] == {
@@ -2408,7 +2376,7 @@ async def test_agents_spawn_marks_task_blocked_when_child_needs_user(tmp_path):
     )
 
     await app.runner.run_turn("hello")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert len(agent_tasks) == 1

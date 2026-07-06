@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from demiurge.runtime.tasks import RuntimeTaskConflictError, RuntimeTaskKindError, RuntimeTaskWorker
-from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
-from demiurge.runtime.store import RuntimeStore
+from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.store import RuntimeEvent, RuntimeStore
 
 
 @pytest.mark.asyncio
@@ -123,9 +123,16 @@ async def test_task_worker_mark_blocked_notifies_without_completion(tmp_path):
 
 def test_task_worker_lists_background_tasks_only_and_fails_unknown_kind(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
-    control.submit(
-        ActionSpec(kind="agent.turn", payload={"task_id": "turn_1", "owner_session_id": "session_1"}),
-        source=ActionSource(actor="host.session_runtime", session_id="session_1", turn_id="turn_1"),
+    control.store.append(
+        [
+            RuntimeEvent(
+                type="task.submitted",
+                aggregate_type="task",
+                aggregate_id="tool_1",
+                actor={"actor": "host.tool_runtime", "session_id": "session_1", "turn_id": "turn_1"},
+                payload={"kind": "tool.call", "owner_session_id": "session_1", "status": "queued"},
+            )
+        ]
     )
     runtime = RuntimeTaskWorker(control_plane=control)
 

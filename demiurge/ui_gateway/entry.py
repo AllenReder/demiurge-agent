@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from demiurge.app import create_app
-from demiurge.ui_gateway.bridge import TuiInteractionBridge
+from demiurge.ui_gateway.bridge import OperatorGatewayRuntime
 from demiurge.ui_gateway.protocol import NdjsonRpcEndpoint
 from demiurge.util import default_home
+
+
+LONG_OPERATOR_COMMANDS = frozenset({"/doctor", "/packages", "/evolve", "/rollback", "/compact"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,49 +50,78 @@ async def async_main(argv: list[str] | None = None) -> None:
             session_id=config.get("resume") or config.get("session"),
             resume_required=bool(config.get("resume")),
         )
-        bridge = TuiInteractionBridge(app, emit=emit, tool_display=config.get("tool_display"), busy_mode=config.get("busy_mode"))
-        await bridge.initialize()
+        gateway = OperatorGatewayRuntime(app, emit=emit, tool_display=config.get("tool_display"), busy_mode=config.get("busy_mode"))
+        await gateway.initialize()
     except Exception as exc:
-        await endpoint.write_event("interaction.error", {"message": str(exc), "source": "gateway_startup"})
+        await endpoint.write_event("operator.error", {"message": str(exc), "source": "gateway_startup"})
         return
 
+    pending_handlers: set[asyncio.Task[None]] = set()
     try:
         async for request in endpoint.iter_requests():
             message_id = request.get("id")
             method = str(request.get("method") or "")
             params = request.get("params") if isinstance(request.get("params"), dict) else {}
-            try:
-                result = await _dispatch(bridge, method, params)
-            except Exception as exc:
-                print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
-                await endpoint.write_error(message_id, str(exc)) if message_id is not None else await endpoint.write_event(
-                    "interaction.error", {"message": str(exc), "source": "gateway_dispatch", "method": method}
-                )
+            if _is_long_operator_request(method, params):
+                task = asyncio.create_task(_handle_request(endpoint, gateway, message_id, method, params))
+                pending_handlers.add(task)
+                task.add_done_callback(pending_handlers.discard)
                 continue
-            if message_id is not None:
-                await endpoint.write_result(message_id, result)
-            if bridge.should_exit:
+            await _handle_request(endpoint, gateway, message_id, method, params)
+            if gateway.should_exit:
                 return
     finally:
+        for task in pending_handlers:
+            task.cancel()
+        if pending_handlers:
+            await asyncio.gather(*pending_handlers, return_exceptions=True)
         await app.close()
 
 
-async def _dispatch(bridge: TuiInteractionBridge, method: str, params: dict[str, Any]) -> Any:
-    if method == "interaction.initialize":
-        return await bridge.initialize()
-    if method == "interaction.submit":
-        return await bridge.submit(str(params.get("text") or ""))
-    if method == "interaction.reply_prompt":
-        return await bridge.reply_prompt(str(params.get("prompt_id") or ""), str(params.get("answer") or ""))
-    if method == "interaction.reply_approval":
-        return await bridge.reply_approval(str(params.get("approval_id") or ""), str(params.get("decision") or ""))
-    if method == "channel.command":
-        return await bridge.command(str(params.get("text") or ""))
-    if method == "channel.interrupt":
-        await bridge.interrupt_current_turn(reason=str(params.get("reason") or "channel.interrupt"))
+async def _handle_request(
+    endpoint: NdjsonRpcEndpoint,
+    gateway: OperatorGatewayRuntime,
+    message_id: object,
+    method: str,
+    params: dict[str, Any],
+) -> None:
+    try:
+        result = await _dispatch(gateway, method, params)
+    except Exception as exc:
+        print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        if message_id is not None:
+            await endpoint.write_error(message_id, str(exc))
+        else:
+            payload = {"message": str(exc), "source": "gateway_dispatch", "method": method}
+            await endpoint.write_event("operator.error", payload)
+        return
+    if message_id is not None:
+        await endpoint.write_result(message_id, result)
+
+
+def _is_long_operator_request(method: str, params: dict[str, Any]) -> bool:
+    if method != "operator.command":
+        return False
+    text = str(params.get("text") or "").strip()
+    return any(text == command or text.startswith(f"{command} ") for command in LONG_OPERATOR_COMMANDS)
+
+
+async def _dispatch(gateway: OperatorGatewayRuntime, method: str, params: dict[str, Any]) -> Any:
+    if method == "operator.initialize":
+        return await gateway.initialize()
+    if method == "operator.submit":
+        return await gateway.submit(str(params.get("text") or ""))
+    if method == "operator.reply_prompt":
+        return await gateway.reply_prompt(str(params.get("prompt_id") or ""), str(params.get("answer") or ""))
+    if method == "operator.reply_approval":
+        return await gateway.reply_approval(str(params.get("approval_id") or ""), str(params.get("decision") or ""))
+    if method == "operator.command":
+        return await gateway.command(str(params.get("text") or ""))
+    if method == "operator.interrupt":
+        await gateway.interrupt_current_turn(reason=str(params.get("reason") or "operator.interrupt"))
         return {"interrupted": True}
-    if method == "channel.shutdown":
-        await bridge.shutdown()
+    if method == "operator.shutdown":
+        await gateway.shutdown()
         return {"shutdown": True}
     raise ValueError(f"unknown method: {method}")
 

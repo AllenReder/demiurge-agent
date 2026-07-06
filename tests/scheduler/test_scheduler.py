@@ -12,7 +12,14 @@ from demiurge.channels.telegram import TelegramInteractionBridge
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionRuntime
 from demiurge.runtime.store import RuntimeQuery
-from demiurge.scheduler import SchedulerRuntime, SchedulerService, next_fire_after, parse_instant, start_scheduler_for_app
+from demiurge.scheduler import (
+    ScheduleFireRuntime,
+    SchedulerRuntime,
+    SchedulerService,
+    next_fire_after,
+    parse_instant,
+    start_scheduler_for_app,
+)
 from demiurge.storage import EventLog
 
 
@@ -188,6 +195,33 @@ def test_scheduler_claim_lease_expiry_reclaims_and_rejects_stale_completion(tmp_
     ).rows[0]
     assert row["task_id"] == second.run_id
     assert row["claim_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_schedule_fire_runtime_executes_claimed_schedule_without_service_loop(tmp_path):
+    agents = _copy_agents(tmp_path)
+    _write_schedule(agents, 'schedule: "* * * * *"\nprompt: "Fire directly"\n')
+    app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, timezone="UTC")
+    provider = RecordingProvider(default="direct result")
+    app.runner.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path(app.runner.core_id))
+    schedule = next(schedule for schedule in core.schedules if schedule.schedule_id == "daily")
+    store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
+    due = datetime(2026, 6, 28, 10, 0, tzinfo=UTC)
+    store.set_next_run(schedule, due)
+    claim = store.claim_due(schedule, now=datetime(2026, 6, 28, 10, 1, tzinfo=UTC))
+    assert claim is not None
+
+    result = await ScheduleFireRuntime(app, store).run(core, schedule, claim)
+
+    assert result.status == "completed"
+    assert result.session_id is not None
+    assert app.control_plane.read(result.run_id)["status"] == "succeeded"
+    user_messages = [message.content for message in provider.requests[0].messages if message.role == "user"]
+    assert user_messages[-1] == "Fire directly"
+    completed_log = store.read_run_logs()[-1]
+    assert completed_log["event"] == "completed"
+    assert completed_log["run_id"] == result.run_id
 
 
 @pytest.mark.asyncio

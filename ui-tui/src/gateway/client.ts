@@ -30,15 +30,15 @@ export class GatewayClient {
     const stdout = createInterface({ input: this.child.stdout })
     stdout.on("line", (line) => this.handleLine(line))
     const stderr = createInterface({ input: this.child.stderr })
-    stderr.on("line", (line) => this.dispatch({ event: "interaction.error", payload: { source: "gateway.stderr", message: line } }))
+    stderr.on("line", (line) => this.dispatch({ event: "operator.error", payload: { source: "gateway.stderr", message: line } }))
     this.child.on("exit", (code, signal) => {
       this.child = undefined
       this.rejectPending(new Error(`gateway exited (${code ?? signal ?? "unknown"})`))
       if (code === 0 && signal == null) {
-        this.dispatch({ event: "channel.shutdown", payload: {} })
+        this.dispatch({ event: "operator.shutdown", payload: {} })
       } else {
         this.dispatch({
-          event: "interaction.error",
+          event: "operator.error",
           payload: { source: "gateway", message: `gateway exited (${code ?? signal ?? "unknown"})` },
         })
       }
@@ -59,7 +59,7 @@ export class GatewayClient {
   shutdown(): void {
     const child = this.child
     if (!child) return
-    if (!child.stdin.destroyed && child.stdin.writable) void this.request("channel.shutdown").catch(() => undefined)
+    if (!child.stdin.destroyed && child.stdin.writable) void this.request("operator.shutdown").catch(() => undefined)
     child.stdin.end()
   }
 
@@ -69,7 +69,7 @@ export class GatewayClient {
       frame = parseRpcLine(line)
     } catch (error) {
       this.dispatch({
-        event: "interaction.error",
+        event: "operator.error",
         payload: { source: "gateway.protocol", message: error instanceof Error ? error.message : String(error) },
       })
       return

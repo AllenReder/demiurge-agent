@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value, runtime_factory_for_app
+from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.http import json_request, require_public_http_url
 from demiurge.channels.webhook_server import WebhookHttpServer
 from demiurge.core import WebhookChannelConfig
+from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
 

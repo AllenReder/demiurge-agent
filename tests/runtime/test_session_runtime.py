@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -34,6 +35,15 @@ class ToolThenAnswerProvider:
         if self.calls == 1:
             return LLMResponse(tool_calls=[ToolCall(id="tools_1", name="tools_list", arguments={})])
         return LLMResponse(content="tool complete")
+
+
+class BlockingProvider:
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def complete(self, request):
+        self.started.set()
+        await asyncio.Event().wait()
 
 
 def test_session_runtime_projects_session_turn_and_messages(tmp_path):
@@ -79,7 +89,6 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
         content="hello",
         turn_id="turn_1",
         delivery_id="delivery_1",
-        task_id="turn_1",
         channel="tui",
         target={"conversation_key": "local"},
         delivery_payload={"fallback_text": "hello"},
@@ -94,10 +103,13 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
 
     assert [event["type"] for event in events] == ["message.persisted", "delivery.queued", "work.enqueued"]
     assert events[0]["aggregate_id"] == message.id
+    assert outbox["owner_turn_id"] == "turn_1"
     assert outbox["payload"]["message_id"] == message.id
     assert work["kind"] == "delivery.send"
     assert work["status"] == "queued"
     assert work["owner_turn_id"] == "turn_1"
+    assert work["parent_work_id"] is None
+    assert work["payload"]["owner_turn_id"] == "turn_1"
     assert work["payload"]["message_id"] == message.id
 
 
@@ -148,7 +160,6 @@ def test_create_app_recovers_stale_delivery_work_once(tmp_path):
         content="hello",
         turn_id="turn_1",
         delivery_id="delivery_1",
-        task_id="turn_1",
         channel="tui",
         target={"conversation_key": "local"},
         delivery_payload={"fallback_text": "hello"},
@@ -193,14 +204,14 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     message_rows = app.runtime_store.query(
         RuntimeQuery(table="messages", where={"session_id": result.session_id}, order_by="created_at", limit=10)
     ).rows
-    outbox_rows = app.runtime_store.query(RuntimeQuery(table="outbox", where={"task_id": result.turn_id}, limit=10)).rows
+    outbox_rows = app.runtime_store.query(RuntimeQuery(table="outbox", where={"owner_turn_id": result.turn_id}, limit=10)).rows
 
     assert session_rows[0]["core_id"] == "assistant"
-    assert app.control_plane.read(result.turn_id)["kind"] == "agent.turn"
-    assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(result.turn_id)
     assert app.task_worker.list_tasks(owner_session_id=result.session_id) == []
+    assert turn_rows[0]["session_id"] == result.session_id
     assert turn_rows[0]["status"] == "completed"
-    assert turn_rows[0]["task_id"] == result.turn_id
     assert [row["role"] for row in message_rows] == ["user", "assistant"]
     assert message_rows[0]["content"]["text"] == "hello"
     assert message_rows[1]["content"]["text"] == "assistant reply"
@@ -234,11 +245,12 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     assert control.is_error is True
     assert "background task not found" in status.content
     assert "background task not found" in control.content
-    assert app.control_plane.read(result.turn_id)["status"] == "succeeded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(result.turn_id)
 
 
 @pytest.mark.asyncio
-async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
+async def test_runner_marks_turn_failed_when_provider_raises(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     app.runner.provider = RaisingProvider()
 
@@ -247,11 +259,30 @@ async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
 
     turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
     failed_turn = turns[-1]
-    task = app.control_plane.read(failed_turn["turn_id"])
 
     assert failed_turn["status"] == "failed"
-    assert task["status"] == "failed"
-    assert task["error"]["message"] == "RuntimeError: provider exploded"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(failed_turn["turn_id"])
+
+
+@pytest.mark.asyncio
+async def test_runner_marks_turn_cancelled_when_provider_turn_is_cancelled(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = BlockingProvider()
+    app.runner.provider = provider
+
+    task = asyncio.create_task(app.runner.run_turn("hello"))
+    await provider.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
+    cancelled_turn = turns[-1]
+
+    assert cancelled_turn["status"] == "cancelled"
+    with pytest.raises(KeyError, match="task not found"):
+        app.control_plane.read(cancelled_turn["turn_id"])
 
 
 @pytest.mark.asyncio
@@ -281,6 +312,7 @@ async def test_runner_tool_loop_projects_tool_calls_to_runtime_store(tmp_path):
     rows = app.runtime_store.query(RuntimeQuery(table="tool_calls", where={"call_id": "tools_1"}, limit=1)).rows
 
     assert rows[0]["turn_id"].startswith("turn_")
+    assert rows[0]["step_id"] == f"{rows[0]['turn_id']}_step_1"
     assert rows[0]["tool_name"] == "tools_list"
     assert rows[0]["status"] == "succeeded"
     assert "tools" in rows[0]["result"]["data"]

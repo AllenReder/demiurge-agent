@@ -13,20 +13,23 @@ description: Host-owned action、task、event、projection 和 Agent Slot v2 设
 新的 deep modules 是：
 
 - `RuntimeStore`：SQLite event store 和 projection surface。
-- `RuntimeControlPlane`：host-owned action 和 task seam。
+- `RuntimeControlPlane`：host-owned detached task seam。
 - `SessionRuntime`：session admission 和 session/turn/message projections。
-- `TurnEngine`：一个 `agent.turn` task 的 provider/tool loop。
+- `TurnEngine`：一个 Agent Core foreground turn 的 provider/tool loop。
 - `SlotRuntime`：按 phase 执行 authored slot callable。
 
-control-plane 模型是：
+detached-work task ledger 模型是：
 
 ```text
-ActionSpec -> Task -> Event -> Projection
+TaskSpec -> Task -> Event -> Projection
 ```
 
-每个 turn、subagent、terminal command、evolver run、scheduled fire、
-delivery、approval、MCP call、authored tool call、state patch 和 artifact
-write 都应该通过 `RuntimeControlPlane` 进入。
+可作为 task 观察的 detached host work 通过
+`RuntimeControlPlane.submit_task()` 进入。当前 task-ledger kinds 是
+`agent.spawn`、`terminal.exec`、`evolver.run` 和 `schedule.fire`。Foreground
+Agent Core turn 不会成为 task row；它们通过 `SessionRuntime` 投影为 turns 和
+messages。Delivery、approval、tool-call、MCP、state 和 artifact facts 应该使用
+自己的 projections 或 runtime events，而不是伪装成 task submission。
 
 ## Storage
 
@@ -78,16 +81,23 @@ side-effect lanes，不能修改 prompt、assistant response 或 session history
 
 ## Current Implementation Slice
 
-runtime store 现在是 sessions、turns、messages、task status、task logs、
-scheduler instances、artifacts 和 delivery outbox rows 的 hot-path source of
-truth。旧安装留下的 JSON session 和 scheduler files 可能仍在磁盘上，但 runtime
-code 不读取、不迁移，也不 dual-write 它们。
+runtime store 现在是 sessions、turns、messages、foreground tool-call records、
+task status、task logs、scheduler instances、artifacts、delivery outbox rows、
+runtime work items 和 unique channel conversation bindings 的 hot-path source
+of truth。Foreground tool-call records 由当前 `turn_id` 和 model-loop
+`step_id` 标识；它们不是 task facts。旧安装留下的 JSON session 和 scheduler
+files 可能仍在磁盘上，但 runtime code 不读取、不迁移，也不 dual-write 它们。
 
 `RuntimeTaskWorker` 是 active subprocess、terminal、evolver 和 child-agent
 work 的 live worker。它只在内存中保存 non-durable process handles、cancel
 callbacks 和 live completion subscribers。Public task reads、lists、logs、
 waits、cancellation results 和 pending completion notifications 都从
 `RuntimeControlPlane` / SQLite projections 与 runtime events 重建。
+
+`BackgroundWorkRuntime` 跟踪 parallel slots 和 delivery dispatch 创建的
+in-process background coroutines。它把这些 local tasks 与 durable
+`RuntimeTaskWorker` 组合起来提供 drain 和 active-count 行为；foreground runner
+不再拥有单独的 background-task ledger。
 
 `DeliveryRuntime` claim 匹配的 durable work item 后，通过 session-scoped interaction
 router dispatch queued delivery intents。Outbox lifecycle 是
@@ -118,3 +128,9 @@ child-count limits，并在 visible-tool construction 和 dispatch 阶段应用 
 `tool_policy` filters。`notify_policy` 只接受 `return_to_parent` 和 `silent`；
 前者会发出 completion event，后者会抑制它。Child output 默认作为 parent 的
 evidence。
+
+Foreground turn 不能通过 control-plane projection 按 task id 读取。它们通过
+session、turn、message、event-log 和 runtime-event projections 保持可追踪。
+面向 model 的 task tools 只操作 detached background task kinds，所以普通 turn
+不会出现在 `task_list` 中，也不支持 `task_status`、`task_control` 或
+`yield_until`。

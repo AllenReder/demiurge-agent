@@ -406,7 +406,7 @@ async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp
     assert waited.data["running"] is True
     assert waited.data["timed_out"] is True
     provider.release.set()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
     assert [event.task_id for event in app.task_worker.pending_events_for_session(app.runner.session_id)] == [
         task_id
     ]
@@ -562,7 +562,7 @@ async def test_delegate_task_allows_two_concurrent_children(tmp_path):
     assert provider.started == 2
     assert provider.release is not None
     provider.release.set()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
 
 @pytest.mark.asyncio

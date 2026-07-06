@@ -14,21 +14,28 @@ refactor. The host owns the harness. Agent Cores own authored files under
 The new deep Modules are:
 
 - `RuntimeStore`: SQLite event store and projection surface.
-- `RuntimeControlPlane`: host-owned action and task seam.
+- `RuntimeControlPlane`: host-owned detached task seam.
 - `DurableWorkRuntime`: lease/ack/terminal-state seam for unfinished host work.
+- `HostWorkLifecycleRuntime`: unified lifecycle and observation seam for
+  durable work, detached tasks, delivery, schedule fires, and task-completion
+  notifications.
 - `SessionRuntime`: session admission and session/turn/message projections.
-- `TurnEngine`: one `agent.turn` task's provider/tool loop.
+- `TurnEngine`: foreground provider/tool loop for one Agent Core turn.
 - `SlotRuntime`: phase-specific authored slot callable execution.
 
-The control-plane model is:
+The detached-work task ledger model is:
 
 ```text
-ActionSpec -> Task -> Event -> Projection
+TaskSpec -> Task -> Event -> Projection
 ```
 
-Every turn, subagent, terminal command, evolver run, scheduled fire, delivery,
-approval, MCP call, authored tool call, state patch, and artifact write should
-enter through `RuntimeControlPlane`.
+Detached host work that is observable as a task enters through
+`RuntimeControlPlane.submit_task()`. The current task-ledger kinds are
+`agent.spawn`, `terminal.exec`, `evolver.run`, and `schedule.fire`. Foreground
+Agent Core turns do not become task rows; they are projected through
+`SessionRuntime` as turns and messages. Delivery, approval, tool-call, MCP,
+state, and artifact facts should use their own projections or runtime events
+rather than fake task submissions.
 
 ## Storage
 
@@ -44,6 +51,27 @@ writing ad hoc `queued`, `running`, `sending`, `sent`, or `acknowledged` state.
 Expired `running` or `claimed` work can be reclaimed by a new claim token.
 Expired `sending` work is marked `unknown`; the host must not blindly replay an
 external send after a crash.
+
+Runtime modules that need a cross-subsystem view use
+`HostWorkLifecycleRuntime`. It wraps `DurableWorkRuntime` behind domain
+methods for delivery sends, schedule fires, and task-completion notifications,
+and it projects operator-readable status from `runtime_work_items`, `tasks`,
+`task_logs`, `outbox`, `scheduler_instances`, and task-completion events. This
+is an observation and lifecycle facade, not a replacement for the specialized
+owners:
+
+- `RuntimeTaskWorker` still owns active process handles, live task objects,
+  cancel callbacks, wait, and live completion subscribers.
+- `DeliveryRuntime` still owns channel dispatch, item dispatch status, message
+  failure updates, and delivery event-log records.
+- `SchedulerRuntime` still owns cron calculation, due-instance records, and
+  fresh scheduled sessions.
+- `DurableWorkRuntime` still owns the low-level claim token state machine.
+
+Foreground Agent Core turns are not host work items and must not be promoted
+into task ids. Memory review, background review, curator behavior, and learning
+loops are also not harness modules; those capabilities belong in Agent
+Slot-driven packages using host-mediated tools and capabilities.
 
 ## Agent Slot Layout
 
@@ -89,16 +117,37 @@ session history.
 ## Current Implementation Slice
 
 The runtime store is now the hot-path source of truth for sessions, turns,
-messages, task status, task logs, scheduler instances, artifacts, delivery
-outbox rows, runtime work items, and unique channel conversation bindings. Old
-JSON session and scheduler files may still exist on disk from older installs,
-but runtime code does not read, migrate, or dual-write them.
+messages, foreground tool-call records, task status, task logs, scheduler
+instances, artifacts, delivery outbox rows, runtime work items, and unique
+channel conversation bindings. Foreground tool-call records are keyed by the
+current `turn_id` and model-loop `step_id`; they are not task facts. Old JSON
+session and scheduler files may still exist on disk from older installs, but
+runtime code does not read, migrate, or dual-write them.
 
 `RuntimeTaskWorker` is the live worker for active subprocess, terminal,
 evolver, and child-agent work. It keeps only non-durable process handles,
 cancel callbacks, and live completion subscribers in memory. Public task reads,
 lists, logs, waits, cancellation results, and pending completion notifications
 are rebuilt from `RuntimeControlPlane` / SQLite projections and runtime events.
+Task-completion claim and acknowledgement flow through
+`HostWorkLifecycleRuntime`, so bridges and operator surfaces share the same
+claim/ack vocabulary.
+
+`BackgroundWorkRuntime` tracks in-process background coroutines created by
+parallel slots and delivery dispatch. It composes those local tasks with the
+durable `RuntimeTaskWorker` for drain and active-count behavior; the foreground
+runner does not own a separate background-task ledger.
+
+`OperatorGatewayRuntime` owns the local operator product surface for TUI and
+future dashboard clients. It projects `operator.ready`, `operator.status`,
+`operator.history`, `operator.work.updated`, `operator.prompt.opened`,
+`operator.approval.opened`, `operator.message`, `operator.deliver`,
+`operator.error`, and `operator.shutdown` events from the runtime store, session
+runtime, conversation lifecycle, approval runtime, and
+`HostWorkLifecycleRuntime`. The NDJSON entrypoint is only transport plumbing
+over this operator module; messaging channels remain separate platform
+adapters. Operator clients do not receive legacy `interaction.*` or
+`channel.*` compatibility frames.
 
 `DeliveryRuntime` dispatches queued delivery intents through the
 session-scoped interaction router after claiming the matching durable work item.
@@ -112,6 +161,11 @@ must not rewrite the original history body.
 
 - session creation, update, turn lifecycle, and message persistence to
   `SessionRuntime`;
+- foreground turn admission, including session/core resolution, route binding,
+  bootstrap, and turn begin, to `TurnAdmissionRuntime`;
+- authored input -> model/tool -> output execution to `TurnPipelineRuntime`;
+- foreground input records, assistant output records, display turns,
+  completion, and interruption to `TurnPersistenceRuntime`;
 - provider/tool loop execution to `TurnEngine`;
 - authored bootstrap/input/output slot callable loading and invocation to
   `SlotRuntime`.
@@ -137,6 +191,8 @@ Child input/output selection defaults to `base_input` and `base_output`;
 active pipeline while preserving order and serial/parallel groups. Bootstrap is
 off by default for delegated child turns.
 
-Foreground `agent.turn` rows remain readable through the control-plane
-projection for tracing, but model-facing task tools only operate on detached
-background task kinds. Ordinary turns do not reappear in `task_list`.
+Foreground turns are not readable as task ids through the control-plane
+projection. They remain traceable through the session, turn, message, event-log,
+and runtime-event projections. Model-facing task tools only operate on detached
+background task kinds, so ordinary turns neither appear in `task_list` nor
+support `task_status`, `task_control`, or `yield_until`.

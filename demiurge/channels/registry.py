@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from demiurge.channels.base import GatewayBridge, runtime_factory_for_app
+from demiurge.channels.base import GatewayBridge
 from demiurge.core import (
     EmailChannelConfig,
     MatrixChannelConfig,
@@ -136,6 +136,5 @@ __all__ = [
     "get_channel_registration",
     "registered_channels",
     "register_channel",
-    "runtime_factory_for_app",
     "validate_schedule_target",
 ]
