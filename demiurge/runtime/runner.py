@@ -11,6 +11,7 @@ from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.runtime.bootstrap import BootstrapSlotRequest, BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
 from demiurge.runtime.child_agents import (
@@ -63,7 +64,6 @@ from demiurge.sdk import (
     AgentInput,
     AgentRunResult,
     AgentSpawnHandle,
-    BootstrapContext,
     ContextContribution,
     DeliverEffect,
     EffectRequest,
@@ -126,16 +126,6 @@ class CompactionResult:
     skipped: bool = False
     error: str | None = None
 
-class ModuleBootstrapClient:
-    def __init__(self, *, workspace: str | None = None) -> None:
-        self.fragments: list[str] = []
-        self.workspace = workspace or ""
-
-    def add(self, text: str) -> None:
-        content = str(text or "")
-        if content.strip():
-            self.fragments.append(content)
-
 
 class SessionTurnStepRunner:
     def __init__(
@@ -185,6 +175,7 @@ class SessionTurnStepRunner:
         self.sessions = session_runtime
         self.slot_runtime = slot_runtime or SlotRuntime()
         self.child_agents = ChildAgentRuntime(RunnerChildAgentHost(self))
+        self.bootstrap_slots = BootstrapSlotRuntime(RunnerBootstrapSlotHost(self))
         self.slot_pipeline = SlotPipelineRuntime(RunnerSlotPipelineHost(self))
         self.turn_engine = turn_engine or TurnEngine(RunnerTurnEngineHost(self))
         self.interaction_router = interaction_router or SessionInteractionRouter()
@@ -280,7 +271,16 @@ class SessionTurnStepRunner:
             self.event_log.emit("session.started", core_id=core.core_id, core_revision=self._core_revision(core), **interaction_metadata)
             self._session_started_ids.add(self.session_id)
         if use_bootstrap:
-            await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
+            await self.bootstrap_slots.ensure(
+                BootstrapSlotRequest(
+                    session_id=self.session_id,
+                    core=core,
+                    core_revision=self._core_revision(core),
+                    capability=capability,
+                    workspace=self.workspace,
+                    interaction_metadata=interaction_metadata,
+                )
+            )
 
         lifecycle = self.turn_lifecycle.begin(
             TurnLifecycleRequest(
@@ -429,101 +429,6 @@ class SessionTurnStepRunner:
     @property
     def _session_started(self) -> bool:
         return self.session_id in self._session_started_ids
-
-    async def _ensure_bootstrap_context(
-        self,
-        core: LoadedCore,
-        capability: CapabilityFacade,
-        *,
-        interaction_metadata: dict[str, Any],
-    ) -> None:
-        if not core.bootstrap_enabled:
-            return
-        if self.sessions.bootstrap_context_exists(self.session_id):
-            return
-
-        self.event_log.emit(
-            "bootstrap.started",
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            slots=[slot.slot_id for slot in core.bootstrap_pipeline.serial],
-            **interaction_metadata,
-        )
-        fragments: list[str] = []
-        try:
-            for slot in core.bootstrap_pipeline.serial:
-                self.event_log.emit(
-                    "bootstrap.module.started",
-                    core_id=core.core_id,
-                    core_revision=self._core_revision(core),
-                    slot=slot.relative_path,
-                    kind="bootstrap",
-                    **interaction_metadata,
-                )
-                client = ModuleBootstrapClient(workspace=self.workspace)
-                ctx = BootstrapContext(
-                    session_id=self.session_id,
-                    core_id=core.core_id,
-                    core_revision=self._core_revision(core),
-                    workspace=self.workspace or "",
-                    slot_id=slot.slot_id,
-                    slot_path=slot.relative_path,
-                    capability=capability,
-                    bootstrap=client,
-                )
-                try:
-                    value = await self._call_slot(slot, ctx)
-                    if value is not None:
-                        self.event_log.emit(
-                            "bootstrap.module.return_ignored",
-                            core_id=core.core_id,
-                            core_revision=self._core_revision(core),
-                            slot=slot.relative_path,
-                            kind="bootstrap",
-                            **interaction_metadata,
-                        )
-                    fragments.extend(client.fragments)
-                    self.event_log.emit(
-                        "bootstrap.module.completed",
-                        core_id=core.core_id,
-                        core_revision=self._core_revision(core),
-                        slot=slot.relative_path,
-                        kind="bootstrap",
-                        fragments=len(client.fragments),
-                        chars=sum(len(fragment) for fragment in client.fragments),
-                        **interaction_metadata,
-                    )
-                except Exception as exc:
-                    self.event_log.emit(
-                        "bootstrap.module.failed",
-                        core_id=core.core_id,
-                        core_revision=self._core_revision(core),
-                        slot=slot.relative_path,
-                        kind="bootstrap",
-                        error=str(exc),
-                        **interaction_metadata,
-                    )
-                    if slot.failure_policy == "hard":
-                        raise
-            content = "\n\n".join(fragments)
-            self.sessions.write_bootstrap_context(self.session_id, content)
-            self.event_log.emit(
-                "bootstrap.completed",
-                core_id=core.core_id,
-                core_revision=self._core_revision(core),
-                fragments=len(fragments),
-                chars=len(content),
-                **interaction_metadata,
-            )
-        except Exception as exc:
-            self.event_log.emit(
-                "bootstrap.failed",
-                core_id=core.core_id,
-                core_revision=self._core_revision(core),
-                error=str(exc),
-                **interaction_metadata,
-            )
-            raise
 
     def _build_messages(
         self,
