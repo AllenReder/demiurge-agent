@@ -370,7 +370,7 @@ class ScheduleFireRuntime:
                     output_slot_ids=schedule.modules.output,
                     route_binding=route_binding,
                 )
-                await runner.drain_background_tasks(include_task_worker=False)
+                await runner.background_tasks.drain(include_runtime_tasks=False)
             finally:
                 if route_binding is not None:
                     route_binding.unbind(runner.interaction_router)

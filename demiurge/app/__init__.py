@@ -315,7 +315,7 @@ class DemiurgeApp:
             "debug_show_system_prompt_source": self.debug_show_system_prompt_source,
             "approval_mode": self.approval_runtime.mode,
             "approval_cached_allows": self.approval_runtime.cached_allow_count,
-            "background_tasks": self.task_worker.active_count,
+            "background_tasks": self.runner.background_tasks.active_count,
             "session_id": self.runner.session_id,
             "session_messages": self.session_runtime.message_count(self.runner.session_id),
             "has_compaction_summary": self.session_runtime.latest_compaction_summary(self.runner.session_id)

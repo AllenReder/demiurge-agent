@@ -338,9 +338,9 @@ class InteractionRuntime:
         if route_binding is None and route is not None:
             route_binding = SessionRouteBinding(route=route)
         result = await self.runner.run_turn(inbound.text, interaction=inbound, route_binding=route_binding)
-        drain = getattr(self.runner, "drain_background_tasks", None)
-        if drain is not None:
-            await drain(include_task_worker=False)
+        background_tasks = getattr(self.runner, "background_tasks", None)
+        if background_tasks is not None:
+            await background_tasks.drain(include_runtime_tasks=False)
         prompt = self._prompt_from_tool_results(result, inbound)
         pending_items = [item for item in result.items if item.dispatch_status == "pending"]
         return InteractionOutbound(

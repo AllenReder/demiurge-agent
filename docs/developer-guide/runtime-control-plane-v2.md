@@ -106,6 +106,11 @@ cancel callbacks, and live completion subscribers in memory. Public task reads,
 lists, logs, waits, cancellation results, and pending completion notifications
 are rebuilt from `RuntimeControlPlane` / SQLite projections and runtime events.
 
+`BackgroundWorkRuntime` tracks in-process background coroutines created by
+parallel slots and delivery dispatch. It composes those local tasks with the
+durable `RuntimeTaskWorker` for drain and active-count behavior; the foreground
+runner does not own a separate background-task ledger.
+
 `DeliveryRuntime` dispatches queued delivery intents through the
 session-scoped interaction router after claiming the matching durable work item.
 The outbox lifecycle is `queued -> sending -> sent/failed/unknown/unrouted`.

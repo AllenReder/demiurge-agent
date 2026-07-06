@@ -218,7 +218,7 @@ async def test_system_prompt_debug_disabled_by_default(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     deliveries = _bridge_deliveries(bridge)
     assert all(delivery.metadata.get("debug") != "system_prompt" for delivery in deliveries)
@@ -253,7 +253,7 @@ async def test_system_prompt_debug_delivers_transient_actual_system_context(tmp_
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="hello", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     deliveries = _bridge_deliveries(bridge)
     debug_delivery = next(delivery for delivery in deliveries if delivery.metadata.get("debug") == "system_prompt")
@@ -287,7 +287,7 @@ async def test_system_prompt_debug_delivers_once_per_model_step(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     await runtime.handle(InteractionInbound(channel="tui", text="tools_list", source="local"), route=bridge)
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     debug_deliveries = [delivery for delivery in _bridge_deliveries(bridge) if delivery.metadata.get("debug") == "system_prompt"]
     assert len(debug_deliveries) == 2
@@ -350,7 +350,7 @@ async def test_parallel_input_cannot_modify_current_prompt(tmp_path):
     app.runner.provider = provider
 
     await app.runner.run_turn("hello")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     request_text = "\n".join(message.content for message in provider.requests[0].messages)
     assert "hello" in request_text
@@ -426,7 +426,7 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == [
@@ -714,7 +714,7 @@ async def test_tool_delivery_schedules_immediately_after_tool_returns(tmp_path):
         InteractionInbound(channel="tui", text="slot end", source="local", conversation_key="local:slot-end"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     delivered = [
         delivery.text
@@ -846,7 +846,7 @@ async def test_parallel_output_runs_in_background_and_uses_active_bridge(tmp_pat
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == ["main", "async extra"]
@@ -880,7 +880,7 @@ async def test_progress_flushes_immediately_without_persisting_history(tmp_path)
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     delivered = [(delivery.kind, delivery.text) for outbound in bridge.outbounds for delivery in outbound.deliveries]
@@ -905,7 +905,7 @@ async def test_immediate_delivery_failure_is_nonfatal_and_keeps_history(tmp_path
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
         route=FailingBridge(),
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     messages = app.session_runtime.read_messages(app.runner.session_id)
@@ -946,7 +946,7 @@ async def test_output_send_commits_history_and_schedules_delivery_immediately(tm
         route=bridge,
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert [delivery.text for outbound in bridge.outbounds for delivery in outbound.deliveries] == ["main", "slot-end"]
@@ -978,7 +978,7 @@ async def test_parallel_output_without_bridge_writes_delivery_failed_event(tmp_p
     outbound = await runtime.handle(
         InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert any(
@@ -1014,7 +1014,7 @@ async def test_parallel_output_bridge_failure_writes_delivery_failed_event(tmp_p
         route=FailingBridge(),
     )
     outbound.mark_delivered()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.deliveries == []
     assert any(
@@ -1338,7 +1338,7 @@ async def test_tool_result_dispatches_before_slow_output_delivery(tmp_path):
         InteractionInbound(channel="tui", text="tools_list", source="local", conversation_key="local:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert outbound.items == []
     ordered = [
@@ -2324,7 +2324,7 @@ async def test_agents_spawn_returns_handle_without_waiting_for_child_turn(tmp_pa
     await asyncio.wait_for(provider.child_started.wait(), timeout=0.2)
     assert not any(event["type"] == "agent_spawn.completed" for event in app.runner.event_log.tail(50))
     provider.release_child.set()
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert len(agent_tasks) == 1
     assert agent_tasks[0].status == "succeeded"
@@ -2372,7 +2372,7 @@ async def test_agents_spawn_records_and_applies_child_tool_selection(tmp_path):
     assert len(agent_tasks) == 1
     assert agent_tasks[0].metadata["requested_child_agent_tools"] == ["read_file"]
 
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert agent_tasks[0].metadata["resolved_child_agent_tools"] == {
@@ -2411,7 +2411,7 @@ async def test_agents_spawn_marks_task_blocked_when_child_needs_user(tmp_path):
     )
 
     await app.runner.run_turn("hello")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     agent_tasks = app.task_worker.list_tasks(kind="agent.spawn")
     assert len(agent_tasks) == 1

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
+from demiurge.runtime.background import BackgroundWorkRuntime
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
@@ -138,7 +138,7 @@ class SessionTurnStepRunner:
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
         self._session_started_ids: set[str] = set()
-        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self.background_tasks = BackgroundWorkRuntime(self.task_worker)
         self.turn_lifecycle = TurnLifecycleRuntime(
             home=self.home,
             session_runtime=self.session_runtime,
@@ -154,7 +154,7 @@ class SessionTurnStepRunner:
         self.interaction_dispatch = InteractionDispatchRuntime(
             session_id=lambda: self.session_id,
             delivery_runtime=self.delivery_runtime,
-            track_background_task=self.track_slot_background_task,
+            track_background_task=self.background_tasks.track,
         )
         self.slot_effects = SlotEffectRuntime(
             home=self.home,
@@ -172,7 +172,7 @@ class SessionTurnStepRunner:
             slot_context=self.slot_context,
             slot_effects=self.slot_effects,
             emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
-            track_background_task=self.track_slot_background_task,
+            track_background_task=self.background_tasks.track,
             refresh_history=self._refresh_history,
         )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
@@ -184,10 +184,6 @@ class SessionTurnStepRunner:
 
     def emit_slot_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         return self.event_log.emit(event_type, **payload)
-
-    def track_slot_background_task(self, task: asyncio.Task[Any]) -> None:
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
 
     def _bind_event_log(self) -> None:
         self.event_log = EventLog(self.home, self.session_id)
@@ -423,16 +419,6 @@ class SessionTurnStepRunner:
             capability=capability,
             emit_event=self.event_log.emit,
         )
-
-    async def drain_background_tasks(self, *, include_task_worker: bool = True) -> None:
-        while self._background_tasks:
-            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
-        if include_task_worker:
-            await self.task_worker.drain()
-
-    @property
-    def background_task_count(self) -> int:
-        return sum(1 for task in self._background_tasks if not task.done()) + self.task_worker.active_count
 
     def _append_runtime_event(self, event: RuntimeEvent) -> None:
         self._append_runtime_events([event])

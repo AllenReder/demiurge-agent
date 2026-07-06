@@ -454,7 +454,7 @@ class ChildAgentRuntime:
             output_phase_slots=child_slots.output,
             use_bootstrap=child_slots.use_bootstrap,
         )
-        await child_runner.drain_background_tasks(include_task_worker=False)
+        await child_runner.background_tasks.drain(include_runtime_tasks=False)
         needs_user = result.needs_user or self._turn_result_needs_user(result)
         return AgentRunResult(
             content="\n\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip(),

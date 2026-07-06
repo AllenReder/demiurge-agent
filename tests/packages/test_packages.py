@@ -2331,7 +2331,7 @@ async def test_minimax_direct_mode_delivers_hex_audio_from_parent_output(tmp_pat
         InteractionInbound(channel="tui", text="hello voice", source="local", conversation_key="pkg:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
     assert audio_block["artifact"]["media_type"] == "audio/mpeg"
@@ -2357,7 +2357,7 @@ async def test_minimax_summary_mode_uses_child_result_then_parent_delivers_audio
         InteractionInbound(channel="tui", text="summarize voice", source="local", conversation_key="pkg:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     audio_delivery = next(
         delivery for delivery in bridge.deliveries if any(block.get("type") == "audio" for block in delivery.blocks)
@@ -2434,7 +2434,7 @@ async def test_tts_minimax_url_output_downloads_audio(tmp_path, monkeypatch):
         InteractionInbound(channel="tui", text="hello url voice", source="local", conversation_key="pkg:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert calls[0]["json"]["output_format"] == "url"
     assert next(workspace.glob(".demiurge-tts/*.mp3")).read_bytes() == b"URL-AUDIO"
@@ -2461,7 +2461,7 @@ async def test_provider_tts_direct_mode_delivers_audio(tmp_path, monkeypatch, pa
         InteractionInbound(channel="tui", text=f"hello {provider} voice", source="local", conversation_key=f"pkg:{provider}"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
     assert audio_block["artifact"]["media_type"] == "audio/mpeg"
@@ -2482,7 +2482,7 @@ async def test_openai_tts_payload_uses_speech_endpoint(tmp_path, monkeypatch):
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="openai voice", source="local", conversation_key="pkg:openai")
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert calls[0]["url"] == "https://api.openai.com/v1/audio/speech"
     assert calls[0]["json"]["model"] == "gpt-4o-mini-tts"
@@ -2502,7 +2502,7 @@ async def test_xai_tts_payload_uses_provider_fields(tmp_path, monkeypatch):
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="xai voice", source="local", conversation_key="pkg:xai")
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert calls[0]["url"] == "https://api.x.ai/v1/tts"
     assert calls[0]["json"]["text"] == "[fake] xai voice"
@@ -2526,7 +2526,7 @@ async def test_gemini_tts_decodes_inline_audio_to_wav(tmp_path, monkeypatch):
         InteractionInbound(channel="tui", text="gemini voice", source="local", conversation_key="pkg:gemini"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     audio_block = next(block for delivery in bridge.deliveries for block in delivery.blocks if block.get("type") == "audio")
     assert audio_block["artifact"]["media_type"] == "audio/wav"
@@ -2555,7 +2555,7 @@ async def test_provider_tts_summary_mode_reuses_tts_summarizer(tmp_path, monkeyp
     await InteractionRuntime(app.runner).handle(
         InteractionInbound(channel="tui", text="summarize provider voice", source="local", conversation_key="pkg:openai")
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert calls[0]["json"]["input"] == "[fake] [fake] summarize provider voice"
 
@@ -2642,7 +2642,7 @@ async def test_tts_minimax_api_error_keeps_base_output_without_audio(tmp_path, m
         InteractionInbound(channel="tui", text="hello failure", source="local", conversation_key="pkg:test"),
         route=bridge,
     )
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert bridge.deliveries
     assert not any(block.get("type") == "audio" for delivery in bridge.deliveries for block in delivery.blocks)

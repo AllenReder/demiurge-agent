@@ -293,7 +293,7 @@ async def test_memory_honcho_hybrid_injects_context_exposes_tools_and_syncs_turn
     app.runner.provider = provider
 
     result = await app.runner.run_turn("remember my project preference")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     first_request_text = _request_text(provider)
     assert _delivery_text(result) == "assistant answer"
@@ -328,7 +328,7 @@ async def test_memory_honcho_tools_mode_skips_auto_recall_but_keeps_tools(tmp_pa
     app.runner.provider = provider
 
     await app.runner.run_turn("do not inject context")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     first_request_text = _request_text(provider)
     assert "# Honcho Memory" in first_request_text
@@ -351,7 +351,7 @@ async def test_memory_honcho_output_sync_marks_turn_once(tmp_path, monkeypatch):
     app.runner.provider = provider
 
     result = await app.runner.run_turn("sync this turn")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     core_path = app.version_store.active_core_path("assistant")
     synced_path = core_path / "memory" / "honcho" / "synced_turns.json"
@@ -408,7 +408,7 @@ async def test_memory_honcho_tool_uses_fake_honcho_adapter(tmp_path, monkeypatch
     app.runner.provider = provider
 
     result = await app.runner.run_turn("search memory")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     tool_result = result.tool_results[0].result
     payload = json.loads(tool_result.content)
@@ -444,9 +444,9 @@ async def test_memory_honcho_missing_client_fails_open_and_tool_returns_error(tm
     app.runner.provider = provider
 
     first = await app.runner.run_turn("ordinary turn")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
     second = await app.runner.run_turn("call honcho tool")
-    await app.runner.drain_background_tasks()
+    await app.runner.background_tasks.drain()
 
     assert _delivery_text(first) == "no honcho"
     assert "# Honcho Memory" in _request_text(provider, 0)

@@ -94,6 +94,11 @@ callbacks 和 live completion subscribers。Public task reads、lists、logs、
 waits、cancellation results 和 pending completion notifications 都从
 `RuntimeControlPlane` / SQLite projections 与 runtime events 重建。
 
+`BackgroundWorkRuntime` 跟踪 parallel slots 和 delivery dispatch 创建的
+in-process background coroutines。它把这些 local tasks 与 durable
+`RuntimeTaskWorker` 组合起来提供 drain 和 active-count 行为；foreground runner
+不再拥有单独的 background-task ledger。
+
 `DeliveryRuntime` claim 匹配的 durable work item 后，通过 session-scoped interaction
 router dispatch queued delivery intents。Outbox lifecycle 是
 `queued -> sending -> sent/failed/unknown/unrouted`。`unrouted` 表示该 delivery

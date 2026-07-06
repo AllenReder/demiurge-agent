@@ -432,7 +432,7 @@ class TuiInteractionBridge:
             "user_theme_color": self.app.user_theme_color,
             "busy_mode": view.busy_mode,
             "queued_inputs": view.queued_inputs,
-            "background_tasks": self.app.runner.background_task_count,
+            "background_tasks": self.app.runner.background_tasks.active_count,
             "message_count": view.message_count or 0,
             "pending_prompts": len(self._pending_prompts),
             "pending_approvals": self._pending_approvals.count,
