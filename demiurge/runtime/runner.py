@@ -12,11 +12,7 @@ from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlot
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
 from demiurge.runtime.child_agents import (
-    CHILD_AGENT_ALL_TOOLS,
     ChildAgentRuntime,
-    ChildSlotRequest,
-    ChildToolRequest,
-    ResolvedChildAgentTools,
     ResolvedPhaseSlots,
     RunnerChildAgentHost,
 )
@@ -56,8 +52,6 @@ from demiurge.runtime.turn_pipeline import RunnerTurnPipelineHost, TurnPipelineR
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
-    AgentRunResult,
-    AgentSpawnHandle,
     ContextContribution,
     InputEnvelope,
     ToolResult,
@@ -490,64 +484,6 @@ class SessionTurnStepRunner:
 
     def _module_result_client(self, *, writable: bool) -> ModuleResultClient:
         return self.slot_context.result_client(writable=writable)
-
-    async def _run_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: ChildSlotRequest = None,
-        output_slots: ChildSlotRequest = None,
-        use_bootstrap: bool = False,
-        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
-        session_id: str | None = None,
-    ) -> AgentRunResult:
-        return await self.child_agents.run_child(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=parent_turn,
-            parent_slot_path=parent_slot_path,
-            context=context,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
-            session_id=session_id,
-        )
-
-    def _spawn_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: ChildSlotRequest = None,
-        output_slots: ChildSlotRequest = None,
-        use_bootstrap: bool = False,
-        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
-        notify_on_complete: bool = True,
-        session_id: str | None = None,
-        resolved_child_tools: ResolvedChildAgentTools | None = None,
-    ) -> AgentSpawnHandle:
-        return self.child_agents.spawn_child(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=parent_turn,
-            parent_slot_path=parent_slot_path,
-            context=context,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
-            notify_on_complete=notify_on_complete,
-            session_id=session_id,
-            resolved_child_tools=resolved_child_tools,
-        )
 
     async def execute_tool(
         self,

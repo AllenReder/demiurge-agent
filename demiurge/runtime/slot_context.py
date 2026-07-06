@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from demiurge.core import LoadedCore, SlotDefinition
 from demiurge.providers import ToolCall
+from demiurge.runtime.child_agents import ChildAgentRunRequest, ChildAgentSpawnRequest
 from demiurge.runtime.delivery import (
     CONTENT_BLOCK_TYPES,
     ArtifactInput,
@@ -82,34 +83,10 @@ class SlotContextHost(Protocol):
     ) -> ToolResult:
         ...
 
-    async def run_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: Any = None,
-        output_slots: Any = None,
-        use_bootstrap: bool = False,
-        tools: Any = "all",
-    ) -> AgentRunResult:
+    async def run_child_agent(self, request: ChildAgentRunRequest) -> AgentRunResult:
         ...
 
-    def spawn_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: Any = None,
-        output_slots: Any = None,
-        use_bootstrap: bool = False,
-        tools: Any = "all",
-    ) -> AgentSpawnHandle:
+    def spawn_child_agent(self, request: ChildAgentSpawnRequest) -> AgentSpawnHandle:
         ...
 
 
@@ -157,55 +134,11 @@ class RunnerSlotContextHost:
             output_factory=output_factory,
         )
 
-    async def run_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: Any = None,
-        output_slots: Any = None,
-        use_bootstrap: bool = False,
-        tools: Any = "all",
-    ) -> AgentRunResult:
-        return await self.runner._run_child_agent(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=parent_turn,
-            parent_slot_path=parent_slot_path,
-            context=context,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
-        )
+    async def run_child_agent(self, request: ChildAgentRunRequest) -> AgentRunResult:
+        return await self.runner.child_agents.run_child(request)
 
-    def spawn_child_agent(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: Any = None,
-        output_slots: Any = None,
-        use_bootstrap: bool = False,
-        tools: Any = "all",
-    ) -> AgentSpawnHandle:
-        return self.runner._spawn_child_agent(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=parent_turn,
-            parent_slot_path=parent_slot_path,
-            context=context,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
-        )
+    def spawn_child_agent(self, request: ChildAgentSpawnRequest) -> AgentSpawnHandle:
+        return self.runner.child_agents.spawn_child(request)
 
 
 class ScopedModuleStateClient:
@@ -359,15 +292,17 @@ class ModuleAgentsClient:
             child_core_id=core_id,
         )
         result = await self.host.run_child_agent(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=self.turn,
-            parent_slot_path=self.slot_path,
-            context=self._normalize_context(context),
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
+            ChildAgentRunRequest(
+                core_id=core_id,
+                raw_input=raw_input,
+                parent_turn=self.turn,
+                parent_slot_path=self.slot_path,
+                context=self._normalize_context(context),
+                input_slots=input_slots,
+                output_slots=output_slots,
+                use_bootstrap=use_bootstrap,
+                tools=tools,
+            )
         )
         self.host.emit_event(
             "agent_run.completed",
@@ -394,15 +329,17 @@ class ModuleAgentsClient:
     ) -> AgentSpawnHandle:
         self.capability.require(f"agents.spawn:{core_id}", slot_path=self.slot_path)
         return self.host.spawn_child_agent(
-            core_id=core_id,
-            raw_input=raw_input,
-            parent_turn=self.turn,
-            parent_slot_path=self.slot_path,
-            context=self._normalize_context(context),
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
-            tools=tools,
+            ChildAgentSpawnRequest(
+                core_id=core_id,
+                raw_input=raw_input,
+                parent_turn=self.turn,
+                parent_slot_path=self.slot_path,
+                context=self._normalize_context(context),
+                input_slots=input_slots,
+                output_slots=output_slots,
+                use_bootstrap=use_bootstrap,
+                tools=tools,
+            )
         )
 
     def _normalize_context(self, context: str | list[str] | None) -> list[str]:

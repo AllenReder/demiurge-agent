@@ -10,6 +10,7 @@ pytestmark = pytest.mark.slow_integration
 from demiurge.app import create_app, source_agents_root
 from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
+from demiurge.runtime.child_agents import ChildAgentRunRequest
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
@@ -1542,13 +1543,15 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
         metadata={},
     )
 
-    result = await app.runner._run_child_agent(
-        core_id="evolver",
-        raw_input="child raw",
-        parent_turn=parent_turn,
-        parent_slot_path="test",
-        context=[],
-        session_id=child_session_id,
+    result = await app.runner.child_agents.run_child(
+        ChildAgentRunRequest(
+            core_id="evolver",
+            raw_input="child raw",
+            parent_turn=parent_turn,
+            parent_slot_path="test",
+            context=[],
+            session_id=child_session_id,
+        )
     )
 
     child_texts = [delivery.text for outbound in child_bridge.outbounds for delivery in outbound.deliveries]

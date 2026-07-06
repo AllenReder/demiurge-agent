@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
 from demiurge.core import LoadedCore, SlotDefinition
@@ -34,6 +34,36 @@ CHILD_AGENT_NO_TOOLS = "none"
 
 ChildSlotRequest = str | Sequence[str] | None
 ChildToolRequest = str | Sequence[str] | None
+
+
+@dataclass(slots=True)
+class ChildAgentRunRequest:
+    core_id: str
+    raw_input: str
+    parent_turn: TurnContext
+    parent_slot_path: str
+    context: list[str] = field(default_factory=list)
+    input_slots: ChildSlotRequest = None
+    output_slots: ChildSlotRequest = None
+    use_bootstrap: bool = False
+    tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS
+    session_id: str | None = None
+
+
+@dataclass(slots=True)
+class ChildAgentSpawnRequest:
+    core_id: str
+    raw_input: str
+    parent_turn: TurnContext
+    parent_slot_path: str
+    context: list[str] = field(default_factory=list)
+    input_slots: ChildSlotRequest = None
+    output_slots: ChildSlotRequest = None
+    use_bootstrap: bool = False
+    tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS
+    notify_on_complete: bool = True
+    session_id: str | None = None
+    resolved_child_tools: "ResolvedChildAgentTools | None" = None
 
 
 @dataclass(slots=True)
@@ -384,34 +414,21 @@ class ChildAgentRuntime:
             normalized.append(tool_id)
         return tuple(normalized)
 
-    async def run_child(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: ChildSlotRequest = None,
-        output_slots: ChildSlotRequest = None,
-        use_bootstrap: bool = False,
-        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
-        session_id: str | None = None,
-    ) -> AgentRunResult:
-        child_session_id = session_id or utc_id("session_child_")
-        child_runner = self.host.create_child_runner(core_id=core_id, session_id=child_session_id)
+    async def run_child(self, request: ChildAgentRunRequest) -> AgentRunResult:
+        child_session_id = request.session_id or utc_id("session_child_")
+        child_runner = self.host.create_child_runner(core_id=request.core_id, session_id=child_session_id)
         await child_runner.prepare_live_core()
-        child_core_path = self.host.version_store.active_core_path(core_id)
+        child_core_path = self.host.version_store.active_core_path(request.core_id)
         child_core = self.host.core_loader.load(child_core_path)
         child_slots = self.resolve_slots(
             child_core,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
+            input_slots=request.input_slots,
+            output_slots=request.output_slots,
+            use_bootstrap=request.use_bootstrap,
         )
         child_tools = await self.resolve_tools_prepared(
             child_core,
-            tools,
+            request.tools,
             session_id=child_session_id,
         )
         self.host.session_runtime.update_session(
@@ -425,25 +442,25 @@ class ChildAgentRuntime:
         child_slot_metadata = child_slots.to_metadata()
         child_tool_metadata = {"requested": child_tools.requested, "resolved": child_tools.resolved}
         child_metadata = {
-            "delegation_depth": int(parent_turn.metadata.get("delegation_depth") or 0) + 1,
-            "parent_session_id": parent_turn.session_id,
-            "parent_turn_id": parent_turn.turn_id,
-            "parent_slot": parent_slot_path,
+            "delegation_depth": int(request.parent_turn.metadata.get("delegation_depth") or 0) + 1,
+            "parent_session_id": request.parent_turn.session_id,
+            "parent_turn_id": request.parent_turn.turn_id,
+            "parent_slot": request.parent_slot_path,
             "child_agent_slots": child_slot_metadata,
             "child_agent_tools": child_tool_metadata,
         }
         if child_tools.tool_policy:
             child_metadata["tool_policy"] = child_tools.tool_policy
         result = await child_runner.run_turn(
-            raw_input,
+            request.raw_input,
             core_path=child_core_path,
             interaction=InteractionInbound(
                 channel="agent",
-                text=raw_input,
-                source=parent_turn.session_id,
+                text=request.raw_input,
+                source=request.parent_turn.session_id,
                 metadata=child_metadata,
             ),
-            injected_system_context=context,
+            injected_system_context=list(request.context),
             input_phase_slots=child_slots.input,
             output_phase_slots=child_slots.output,
             use_bootstrap=child_slots.use_bootstrap,
@@ -474,84 +491,71 @@ class ChildAgentRuntime:
                 for record in result.tool_results
             ),
             metadata={
-                "parent_turn_id": parent_turn.turn_id,
-                "parent_slot": parent_slot_path,
+                "parent_turn_id": request.parent_turn.turn_id,
+                "parent_slot": request.parent_slot_path,
                 "needs_user": needs_user,
                 "child_agent_slots": child_slot_metadata,
                 "child_agent_tools": child_tool_metadata,
             },
         )
 
-    def spawn_child(
-        self,
-        *,
-        core_id: str,
-        raw_input: str,
-        parent_turn: TurnContext,
-        parent_slot_path: str,
-        context: list[str],
-        input_slots: ChildSlotRequest = None,
-        output_slots: ChildSlotRequest = None,
-        use_bootstrap: bool = False,
-        tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS,
-        notify_on_complete: bool = True,
-        session_id: str | None = None,
-        resolved_child_tools: ResolvedChildAgentTools | None = None,
-    ) -> AgentSpawnHandle:
+    def spawn_child(self, request: ChildAgentSpawnRequest) -> AgentSpawnHandle:
         self.resolve_slots_for_core_id(
-            core_id,
-            input_slots=input_slots,
-            output_slots=output_slots,
-            use_bootstrap=use_bootstrap,
+            request.core_id,
+            input_slots=request.input_slots,
+            output_slots=request.output_slots,
+            use_bootstrap=request.use_bootstrap,
         )
         requested_tools = (
-            resolved_child_tools.requested
-            if resolved_child_tools is not None
-            else self.requested_tools_for_core_id(core_id, tools)
+            request.resolved_child_tools.requested
+            if request.resolved_child_tools is not None
+            else self.requested_tools_for_core_id(request.core_id, request.tools)
         )
         requested_slot_metadata = {
             "input_slots": self.slot_request_metadata(
                 "input",
-                input_slots,
+                request.input_slots,
                 default_ids=CHILD_AGENT_DEFAULT_INPUT_SLOTS,
             ),
             "output_slots": self.slot_request_metadata(
                 "output",
-                output_slots,
+                request.output_slots,
                 default_ids=CHILD_AGENT_DEFAULT_OUTPUT_SLOTS,
             ),
-            "use_bootstrap": use_bootstrap,
+            "use_bootstrap": request.use_bootstrap,
         }
-        session_id = session_id or utc_id("session_child_")
+        session_id = request.session_id or utc_id("session_child_")
 
         async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.host.emit_event(
                 "agent_spawn.started",
-                turn_id=parent_turn.turn_id,
-                slot=parent_slot_path,
+                turn_id=request.parent_turn.turn_id,
+                slot=request.parent_slot_path,
                 task_id=ctx.task_id,
-                child_core_id=core_id,
+                child_core_id=request.core_id,
                 child_session_id=session_id,
             )
             try:
                 result = await self.run_child(
-                    core_id=core_id,
-                    raw_input=raw_input,
-                    parent_turn=parent_turn,
-                    parent_slot_path=parent_slot_path,
-                    context=context,
-                    input_slots=input_slots,
-                    output_slots=output_slots,
-                    use_bootstrap=use_bootstrap,
-                    tools=tools,
-                    session_id=session_id,
+                    ChildAgentRunRequest(
+                        core_id=request.core_id,
+                        raw_input=request.raw_input,
+                        parent_turn=request.parent_turn,
+                        parent_slot_path=request.parent_slot_path,
+                        context=list(request.context),
+                        input_slots=request.input_slots,
+                        output_slots=request.output_slots,
+                        use_bootstrap=request.use_bootstrap,
+                        tools=request.tools,
+                        session_id=session_id,
+                    )
                 )
                 child_slot_metadata = result.metadata.get("child_agent_slots")
                 child_tool_metadata = result.metadata.get("child_agent_tools")
-                summary = result.content or f"child agent {core_id} completed"
+                summary = result.content or f"child agent {request.core_id} completed"
                 ctx.update_metadata(
                     {
-                        "child_core_id": core_id,
+                        "child_core_id": request.core_id,
                         "child_session_id": session_id,
                         "child_turn_id": result.turn_id,
                         "needs_user": bool(result.metadata.get("needs_user")),
@@ -562,14 +566,14 @@ class ChildAgentRuntime:
                 needs_user = bool(result.metadata.get("needs_user"))
                 event_name = "agent_spawn.blocked" if needs_user else "agent_spawn.completed"
                 if needs_user:
-                    summary = summary or f"child agent {core_id} needs user input"
+                    summary = summary or f"child agent {request.core_id} needs user input"
                     ctx.mark_blocked(summary, metadata={"needs_user": True})
                 self.host.emit_event(
                     event_name,
-                    turn_id=parent_turn.turn_id,
-                    slot=parent_slot_path,
+                    turn_id=request.parent_turn.turn_id,
+                    slot=request.parent_slot_path,
                     task_id=ctx.task_id,
-                    child_core_id=core_id,
+                    child_core_id=request.core_id,
                     child_session_id=session_id,
                     child_turn_id=result.turn_id,
                 )
@@ -577,7 +581,7 @@ class ChildAgentRuntime:
                     summary=summary,
                     result_ref=f"session:{session_id}:{result.turn_id}",
                     metadata={
-                        "child_core_id": core_id,
+                        "child_core_id": request.core_id,
                         "child_session_id": session_id,
                         "child_turn_id": result.turn_id,
                         "needs_user": needs_user,
@@ -588,10 +592,10 @@ class ChildAgentRuntime:
             except Exception as exc:
                 self.host.emit_event(
                     "agent_spawn.failed",
-                    turn_id=parent_turn.turn_id,
-                    slot=parent_slot_path,
+                    turn_id=request.parent_turn.turn_id,
+                    slot=request.parent_slot_path,
                     task_id=ctx.task_id,
-                    child_core_id=core_id,
+                    child_core_id=request.core_id,
                     child_session_id=session_id,
                     error=str(exc),
                 )
@@ -600,16 +604,16 @@ class ChildAgentRuntime:
         try:
             record = self.host.task_worker.start_task(
                 kind="agent.spawn",
-                owner_session_id=parent_turn.session_id,
-                owner_turn_id=parent_turn.turn_id,
+                owner_session_id=request.parent_turn.session_id,
+                owner_turn_id=request.parent_turn.turn_id,
                 source_tool="agents.spawn",
                 task_factory=run_task,
                 write_scope=f"agent-session:{session_id}",
-                notify_on_complete=notify_on_complete,
+                notify_on_complete=request.notify_on_complete,
                 metadata={
-                    "child_core_id": core_id,
+                    "child_core_id": request.core_id,
                     "child_session_id": session_id,
-                    "parent_slot": parent_slot_path,
+                    "parent_slot": request.parent_slot_path,
                     "requested_child_agent_slots": requested_slot_metadata,
                     "requested_child_agent_tools": requested_tools,
                 },
@@ -617,14 +621,14 @@ class ChildAgentRuntime:
         except RuntimeTaskConflictError as exc:
             self.host.emit_event(
                 "agent_spawn.rejected",
-                turn_id=parent_turn.turn_id,
-                slot=parent_slot_path,
-                child_core_id=core_id,
+                turn_id=request.parent_turn.turn_id,
+                slot=request.parent_slot_path,
+                child_core_id=request.core_id,
                 child_session_id=session_id,
                 error=str(exc),
             )
-            return AgentSpawnHandle(task_id="", core_id=core_id, session_id=session_id, status="failed")
-        return AgentSpawnHandle(task_id=record.task_id, core_id=core_id, session_id=session_id)
+            return AgentSpawnHandle(task_id="", core_id=request.core_id, session_id=session_id, status="failed")
+        return AgentSpawnHandle(task_id=record.task_id, core_id=request.core_id, session_id=session_id)
 
     async def handle_delegate_task(
         self,
@@ -677,18 +681,20 @@ class ChildAgentRuntime:
                 session_id=child_session_id,
             )
             handle = self.spawn_child(
-                core_id=child_core_id,
-                raw_input=goal,
-                parent_turn=turn,
-                parent_slot_path="builtin:delegate_task",
-                context=context,
-                input_slots=call.arguments.get("input_slots"),
-                output_slots=call.arguments.get("output_slots"),
-                use_bootstrap=use_bootstrap,
-                tools=child_tools_request,
-                notify_on_complete=notify_policy == "return_to_parent",
-                session_id=child_session_id,
-                resolved_child_tools=child_tools,
+                ChildAgentSpawnRequest(
+                    core_id=child_core_id,
+                    raw_input=goal,
+                    parent_turn=turn,
+                    parent_slot_path="builtin:delegate_task",
+                    context=context,
+                    input_slots=call.arguments.get("input_slots"),
+                    output_slots=call.arguments.get("output_slots"),
+                    use_bootstrap=use_bootstrap,
+                    tools=child_tools_request,
+                    notify_on_complete=notify_policy == "return_to_parent",
+                    session_id=child_session_id,
+                    resolved_child_tools=child_tools,
+                )
             )
         except ValueError as exc:
             return ToolResult(content=str(exc), is_error=True)

@@ -124,10 +124,10 @@ class _Host:
     async def execute_tool(self, *args, **kwargs) -> ToolResult:
         return ToolResult(content="tool result")
 
-    async def run_child_agent(self, **kwargs) -> AgentRunResult:
+    async def run_child_agent(self, request) -> AgentRunResult:
         return AgentRunResult(content="child", core_id="assistant", session_id="child_session", turn_id="child_turn")
 
-    def spawn_child_agent(self, **kwargs) -> AgentSpawnHandle:
+    def spawn_child_agent(self, request) -> AgentSpawnHandle:
         return AgentSpawnHandle(task_id="task_1", core_id="assistant", session_id="child_session")
 
 
