@@ -99,11 +99,15 @@ async def _wait_idle(state: ConversationIngressState) -> None:
 @pytest.mark.asyncio
 async def test_lifecycle_runtime_starts_finishes_and_drains_next_inbound():
     seen: list[str] = []
+    turn_finished: list[bool] = []
 
     async def run_turn(state: ConversationIngressState, inbound: InteractionInbound) -> None:
         seen.append(inbound.text)
         if inbound.text == "first":
             await state.queue.put(_inbound("second"))
+
+    async def after_turn(state: ConversationIngressState, drained: bool) -> None:
+        turn_finished.append(drained)
 
     runtime = ConversationLifecycleRuntime(
         config=ConversationLifecycleConfig(
@@ -113,6 +117,7 @@ async def test_lifecycle_runtime_starts_finishes_and_drains_next_inbound():
         ),
         state_factory=lambda key: _state(key),
         run_turn=run_turn,
+        after_turn=after_turn,
     )
     state = runtime.state_for_key("chat")
 
@@ -120,6 +125,41 @@ async def test_lifecycle_runtime_starts_finishes_and_drains_next_inbound():
     await _wait_idle(state)
 
     assert seen == ["first", "second"]
+    assert turn_finished == [True, False]
+    assert state.active_task is None
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_runtime_can_skip_drain_when_adapter_is_closing():
+    seen: list[str] = []
+    turn_finished: list[bool] = []
+
+    async def run_turn(state: ConversationIngressState, inbound: InteractionInbound) -> None:
+        seen.append(inbound.text)
+        await state.queue.put(_inbound("second"))
+
+    async def after_turn(state: ConversationIngressState, drained: bool) -> None:
+        turn_finished.append(drained)
+
+    runtime = ConversationLifecycleRuntime(
+        config=ConversationLifecycleConfig(
+            channel="test",
+            merge_owner_id="merge-owner",
+            enqueue_owner_id="enqueue-owner",
+        ),
+        state_factory=lambda key: _state(key),
+        run_turn=run_turn,
+        should_drain=lambda state: False,
+        after_turn=after_turn,
+    )
+    state = runtime.state_for_key("chat")
+
+    runtime.start_turn(state, _inbound("first"))
+    await _wait_idle(state)
+
+    assert seen == ["first"]
+    assert turn_finished == [False]
+    assert state.queue.qsize() == 1
     assert state.active_task is None
 
 
@@ -179,12 +219,16 @@ async def test_lifecycle_runtime_enqueues_task_completion_from_subscription():
     worker = FakeTaskWorker([event])
     seen: list[str] = []
     before_enqueue: list[str] = []
+    after_enqueue: list[tuple[str, str]] = []
 
     async def run_turn(state: ConversationIngressState, inbound: InteractionInbound) -> None:
         seen.append(inbound.metadata["task_id"])
 
     async def before(state, task_event, inbound) -> None:
         before_enqueue.append(task_event.task_id)
+
+    async def after(state, task_event, result) -> None:
+        after_enqueue.append((task_event.task_id, result.status))
 
     runtime = ConversationLifecycleRuntime(
         config=ConversationLifecycleConfig(
@@ -195,6 +239,7 @@ async def test_lifecycle_runtime_enqueues_task_completion_from_subscription():
         state_factory=lambda key: _state(key, worker),
         run_turn=run_turn,
         before_completion_enqueue=before,
+        after_completion_enqueue=after,
     )
     state = runtime.state_for_key("chat")
 
@@ -203,4 +248,5 @@ async def test_lifecycle_runtime_enqueues_task_completion_from_subscription():
 
     assert worker.claimed == {"event_1": "enqueue-owner"}
     assert before_enqueue == ["task_1"]
+    assert after_enqueue == [("task_1", "started")]
     assert seen == ["task_1"]

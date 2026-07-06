@@ -22,6 +22,9 @@ StateFactory = Callable[[str], StateT]
 ConversationTurnRunner = Callable[[StateT, InteractionInbound], Awaitable[None]]
 BusyNotifier = Callable[[StateT, InteractionInbound, BusyInboundDecision], Awaitable[None]]
 CompletionBeforeEnqueue = Callable[[StateT, RuntimeTaskCompletionEvent, InteractionInbound], Awaitable[None]]
+CompletionAfterEnqueue = Callable[[StateT, RuntimeTaskCompletionEvent, CompletionEnqueueResult], Awaitable[None]]
+DrainPredicate = Callable[[StateT], bool]
+TurnFinishedNotifier = Callable[[StateT, bool], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +47,17 @@ class ConversationLifecycleRuntime(Generic[StateT]):
         run_turn: ConversationTurnRunner[StateT],
         notify_busy: BusyNotifier[StateT] | None = None,
         before_completion_enqueue: CompletionBeforeEnqueue[StateT] | None = None,
+        after_completion_enqueue: CompletionAfterEnqueue[StateT] | None = None,
+        should_drain: DrainPredicate[StateT] | None = None,
+        after_turn: TurnFinishedNotifier[StateT] | None = None,
     ) -> None:
         self.config = config
         self._run_turn = run_turn
         self._notify_busy = notify_busy
         self._before_completion_enqueue = before_completion_enqueue
+        self._after_completion_enqueue = after_completion_enqueue
+        self._should_drain = should_drain
+        self._after_turn = after_turn
         self._states = ConversationStateStore(
             state_factory=state_factory,
             on_task_completion=self._on_task_completion,
@@ -115,7 +124,11 @@ class ConversationLifecycleRuntime(Generic[StateT]):
         finally:
             controller = ConversationTurnController(state)
             controller.finish(task)
-            await controller.drain_next(lambda next_inbound: self.run_state_turn(state, next_inbound))
+            drained = False
+            if self._should_drain is None or self._should_drain(state):
+                drained = await controller.drain_next(lambda next_inbound: self.run_state_turn(state, next_inbound))
+            if self._after_turn is not None:
+                await self._after_turn(state, drained)
 
     async def cancel_active(
         self,
@@ -139,12 +152,15 @@ class ConversationLifecycleRuntime(Generic[StateT]):
             if self._before_completion_enqueue is not None:
                 await self._before_completion_enqueue(state, event, inbound)
 
-        return await self._completion_delivery(state).enqueue_event(
+        result = await self._completion_delivery(state).enqueue_event(
             state,
             event,
             run=lambda next_inbound: self.run_state_turn(state, next_inbound),
             before_enqueue=before_enqueue if self._before_completion_enqueue is not None else None,
         )
+        if self._after_completion_enqueue is not None:
+            await self._after_completion_enqueue(state, event, result)
+        return result
 
     def _completion_delivery(self, state: StateT) -> CompletionDeliveryRuntime:
         return CompletionDeliveryRuntime(

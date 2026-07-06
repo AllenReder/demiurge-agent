@@ -8,11 +8,10 @@ from typing import Any
 
 from demiurge.app import DemiurgeApp, load_host_config
 from demiurge.diagnostics.doctor import DoctorRuntime
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.packages import PackageManager, PackageOperationError, load_package_repository_collection
 from demiurge.providers import ToolCall
-from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
 from demiurge.runtime.completions import is_background_completion
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.event_commands import build_events_command_text, build_trace_command_text
 from demiurge.runtime.history_display import build_history_items
@@ -24,7 +23,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.ingress import BusyInboundDecision, CompletionEnqueueResult, ConversationIngressState
 from demiurge.runtime.approvals import ApprovalPromptRuntime, parse_approval_response
 from demiurge.runtime.outbound_delivery import ui_delivery_steps
 from demiurge.runtime.prompts import normalize_prompt_answer
@@ -98,13 +97,22 @@ class TuiInteractionBridge:
         self.tool_display = parse_tool_display_level(tool_display or app.tool_display) or "summary"
         resolved_busy_mode = busy_mode or app.channel_busy_mode
         self.busy_mode = resolved_busy_mode if resolved_busy_mode in {"interrupt", "queue"} else "interrupt"
-        self._ingress_state = ConversationIngressState(
-            runtime=self.runtime,
-            busy_mode=self.busy_mode,
-            route_binding=self._route_binding,
-            conversation_key=self._conversation_key(),
-            source="local",
+        self._conversation_lifecycle = ConversationLifecycleRuntime(
+            config=ConversationLifecycleConfig(
+                channel="tui",
+                merge_owner_id="bridge:tui:stored",
+                enqueue_owner_id="bridge:tui:enqueue",
+                fallback_source="local",
+            ),
+            state_factory=self._new_ingress_state,
+            run_turn=self._run_inbound,
+            notify_busy=self._notify_busy_inbound,
+            before_completion_enqueue=self._before_completion_enqueue,
+            after_completion_enqueue=self._after_completion_enqueue,
+            should_drain=lambda _state: not self.should_exit,
+            after_turn=self._after_turn,
         )
+        self._ingress_state = self._conversation_lifecycle.state_for_key(self._conversation_key())
         self._queued_inputs = self._ingress_state.queue
         self._pending_prompts: dict[str, PendingPrompt] = {}
         self._pending_approvals = ApprovalPromptRuntime(id_prefix="approval_")
@@ -112,11 +120,10 @@ class TuiInteractionBridge:
         self._last_error = ""
         self.should_exit = False
         self._scheduler: SchedulerService | None = None
-        self._task_unsubscribe = self.app.task_worker.subscribe(self._on_task_completion)
 
     @property
     def running(self) -> bool:
-        return ConversationTurnController(self._ingress_state).running
+        return self._conversation_lifecycle.running(self._ingress_state)
 
     async def initialize(self) -> dict[str, Any]:
         self._start_scheduler()
@@ -132,28 +139,32 @@ class TuiInteractionBridge:
         if not text:
             return {"accepted": False, "reason": "empty"}
         inbound = self._user_inbound(text)
-        self._ingress_state.remember_route(inbound)
+        self._conversation_lifecycle.remember_route(self._ingress_state, inbound)
         if self.running:
             task = self._ingress_state.active_task
-
-            async def notify(decision) -> None:
-                if decision.kind == "queue":
-                    await self._emit_notice(f"queued input: {shorten_text(text, 100)}")
-                    return
-                if decision.kind == "interrupt":
-                    await self._emit_notice("interrupting current turn: new input")
-
-            decision = await ConversationTurnController(self._ingress_state).handle_busy_inbound(inbound, notify=notify)
+            decision = await self._conversation_lifecycle.handle_busy(self._ingress_state, inbound)
             if decision.cancel_active and task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
                 await self._emit_notice("turn interrupted")
             await self._emit_status()
             return {"accepted": True, "queued": True}
-        inbound = self._completion_delivery_runtime().merge_pending_into(self._ingress_state, inbound)
-        ConversationTurnController(self._ingress_state).start(inbound, self._run_inbound)
+        inbound = self._conversation_lifecycle.merge_pending(self._ingress_state, inbound)
+        await self._conversation_lifecycle.accept_inbound(self._ingress_state, inbound)
         await self._emit_status()
         return {"accepted": True, "queued": False}
+
+    async def _notify_busy_inbound(
+        self,
+        state: ConversationIngressState,
+        inbound: InteractionInbound,
+        decision: BusyInboundDecision,
+    ) -> None:
+        if decision.kind == "queue":
+            await self._emit_notice(f"queued input: {shorten_text(inbound.text, 100)}")
+            return
+        if decision.kind == "interrupt":
+            await self._emit_notice("interrupting current turn: new input")
 
     async def wait_for_idle(self) -> None:
         task = self._ingress_state.active_task
@@ -245,7 +256,8 @@ class TuiInteractionBridge:
         if not self.running:
             await self._emit_notice("no running turn")
             return
-        await ConversationTurnController(self._ingress_state).cancel_active(
+        await self._conversation_lifecycle.cancel_active(
+            self._ingress_state,
             before_cancel=lambda: self._emit_notice(f"interrupting current turn: {reason}")
         )
         await self._emit_notice("turn interrupted")
@@ -256,18 +268,12 @@ class TuiInteractionBridge:
         if self._scheduler is not None:
             await self._scheduler.stop()
             self._scheduler = None
-        task = self._ingress_state.active_task
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await self._conversation_lifecycle.cancel_active(self._ingress_state)
         self._pending_approvals.cancel_all("TUI shutdown")
         for prompt in self._pending_prompts.values():
             if prompt.future is not None and not prompt.future.done():
                 prompt.future.set_result("")
-        if self._task_unsubscribe is not None:
-            self._task_unsubscribe()
-            self._task_unsubscribe = None
+        self._conversation_lifecycle.close()
         self._route_binding.unbind(self.app.runner.interaction_router)
         await self.emit("channel.shutdown", {})
 
@@ -310,62 +316,40 @@ class TuiInteractionBridge:
         return await handler(command.args)
 
     async def _run_message(self, text: str) -> None:
-        await self._run_inbound(self._user_inbound(text))
+        await self.submit(text)
 
-    async def _run_inbound(self, inbound: InteractionInbound) -> None:
+    async def _run_inbound(self, state: ConversationIngressState, inbound: InteractionInbound) -> None:
         try:
             if not is_background_completion(inbound):
                 await self.emit("interaction.message", {"role": "user", "text": inbound.text})
-            result = await self.runtime.handle(inbound, route_binding=self._route_binding)
+            result = await self.runtime.handle(inbound, route_binding=state.route_binding)
             await self.deliver(result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = str(exc)
             await self.emit("interaction.error", {"message": str(exc), "source": "tui_bridge"})
-        finally:
-            ConversationTurnController(self._ingress_state).finish(asyncio.current_task())
-            await self._emit_status()
-            await self._drain_next_queued_input()
 
-    async def _drain_next_queued_input(self) -> None:
-        if self.should_exit:
-            return
-        if await ConversationTurnController(self._ingress_state).drain_next(self._run_inbound):
-            await self._emit_status()
+    async def _after_turn(self, state: ConversationIngressState, drained: bool) -> None:
+        await self._emit_status()
 
-    def _next_queued_input(self) -> InteractionInbound:
-        return ConversationTurnController(self._ingress_state).next_queued_input()
+    async def _before_completion_enqueue(
+        self,
+        state: ConversationIngressState,
+        event,
+        inbound: InteractionInbound,
+    ) -> None:
+        await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
 
-    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        if event.owner_session_id != self.app.runner.session_id or self.should_exit:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._enqueue_task_completion(event))
-        except RuntimeError:
-            return
-
-    async def _enqueue_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        async def before_enqueue(_inbound: InteractionInbound) -> None:
-            await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
-
-        result = await self._completion_delivery_runtime().enqueue_event(
-            self._ingress_state,
-            event,
-            run=self._run_inbound,
-            before_enqueue=before_enqueue,
-        )
+    async def _after_completion_enqueue(
+        self,
+        state: ConversationIngressState,
+        event,
+        result: CompletionEnqueueResult,
+    ) -> None:
         if result.inbound is None:
             return
         await self._emit_status()
-
-    def _completion_delivery_runtime(self) -> CompletionDeliveryRuntime:
-        return CompletionDeliveryRuntime(
-            channel="tui",
-            merge_owner_id="bridge:tui:stored",
-            enqueue_owner_id="bridge:tui:enqueue",
-            fallback_source="local",
-        )
 
     async def _open_prompt(self, prompt: UserPromptRequest, *, kind: str, wait: bool) -> PendingPrompt:
         self._prompt_counter += 1
@@ -880,6 +864,15 @@ class TuiInteractionBridge:
     def _conversation_key(self) -> str:
         return f"tui:{self.app.runner.session_id}"
 
+    def _new_ingress_state(self, conversation_key: str) -> ConversationIngressState:
+        return ConversationIngressState(
+            runtime=self.runtime,
+            busy_mode=self.busy_mode,
+            route_binding=self._route_binding,
+            conversation_key=conversation_key,
+            source="local",
+        )
+
     def _sync_ingress_state(self) -> None:
         self._ingress_state.runtime = self.runtime
         self._ingress_state.busy_mode = self.busy_mode
@@ -887,6 +880,7 @@ class TuiInteractionBridge:
         self._ingress_state.source = "local"
         self._ingress_state.reply_to = None
         self._ingress_state.metadata = {}
+        self._queued_inputs = self._ingress_state.queue
 
     def _user_inbound(self, text: str) -> InteractionInbound:
         return InteractionInbound(
