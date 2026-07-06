@@ -536,13 +536,13 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO artifacts (
-                    artifact_id, task_id, kind, uri, metadata_json, created_at
+                    artifact_id, owner_turn_id, kind, uri, metadata_json, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
+                    payload.get("owner_turn_id"),
                     payload.get("kind") or "file",
                     payload.get("uri") or "",
                     json.dumps(payload.get("metadata") or {}, ensure_ascii=False, sort_keys=True),
@@ -936,7 +936,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,
-    task_id TEXT,
+    owner_turn_id TEXT,
     kind TEXT NOT NULL,
     uri TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}',

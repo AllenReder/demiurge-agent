@@ -42,6 +42,9 @@ useful for progress, notices, and live-only output.
 
 Artifacts are represented by host-owned records. Output modules may request
 artifact delivery, but the host owns paths, metadata, and persistence.
+Foreground delivery artifacts are owned by the session turn through
+`owner_turn_id`; they are not task artifacts unless a real detached task creates
+them through a future explicit task-artifact seam.
 
 ## Session Routes
 

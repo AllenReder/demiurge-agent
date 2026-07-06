@@ -187,8 +187,12 @@ def test_artifact_delivery_stores_artifact_and_records_tui_text_fallback_degrada
     messages = host.session_runtime.read_messages("session_1")
     assert [(message.content, message.model_visible) for message in messages] == [("voice result ready", False)]
     artifact_events = host.rows("runtime_events", type="artifact.stored")
+    artifact_rows = host.rows("artifacts")
     assert len(artifact_events) == 1
     assert artifact_events[0]["payload"]["kind"] == "audio"
+    assert artifact_events[0]["payload"]["owner_turn_id"] == "turn_1"
+    assert artifact_rows[0]["owner_turn_id"] == "turn_1"
+    assert artifact_rows[0]["kind"] == "audio"
     assert delivery is not None
     assert delivery.blocks[0]["type"] == "audio"
     assert delivery.blocks[0]["artifact"]["resolved_path"].endswith("/voice.txt")

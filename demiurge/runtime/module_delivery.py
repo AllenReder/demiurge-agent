@@ -155,7 +155,7 @@ class ModuleDeliveryRuntime:
                     aggregate_type="artifact",
                     aggregate_id=artifact.artifact_id,
                     payload={
-                        "task_id": turn.turn_id,
+                        "owner_turn_id": turn.turn_id,
                         "kind": artifact.kind,
                         "uri": artifact.path or artifact.url or "",
                         "metadata": {

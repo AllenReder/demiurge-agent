@@ -40,6 +40,9 @@ notice 和仅实时输出。
 
 Artifacts 由 host-owned records 表示。Output modules 可以请求 artifact delivery，
 但路径、metadata 和持久化都由 host 负责。
+Foreground delivery artifacts 通过 `owner_turn_id` 归属于 session turn；除非未来
+由明确的 task-artifact seam 支持真实 detached task 产物，否则它们不是 task
+artifacts。
 
 ## Session Routes
 

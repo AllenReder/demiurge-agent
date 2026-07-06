@@ -37,6 +37,9 @@ ctx.output.send_file("report.pdf", summary="Report PDF", history_text="Sent a re
 artifacts。Input deliveries 默认使用 transient history，因为 input slots 在
 assistant response 之前运行。
 
+Foreground delivery 产生的 artifacts 会保存为 host-owned records，并通过
+`owner_turn_id` 关联到当前 turn。
+
 ## `send_text`
 
 ```python
