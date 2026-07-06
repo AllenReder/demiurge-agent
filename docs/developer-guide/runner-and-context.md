@@ -5,23 +5,24 @@ description: Contributor notes for turn execution and provider context assembly.
 
 # Runner and Context
 
-The runner owns the turn lifecycle. Agent Core slots participate through
-controlled interfaces; they do not own the lifecycle.
+The runner wires the turn lifecycle modules. `TurnAdmissionRuntime` resolves the
+core/session route and starts the turn, `TurnPipelineRuntime` runs the authored
+input -> model/tool -> output path, and `TurnPersistenceRuntime` records input,
+assistant output, display state, completion, and interruption. Agent Core slots
+participate through controlled interfaces; they do not own the lifecycle.
 
 ## Turn Flow
 
 ```text
 inbound interaction
-  -> create or resume session
-  -> bind inbound route to the resolved session
-  -> run bootstrap when needed
-  -> run input pipeline
+  -> admit turn: resolve session/core, bind route, run bootstrap, begin turn
+  -> run authored input pipeline
   -> assemble provider context
   -> call provider
   -> execute tool calls through ToolRuntime
   -> continue model/tool loop until final response
-  -> run output pipeline
-  -> record deliveries and session events
+  -> run authored output pipeline
+  -> persist input, assistant output, display state, completion, and session events
 ```
 
 ## Context Layers

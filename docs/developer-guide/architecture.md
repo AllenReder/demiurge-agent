@@ -36,7 +36,7 @@ SessionTurnStepRunner
 | CLI | Parse commands and start TUI, gateway, setup, package, update, and doctor flows. |
 | App factory | Resolve runtime home, config, source templates, core, workspace, provider, approvals, and tools. |
 | Core loader | Load `agent.yaml`, slots, pipelines, skills, schedules, and MCP declarations. |
-| Runner | Own session, turn, step, bootstrap, input, model/tool loop, output, and delivery flow. |
+| Runner | Wire host runtime modules for turn admission, authored pipeline execution, persistence, tools, slots, and delivery. |
 | Context assembler | Build provider messages from soul, skills, bootstrap, input, history, and current turn. |
 | Tool runtime | Build the visible registry and execute built-in, authored, and MCP tools. |
 | Core repository | Own the Git-backed runtime agents tree, refs, change sets, package transactions, and rollback commits. |

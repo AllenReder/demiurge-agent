@@ -7,11 +7,16 @@ from typing import Any
 import pytest
 
 from demiurge.providers import LLMMessage
-from demiurge.runtime.interactions import InteractionDelivery, InteractionItem
+from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionItem, SessionRouteBinding
 from demiurge.runtime.slots import InputPipelineResult
 from demiurge.runtime.turn import TurnEngineRequest, TurnEngineResult
 from demiurge.runtime.turn_lifecycle import TurnLifecycle, TurnLifecycleCompletion, TurnLifecycleRequest
-from demiurge.runtime.turn_pipeline import TurnPipelineRequest, TurnPipelineRuntime
+from demiurge.runtime.turn_pipeline import (
+    TurnAdmissionRuntime,
+    TurnPersistenceRuntime,
+    TurnPipelineRequest,
+    TurnPipelineRuntime,
+)
 from demiurge.sdk import AgentInput, ContextContribution, InputEnvelope, TurnContext
 
 
@@ -42,7 +47,7 @@ class _Core:
     tool_slots: list[Any] = field(default_factory=list)
 
 
-class _FakeTurnPipelineHost:
+class _FakeTurnRuntimeHost:
     def __init__(
         self,
         *,
@@ -61,6 +66,7 @@ class _FakeTurnPipelineHost:
         self.input_requests: list[Any] = []
         self.output_requests: list[Any] = []
         self.engine_requests: list[TurnEngineRequest] = []
+        self.begin_requests: list[TurnLifecycleRequest] = []
         self.completed: TurnLifecycleCompletion | None = None
         self.interrupts: list[dict[str, str]] = []
         self.display_turns: list[dict[str, Any]] = []
@@ -96,6 +102,7 @@ class _FakeTurnPipelineHost:
         self.bootstrap_requests.append(request)
 
     def begin_turn(self, request: TurnLifecycleRequest):
+        self.begin_requests.append(request)
         user_input = AgentInput(content=request.raw_text, metadata=dict(request.metadata))
         turn = TurnContext(
             session_id=request.session_id,
@@ -108,7 +115,11 @@ class _FakeTurnPipelineHost:
         return TurnLifecycle(
             session_id=request.session_id,
             turn_id="turn_1",
-            input_envelope=InputEnvelope(raw_text=request.raw_text, metadata=dict(request.metadata)),
+            input_envelope=InputEnvelope(
+                raw_text=request.raw_text,
+                metadata=dict(request.metadata),
+                attachments=list(request.attachments),
+            ),
             user_input=user_input,
             turn=turn,
             state_stores=object(),
@@ -170,18 +181,108 @@ class _FakeTurnPipelineHost:
         return f"sanitized: {exc.__class__.__name__}: {str(exc).replace(chr(10), ' ')}"
 
 
+def _runtime(host: _FakeTurnRuntimeHost) -> TurnPipelineRuntime:
+    return TurnPipelineRuntime(
+        host,
+        admission=TurnAdmissionRuntime(host),
+        persistence=TurnPersistenceRuntime(host),
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_admission_runtime_resolves_session_bootstrap_and_begin_scope():
+    host = _FakeTurnRuntimeHost()
+    route_binding = SessionRouteBinding(route=SimpleNamespace())
+    inbound = InteractionInbound(
+        channel="telegram",
+        text="hello",
+        source="123",
+        attachments=["image"],
+    )
+
+    scope = await TurnAdmissionRuntime(host).admit(
+        TurnPipelineRequest(text="hello", interaction=inbound, route_binding=route_binding)
+    )
+
+    assert scope.session_id == "session_1"
+    assert scope.core is host.core
+    assert scope.core_revision == "rev_1"
+    assert scope.interaction_metadata == {"channel": "telegram"}
+    assert scope.input_envelope.raw_text == "hello"
+    assert scope.input_envelope.attachments == ["image"]
+    assert host.resolved_session == ("assistant", {"channel": "telegram"})
+    assert host.bound_route is route_binding
+    assert host.updated_core == "assistant"
+    assert [event["type"] for event in host.events] == ["session.started"]
+    assert host.session_started is True
+    assert host.bootstrap_requests[0].session_id == "session_1"
+    assert host.bootstrap_requests[0].workspace == "/workspace"
+    assert host.begin_requests[0].attachments == ("image",)
+
+
+def test_turn_persistence_runtime_records_input_and_completes_turn():
+    host = _FakeTurnRuntimeHost()
+    lifecycle = host.begin_turn(
+        TurnLifecycleRequest(
+            session_id="session_1",
+            core_id="assistant",
+            core_revision="rev_1",
+            raw_text="hello",
+            metadata={"channel": "tui"},
+        )
+    )
+    scope = SimpleNamespace(
+        session_id="session_1",
+        core=host.core,
+        core_revision="rev_1",
+        lifecycle=lifecycle,
+        turn=lifecycle.turn,
+        interaction_metadata={"channel": "tui"},
+    )
+    input_result = InputPipelineResult(
+        user_text="normalized hello",
+        persisted_user_text="persisted hello",
+        context=[],
+        items=[],
+    )
+    turn_messages = [LLMMessage(role="assistant", content="model answer")]
+    item = InteractionItem.delivery_item(InteractionDelivery(text="visible output"))
+    persistence = TurnPersistenceRuntime(host)
+
+    persistence.record_input(scope, input_result)
+    result = persistence.complete(
+        scope,
+        user_text=input_result.user_text,
+        items=[item],
+        turn_messages=turn_messages,
+        tool_records=[],
+        agent_result={"ok": True},
+        needs_user=False,
+    )
+
+    assert scope.turn.user_input.content == "normalized hello"
+    assert host.events == [{"type": "message.received", "turn_id": "turn_1", "content": "normalized hello", "channel": "tui"}]
+    assert host.sent_users == [{"turn_id": "turn_1", "content": "persisted hello", "metadata": {"channel": "tui"}}]
+    assert turn_messages[-1] == LLMMessage(role="assistant", content="visible output")
+    assert host.display_turns == [
+        {"turn_id": "turn_1", "user": "normalized hello", "assistant": ["visible output"], "tools": []}
+    ]
+    assert host.completed is not None
+    assert host.completed.agent_result == {"ok": True}
+    assert result.agent_result == {"ok": True}
+    assert result.items == [item]
+
+
 @pytest.mark.asyncio
 async def test_turn_pipeline_runs_full_host_lifecycle():
-    host = _FakeTurnPipelineHost(
+    host = _FakeTurnRuntimeHost(
         engine_result=TurnEngineResult(
             final_output="model answer",
             turn_messages=[LLMMessage(role="assistant", content="model answer")],
         )
     )
 
-    result = await TurnPipelineRuntime(host).run(
-        TurnPipelineRequest(text="hello", injected_system_context=["extra context"])
-    )
+    result = await _runtime(host).run(TurnPipelineRequest(text="hello", injected_system_context=["extra context"]))
 
     assert result.session_id == "session_1"
     assert result.turn_id == "turn_1"
@@ -205,10 +306,10 @@ async def test_turn_pipeline_runs_full_host_lifecycle():
 
 @pytest.mark.asyncio
 async def test_turn_pipeline_interrupts_failed_engine_turn():
-    host = _FakeTurnPipelineHost(engine_error=RuntimeError("boom\nnoisy"))
+    host = _FakeTurnRuntimeHost(engine_error=RuntimeError("boom\nnoisy"))
 
     with pytest.raises(RuntimeError, match="boom"):
-        await TurnPipelineRuntime(host).run(TurnPipelineRequest(text="hello"))
+        await _runtime(host).run(TurnPipelineRequest(text="hello"))
 
     assert host.completed is None
     assert host.interrupts == [

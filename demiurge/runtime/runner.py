@@ -43,7 +43,16 @@ from demiurge.runtime.slots import (
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine
 from demiurge.runtime.turn_lifecycle import TurnLifecycleRuntime
-from demiurge.runtime.turn_pipeline import RunnerTurnPipelineHost, TurnPipelineRequest, TurnPipelineRuntime, TurnResult
+from demiurge.runtime.turn_pipeline import (
+    RunnerTurnAdmissionHost,
+    RunnerTurnPersistenceHost,
+    RunnerTurnPipelineHost,
+    TurnAdmissionRuntime,
+    TurnPersistenceRuntime,
+    TurnPipelineRequest,
+    TurnPipelineRuntime,
+    TurnResult,
+)
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
@@ -176,7 +185,11 @@ class SessionTurnStepRunner:
             refresh_history=self._refresh_history,
         )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
-        self.turn_pipeline = TurnPipelineRuntime(RunnerTurnPipelineHost(self))
+        self.turn_pipeline = TurnPipelineRuntime(
+            RunnerTurnPipelineHost(self),
+            admission=TurnAdmissionRuntime(RunnerTurnAdmissionHost(self)),
+            persistence=TurnPersistenceRuntime(RunnerTurnPersistenceHost(self)),
+        )
         self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:

@@ -123,6 +123,11 @@ must not rewrite the original history body.
 
 - session creation, update, turn lifecycle, and message persistence to
   `SessionRuntime`;
+- foreground turn admission, including session/core resolution, route binding,
+  bootstrap, and turn begin, to `TurnAdmissionRuntime`;
+- authored input -> model/tool -> output execution to `TurnPipelineRuntime`;
+- foreground input records, assistant output records, display turns,
+  completion, and interruption to `TurnPersistenceRuntime`;
 - provider/tool loop execution to `TurnEngine`;
 - authored bootstrap/input/output slot callable loading and invocation to
   `SlotRuntime`.
