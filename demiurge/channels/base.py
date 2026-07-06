@@ -7,9 +7,7 @@ import logging
 from typing import Any, Callable, Protocol
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
-from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
-from demiurge.runtime.conversation_states import ConversationStateStore
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -19,7 +17,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.ingress import BusyInboundDecision, ConversationIngressState
 from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime, delivery_text_chunks, text_outbound_target
 from demiurge.runtime.prompts import PromptDeliveryRuntime
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
@@ -74,15 +72,23 @@ class TextChannelBridgeBase:
             channel_name=channel_name,
             surface="text",
             send_text=self._send_command_text,
-            run_inbound=self._run_inbound,
+            run_inbound=self._run_lifecycle_turn,
+            cancel_active=self._cancel_active,
             help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
         self._prompt_delivery = PromptDeliveryRuntime()
-        self._conversation_states = ConversationStateStore(
+        self._conversation_lifecycle = ConversationLifecycleRuntime(
+            config=ConversationLifecycleConfig(
+                channel=channel_name,
+                merge_owner_id=f"bridge:{channel_name}:merge",
+                enqueue_owner_id=f"bridge:{channel_name}:enqueue",
+                require_source=True,
+            ),
             state_factory=self._new_conversation_state,
-            on_task_completion=self._on_task_completion,
+            run_turn=self._run_inbound,
+            notify_busy=self._notify_busy_inbound,
         )
-        self._conversations = self._conversation_states.states
+        self._conversations = self._conversation_lifecycle.states
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             f"demiurge_{channel_name}_active_inbound",
             default=None,
@@ -93,22 +99,19 @@ class TextChannelBridgeBase:
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"{self.channel_name}:{inbound.source}")
-        self._remember_route(state, inbound)
+        self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_command(inbound, state)
         if command_outcome.handled:
             return
         inbound = command_outcome.inbound
 
         inbound = self._prompt_delivery.resolve_inbound(inbound)
-        inbound = self._completion_delivery_runtime().merge_pending_into(
+        inbound = self._conversation_lifecycle.merge_pending(
             state,
             inbound,
             fallback_source=inbound.source,
         )
-        if state.active_task and not state.active_task.done():
-            await self._handle_busy_inbound(state, inbound)
-            return
-        self._start_turn(state, inbound)
+        await self._conversation_lifecycle.accept_inbound(state, inbound)
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
         await self._text_outbound_delivery_runtime().deliver(outbound)
@@ -196,7 +199,7 @@ class TextChannelBridgeBase:
         return tool_results_markdown(records, mode=self.tool_display)
 
     def _conversation_state(self, conversation_key: str) -> TextConversationState:
-        return self._conversation_states.state_for_key(conversation_key)
+        return self._conversation_lifecycle.state_for_key(conversation_key)
 
     def _new_conversation_state(self, conversation_key: str) -> TextConversationState:
         return TextConversationState(
@@ -206,31 +209,32 @@ class TextChannelBridgeBase:
             conversation_key=conversation_key,
         )
 
-    async def _handle_busy_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        async def notify(decision) -> None:
-            if decision.kind == "queue":
-                await self._send_text(
-                    inbound.source,
-                    f"Queued for next turn: {self._shorten(inbound.text)}",
-                    reply_to=inbound.reply_to,
-                    metadata=inbound.metadata,
-                )
-                return
-            if decision.kind == "interrupt":
-                await self._send_text(
-                    inbound.source,
-                    f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
-                    reply_to=inbound.reply_to,
-                    metadata=inbound.metadata,
-                )
+    async def _notify_busy_inbound(
+        self,
+        state: TextConversationState,
+        inbound: InteractionInbound,
+        decision: BusyInboundDecision,
+    ) -> None:
+        if decision.kind == "queue":
+            await self._send_text(
+                inbound.source,
+                f"Queued for next turn: {self._shorten(inbound.text)}",
+                reply_to=inbound.reply_to,
+                metadata=inbound.metadata,
+            )
+            return
+        if decision.kind == "interrupt":
+            await self._send_text(
+                inbound.source,
+                f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
+                reply_to=inbound.reply_to,
+                metadata=inbound.metadata,
+            )
 
-        await ConversationTurnController(state).handle_busy_inbound(inbound, notify=notify)
-
-    def _start_turn(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        ConversationTurnController(state).start(inbound, lambda next_inbound: self._run_inbound(state, next_inbound))
+    async def _run_lifecycle_turn(self, state: TextConversationState, inbound: InteractionInbound) -> None:
+        await self._conversation_lifecycle.run_state_turn(state, inbound)
 
     async def _run_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        task = asyncio.current_task()
         token = self._active_inbound.set(inbound)
         try:
             await self._send_typing(inbound)
@@ -243,9 +247,6 @@ class TextChannelBridgeBase:
             await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to, metadata=inbound.metadata)
         finally:
             self._active_inbound.reset(token)
-            controller = ConversationTurnController(state)
-            controller.finish(task)
-            await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _handle_command(self, inbound: InteractionInbound, state: TextConversationState):
         async def send_notice(text: str) -> None:
@@ -261,35 +262,11 @@ class TextChannelBridgeBase:
     async def _send_command_text(self, inbound: InteractionInbound, text: str) -> None:
         await self._send_text(inbound.source, text, reply_to=inbound.reply_to, metadata=inbound.metadata)
 
-    def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
-        state.remember_route(inbound)
-
-    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        state = self._conversation_states.state_for_session(event.owner_session_id)
-        if state is None:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._enqueue_task_completion(state, event))
-        except RuntimeError:
-            return
-
-    async def _enqueue_task_completion(self, state: TextConversationState, event: RuntimeTaskCompletionEvent) -> None:
-        await self._completion_delivery_runtime().enqueue_event(
-            state,
-            event,
-            run=lambda next_inbound: self._run_inbound(state, next_inbound),
-        )
-
-    def _completion_delivery_runtime(self) -> CompletionDeliveryRuntime:
-        return CompletionDeliveryRuntime(
-            channel=self.channel_name,
-            merge_owner_id=f"bridge:{self.channel_name}:merge",
-            enqueue_owner_id=f"bridge:{self.channel_name}:enqueue",
-            require_source=True,
-        )
+    async def _cancel_active(self, state: TextConversationState) -> None:
+        await self._conversation_lifecycle.cancel_active(state)
 
     def _state_for_session(self, session_id: str) -> TextConversationState | None:
-        return self._conversation_states.state_for_session(session_id)
+        return self._conversation_lifecycle.state_for_session(session_id)
 
     async def _send_typing(self, inbound: InteractionInbound) -> None:
         return None

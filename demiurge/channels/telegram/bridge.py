@@ -21,9 +21,7 @@ from typing import Any, Callable
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.core import TelegramChannelConfig
-from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
-from demiurge.runtime.conversation_states import ConversationStateStore
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
@@ -35,7 +33,7 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController
+from demiurge.runtime.ingress import BusyInboundDecision, ConversationIngressState
 from demiurge.runtime.approvals import (
     ApprovalPromptRuntime,
     PendingApproval,
@@ -139,7 +137,7 @@ class TelegramInteractionBridge:
             channel_name="telegram",
             surface="telegram",
             send_text=self._send_command_text,
-            run_inbound=self._run_inbound,
+            run_inbound=self._run_lifecycle_turn,
             cancel_active=self._cancel_active,
             include_status_channel=False,
             status_extra_lines=self._status_extra_lines,
@@ -160,11 +158,18 @@ class TelegramInteractionBridge:
             "demiurge_telegram_active_inbound",
             default=None,
         )
-        self._conversation_states = ConversationStateStore(
+        self._conversation_lifecycle = ConversationLifecycleRuntime(
+            config=ConversationLifecycleConfig(
+                channel="telegram",
+                merge_owner_id="bridge:telegram:merge",
+                enqueue_owner_id="bridge:telegram:enqueue",
+                require_source=True,
+            ),
             state_factory=self._new_conversation_state,
-            on_task_completion=self._on_task_completion,
+            run_turn=self._run_inbound,
+            notify_busy=self._notify_busy_inbound,
         )
-        self._conversations = self._conversation_states.states
+        self._conversations = self._conversation_lifecycle.states
         self._tool_message_ids: dict[tuple[str, str], tuple[str, int]] = {}
 
     @classmethod
@@ -420,21 +425,18 @@ class TelegramInteractionBridge:
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"telegram:{inbound.source}")
-        self._remember_route(state, inbound)
+        self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_telegram_command(inbound, state)
         if command_outcome.handled:
             return
         inbound = command_outcome.inbound
 
-        inbound = self._completion_delivery_runtime().merge_pending_into(
+        inbound = self._conversation_lifecycle.merge_pending(
             state,
             inbound,
             fallback_source=inbound.source,
         )
-        if state.active_task and not state.active_task.done():
-            await self._handle_busy_inbound(state, inbound)
-            return
-        self._start_turn(state, inbound)
+        await self._conversation_lifecycle.accept_inbound(state, inbound)
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
         await self._text_outbound_delivery_runtime().deliver(outbound)
@@ -666,7 +668,7 @@ class TelegramInteractionBridge:
         )
 
     def _conversation_state(self, conversation_key: str) -> TelegramConversationState:
-        return self._conversation_states.state_for_key(conversation_key)
+        return self._conversation_lifecycle.state_for_key(conversation_key)
 
     def _new_conversation_state(self, conversation_key: str) -> TelegramConversationState:
         return TelegramConversationState(
@@ -676,25 +678,26 @@ class TelegramInteractionBridge:
             conversation_key=conversation_key,
         )
 
-    async def _handle_busy_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        async def notify(decision) -> None:
-            if decision.kind == "queue":
-                await self._send_text(inbound.source, f"Queued for next turn: {self._shorten(inbound.text)}", reply_to=inbound.reply_to)
-                return
-            if decision.kind == "interrupt":
-                await self._send_text(
-                    inbound.source,
-                    f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
-                    reply_to=inbound.reply_to,
-                )
+    async def _notify_busy_inbound(
+        self,
+        state: TelegramConversationState,
+        inbound: InteractionInbound,
+        decision: BusyInboundDecision,
+    ) -> None:
+        if decision.kind == "queue":
+            await self._send_text(inbound.source, f"Queued for next turn: {self._shorten(inbound.text)}", reply_to=inbound.reply_to)
+            return
+        if decision.kind == "interrupt":
+            await self._send_text(
+                inbound.source,
+                f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
+                reply_to=inbound.reply_to,
+            )
 
-        await ConversationTurnController(state).handle_busy_inbound(inbound, notify=notify)
-
-    def _start_turn(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        ConversationTurnController(state).start(inbound, lambda next_inbound: self._run_inbound(state, next_inbound))
+    async def _run_lifecycle_turn(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
+        await self._conversation_lifecycle.run_state_turn(state, inbound)
 
     async def _run_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        task = asyncio.current_task()
         token = self._active_inbound.set(inbound)
         try:
             if self.send_typing:
@@ -708,9 +711,6 @@ class TelegramInteractionBridge:
             await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to)
         finally:
             self._active_inbound.reset(token)
-            controller = ConversationTurnController(state)
-            controller.finish(task)
-            await controller.drain_next(lambda next_inbound: self._run_inbound(state, next_inbound))
 
     async def _handle_telegram_command(
         self,
@@ -739,39 +739,13 @@ class TelegramInteractionBridge:
         )
 
     async def _cancel_active(self, state: TelegramConversationState) -> None:
-        await ConversationTurnController(state).cancel_active(
+        await self._conversation_lifecycle.cancel_active(
+            state,
             before_cancel=lambda: self._cancel_pending_approval(state, reason="telegram turn stopped")
         )
 
-    def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        state.remember_route(inbound)
-
-    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        state = self._conversation_states.state_for_session(event.owner_session_id)
-        if state is None:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._enqueue_task_completion(state, event))
-        except RuntimeError:
-            return
-
-    async def _enqueue_task_completion(self, state: TelegramConversationState, event: RuntimeTaskCompletionEvent) -> None:
-        await self._completion_delivery_runtime().enqueue_event(
-            state,
-            event,
-            run=lambda next_inbound: self._run_inbound(state, next_inbound),
-        )
-
-    def _completion_delivery_runtime(self) -> CompletionDeliveryRuntime:
-        return CompletionDeliveryRuntime(
-            channel="telegram",
-            merge_owner_id="bridge:telegram:merge",
-            enqueue_owner_id="bridge:telegram:enqueue",
-            require_source=True,
-        )
-
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:
-        return self._conversation_states.state_for_session(session_id)
+        return self._conversation_lifecycle.state_for_session(session_id)
 
     async def _send_text(
         self,
