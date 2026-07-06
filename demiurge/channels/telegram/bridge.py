@@ -22,7 +22,8 @@ from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRun
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
+from demiurge.runtime.conversation_states import ConversationStateStore
+from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
@@ -153,10 +154,12 @@ class TelegramInteractionBridge:
             "demiurge_telegram_active_inbound",
             default=None,
         )
-        self._conversations: dict[str, TelegramConversationState] = {}
+        self._conversation_states = ConversationStateStore(
+            state_factory=self._new_conversation_state,
+            on_task_completion=self._on_task_completion,
+        )
+        self._conversations = self._conversation_states.states
         self._tool_message_ids: dict[tuple[str, str], tuple[str, int]] = {}
-        self._task_worker: RuntimeTaskWorker | None = None
-        self._task_unsubscribe: Callable[[], None] | None = None
 
     @classmethod
     def from_config(
@@ -737,17 +740,15 @@ class TelegramInteractionBridge:
         return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
 
     def _conversation_state(self, conversation_key: str) -> TelegramConversationState:
-        state = self._conversations.get(conversation_key)
-        if state is None:
-            state = TelegramConversationState(
-                runtime=self._runtime_factory(conversation_key),
-                busy_mode=self.default_busy_mode,
-                route_binding=SessionRouteBinding(route=self),
-                conversation_key=conversation_key,
-            )
-            self._conversations[conversation_key] = state
-            self._subscribe_task_worker(state.runtime)
-        return state
+        return self._conversation_states.state_for_key(conversation_key)
+
+    def _new_conversation_state(self, conversation_key: str) -> TelegramConversationState:
+        return TelegramConversationState(
+            runtime=self._runtime_factory(conversation_key),
+            busy_mode=self.default_busy_mode,
+            route_binding=SessionRouteBinding(route=self),
+            conversation_key=conversation_key,
+        )
 
     async def _handle_busy_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         async def notify(decision) -> None:
@@ -819,17 +820,8 @@ class TelegramInteractionBridge:
     def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
 
-    def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
-        task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
-        if task_worker is None or task_worker is self._task_worker:
-            return
-        if self._task_unsubscribe is not None:
-            self._task_unsubscribe()
-        self._task_worker = task_worker
-        self._task_unsubscribe = task_worker.subscribe(self._on_task_completion)
-
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        state = self._state_for_session(event.owner_session_id)
+        state = self._conversation_states.state_for_session(event.owner_session_id)
         if state is None:
             return
         try:
@@ -849,15 +841,11 @@ class TelegramInteractionBridge:
             channel="telegram",
             merge_owner_id="bridge:telegram:merge",
             enqueue_owner_id="bridge:telegram:enqueue",
-            task_worker=self._task_worker,
             require_source=True,
         )
 
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:
-        for state in self._conversations.values():
-            if state.session_id == session_id:
-                return state
-        return None
+        return self._conversation_states.state_for_session(session_id)
 
     async def _send_text(
         self,

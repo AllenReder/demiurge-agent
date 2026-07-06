@@ -8,7 +8,8 @@ from typing import Any, Callable, Protocol
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.runtime.completion_delivery import CompletionDeliveryRuntime
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
+from demiurge.runtime.conversation_states import ConversationStateStore
+from demiurge.runtime.tasks import RuntimeTaskCompletionEvent
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -78,9 +79,11 @@ class TextChannelBridgeBase:
             help_extra_lines=("- `/ask <prompt>` - send a prompt",),
         )
         self._pending_choices = PromptChoiceRuntime()
-        self._conversations: dict[str, TextConversationState] = {}
-        self._task_worker: RuntimeTaskWorker | None = None
-        self._task_unsubscribe: Callable[[], None] | None = None
+        self._conversation_states = ConversationStateStore(
+            state_factory=self._new_conversation_state,
+            on_task_completion=self._on_task_completion,
+        )
+        self._conversations = self._conversation_states.states
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             f"demiurge_{channel_name}_active_inbound",
             default=None,
@@ -225,17 +228,15 @@ class TextChannelBridgeBase:
         return tool_results_markdown(records, mode=self.tool_display)
 
     def _conversation_state(self, conversation_key: str) -> TextConversationState:
-        state = self._conversations.get(conversation_key)
-        if state is None:
-            state = TextConversationState(
-                runtime=self._runtime_factory(conversation_key),
-                busy_mode=self.default_busy_mode,
-                route_binding=SessionRouteBinding(route=self),
-                conversation_key=conversation_key,
-            )
-            self._conversations[conversation_key] = state
-            self._subscribe_task_worker(state.runtime)
-        return state
+        return self._conversation_states.state_for_key(conversation_key)
+
+    def _new_conversation_state(self, conversation_key: str) -> TextConversationState:
+        return TextConversationState(
+            runtime=self._runtime_factory(conversation_key),
+            busy_mode=self.default_busy_mode,
+            route_binding=SessionRouteBinding(route=self),
+            conversation_key=conversation_key,
+        )
 
     async def _handle_busy_inbound(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         async def notify(decision) -> None:
@@ -295,17 +296,8 @@ class TextChannelBridgeBase:
     def _remember_route(self, state: TextConversationState, inbound: InteractionInbound) -> None:
         state.remember_route(inbound)
 
-    def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
-        task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
-        if task_worker is None or task_worker is self._task_worker:
-            return
-        if self._task_unsubscribe is not None:
-            self._task_unsubscribe()
-        self._task_worker = task_worker
-        self._task_unsubscribe = task_worker.subscribe(self._on_task_completion)
-
     def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        state = self._state_for_session(event.owner_session_id)
+        state = self._conversation_states.state_for_session(event.owner_session_id)
         if state is None:
             return
         try:
@@ -325,15 +317,11 @@ class TextChannelBridgeBase:
             channel=self.channel_name,
             merge_owner_id=f"bridge:{self.channel_name}:merge",
             enqueue_owner_id=f"bridge:{self.channel_name}:enqueue",
-            task_worker=self._task_worker,
             require_source=True,
         )
 
     def _state_for_session(self, session_id: str) -> TextConversationState | None:
-        for state in self._conversations.values():
-            if state.session_id == session_id:
-                return state
-        return None
+        return self._conversation_states.state_for_session(session_id)
 
     def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
         if not inbound.conversation_key:
