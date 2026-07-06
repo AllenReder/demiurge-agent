@@ -87,6 +87,7 @@ package state repair.
 Agent Core authors must not take ownership of:
 
 - provider request construction
+- provider wire protocol conversion and `api_mode` selection
 - provider calls
 - session, turn, step, message, artifact, and runtime event storage
 - tool registry and dispatch

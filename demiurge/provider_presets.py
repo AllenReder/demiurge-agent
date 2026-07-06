@@ -10,7 +10,7 @@ class ProviderPreset:
     base_url: str
     api_key_env: str
     suggested_model: str | None
-    adapter: str = "openai-compatible"
+    api_mode: str = "openai-chat"
 
 
 BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
@@ -20,6 +20,14 @@ BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         base_url="https://api.openai.com/v1",
         api_key_env="OPENAI_API_KEY",
         suggested_model="gpt-5.5",
+    ),
+    ProviderPreset(
+        preset_id="anthropic",
+        label="Anthropic",
+        base_url="https://api.anthropic.com/v1",
+        api_key_env="ANTHROPIC_API_KEY",
+        suggested_model=None,
+        api_mode="anthropic-messages",
     ),
     ProviderPreset(
         preset_id="deepseek",

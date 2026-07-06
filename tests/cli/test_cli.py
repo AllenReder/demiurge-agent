@@ -263,8 +263,36 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
     assert '"provider": "deepseek"' in output
     raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert raw["providers"]["default"] == "deepseek"
+    assert raw["providers"]["profiles"]["deepseek"]["api_mode"] == "openai-chat"
     assert raw["providers"]["profiles"]["deepseek"]["base_url"] == "https://api.deepseek.com"
     assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_setup_provider_add_accepts_explicit_api_mode(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "claude",
+            "--api-mode",
+            "anthropic-messages",
+            "--base-url",
+            "https://api.anthropic.com/v1",
+            "--api-key-env",
+            "ANTHROPIC_API_KEY",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"api_mode": "anthropic-messages"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["profiles"]["claude"]["api_mode"] == "anthropic-messages"
 
 
 def test_setup_model_set_commits_core_revision_and_leaves_live_clean(tmp_path):

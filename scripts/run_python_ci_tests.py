@@ -16,6 +16,7 @@ SHARDS: dict[str, tuple[str, ...]] = {
         "tests/core",
         "tests/diagnostics",
         "tests/evolution",
+        "tests/providers",
         "tests/scheduler",
         "tests/scripts",
         "tests/security",

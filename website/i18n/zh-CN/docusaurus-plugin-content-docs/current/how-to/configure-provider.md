@@ -56,6 +56,18 @@ uv run demiurge setup providers add <provider-id> \
   --set-default
 ```
 
+Provider profile 也会选择 `api_mode`，用于控制 host-owned wire protocol
+adapter。内置 OpenAI-compatible presets 默认使用 `openai-chat`。只有 endpoint
+使用 Anthropic Messages API 时才使用 `anthropic-messages`：
+
+```bash
+uv run demiurge setup providers add anthropic \
+  --api-mode anthropic-messages \
+  --base-url https://api.anthropic.com/v1 \
+  --api-key-env ANTHROPIC_API_KEY \
+  --set-default
+```
+
 在 shell 中 export secret，或把它存入 `~/.demiurge/.env`：
 
 ```bash
@@ -134,4 +146,6 @@ uv run demiurge setup timezone clear
 
 Provider profiles 是 host-owned configuration。Agent Core 可以在 `agent.yaml`
 中声明 model defaults，但 Agent Slots 不应该直接构造 provider requests 或读取
-secrets。API keys 优先使用环境变量或 `~/.demiurge/.env`。
+secrets。Host 会解析 profile、选择 `api_mode`、把内部 `LLMRequest` 转成
+provider-native payload，并把 response 归一回 `LLMResponse`。API keys 优先使用
+环境变量或 `~/.demiurge/.env`。

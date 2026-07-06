@@ -337,7 +337,13 @@ def _add_setup_parser(subparsers: argparse._SubParsersAction) -> None:
             default=None,
             help="Built-in provider preset to start from",
         )
-        provider_edit.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
+        provider_edit.add_argument(
+            "--api-mode",
+            choices=["openai-chat", "anthropic-messages"],
+            default=None,
+            help="Provider wire protocol used by this profile",
+        )
+        provider_edit.add_argument("--base-url", default=None, help="Provider API base URL")
         provider_edit.add_argument("--api-key-env", default=None, help="Environment variable containing the API key")
         provider_edit.add_argument("--api-key", default=None, help="Direct API key value")
         provider_edit.add_argument("--write-env", action="store_true", help="Write --api-key into <home>/.env")

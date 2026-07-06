@@ -160,20 +160,21 @@ class SetupWizard:
         choices = [
             SelectChoice(preset.preset_id, preset.label, preset.base_url) for preset in BUILTIN_PROVIDER_PRESETS
         ]
-        choices.append(SelectChoice("custom", "Custom", "Any OpenAI-compatible endpoint"))
+        choices.append(SelectChoice("custom", "Custom", "Any OpenAI Chat-compatible endpoint"))
         preset_id = self.prompt.select("Provider preset", choices)
         preset = get_provider_preset(preset_id)
         default_id = preset.preset_id if preset else "custom"
         provider_id = _normalize_setup_provider_id(self.prompt.input("Profile id", default=default_id))
         default_base_url = preset.base_url if preset else "http://localhost:11434/v1"
         default_env = preset.api_key_env if preset else f"{provider_id.upper().replace('-', '_')}_API_KEY"
+        api_mode = preset.api_mode if preset else "openai-chat"
         base_url = self.prompt.input("Base URL", default=default_base_url).strip()
         api_key_env = self.prompt.input("API key environment variable", default=default_env).strip()
         api_key = self.prompt.input("API key", secret=True).strip()
         write_provider_profile(
             self.context,
             provider_id=provider_id,
-            profile=HostProviderProfile(base_url=base_url, api_key_env=api_key_env or None),
+            profile=HostProviderProfile(api_mode=api_mode, base_url=base_url, api_key_env=api_key_env or None),
             set_default=self.prompt.confirm(f"Use {provider_id} as default provider?", default=False),
         )
         if api_key and api_key_env:
@@ -257,6 +258,7 @@ def setup_status(context: SetupContext, *, core_id: str | None = None, timezone_
             {
                 "provider": provider_config.provider_id,
                 "provider_source": provider_config.provider_source,
+                "provider_api_mode": provider_config.api_mode,
                 "model": model_name,
                 "model_source": model_source,
             }
@@ -288,7 +290,7 @@ def provider_profile_dict(profile: HostProviderProfile) -> dict[str, object]:
     if not api_key_source and profile.api_key_env:
         api_key_source = f"env:{profile.api_key_env} (missing)"
     return {
-        "adapter": profile.adapter,
+        "api_mode": profile.api_mode,
         "base_url": profile.base_url,
         "api_key_env": profile.api_key_env,
         "api_key": "<redacted>" if profile.api_key else None,
@@ -418,11 +420,16 @@ def provider_profile_from_args(args: argparse.Namespace, *, existing: HostProvid
     base_url = args.base_url or (preset.base_url if preset else None) or (existing.base_url if existing else None)
     if not base_url:
         raise SystemExit("--base-url is required for custom provider profiles")
+    api_mode = getattr(args, "api_mode", None) or (preset.api_mode if preset else None)
+    if api_mode is None and existing is not None:
+        api_mode = existing.api_mode
+    api_mode = api_mode or "openai-chat"
     api_key_env = args.api_key_env if args.api_key_env is not None else (preset.api_key_env if preset else None)
     if api_key_env is None and existing is not None:
         api_key_env = existing.api_key_env
     api_key = args.api_key if args.api_key is not None else (existing.api_key if existing else None)
     return HostProviderProfile(
+        api_mode=api_mode,
         base_url=base_url,
         api_key_env=api_key_env,
         api_key=api_key,
@@ -503,6 +510,7 @@ def _test_provider(context: SetupContext, provider_id: str, *, model: str | None
     response = asyncio.run(provider.complete(request))
     return {
         "provider": resolved_id,
+        "api_mode": provider_config.api_mode,
         "base_url": profile.base_url,
         "model": test_model,
         "api_key": provider_config.api_key_source or "not configured",

@@ -12,7 +12,7 @@ from demiurge.app import (
     resolve_tool_display,
 )
 from demiurge.core import ModelInfo, UiInfo
-from demiurge.providers import FakeProvider, OpenAICompatibleProvider
+from demiurge.providers import AnthropicMessagesProvider, FakeProvider, OpenAIChatProvider
 
 
 def _host_config_with_profile(
@@ -22,12 +22,14 @@ def _host_config_with_profile(
     api_key_env: str | None = "DEMIURGE_TEST_API_KEY",
     api_key: str | None = None,
     default: str | None = None,
+    api_mode: str = "openai-chat",
 ) -> HostConfig:
     return HostConfig(
         providers={
             "default": default,
             "profiles": {
                 provider_id: {
+                    "api_mode": api_mode,
                     "base_url": base_url,
                     "api_key_env": api_key_env,
                     "api_key": api_key,
@@ -45,9 +47,11 @@ def test_create_provider_uses_host_profile_base_url_and_key(monkeypatch):
     provider, name = create_provider(provider_config=resolved)
 
     assert name == "deepseek"
-    assert isinstance(provider, OpenAICompatibleProvider)
+    assert isinstance(provider, OpenAIChatProvider)
     assert provider.base_url == "https://llm.example.test/v1"
     assert provider.api_key == "test-key"
+    assert resolved.api_mode == "openai-chat"
+    assert resolved.api_mode_source == "config.yaml:providers.profiles.deepseek.api_mode"
     assert resolved.api_key_source == "env:DEMIURGE_TEST_API_KEY"
 
 
@@ -87,10 +91,40 @@ def test_builtin_provider_profile_can_be_selected_with_standard_env(monkeypatch)
     provider, name = create_provider(provider_config=resolved)
 
     assert name == "openai"
-    assert isinstance(provider, OpenAICompatibleProvider)
+    assert isinstance(provider, OpenAIChatProvider)
     assert provider.base_url == "https://api.openai.com/v1"
     assert provider.api_key == "openai-key"
+    assert resolved.api_mode == "openai-chat"
     assert resolved.base_url_source == "builtin:openai.base_url"
+
+
+def test_anthropic_provider_profile_selects_messages_api_mode(monkeypatch):
+    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    config = _host_config_with_profile(
+        provider_id="claude",
+        base_url="https://api.anthropic.com/v1",
+        api_mode="anthropic-messages",
+    )
+    resolved = resolve_provider_config(config, ModelInfo(provider="claude", model_name="claude-test"))
+
+    provider, name = create_provider(provider_config=resolved)
+
+    assert name == "claude"
+    assert isinstance(provider, AnthropicMessagesProvider)
+    assert provider.endpoint == "https://api.anthropic.com/v1/messages"
+    assert resolved.api_mode == "anthropic-messages"
+
+
+def test_builtin_anthropic_preset_uses_messages_api_mode(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    resolved = resolve_provider_config(HostConfig(), ModelInfo(provider="anthropic"))
+
+    provider, name = create_provider(provider_config=resolved)
+
+    assert name == "anthropic"
+    assert isinstance(provider, AnthropicMessagesProvider)
+    assert provider.api_key == "anthropic-key"
+    assert resolved.api_mode == "anthropic-messages"
 
 
 def test_env_api_key_wins_over_direct_api_key(monkeypatch):
@@ -180,5 +214,5 @@ def test_create_app_loads_runtime_env_file_over_shell_env(tmp_path, monkeypatch)
     assert app.provider_name == "deepseek"
     assert app.base_url == "https://env.example.test/v1"
     assert app.api_key_source == "env:DEMIURGE_TEST_API_KEY"
-    assert isinstance(app.runner.provider, OpenAICompatibleProvider)
+    assert isinstance(app.runner.provider, OpenAIChatProvider)
     assert app.runner.provider.api_key == "file-key"

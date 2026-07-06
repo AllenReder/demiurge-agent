@@ -24,7 +24,7 @@ from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInterac
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
-from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
+from demiurge.providers import Provider, ProviderFactoryConfig, create_provider_from_config
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
@@ -86,10 +86,19 @@ class HostDebugConfig(BaseModel):
 class HostProviderProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    adapter: Literal["openai-compatible"] = "openai-compatible"
+    api_mode: Literal["openai-chat", "anthropic-messages"] = "openai-chat"
     base_url: str
     api_key_env: str | None = None
     api_key: str | None = None
+
+    @field_validator("api_mode", mode="before")
+    @classmethod
+    def _api_mode(cls, value: Any) -> Any:
+        if value is None:
+            return "openai-chat"
+        if not isinstance(value, str):
+            raise ValueError("providers profile api_mode must be a string")
+        return value.strip()
 
     @field_validator("base_url", "api_key_env", "api_key", mode="before")
     @classmethod
@@ -208,7 +217,8 @@ class HostConfig(BaseModel):
 class ResolvedProviderConfig:
     provider_id: str
     provider_source: str
-    adapter: str
+    api_mode: str
+    api_mode_source: str | None
     base_url: str | None
     base_url_source: str | None
     api_key: str | None
@@ -236,6 +246,7 @@ class DemiurgeApp:
     runner: SessionTurnStepRunner
     provider_name: str
     provider_source: str
+    provider_api_mode: str
     model_name: str
     model_name_source: str
     base_url: str | None
@@ -292,6 +303,7 @@ class DemiurgeApp:
             "workspace": str(self.workspace.root),
             "provider": self.provider_name,
             "provider_source": self.provider_source,
+            "provider_api_mode": self.provider_api_mode,
             "model": self.model_name,
             "model_source": self.model_name_source,
             "base_url": self.base_url,
@@ -655,6 +667,7 @@ def create_app(
         runner=runner,
         provider_name=resolved_provider_name,
         provider_source=provider_config.provider_source,
+        provider_api_mode=provider_config.api_mode,
         model_name=resolved_model,
         model_name_source=resolved_model_source,
         base_url=provider_config.base_url,
@@ -934,14 +947,15 @@ def create_provider(
     provider_config: ResolvedProviderConfig,
     fake_script: Path | None = None,
 ) -> tuple[Provider, str]:
-    if provider_config.provider_id == "fake":
-        return FakeProvider(fake_script), "fake"
-    if provider_config.adapter == "openai-compatible":
-        return (
-            OpenAICompatibleProvider(api_key=provider_config.api_key, base_url=provider_config.base_url),
-            provider_config.provider_id,
-        )
-    raise ValueError(f"unknown provider adapter: {provider_config.adapter}")
+    return create_provider_from_config(
+        config=ProviderFactoryConfig(
+            provider_id=provider_config.provider_id,
+            api_mode=provider_config.api_mode,
+            base_url=provider_config.base_url,
+            api_key=provider_config.api_key,
+        ),
+        fake_script=fake_script,
+    )
 
 
 def resolve_provider_config(
@@ -962,7 +976,8 @@ def resolve_provider_config(
         return ResolvedProviderConfig(
             provider_id="fake",
             provider_source=provider_source,
-            adapter="fake",
+            api_mode="fake",
+            api_mode_source=None,
             base_url=None,
             base_url_source=None,
             api_key=None,
@@ -978,7 +993,8 @@ def resolve_provider_config(
     return ResolvedProviderConfig(
         provider_id=provider_id,
         provider_source=provider_source,
-        adapter=profile.adapter,
+        api_mode=profile.api_mode,
+        api_mode_source=f"{profile_source}.api_mode",
         base_url=profile.base_url,
         base_url_source=f"{profile_source}.base_url",
         api_key=api_key,
@@ -1019,7 +1035,7 @@ def resolve_host_provider_profile(host_config: HostConfig, provider_id: str) -> 
     if preset:
         return (
             HostProviderProfile(
-                adapter="openai-compatible",
+                api_mode=preset.api_mode,
                 base_url=preset.base_url,
                 api_key_env=preset.api_key_env,
                 api_key=None,

@@ -56,6 +56,19 @@ uv run demiurge setup providers add <provider-id> \
   --set-default
 ```
 
+Provider profiles also choose an `api_mode`, which controls the host-owned wire
+protocol adapter. Built-in OpenAI-compatible presets default to `openai-chat`.
+Use `anthropic-messages` only for endpoints that speak the Anthropic Messages
+API:
+
+```bash
+uv run demiurge setup providers add anthropic \
+  --api-mode anthropic-messages \
+  --base-url https://api.anthropic.com/v1 \
+  --api-key-env ANTHROPIC_API_KEY \
+  --set-default
+```
+
 Export the secret in your shell or store it in `~/.demiurge/.env`:
 
 ```bash
@@ -135,5 +148,7 @@ uv run demiurge setup timezone clear
 
 Provider profiles are host-owned configuration. Agent Cores can declare model
 defaults in `agent.yaml`, but Agent Slots should not construct provider requests
-or read secrets directly. Prefer environment variables or `~/.demiurge/.env` for
-API keys.
+or read secrets directly. The host resolves the profile, selects the
+`api_mode`, converts the internal `LLMRequest` into the provider-native payload,
+and normalizes the response back into `LLMResponse`. Prefer environment
+variables or `~/.demiurge/.env` for API keys.
