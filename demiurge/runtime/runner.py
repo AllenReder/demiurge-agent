@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -22,8 +22,6 @@ from demiurge.runtime.child_agents import (
     ResolvedPhaseSlots,
     RunnerChildAgentHost,
 )
-from demiurge.runtime.control import ActionSource, ActionSpec
-from demiurge.runtime.completions import CompletionInbox
 from demiurge.runtime.delivery import DeliveryRequest, DeliveryRouteContext
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -57,6 +55,7 @@ from demiurge.runtime.slots import (
 )
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime.turn import RunnerTurnEngineHost, TurnEngine, TurnEngineRequest
+from demiurge.runtime.turn_lifecycle import TurnLifecycleCompletion, TurnLifecycleRequest, TurnLifecycleRuntime
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, Provider, ToolCall
 from demiurge.sdk import (
@@ -73,7 +72,7 @@ from demiurge.sdk import (
     ToolResult,
     TurnContext,
 )
-from demiurge.storage import EventLog, SessionMessage, StateStore, VersionStore
+from demiurge.storage import EventLog, SessionMessage, VersionStore
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import utc_id
@@ -192,6 +191,12 @@ class SessionTurnStepRunner:
         self.prepare_live_core_callback = prepare_live_core
         self.context_assembler = ContextAssembler()
         self.event_log = EventLog(home, self.session_id)
+        self.turn_lifecycle = TurnLifecycleRuntime(
+            home=self.home,
+            session_runtime=self.session_runtime,
+            task_worker=self.task_worker,
+            event_log=self.event_log,
+        )
         self.delivery_runtime = DeliveryRuntime(
             store=self.session_runtime.store,
             event_log=self.event_log,
@@ -214,6 +219,13 @@ class SessionTurnStepRunner:
     def track_slot_background_task(self, task: asyncio.Task[Any]) -> None:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    def _bind_event_log(self) -> None:
+        self.event_log = EventLog(self.home, self.session_id)
+        if hasattr(self, "delivery_runtime"):
+            self.delivery_runtime.event_log = self.event_log
+        if hasattr(self, "turn_lifecycle"):
+            self.turn_lifecycle.event_log = self.event_log
 
     async def run_turn(
         self,
@@ -256,36 +268,20 @@ class SessionTurnStepRunner:
         if use_bootstrap:
             await self._ensure_bootstrap_context(core, capability, interaction_metadata=interaction_metadata)
 
-        turn_id = utc_id("turn_")
-        input_envelope = InputEnvelope(
-            raw_text=text,
-            metadata=interaction_metadata,
-            attachments=list(interaction.attachments) if interaction is not None else [],
+        lifecycle = self.turn_lifecycle.begin(
+            TurnLifecycleRequest(
+                session_id=self.session_id,
+                core_id=core.core_id,
+                core_revision=self._core_revision(core),
+                raw_text=text,
+                metadata=interaction_metadata,
+                attachments=tuple(interaction.attachments) if interaction is not None else (),
+            )
         )
-        user_input = AgentInput(content=text, metadata=interaction_metadata)
-        state_stores = ModuleStateStores(
-            core=StateStore.core(self.home, core.core_id),
-            session=StateStore.session(self.home, core_id=core.core_id, session_id=self.session_id),
-        )
-        turn = TurnContext(
-            session_id=self.session_id,
-            turn_id=turn_id,
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            user_input=user_input,
-            metadata=interaction_metadata,
-        )
-
-        self.event_log.emit(
-            "turn.started",
-            turn_id=turn_id,
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            **interaction_metadata,
-        )
-        turn_task_id = self._submit_turn_task(core=core, turn_id=turn_id, metadata=interaction_metadata)
-        self.session_runtime.start_turn(session_id=self.session_id, turn_id=turn_id, task_id=turn_task_id)
-        self.event_log.emit("message.inbound", turn_id=turn_id, content=text, **interaction_metadata)
+        turn_id = lifecycle.turn_id
+        input_envelope = lifecycle.input_envelope
+        state_stores = lifecycle.state_stores
+        turn = lifecycle.turn
 
         try:
             user_text, persisted_user_text, context, input_items = await self._run_input_slots(
@@ -300,14 +296,13 @@ class SessionTurnStepRunner:
                 phase_slots=input_phase_slots,
             )
         except asyncio.CancelledError:
-            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
             raise
         except Exception as exc:
-            self._finalize_interrupted_turn(
-                turn_id,
+            self.turn_lifecycle.interrupt(
+                lifecycle,
                 status="failed",
                 error=self._sanitize_runtime_error(exc),
-                metadata=interaction_metadata,
             )
             raise
         turn.user_input = AgentInput(content=user_text, metadata=interaction_metadata)
@@ -334,14 +329,13 @@ class SessionTurnStepRunner:
                 )
             )
         except asyncio.CancelledError:
-            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
             raise
         except Exception as exc:
-            self._finalize_interrupted_turn(
-                turn_id,
+            self.turn_lifecycle.interrupt(
+                lifecycle,
                 status="failed",
                 error=self._sanitize_runtime_error(exc),
-                metadata=interaction_metadata,
             )
             raise
         final_output = engine_result.final_output
@@ -365,14 +359,13 @@ class SessionTurnStepRunner:
                 phase_slots=output_phase_slots,
             )
         except asyncio.CancelledError:
-            self._finalize_interrupted_turn(turn_id, status="cancelled", error="turn cancelled", metadata=interaction_metadata)
+            self.turn_lifecycle.interrupt(lifecycle, status="cancelled", error="turn cancelled")
             raise
         except Exception as exc:
-            self._finalize_interrupted_turn(
-                turn_id,
+            self.turn_lifecycle.interrupt(
+                lifecycle,
                 status="failed",
                 error=self._sanitize_runtime_error(exc),
-                metadata=interaction_metadata,
             )
             raise
         items.extend(output_items)
@@ -400,17 +393,15 @@ class SessionTurnStepRunner:
                 ],
             }
         )
-        self.event_log.emit(
-            "turn.completed",
-            turn_id=turn_id,
-            items=[asdict(item) for item in items],
-            agent_result=result_client.value,
-            needs_user=needs_user,
-            **interaction_metadata,
+        self.turn_lifecycle.complete(
+            lifecycle,
+            TurnLifecycleCompletion(
+                items=tuple(items),
+                agent_result=result_client.value,
+                needs_user=needs_user,
+                result_ref=turn_id,
+            ),
         )
-        self._complete_turn_task(turn_id, result_ref=turn_id)
-        self.session_runtime.complete_turn(session_id=self.session_id, turn_id=turn_id, result_ref=turn_id)
-        self._ack_background_completion_claims(interaction_metadata)
         return TurnResult(
             session_id=self.session_id,
             turn_id=turn_id,
@@ -893,8 +884,7 @@ class SessionTurnStepRunner:
             provider=self.provider_name,
             model=self._resolve_model_name(core),
         )
-        self.event_log = EventLog(self.home, self.session_id)
-        self.delivery_runtime.event_log = self.event_log
+        self._bind_event_log()
         self.event_log.emit(
             "session.created" if created else "session.resumed",
             core_id=core.core_id,
@@ -906,8 +896,7 @@ class SessionTurnStepRunner:
         if not self.sessions.exists(session_id):
             raise FileNotFoundError(f"session not found: {session_id}")
         self.session_id = session_id
-        self.event_log = EventLog(self.home, self.session_id)
-        self.delivery_runtime.event_log = self.event_log
+        self._bind_event_log()
         self.history = self._session_history_messages()
         if emit_resumed:
             record = self.sessions.get_session(session_id)
@@ -1892,67 +1881,6 @@ class SessionTurnStepRunner:
     def background_task_count(self) -> int:
         return sum(1 for task in self._background_tasks if not task.done()) + self.task_worker.active_count
 
-    def _submit_turn_task(self, *, core: LoadedCore, turn_id: str, metadata: Mapping[str, Any]) -> str | None:
-        control_plane = getattr(self.session_runtime, "control_plane", None)
-        if control_plane is None:
-            return None
-        control_plane.submit(
-            ActionSpec(
-                kind="agent.turn",
-                payload={
-                    "task_id": turn_id,
-                    "owner_session_id": self.session_id,
-                    "owner_turn_id": turn_id,
-                    "core_id": core.core_id,
-                    "notify_policy": "session",
-                    "metadata": dict(metadata),
-                },
-                idempotency_key=f"turn:{turn_id}:submitted",
-            ),
-            source=ActionSource(
-                actor="host.session_runtime",
-                session_id=self.session_id,
-                turn_id=turn_id,
-                core_id=core.core_id,
-                metadata=dict(metadata),
-            ),
-        )
-        control_plane.mark_started(
-            turn_id,
-            source=ActionSource(
-                actor="host.session_runtime",
-                session_id=self.session_id,
-                turn_id=turn_id,
-                core_id=core.core_id,
-                metadata=dict(metadata),
-            ),
-        )
-        return turn_id
-
-    def _complete_turn_task(self, turn_id: str, *, result_ref: str | None = None) -> None:
-        control_plane = getattr(self.session_runtime, "control_plane", None)
-        if control_plane is not None:
-            control_plane.succeed(turn_id, result_ref=result_ref)
-
-    def _finalize_interrupted_turn(
-        self,
-        turn_id: str,
-        *,
-        status: str,
-        error: str,
-        metadata: Mapping[str, Any],
-    ) -> None:
-        self.event_log.emit(f"turn.{status}", turn_id=turn_id, error=error, **dict(metadata))
-        self.session_runtime.complete_turn(session_id=self.session_id, turn_id=turn_id, status=status, result_ref=turn_id)
-        control_plane = getattr(self.session_runtime, "control_plane", None)
-        if control_plane is None:
-            return
-        source = ActionSource(actor="host.session_runtime", session_id=self.session_id, turn_id=turn_id, metadata=dict(metadata))
-        if status == "cancelled":
-            control_plane.cancel(turn_id, summary=error, source=source)
-        else:
-            control_plane.fail(turn_id, error=error, summary=error, source=source)
-
     def _append_runtime_event(self, event: RuntimeEvent) -> None:
         self._append_runtime_events([event])
 
@@ -1963,9 +1891,6 @@ class SessionTurnStepRunner:
         control_plane = getattr(self.session_runtime, "control_plane", None)
         if control_plane is not None:
             control_plane.record_events(events)
-
-    def _ack_background_completion_claims(self, metadata: Mapping[str, Any]) -> None:
-        CompletionInbox(self.task_worker).ack_from_metadata(metadata)
 
     def _sanitize_runtime_error(self, exc: Exception) -> str:
         message = str(exc).replace("\n", " ").strip()

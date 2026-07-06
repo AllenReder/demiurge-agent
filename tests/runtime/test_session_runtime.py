@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -34,6 +35,15 @@ class ToolThenAnswerProvider:
         if self.calls == 1:
             return LLMResponse(tool_calls=[ToolCall(id="tools_1", name="tools_list", arguments={})])
         return LLMResponse(content="tool complete")
+
+
+class BlockingProvider:
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def complete(self, request):
+        self.started.set()
+        await asyncio.Event().wait()
 
 
 def test_session_runtime_projects_session_turn_and_messages(tmp_path):
@@ -252,6 +262,27 @@ async def test_runner_marks_turn_and_task_failed_when_provider_raises(tmp_path):
     assert failed_turn["status"] == "failed"
     assert task["status"] == "failed"
     assert task["error"]["message"] == "RuntimeError: provider exploded"
+
+
+@pytest.mark.asyncio
+async def test_runner_marks_turn_and_task_cancelled_when_provider_turn_is_cancelled(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = BlockingProvider()
+    app.runner.provider = provider
+
+    task = asyncio.create_task(app.runner.run_turn("hello"))
+    await provider.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    turns = app.runtime_store.query(RuntimeQuery(table="turns", order_by="created_at", limit=10)).rows
+    cancelled_turn = turns[-1]
+    task_record = app.control_plane.read(cancelled_turn["turn_id"])
+
+    assert cancelled_turn["status"] == "cancelled"
+    assert task_record["status"] == "cancelled"
+    assert task_record["error"]["message"] == "turn cancelled"
 
 
 @pytest.mark.asyncio
