@@ -194,6 +194,7 @@ async def test_turn_engine_feeds_tool_result_back_to_provider():
     second_messages = host.provider_requests[1].messages
     assert any(message.role == "tool" and message.content == "model-visible data" for message in second_messages)
     assert [event.type for event in host.runtime_events] == ["tool.call.started", "tool.call.completed"]
+    assert [event.payload["step_id"] for event in host.runtime_events] == ["turn_1_step_1", "turn_1_step_1"]
 
 
 @pytest.mark.asyncio

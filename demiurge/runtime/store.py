@@ -553,14 +553,14 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO tool_calls (
-                    call_id, task_id, turn_id, tool_name, status, args_json, result_json, created_at, completed_at
+                    call_id, turn_id, step_id, tool_name, status, args_json, result_json, created_at, completed_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
                     payload.get("turn_id"),
+                    payload.get("step_id"),
                     payload.get("tool_name"),
                     payload.get("status", "running"),
                     json.dumps(payload.get("args") or {}, ensure_ascii=False, sort_keys=True),
@@ -924,8 +924,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, runtime
 
 CREATE TABLE IF NOT EXISTS tool_calls (
     call_id TEXT PRIMARY KEY,
-    task_id TEXT,
     turn_id TEXT,
+    step_id TEXT,
     tool_name TEXT NOT NULL,
     status TEXT NOT NULL,
     args_json TEXT NOT NULL DEFAULT '{}',

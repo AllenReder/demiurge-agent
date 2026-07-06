@@ -93,10 +93,12 @@ session history.
 ## Current Implementation Slice
 
 The runtime store is now the hot-path source of truth for sessions, turns,
-messages, task status, task logs, scheduler instances, artifacts, delivery
-outbox rows, runtime work items, and unique channel conversation bindings. Old
-JSON session and scheduler files may still exist on disk from older installs,
-but runtime code does not read, migrate, or dual-write them.
+messages, foreground tool-call records, task status, task logs, scheduler
+instances, artifacts, delivery outbox rows, runtime work items, and unique
+channel conversation bindings. Foreground tool-call records are keyed by the
+current `turn_id` and model-loop `step_id`; they are not task facts. Old JSON
+session and scheduler files may still exist on disk from older installs, but
+runtime code does not read, migrate, or dual-write them.
 
 `RuntimeTaskWorker` is the live worker for active subprocess, terminal,
 evolver, and child-agent work. It keeps only non-durable process handles,

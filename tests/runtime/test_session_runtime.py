@@ -312,6 +312,7 @@ async def test_runner_tool_loop_projects_tool_calls_to_runtime_store(tmp_path):
     rows = app.runtime_store.query(RuntimeQuery(table="tool_calls", where={"call_id": "tools_1"}, limit=1)).rows
 
     assert rows[0]["turn_id"].startswith("turn_")
+    assert rows[0]["step_id"] == f"{rows[0]['turn_id']}_step_1"
     assert rows[0]["tool_name"] == "tools_list"
     assert rows[0]["status"] == "succeeded"
     assert "tools" in rows[0]["result"]["data"]

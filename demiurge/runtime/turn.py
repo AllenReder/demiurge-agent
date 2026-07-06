@@ -352,6 +352,7 @@ class TurnEngine:
                             aggregate_id=call.id,
                             payload={
                                 "turn_id": request.turn.turn_id,
+                                "step_id": step_id,
                                 "tool_name": call.name,
                                 "status": "running",
                                 "args": dict(call.arguments),
@@ -381,6 +382,7 @@ class TurnEngine:
                             aggregate_id=call.id,
                             payload={
                                 "turn_id": request.turn.turn_id,
+                                "step_id": step_id,
                                 "tool_name": call.name,
                                 "status": "failed" if result.is_error else "succeeded",
                                 "result": {

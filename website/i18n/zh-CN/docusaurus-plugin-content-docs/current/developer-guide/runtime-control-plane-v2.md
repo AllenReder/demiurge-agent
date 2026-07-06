@@ -81,10 +81,12 @@ side-effect lanes，不能修改 prompt、assistant response 或 session history
 
 ## Current Implementation Slice
 
-runtime store 现在是 sessions、turns、messages、task status、task logs、
-scheduler instances、artifacts 和 delivery outbox rows 的 hot-path source of
-truth。旧安装留下的 JSON session 和 scheduler files 可能仍在磁盘上，但 runtime
-code 不读取、不迁移，也不 dual-write 它们。
+runtime store 现在是 sessions、turns、messages、foreground tool-call records、
+task status、task logs、scheduler instances、artifacts、delivery outbox rows、
+runtime work items 和 unique channel conversation bindings 的 hot-path source
+of truth。Foreground tool-call records 由当前 `turn_id` 和 model-loop
+`step_id` 标识；它们不是 task facts。旧安装留下的 JSON session 和 scheduler
+files 可能仍在磁盘上，但 runtime code 不读取、不迁移，也不 dual-write 它们。
 
 `RuntimeTaskWorker` 是 active subprocess、terminal、evolver 和 child-agent
 work 的 live worker。它只在内存中保存 non-durable process handles、cancel
