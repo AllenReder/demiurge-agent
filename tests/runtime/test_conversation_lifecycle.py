@@ -57,7 +57,7 @@ def _inbound(text: str = "hello", *, conversation_key: str = "chat") -> Interact
     return InteractionInbound(channel="test", text=text, source="user", conversation_key=conversation_key)
 
 
-def _state(key: str, worker: FakeTaskWorker | None = None) -> ConversationIngressState:
+def _state(key: str, worker: FakeTaskWorker | None = None, *, source: str = "user") -> ConversationIngressState:
     runner = SimpleNamespace(session_id=f"session_{key}", task_worker=worker)
     runtime = SimpleNamespace(runner=runner)
     return ConversationIngressState(
@@ -65,7 +65,7 @@ def _state(key: str, worker: FakeTaskWorker | None = None) -> ConversationIngres
         busy_mode="interrupt",
         route_binding=SessionRouteBinding(route=SimpleNamespace()),
         conversation_key=key,
-        source="user",
+        source=source,
     )
 
 
@@ -94,6 +94,36 @@ async def _wait_idle(state: ConversationIngressState) -> None:
         await asyncio.sleep(0)
         if state.active_task is task:
             break
+
+
+def test_lifecycle_runtime_caches_state_and_closes_task_worker_subscription():
+    worker = FakeTaskWorker()
+    seen: list[str] = []
+    runtime = _runtime(worker, seen)
+
+    first = runtime.state_for_key("chat")
+    second = runtime.state_for_key("chat")
+
+    assert first is second
+    assert runtime.states == {"chat": first}
+    assert runtime.state_for_session("session_chat") is first
+    assert runtime.state_for_session("missing") is None
+    assert len(worker.callbacks) == 1
+
+    runtime.close()
+
+    assert worker.callbacks == []
+
+
+def test_lifecycle_runtime_deduplicates_shared_task_worker_subscription():
+    worker = FakeTaskWorker()
+    seen: list[str] = []
+    runtime = _runtime(worker, seen)
+
+    runtime.state_for_key("chat-a")
+    runtime.state_for_key("chat-b")
+
+    assert len(worker.callbacks) == 1
 
 
 @pytest.mark.asyncio
@@ -213,6 +243,21 @@ def test_lifecycle_runtime_merges_pending_completions():
     assert worker.claimed == {"event_1": "merge-owner"}
 
 
+def test_lifecycle_runtime_leaves_background_completion_inbound_unmerged():
+    event = _event()
+    worker = FakeTaskWorker([event])
+    seen: list[str] = []
+    runtime = _runtime(worker, seen)
+    state = runtime.state_for_key("chat")
+    inbound = _inbound("done")
+    inbound.metadata["trigger"] = "background_task"
+
+    merged = runtime.merge_pending(state, inbound)
+
+    assert merged is inbound
+    assert worker.claimed == {}
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_runtime_enqueues_task_completion_from_subscription():
     event = _event()
@@ -250,3 +295,37 @@ async def test_lifecycle_runtime_enqueues_task_completion_from_subscription():
     assert before_enqueue == ["task_1"]
     assert after_enqueue == [("task_1", "started")]
     assert seen == ["task_1"]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_runtime_can_require_known_completion_route_source():
+    event = _event()
+    worker = FakeTaskWorker([event])
+    seen: list[str] = []
+    after_enqueue: list[str] = []
+
+    async def run_turn(state: ConversationIngressState, inbound: InteractionInbound) -> None:
+        seen.append(inbound.text)
+
+    async def after(state, task_event, result) -> None:
+        after_enqueue.append(result.status)
+
+    runtime = ConversationLifecycleRuntime(
+        config=ConversationLifecycleConfig(
+            channel="test",
+            merge_owner_id="merge-owner",
+            enqueue_owner_id="enqueue-owner",
+            require_source=True,
+        ),
+        state_factory=lambda key: _state(key, worker, source=""),
+        run_turn=run_turn,
+        after_completion_enqueue=after,
+    )
+    state = runtime.state_for_key("chat")
+
+    worker.emit(event)
+    await _wait_idle(state)
+
+    assert worker.claimed == {}
+    assert after_enqueue == ["ignored_no_route"]
+    assert seen == []
