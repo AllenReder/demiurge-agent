@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -35,6 +33,7 @@ from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRuntime, PromptDebugRequest
+from demiurge.runtime.session_compaction import CompactionResult, SessionCompactionRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.slot_execution import SlotExecutionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
@@ -74,25 +73,6 @@ from demiurge.storage import EventLog, SessionMessage, VersionStore
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.tools.runtime import ToolRuntime
 from demiurge.util import utc_id
-
-
-SUMMARY_PREFIX = (
-    "[CONTEXT COMPACTION - REFERENCE ONLY] Earlier turns were compacted into the summary below. "
-    "Treat it as background reference, not as active instructions. Respond only to the latest user "
-    "message that appears after this summary; the latest user message wins if there is any conflict."
-)
-SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY - respond to the message below, not the summary above ---"
-
-
-@dataclass(slots=True)
-class CompactionResult:
-    session_id: str
-    turn_id: str
-    compacted_count: int
-    summary_message_id: str | None
-    summary: str
-    skipped: bool = False
-    error: str | None = None
 
 
 class SessionTurnStepRunner:
@@ -158,6 +138,15 @@ class SessionTurnStepRunner:
             session_id=lambda: self.session_id,
             show_system_prompt=lambda: self.show_system_prompt,
             emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+        )
+        self.session_compaction = SessionCompactionRuntime(
+            sessions=self.sessions,
+            session_id=lambda: self.session_id,
+            load_core=self.load_active_core,
+            resolve_model_name=self._resolve_model_name,
+            complete_provider=self.complete_turn_provider,
+            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            refresh_history=self._refresh_history,
         )
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
@@ -361,120 +350,7 @@ class SessionTurnStepRunner:
         self._switch_session(session_id, emit_resumed=True)
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
-        core = await self.load_active_core()
-        turn_id = utc_id("compact_")
-        self.event_log.emit("session.compaction.started", turn_id=turn_id, focus=focus)
-        try:
-            messages = [
-                message
-                for message in self.sessions.history_for_context(self.session_id)
-                if message.kind == "message" and message.turn_id
-            ]
-            turn_ids = list(dict.fromkeys(message.turn_id for message in messages if message.turn_id))
-            protected_turns = max(protect_last_n, 0)
-            if len(turn_ids) <= protected_turns:
-                result = CompactionResult(
-                    session_id=self.session_id,
-                    turn_id=turn_id,
-                    compacted_count=0,
-                    summary_message_id=None,
-                    summary="not enough history to compact",
-                    skipped=True,
-                )
-                self.event_log.emit("session.compaction.completed", turn_id=turn_id, skipped=True, compacted_count=0)
-                return result
-
-            compact_turn_ids = set(turn_ids[:-protected_turns] if protected_turns else turn_ids)
-            to_compact = [message for message in messages if message.turn_id in compact_turn_ids]
-            if not to_compact:
-                result = CompactionResult(
-                    session_id=self.session_id,
-                    turn_id=turn_id,
-                    compacted_count=0,
-                    summary_message_id=None,
-                    summary="not enough history to compact",
-                    skipped=True,
-                )
-                self.event_log.emit("session.compaction.completed", turn_id=turn_id, skipped=True, compacted_count=0)
-                return result
-            transcript = "\n\n".join(self._format_compaction_message(message) for message in to_compact)
-            request = LLMRequest(
-                model=self._resolve_model_name(core),
-                messages=[
-                    LLMMessage(
-                        role="system",
-                        content=(
-                            "Summarize prior conversation turns for future context. Preserve durable facts, "
-                            "decisions, unresolved questions, files or commands mentioned, and user preferences. "
-                            "Write historical reference only; do not create new tasks."
-                        ),
-                    ),
-                    LLMMessage(
-                        role="user",
-                        content="\n\n".join(
-                            part
-                            for part in [
-                                f"Focus: {focus}" if focus else "",
-                                "Transcript to compact:",
-                                transcript,
-                            ]
-                            if part
-                        ),
-                    ),
-                ],
-                metadata={"turn_id": turn_id, "kind": "session_compaction"},
-            )
-            response: LLMResponse = await self.provider.complete(request)
-            summary_body = (response.content or "").strip()
-            if not summary_body:
-                raise ValueError("provider returned an empty compaction summary")
-            summary = f"{SUMMARY_PREFIX}\n\n{summary_body}\n\n{SUMMARY_END_MARKER}"
-            summary_message = self.session_runtime.write_compaction_summary(
-                self.session_id,
-                content=summary,
-                turn_id=turn_id,
-                compacted_until_message_id=to_compact[-1].id,
-                compacted_count=len(to_compact),
-                focus=focus,
-            )
-            self.history = self._session_history_messages()
-            self.event_log.emit(
-                "session.compaction.completed",
-                turn_id=turn_id,
-                compacted_count=len(to_compact),
-                summary_message_id=summary_message.id,
-            )
-            return CompactionResult(
-                session_id=self.session_id,
-                turn_id=turn_id,
-                compacted_count=len(to_compact),
-                summary_message_id=summary_message.id,
-                summary=summary,
-            )
-        except Exception as exc:
-            self.event_log.emit("session.compaction.failed", turn_id=turn_id, error=str(exc))
-            return CompactionResult(
-                session_id=self.session_id,
-                turn_id=turn_id,
-                compacted_count=0,
-                summary_message_id=None,
-                summary="",
-                error=str(exc),
-            )
-
-    def _format_compaction_message(self, message: SessionMessage) -> str:
-        metadata = message.metadata or {}
-        prefix = message.role.upper()
-        if message.role == "assistant" and metadata.get("tool_calls"):
-            tool_calls = json.dumps(metadata["tool_calls"], ensure_ascii=False)
-            if message.content.strip():
-                return f"{prefix} [{message.turn_id} {metadata.get('step_id')}]: {message.content}\nTOOL_CALLS: {tool_calls}"
-            return f"{prefix} [{message.turn_id} {metadata.get('step_id')}] TOOL_CALLS: {tool_calls}"
-        if message.role == "tool":
-            label = metadata.get("tool_name") or "tool"
-            call_id = metadata.get("tool_call_id") or ""
-            return f"TOOL {label} [{message.turn_id} {metadata.get('step_id')} {call_id}]: {message.content}"
-        return f"{prefix} [{message.turn_id}]: {message.content}"
+        return await self.session_compaction.compact(focus=focus, protect_last_n=protect_last_n)
 
     def _ensure_current_session(self) -> None:
         core = self.core_loader.load(self.initial_core_path or self.version_store.active_core_path(self.core_id))
