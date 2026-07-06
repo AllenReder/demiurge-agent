@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -9,6 +11,7 @@ from demiurge.runtime.interactions import (
     UserPromptRequest,
 )
 from demiurge.runtime.outbound_delivery import text_delivery_steps, ui_delivery_steps
+from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
@@ -69,6 +72,85 @@ def test_text_delivery_steps_ignores_items_without_matching_payload():
     )
 
     assert steps == []
+
+
+async def _noop_prompt(_prompt: UserPromptRequest) -> str:
+    return ""
+
+
+async def _raise_on_delivery(_delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
+    raise RuntimeError("delivery failed")
+
+
+async def _unused_tool_call_delivery(_record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
+    raise AssertionError("tool call delivery should not run")
+
+
+async def _unused_tool_results_delivery(_records: list[ToolExecutionRecord], *, outbound: InteractionOutbound) -> None:
+    raise AssertionError("tool results delivery should not run")
+
+
+def _marked_item_statuses(outbound: InteractionOutbound) -> list[str]:
+    return [item.dispatch_status for item in outbound.items]
+
+
+def _recording_text_delivery_runtime(calls: list[tuple[str, object]]) -> TextOutboundDeliveryRuntime:
+    async def deliver_tool_call(record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
+        calls.append(("tool_call", record.call.id))
+
+    async def deliver_tool_results(records: list[ToolExecutionRecord], *, outbound: InteractionOutbound) -> None:
+        calls.append(("tool_results", [record.call.id for record in records]))
+
+    async def deliver_delivery(delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
+        calls.append(("delivery", delivery.text))
+
+    return TextOutboundDeliveryRuntime(
+        deliver_tool_call=deliver_tool_call,
+        deliver_tool_results=deliver_tool_results,
+        deliver_delivery=deliver_delivery,
+        prompt_user=_noop_prompt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_text_outbound_delivery_runtime_dispatches_text_steps_in_order():
+    calls: list[tuple[str, object]] = []
+    first = _tool_result("call_1", "one")
+    second = _tool_result("call_2", "two")
+    call = _tool_call("call_3")
+    delivery = _delivery("done")
+    outbound = _outbound(
+        InteractionItem.tool_result_item(first),
+        InteractionItem.tool_result_item(second),
+        InteractionItem.tool_call_item(call),
+        InteractionItem.delivery_item(delivery),
+    )
+    runtime = _recording_text_delivery_runtime(calls)
+
+    await runtime.deliver(outbound)
+
+    assert calls == [
+        ("tool_results", ["call_1", "call_2"]),
+        ("tool_call", "call_3"),
+        ("delivery", "done"),
+    ]
+    assert _marked_item_statuses(outbound) == ["delivered", "delivered", "delivered", "delivered"]
+
+
+@pytest.mark.asyncio
+async def test_text_outbound_delivery_runtime_marks_delivered_after_exception():
+    outbound = _outbound(InteractionItem.delivery_item(_delivery("fail")))
+    runtime = TextOutboundDeliveryRuntime(
+        deliver_tool_call=_unused_tool_call_delivery,
+        deliver_tool_results=_unused_tool_results_delivery,
+        deliver_delivery=_raise_on_delivery,
+        prompt_user=_noop_prompt,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await runtime.deliver(outbound)
+
+    assert _marked_item_statuses(outbound) == ["delivered"]
 
 
 def test_ui_delivery_steps_batches_deliveries_and_projects_tool_results_as_finished_tool_calls():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Awaitable, Literal, Protocol
 
 from demiurge.runtime.interactions import (
     InteractionDelivery,
@@ -14,6 +14,26 @@ from demiurge.tools.records import ToolExecutionRecord
 OutboundDeliveryKind = Literal["delivery", "deliveries", "tool_call", "tool_calls", "tool_results", "prompt"]
 
 
+class TextToolCallDelivery(Protocol):
+    def __call__(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> Awaitable[None]:
+        ...
+
+
+class TextToolResultsDelivery(Protocol):
+    def __call__(self, records: list[ToolExecutionRecord], *, outbound: InteractionOutbound) -> Awaitable[None]:
+        ...
+
+
+class TextDeliveryDelivery(Protocol):
+    def __call__(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> Awaitable[None]:
+        ...
+
+
+class TextPromptDelivery(Protocol):
+    def __call__(self, prompt: UserPromptRequest) -> Awaitable[str]:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class OutboundDeliveryStep:
     kind: OutboundDeliveryKind
@@ -22,6 +42,31 @@ class OutboundDeliveryStep:
     tool_calls: tuple[ToolInteractionRecord, ...] = field(default_factory=tuple)
     tool_results: tuple[ToolExecutionRecord, ...] = field(default_factory=tuple)
     prompt: UserPromptRequest | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TextOutboundDeliveryRuntime:
+    deliver_tool_call: TextToolCallDelivery
+    deliver_tool_results: TextToolResultsDelivery
+    deliver_delivery: TextDeliveryDelivery
+    prompt_user: TextPromptDelivery
+
+    async def deliver(self, outbound: InteractionOutbound) -> None:
+        try:
+            for step in text_delivery_steps(outbound):
+                if step.kind == "tool_call" and step.tool_call is not None:
+                    await self.deliver_tool_call(step.tool_call, outbound=outbound)
+                    continue
+                if step.kind == "tool_results":
+                    await self.deliver_tool_results(list(step.tool_results), outbound=outbound)
+                    continue
+                if step.kind == "delivery" and step.deliveries:
+                    await self.deliver_delivery(step.deliveries[0], outbound=outbound)
+                    continue
+                if step.kind == "prompt" and step.prompt is not None:
+                    await self.prompt_user(step.prompt)
+        finally:
+            outbound.mark_delivered()
 
 
 def text_delivery_steps(outbound: InteractionOutbound) -> list[OutboundDeliveryStep]:

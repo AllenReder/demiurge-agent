@@ -47,7 +47,7 @@ from demiurge.runtime.approvals import (
     format_resolved_approval_text,
     parse_approval_callback_data,
 )
-from demiurge.runtime.outbound_delivery import text_delivery_steps
+from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime
 from demiurge.runtime.prompts import PromptChoiceRuntime, choice_button_rows, format_prompt_text
 from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
@@ -448,21 +448,15 @@ class TelegramInteractionBridge:
         self._start_turn(state, inbound)
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
-        try:
-            for step in text_delivery_steps(outbound):
-                if step.kind == "tool_call" and step.tool_call is not None:
-                    await self._deliver_tool_call(step.tool_call, outbound=outbound)
-                    continue
-                if step.kind == "tool_results":
-                    await self._deliver_tool_results(list(step.tool_results), outbound=outbound)
-                    continue
-                if step.kind == "delivery" and step.deliveries:
-                    await self._deliver_delivery(step.deliveries[0], outbound=outbound)
-                    continue
-                if step.kind == "prompt" and step.prompt is not None:
-                    await self.prompt_user(step.prompt)
-        finally:
-            outbound.mark_delivered()
+        await self._text_outbound_delivery_runtime().deliver(outbound)
+
+    def _text_outbound_delivery_runtime(self) -> TextOutboundDeliveryRuntime:
+        return TextOutboundDeliveryRuntime(
+            deliver_tool_call=self._deliver_tool_call,
+            deliver_tool_results=self._deliver_tool_results,
+            deliver_delivery=self._deliver_delivery,
+            prompt_user=self.prompt_user,
+        )
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
         self._pending_choices.remember(prompt.conversation_key, prompt.choices)
