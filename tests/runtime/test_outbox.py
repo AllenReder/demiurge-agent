@@ -37,7 +37,6 @@ def _queue_delivery(store: RuntimeStore, delivery_id: str = "delivery_1") -> Int
         content="hello",
         turn_id="turn_1",
         delivery_id=delivery_id,
-        task_id="turn_1",
         channel="tui",
         target={"conversation_key": "local"},
         delivery_payload={"fallback_text": "hello"},

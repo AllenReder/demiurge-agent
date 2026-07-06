@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import contextvars
 import http.client
-import json
 import logging
 import os
 import re
@@ -15,16 +14,16 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
-from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import TelegramChannelConfig
-from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
-from demiurge.runtime.delegation import subagents_command_text
-from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
+from demiurge.runtime.interaction_factory import runtime_factory_for_app
+from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -34,9 +33,27 @@ from demiurge.runtime.interactions import (
     ToolInteractionRecord,
     UserPromptRequest,
 )
-from demiurge.providers import ToolCall
-from demiurge.sdk import AgentInput, TurnContext
-from demiurge.slash import SlashCommand, parse_slash_command, specs_for_surface, telegram_command_specs
+from demiurge.runtime.ingress import BusyInboundDecision, ConversationIngressState
+from demiurge.runtime.approvals import (
+    ApprovalPromptRuntime,
+    PendingApproval,
+    approval_button_rows,
+    approval_callback_answer,
+    approval_decision_for_action,
+    approval_resolution,
+    format_approval_request_text,
+    format_resolved_approval_text,
+    parse_approval_callback_data,
+)
+from demiurge.runtime.outbound_delivery import (
+    NativeDeliveryRuntime,
+    NativeMediaRequest,
+    TextOutboundTarget,
+    TextOutboundDeliveryRuntime,
+    text_outbound_target,
+)
+from demiurge.runtime.prompts import PromptDeliveryRuntime, choice_button_rows
+from demiurge.slash import command_names_for_surface, parse_slash_command, telegram_command_specs
 from demiurge.channels.telegram.bot_api import TelegramApiError, TelegramBotApi
 from demiurge.channels.telegram.formatting import (
     _needs_rich_telegram_rendering,
@@ -53,23 +70,12 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class TelegramConversationState:
-    runtime: InteractionRuntime
-    busy_mode: str
-    route_binding: SessionRouteBinding
-    conversation_key: str = ""
-    source: str = ""
-    reply_to: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    active_task: asyncio.Task[None] | None = None
-    queue: asyncio.Queue[InteractionInbound] = field(default_factory=asyncio.Queue)
+class TelegramConversationState(ConversationIngressState):
     pending_approval_id: str | None = None
 
 
 @dataclass(slots=True)
 class TelegramPendingApproval:
-    request: ApprovalRequest
-    future: asyncio.Future[ApprovalDecision]
     source: str
     reply_to: str | None
     conversation_key: str
@@ -82,47 +88,6 @@ TELEGRAM_POLL_NETWORK_MAX_DELAY_SECONDS = 30.0
 TELEGRAM_POLL_CONFLICT_BASE_DELAY_SECONDS = 15.0
 TELEGRAM_POLL_CONFLICT_STEP_DELAY_SECONDS = 10.0
 TELEGRAM_POLL_CONFLICT_MAX_RETRIES = 5
-
-
-def _normalize_tool_display(value: str | None) -> str:
-    normalized = (value or "summary").strip().lower()
-    return normalized if normalized in {"quiet", "summary", "full"} else "summary"
-
-
-def _tool_call_start_summary(call: ToolCall) -> str:
-    if call.name == "terminal":
-        command = str(call.arguments.get("command") or "").strip()
-        return f"$ {command}" if command else "running terminal"
-    if call.name in {"read_file", "write_file", "patch"}:
-        path = call.arguments.get("path") or call.arguments.get("file_path")
-        return f"{call.name}: {path}" if path else call.name
-    if call.arguments:
-        return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
-    return "running"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TelegramInteractionBridge:
@@ -162,7 +127,12 @@ class TelegramInteractionBridge:
         self.allowed_chats = set(allowed_chats or [])
         self.unauthorized_response = unauthorized_response
         self.approval_timeout_seconds = approval_timeout_seconds
-        self.tool_display = _normalize_tool_display(tool_display)
+        self.tool_display = normalize_tool_display(tool_display)
+        self._command_runtime = ChannelCommandRuntime(
+            command_names=command_names_for_surface("telegram"),
+            unavailable_template="Command not available on Telegram: /{name}",
+            unknown_template="Unknown command: /{name}",
+        )
         self._polling_network_error_count = 0
         self._polling_conflict_count = 0
         self._polling_network_base_delay = TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS
@@ -172,17 +142,35 @@ class TelegramInteractionBridge:
         self._polling_conflict_max_retries = TELEGRAM_POLL_CONFLICT_MAX_RETRIES
         self._rich_messages_disabled = False
         self.offset: int | None = None
-        self._pending_choices: dict[str, list[str]] = {}
-        self._pending_approvals: dict[str, TelegramPendingApproval] = {}
-        self._approval_counter = 0
+        self._prompt_delivery = PromptDeliveryRuntime()
+        self._pending_approvals = ApprovalPromptRuntime()
         self._active_inbound: contextvars.ContextVar[InteractionInbound | None] = contextvars.ContextVar(
             "demiurge_telegram_active_inbound",
             default=None,
         )
-        self._conversations: dict[str, TelegramConversationState] = {}
+        self._conversation_lifecycle = ConversationLifecycleRuntime(
+            config=ConversationLifecycleConfig(
+                channel="telegram",
+                merge_owner_id="bridge:telegram:merge",
+                enqueue_owner_id="bridge:telegram:enqueue",
+                require_source=True,
+            ),
+            state_factory=self._new_conversation_state,
+            run_turn=self._run_inbound,
+            notify_busy=self._notify_busy_inbound,
+        )
+        self._command_executor = ChannelCommandExecutor(
+            channel_name="telegram",
+            surface="telegram",
+            send_text=self._send_command_text,
+            lifecycle=self._conversation_lifecycle,
+            cancel_active=self._cancel_active,
+            include_status_channel=False,
+            status_extra_lines=self._status_extra_lines,
+            include_subagents=True,
+        )
+        self._conversations = self._conversation_lifecycle.states
         self._tool_message_ids: dict[tuple[str, str], tuple[str, int]] = {}
-        self._task_worker: RuntimeTaskWorker | None = None
-        self._task_unsubscribe: Callable[[], None] | None = None
 
     @classmethod
     def from_config(
@@ -322,7 +310,7 @@ class TelegramInteractionBridge:
             return
         if not await self._authorize_inbound(inbound):
             return
-        inbound = self._consume_inbound_pending_choice(inbound)
+        inbound = self._prompt_delivery.resolve_inbound(inbound)
         await self.handle_inbound(inbound)
 
     def normalize_update(self, update: dict[str, Any]) -> InteractionInbound | None:
@@ -344,8 +332,6 @@ class TelegramInteractionBridge:
         if normalized is None or not normalized.strip():
             return None
         conversation_key = f"telegram:{chat_id}"
-        if self._telegram_access_allowed(chat_id=chat_id, chat_type=str(chat_type), user_id=user_id):
-            normalized = self._consume_pending_choice(conversation_key, normalized.strip())
         return InteractionInbound(
             channel="telegram",
             text=normalized.strip(),
@@ -358,21 +344,6 @@ class TelegramInteractionBridge:
                 "telegram_user_id": user_id,
                 "telegram_update_id": update.get("update_id"),
             },
-        )
-
-    def _consume_inbound_pending_choice(self, inbound: InteractionInbound) -> InteractionInbound:
-        if not inbound.conversation_key:
-            return inbound
-        text = self._consume_pending_choice(inbound.conversation_key, inbound.text.strip())
-        if text == inbound.text:
-            return inbound
-        return InteractionInbound(
-            channel=inbound.channel,
-            text=text,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            conversation_key=inbound.conversation_key,
-            metadata=dict(inbound.metadata),
         )
 
     async def _authorize_callback(self, callback: dict[str, Any]) -> bool:
@@ -432,19 +403,13 @@ class TelegramInteractionBridge:
         chat_type = chat.get("type") or "private"
         user_id = (callback.get("from") or {}).get("id")
         conversation_key = f"telegram:{chat_id}"
-        choices = self._pending_choices.pop(conversation_key, None)
-        if not choices:
-            return None
-        try:
-            index = int(data.split(":", 1)[1])
-        except ValueError:
-            return None
-        if index < 0 or index >= len(choices):
+        resolution = self._prompt_delivery.consume_callback_data(conversation_key, data)
+        if resolution is None:
             return None
         message_id = message.get("message_id")
         return InteractionInbound(
             channel="telegram",
-            text=choices[index],
+            text=resolution.text,
             source=str(chat_id),
             reply_to=str(message_id) if message_id is not None else None,
             conversation_key=conversation_key,
@@ -460,69 +425,39 @@ class TelegramInteractionBridge:
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
         state = self._conversation_state(inbound.conversation_key or f"telegram:{inbound.source}")
-        self._remember_route(state, inbound)
-        command = parse_slash_command(inbound.text)
-        if command:
-            if command.name == "ask" and command.args:
-                inbound = InteractionInbound(
-                    channel=inbound.channel,
-                    text=command.args,
-                    source=inbound.source,
-                    reply_to=inbound.reply_to,
-                    conversation_key=inbound.conversation_key,
-                    metadata=dict(inbound.metadata),
-                )
-            elif command.name in {spec.name for spec in specs_for_surface("telegram")}:
-                await self._handle_telegram_command(command, inbound, state)
-                return
-            else:
-                await self._send_text(inbound.source, f"Unknown command: /{command.name}", reply_to=inbound.reply_to)
-                return
-
-        if not _is_background_completion(inbound):
-            inbound = self._merge_stored_task_completions(state, inbound)
-        if state.active_task and not state.active_task.done():
-            await self._handle_busy_inbound(state, inbound)
+        self._conversation_lifecycle.remember_route(state, inbound)
+        command_outcome = await self._handle_telegram_command(inbound, state)
+        if command_outcome.handled:
             return
-        self._start_turn(state, inbound)
+        inbound = command_outcome.inbound
+
+        inbound = self._conversation_lifecycle.merge_pending(
+            state,
+            inbound,
+            fallback_source=inbound.source,
+        )
+        await self._conversation_lifecycle.accept_inbound(state, inbound)
 
     async def deliver(self, outbound: InteractionOutbound) -> None:
-        try:
-            pending_tool_results = []
-            for item in outbound.items:
-                if item.kind == "tool_call" and item.tool_call is not None:
-                    if pending_tool_results:
-                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-                        pending_tool_results = []
-                    await self._deliver_tool_call(item.tool_call, outbound=outbound)
-                    continue
-                if item.kind == "tool_result" and item.tool_result is not None:
-                    pending_tool_results.append(item.tool_result)
-                    continue
-                if item.kind == "delivery" and item.delivery is not None:
-                    if pending_tool_results:
-                        await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-                        pending_tool_results = []
-                    await self._deliver_delivery(item.delivery, outbound=outbound)
-            if pending_tool_results:
-                await self._deliver_tool_results(pending_tool_results, outbound=outbound)
-            if outbound.prompt is not None:
-                await self.prompt_user(outbound.prompt)
-        finally:
-            outbound.mark_delivered()
+        await self._text_outbound_delivery_runtime().deliver(outbound)
+
+    def _text_outbound_delivery_runtime(self) -> TextOutboundDeliveryRuntime:
+        return TextOutboundDeliveryRuntime(
+            deliver_tool_call=self._deliver_tool_call,
+            deliver_tool_results=self._deliver_tool_results,
+            deliver_delivery=self._deliver_delivery,
+            prompt_user=self.prompt_user,
+        )
 
     async def prompt_user(self, prompt: UserPromptRequest) -> str:
-        if prompt.conversation_key and prompt.choices:
-            self._pending_choices[prompt.conversation_key] = list(prompt.choices)
-        source = prompt.metadata.get("source")
-        if source is None:
+        delivery = self._prompt_delivery.prepare(prompt)
+        if delivery is None:
             return ""
-        reply_to = prompt.metadata.get("reply_to")
         await self._send_text(
-            str(source),
-            self._prompt_text(prompt),
-            reply_to=str(reply_to) if reply_to is not None else None,
-            reply_markup=self._choice_reply_markup(prompt.choices) if prompt.choices else None,
+            delivery.source,
+            delivery.text,
+            reply_to=delivery.reply_to,
+            reply_markup={"inline_keyboard": choice_button_rows(delivery.choices)} if delivery.choices else None,
         )
         return ""
 
@@ -539,80 +474,95 @@ class TelegramInteractionBridge:
             )
             return ApprovalDecision("deny", "telegram approval is only supported in private chat")
 
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision] = loop.create_future()
-        approval_id = self._next_approval_id()
         conversation_key = inbound.conversation_key or f"telegram:{inbound.source}"
-        pending = TelegramPendingApproval(
-            request=request,
-            future=future,
+        payload = TelegramPendingApproval(
             source=inbound.source,
             reply_to=inbound.reply_to,
             conversation_key=conversation_key,
         )
-        sent = await self._send_text(
-            inbound.source,
-            self._approval_text(request),
-            reply_to=inbound.reply_to,
-            reply_markup=self._approval_reply_markup(approval_id),
+        pending = self._pending_approvals.open(request, payload=payload)
+        send_task = asyncio.create_task(
+            self._send_text(
+                inbound.source,
+                format_approval_request_text(request),
+                reply_to=inbound.reply_to,
+                reply_markup={"inline_keyboard": approval_button_rows(pending.approval_id)},
+            )
         )
-        pending.message_id = _telegram_message_id(sent)
-        self._pending_approvals[approval_id] = pending
-        self._conversation_state(conversation_key).pending_approval_id = approval_id
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=self.approval_timeout_seconds)
+            sent = await asyncio.shield(send_task)
+        except asyncio.CancelledError:
+            try:
+                sent = await send_task
+            except BaseException:
+                self._pending_approvals.discard(pending.approval_id)
+            else:
+                self._record_pending_approval_message(pending, sent, conversation_key)
+                resolved = self._resolve_pending_approval(
+                    pending.approval_id,
+                    ApprovalDecision("deny", "telegram approval cancelled"),
+                )
+                if resolved is not None:
+                    await self._edit_approval_message(
+                        resolved,
+                        "Approval expired",
+                        "The turn was stopped before approval.",
+                    )
+            raise
+        except BaseException:
+            self._pending_approvals.discard(pending.approval_id)
+            raise
+        self._record_pending_approval_message(pending, sent, conversation_key)
+        try:
+            return await asyncio.wait_for(
+                self._pending_approvals.wait(pending, shield=True),
+                timeout=self.approval_timeout_seconds,
+            )
         except asyncio.TimeoutError:
             decision = ApprovalDecision("deny", "telegram approval timed out")
-            pending = self._resolve_pending_approval(approval_id, decision)
-            if pending is not None:
-                await self._edit_approval_message(pending, "Approval expired", "Request denied after 10 minutes.")
+            resolved = self._resolve_pending_approval(pending.approval_id, decision)
+            if resolved is not None:
+                await self._edit_approval_message(resolved, "Approval expired", "Request denied after 10 minutes.")
             else:
                 await self._send_text(inbound.source, "Approval timed out; request denied.", reply_to=inbound.reply_to)
             return decision
         except asyncio.CancelledError:
-            self._resolve_pending_approval(approval_id, ApprovalDecision("deny", "telegram approval cancelled"))
+            resolved = self._resolve_pending_approval(
+                pending.approval_id,
+                ApprovalDecision("deny", "telegram approval cancelled"),
+            )
+            if resolved is not None:
+                await self._edit_approval_message(resolved, "Approval expired", "The turn was stopped before approval.")
             raise
-
-    async def _deliver_text(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
-        text = delivery.text or delivery.fallback_text
-        if not delivery.visible or not text:
-            return
-        source = outbound.metadata.get("source")
-        if source is None:
-            return
-        reply_to = outbound.metadata.get("reply_to")
-        await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
 
     async def _deliver_tool_results(self, records, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet" or not records:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_results_text(records)
         if text:
-            await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+            await self._send_text(target.source, text, reply_to=target.reply_to)
 
     async def _deliver_tool_call(self, record: ToolInteractionRecord, *, outbound: InteractionOutbound) -> None:
         if self.tool_display == "quiet":
             return
-        source = outbound.metadata.get("source")
-        if source is None:
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        reply_to = outbound.metadata.get("reply_to")
         text = self._tool_call_text(record)
         if not text:
             return
         key = self._tool_message_key(record, outbound)
         if record.phase == "finish":
-            target = self._tool_message_ids.pop(key, None)
-            if target is not None and await self._edit_tool_call_message(target[0], target[1], text):
+            edit_target = self._tool_message_ids.pop(key, None)
+            if edit_target is not None and await self._edit_tool_call_message(edit_target[0], edit_target[1], text):
                 return
-        sent = await self._send_text(str(source), text, reply_to=str(reply_to) if reply_to is not None else None)
+        sent = await self._send_text(target.source, text, reply_to=target.reply_to)
         message_id = _telegram_message_id(sent)
         if record.phase == "start" and message_id is not None:
-            self._tool_message_ids[key] = (str(source), message_id)
+            self._tool_message_ids[key] = (target.source, message_id)
 
     async def _edit_tool_call_message(self, chat_id: str, message_id: int, text: str) -> bool:
         if not hasattr(self.api, "edit_message_text"):
@@ -646,149 +596,63 @@ class TelegramInteractionBridge:
         return (conversation, record.call.id)
 
     def _tool_call_text(self, record: ToolInteractionRecord) -> str:
-        status = record.status
-        if record.phase == "start":
-            return f"## Tool call\n`{record.call.name}` - `running` - {self._shorten(_tool_call_start_summary(record.call), limit=220)}"
-        result = ""
-        if record.result is not None:
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-        if self.tool_display == "full" and record.result is not None:
-            sections = [
-                "## Tool call",
-                "",
-                f"### `{record.call.name}` - `{status}`",
-                "",
-                "**Arguments**",
-                "```json",
-                self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
-                "```",
-                "",
-                "**Result**",
-                "```",
-                self._shorten(record.result.display_output or record.result.content or "", limit=1800),
-                "```",
-            ]
-            if record.result.model_output and record.result.model_output != record.result.content:
-                sections.extend(["", "**Model output**", "```", self._shorten(record.result.model_output, limit=1200), "```"])
-            return "\n".join(sections)
-        return f"## Tool call\n`{record.call.name}` - `{status}` - {result}"
+        return tool_call_markdown(record, mode=self.tool_display)
 
     def _tool_results_text(self, records) -> str:
-        if self.tool_display == "full":
-            sections: list[str] = ["## Tool calls"]
-            for index, record in enumerate(records, start=1):
-                status = "error" if record.result.is_error else "ok"
-                sections.extend(
-                    [
-                        "",
-                        f"### {index}. `{record.call.name}` - `{status}`",
-                        "",
-                        "**Arguments**",
-                        "```json",
-                        self._shorten(json.dumps(record.call.arguments, ensure_ascii=False, indent=2), limit=1800),
-                        "```",
-                        "",
-                        "**Result**",
-                        "```",
-                        self._shorten(record.result.display_output or record.result.content or "", limit=1800),
-                        "```",
-                    ]
-                )
-                if record.result.model_output and record.result.model_output != record.result.content:
-                    sections.extend(
-                        [
-                            "",
-                            "**Model output**",
-                            "```",
-                            self._shorten(record.result.model_output, limit=1200),
-                            "```",
-                        ]
-                    )
-            return "\n".join(sections)
-
-        lines = ["## Tool calls"]
-        for index, record in enumerate(records, start=1):
-            status = "error" if record.result.is_error else "ok"
-            result = self._shorten(record.result.display_output or record.result.content or "", limit=220)
-            lines.append(f"{index}. `{record.call.name}` - `{status}` - {result}")
-        return "\n".join(lines)
+        return tool_results_markdown(records, mode=self.tool_display)
 
     async def _deliver_delivery(self, delivery: InteractionDelivery, *, outbound: InteractionOutbound) -> None:
         if not delivery.visible:
             return
-        blocks = delivery.blocks or []
-        if not blocks:
-            await self._deliver_text(delivery, outbound=outbound)
+        target = text_outbound_target(outbound)
+        if target is None:
             return
-        source = outbound.metadata.get("source")
-        if source is None:
-            return
-        reply_to = outbound.metadata.get("reply_to")
-        reply_to_text = str(reply_to) if reply_to is not None else None
-        fallback_lines: list[str] = []
-        for index, block in enumerate(blocks):
-            block_type = str(block.get("type") or "text")
-            if block_type == "text":
-                text = str(block.get("text") or "")
-                if text:
-                    await self._send_text(
-                        str(source),
-                        text,
-                        reply_to=reply_to_text if index == 0 else None,
-                    )
-                continue
-            delivered = await self._deliver_media_block(
-                str(source),
-                block,
-                reply_to=reply_to_text if index == 0 else None,
-            )
-            if not delivered:
-                fallback = self._media_block_fallback(block)
-                if fallback:
-                    fallback_lines.append(fallback)
-        if fallback_lines:
-            await self._send_text(str(source), "\n\n".join(fallback_lines), reply_to=reply_to_text)
+        await self._native_delivery_runtime().deliver(delivery, target=target)
 
-    async def _deliver_media_block(self, chat_id: str, block: dict[str, Any], *, reply_to: str | None = None) -> bool:
-        artifact = block.get("artifact")
-        if not isinstance(artifact, dict):
-            return False
-        source = self._artifact_send_source(artifact)
-        if not source:
-            return False
+    def _native_delivery_runtime(self) -> NativeDeliveryRuntime:
+        return NativeDeliveryRuntime(
+            send_text=self._send_text,
+            send_media=self._send_native_media,
+        )
+
+    async def _send_native_media(
+        self,
+        request: NativeMediaRequest,
+        *,
+        target: TextOutboundTarget,
+        reply_to: str | None = None,
+    ) -> bool:
         reply_to_id = int(reply_to) if isinstance(reply_to, str) and reply_to.isdigit() else None
-        caption = str(block.get("text") or artifact.get("summary") or "") or None
-        block_type = str(block.get("type") or artifact.get("kind") or "file")
         try:
-            if block_type == "image":
+            if request.kind == "image":
                 await asyncio.to_thread(
                     self.api.send_photo,
-                    chat_id=chat_id,
-                    photo=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    photo=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
-            elif block_type == "audio":
+            elif request.kind == "audio":
                 await self._deliver_voice_block(
-                    chat_id=chat_id,
-                    source=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    source=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
-            elif block_type == "video":
+            elif request.kind == "video":
                 await asyncio.to_thread(
                     self.api.send_video,
-                    chat_id=chat_id,
-                    video=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    video=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
             else:
                 await asyncio.to_thread(
                     self.api.send_document,
-                    chat_id=chat_id,
-                    document=source,
-                    caption=caption,
+                    chat_id=target.source,
+                    document=request.source,
+                    caption=request.caption,
                     reply_to_message_id=reply_to_id if _should_thread_reply(reply_to_id, 0, self.reply_to_mode) else None,
                 )
             return True
@@ -825,62 +689,34 @@ class TelegramInteractionBridge:
             reply_to_message_id=reply_to_message_id,
         )
 
-    def _artifact_send_source(self, artifact: dict[str, Any]) -> str | None:
-        url = artifact.get("url")
-        if url:
-            return str(url)
-        path = artifact.get("resolved_path") or artifact.get("path")
-        if not path:
-            return None
-        return str(path)
-
-    def _media_block_fallback(self, block: dict[str, Any]) -> str:
-        artifact = block.get("artifact")
-        if not isinstance(artifact, dict):
-            return ""
-        summary = artifact.get("summary") or artifact.get("media_type") or artifact.get("kind") or block.get("type")
-        artifact_id = artifact.get("artifact_id") or "artifact"
-        caption = block.get("text")
-        prefix = f"{caption}\n" if caption else ""
-        return f"{prefix}[artifact:{artifact_id} {artifact.get('kind') or block.get('type')} {summary}]"
-
     def _conversation_state(self, conversation_key: str) -> TelegramConversationState:
-        state = self._conversations.get(conversation_key)
-        if state is None:
-            state = TelegramConversationState(
-                runtime=self._runtime_factory(conversation_key),
-                busy_mode=self.default_busy_mode,
-                route_binding=SessionRouteBinding(route=self),
-                conversation_key=conversation_key,
-            )
-            self._conversations[conversation_key] = state
-            self._subscribe_task_worker(state.runtime)
-        return state
+        return self._conversation_lifecycle.state_for_key(conversation_key)
 
-    async def _handle_busy_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        await state.queue.put(inbound)
-        if _is_background_completion(inbound):
-            return
-        if state.busy_mode == "queue":
+    def _new_conversation_state(self, conversation_key: str) -> TelegramConversationState:
+        return TelegramConversationState(
+            runtime=self._runtime_factory(conversation_key),
+            busy_mode=self.default_busy_mode,
+            route_binding=SessionRouteBinding(route=self),
+            conversation_key=conversation_key,
+        )
+
+    async def _notify_busy_inbound(
+        self,
+        state: TelegramConversationState,
+        inbound: InteractionInbound,
+        decision: BusyInboundDecision,
+    ) -> None:
+        if decision.kind == "queue":
             await self._send_text(inbound.source, f"Queued for next turn: {self._shorten(inbound.text)}", reply_to=inbound.reply_to)
             return
-        await self._send_text(
-            inbound.source,
-            f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
-            reply_to=inbound.reply_to,
-        )
-        if state.active_task and not state.active_task.done():
-            state.active_task.cancel()
-
-    def _start_turn(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        if state.active_task and not state.active_task.done():
-            state.queue.put_nowait(inbound)
-            return
-        task = asyncio.create_task(self._run_inbound(state, inbound))
-        state.active_task = task
+        if decision.kind == "interrupt":
+            await self._send_text(
+                inbound.source,
+                f"Interrupting current turn; queued latest input: {self._shorten(inbound.text)}",
+                reply_to=inbound.reply_to,
+            )
 
     async def _run_inbound(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        task = asyncio.current_task()
         token = self._active_inbound.set(inbound)
         try:
             if self.send_typing:
@@ -894,355 +730,41 @@ class TelegramInteractionBridge:
             await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to)
         finally:
             self._active_inbound.reset(token)
-            if state.active_task is task:
-                state.active_task = None
-            await self._drain_next_queued_input(state)
-
-    async def _drain_next_queued_input(self, state: TelegramConversationState) -> None:
-        if state.active_task and not state.active_task.done():
-            return
-        if state.queue.empty():
-            return
-        next_inbound = self._next_queued_input(state)
-        self._start_turn(state, next_inbound)
 
     async def _handle_telegram_command(
         self,
-        command: SlashCommand,
         inbound: InteractionInbound,
         state: TelegramConversationState,
-    ) -> None:
-        handlers = {
-            "help": self._command_help,
-            "status": self._command_status,
-            "new": self._command_new,
-            "stop": self._command_stop,
-            "queue": self._command_queue,
-            "busy": self._command_busy,
-            "sessions": self._command_sessions,
-            "subagents": self._command_subagents,
-            "resume": self._command_resume,
-            "tools": self._command_tools,
-            "skills": self._command_skills,
-            "skill": self._command_skill,
-        }
-        handler = handlers.get(command.name)
-        if handler is None:
-            await self._send_text(inbound.source, f"Command not available on Telegram: /{command.name}", reply_to=inbound.reply_to)
-            return
-        await handler(command.args, inbound, state)
+    ):
+        async def send_notice(text: str) -> None:
+            await self._send_command_text(inbound, text)
 
-    async def _command_help(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        lines = ["# Commands"]
-        current_group = ""
-        for spec in specs_for_surface("telegram"):
-            if spec.group != current_group:
-                current_group = spec.group
-                lines.extend(["", f"## {current_group}"])
-            usage = spec.usage or f"/{spec.name}"
-            lines.append(f"- `{usage}` - {spec.description}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
+        return await self._command_runtime.handle(
+            inbound,
+            state,
+            handlers=self._command_executor.handlers(),
+            send_notice=send_notice,
+        )
 
-    async def _command_status(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        queue_depth = state.queue.qsize()
-        running = bool(state.active_task and not state.active_task.done())
-        lines = [
-            "# Status",
-            f"- core: `{getattr(runner, 'core_id', '?')}`",
-            f"- session: `{getattr(runner, 'session_id', '?')}`",
-            f"- running: `{str(running).lower()}`",
-            f"- busy mode: `{state.busy_mode}`",
-            f"- queued: `{queue_depth}`",
+    async def _send_command_text(self, inbound: InteractionInbound, text: str) -> None:
+        await self._send_text(inbound.source, text, reply_to=inbound.reply_to)
+
+    def _status_extra_lines(self, inbound: InteractionInbound) -> tuple[str, ...]:
+        return (
             "- access: `restricted`",
             f"- allowed users: `{len(self.allowed_users)}`",
             f"- allowed chats: `{len(self.allowed_chats)}`",
             f"- current authorized: `{str(self._inbound_authorized(inbound)).lower()}`",
-        ]
-        session_id = getattr(runner, "session_id", None)
-        if session_id:
-            with contextlib.suppress(Exception):
-                lines.append(f"- messages: `{state.runtime.session_runtime.message_count(session_id)}`")
-        provider_name = getattr(runner, "provider_name", None)
-        if provider_name:
-            lines.append(f"- provider: `{provider_name}`")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
-
-    async def _command_new(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        await self._cancel_active(state)
-        self._clear_queue(state, preserve_completions=False)
-        runner = state.runtime.runner
-        if not hasattr(runner, "start_new_session"):
-            await self._send_text(inbound.source, "Session reset is not available.", reply_to=inbound.reply_to)
-            return
-        await runner.prepare_live_core()
-        session_id = runner.start_new_session(
-            channel="telegram",
-            conversation_key=inbound.conversation_key,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            replace_conversation_binding=True,
         )
-        state.route_binding.bind(runner.interaction_router, session_id)
-        await self._send_text(inbound.source, f"New session: `{session_id}`", reply_to=inbound.reply_to)
-
-    async def _command_stop(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        running = bool(state.active_task and not state.active_task.done())
-        queued = self._clear_queue(state, preserve_completions=True)
-        if running:
-            await self._cancel_active(state)
-            await self._send_text(inbound.source, f"Stopped current turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to)
-            return
-        await self._send_text(inbound.source, f"No running turn; cleared {queued} queued message(s).", reply_to=inbound.reply_to)
-        await self._drain_next_queued_input(state)
-
-    async def _command_queue(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        text = args.strip()
-        if not text:
-            await self._send_text(inbound.source, "Usage: `/queue <prompt>`", reply_to=inbound.reply_to)
-            return
-        queued = InteractionInbound(
-            channel=inbound.channel,
-            text=text,
-            source=inbound.source,
-            reply_to=inbound.reply_to,
-            conversation_key=inbound.conversation_key,
-            metadata=dict(inbound.metadata),
-        )
-        await state.queue.put(queued)
-        await self._send_text(inbound.source, f"Queued: {self._shorten(text)}", reply_to=inbound.reply_to)
-        if not state.active_task or state.active_task.done():
-            await self._drain_next_queued_input(state)
-
-    async def _command_busy(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        mode = args.strip().lower()
-        if not mode:
-            await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to)
-            return
-        if mode not in {"interrupt", "queue"}:
-            await self._send_text(inbound.source, "Usage: `/busy interrupt|queue`", reply_to=inbound.reply_to)
-            return
-        state.busy_mode = mode
-        await self._send_text(inbound.source, f"Busy mode: `{state.busy_mode}`", reply_to=inbound.reply_to)
-
-    async def _command_sessions(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        limit = int(args.strip()) if args.strip().isdigit() else 10
-        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=limit)
-        await self._send_text(inbound.source, self._sessions_text(records, state.runtime.runner.session_id), reply_to=inbound.reply_to)
-
-    async def _command_subagents(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        text = await subagents_command_text(
-            state.runtime.runner.task_worker,
-            session_id=state.runtime.runner.session_id,
-            args=args,
-        )
-        await self._send_text(inbound.source, text[:3800], reply_to=inbound.reply_to)
-
-    async def _command_resume(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        raw = args.strip()
-        records = state.runtime.session_runtime.list_sessions(core_id=state.runtime.runner.core_id, limit=20)
-        if not raw:
-            await self._send_text(
-                inbound.source,
-                self._sessions_text(records, state.runtime.runner.session_id) + "\n\nUse `/resume <number|session_id>`.",
-                reply_to=inbound.reply_to,
-            )
-            return
-        session_id = raw
-        if raw.isdigit():
-            index = int(raw) - 1
-            if index < 0 or index >= len(records):
-                await self._send_text(inbound.source, f"Session number out of range: {raw}", reply_to=inbound.reply_to)
-                return
-            session_id = records[index].session_id
-        try:
-            state.runtime.runner.resume_session(session_id)
-        except FileNotFoundError as exc:
-            await self._send_text(inbound.source, str(exc), reply_to=inbound.reply_to)
-            return
-        state.route_binding.bind(state.runtime.runner.interaction_router, session_id)
-        await self._send_text(inbound.source, f"Resumed session: `{session_id}`", reply_to=inbound.reply_to)
-
-    async def _command_tools(self, _: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        lines = ["# Tools"]
-        for entry in runner.tool_runtime.registry_for(core):
-            lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
-
-    async def _command_skills(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        category = args.strip() or None
-        skills = [skill for skill in core.skills if category is None or skill.category == category]
-        lines = ["# Skills"]
-        for skill in skills:
-            lines.append(f"- `{skill.name}` - {skill.category} - {skill.description}")
-        await self._send_text(inbound.source, "\n".join(lines), reply_to=inbound.reply_to)
-
-    async def _command_skill(self, args: str, inbound: InteractionInbound, state: TelegramConversationState) -> None:
-        parts = args.split(maxsplit=1)
-        if not parts:
-            await self._send_text(inbound.source, "Usage: `/skill <name>`", reply_to=inbound.reply_to)
-            return
-        runner = state.runtime.runner
-        core = await runner.load_active_core()
-        result = await runner.tool_runtime.execute(
-            ToolCall(name="skill_view", arguments={"name": parts[0]}, id="telegram_skill_view"),
-            core=core,
-            turn=TurnContext(
-                session_id=runner.session_id,
-                turn_id="telegram_slash",
-                core_id=core.core_id,
-                core_revision=runner.version_store.active_pointer(core.core_id).active_revision,
-                user_input=AgentInput(content=inbound.text, metadata=dict(inbound.metadata)),
-                metadata=dict(inbound.metadata),
-            ),
-            capability=CapabilityFacade(core),
-            emit_event=runner.event_log.emit,
-        )
-        content = result.content
-        if isinstance(result.data, dict) and result.data.get("content"):
-            content = str(result.data["content"])
-        await self._send_text(inbound.source, content[:3800], reply_to=inbound.reply_to)
 
     async def _cancel_active(self, state: TelegramConversationState) -> None:
-        task = state.active_task
-        if not task or task.done():
-            return
-        await self._cancel_pending_approval(state, reason="telegram turn stopped")
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
-
-    def _clear_queue(self, state: TelegramConversationState, *, preserve_completions: bool) -> int:
-        count = 0
-        preserved: list[InteractionInbound] = []
-        while not state.queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                inbound = state.queue.get_nowait()
-                if preserve_completions and _is_background_completion(inbound):
-                    preserved.append(inbound)
-                else:
-                    count += 1
-        for inbound in preserved:
-            state.queue.put_nowait(inbound)
-        return count
-
-    def _next_queued_input(self, state: TelegramConversationState) -> InteractionInbound:
-        pending: list[InteractionInbound] = []
-        while not state.queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                pending.append(state.queue.get_nowait())
-        user_index = next((index for index, item in enumerate(pending) if not _is_background_completion(item)), None)
-        selected_index = user_index if user_index is not None else 0
-        selected = pending.pop(selected_index)
-        if not _is_background_completion(selected):
-            completions = [item for item in pending if _is_background_completion(item)]
-            pending = [item for item in pending if not _is_background_completion(item)]
-            if completions:
-                selected = _merge_completion_inbounds(selected, completions)
-        for item in pending:
-            state.queue.put_nowait(item)
-        return selected
-
-    def _remember_route(self, state: TelegramConversationState, inbound: InteractionInbound) -> None:
-        state.source = inbound.source
-        state.reply_to = inbound.reply_to
-        state.metadata = dict(inbound.metadata)
-        state.conversation_key = inbound.conversation_key or state.conversation_key
-
-    def _merge_stored_task_completions(
-        self,
-        state: TelegramConversationState,
-        inbound: InteractionInbound,
-    ) -> InteractionInbound:
-        task_worker = getattr(getattr(state.runtime, "runner", None), "task_worker", None)
-        session_id = getattr(getattr(state.runtime, "runner", None), "session_id", None)
-        if task_worker is None or not session_id:
-            return inbound
-        completions: list[InteractionInbound] = []
-        for event in task_worker.pending_events_for_session(str(session_id)):
-            claim = task_worker.claim_pending_event(event.event_id, owner_id="bridge:telegram:merge")
-            if claim is None:
-                continue
-            completions.append(
-                _task_completion_inbound(
-                    event,
-                    channel="telegram",
-                    source=state.source or inbound.source,
-                    reply_to=state.reply_to,
-                    conversation_key=state.conversation_key,
-                    metadata=state.metadata,
-                    claim_id=claim.claim_id,
-                )
-            )
-        if not completions:
-            return inbound
-        return _merge_completion_inbounds(inbound, completions)
-
-    def _subscribe_task_worker(self, runtime: InteractionRuntime) -> None:
-        task_worker = getattr(getattr(runtime, "runner", None), "task_worker", None)
-        if task_worker is None or task_worker is self._task_worker:
-            return
-        if self._task_unsubscribe is not None:
-            self._task_unsubscribe()
-        self._task_worker = task_worker
-        self._task_unsubscribe = task_worker.subscribe(self._on_task_completion)
-
-    def _on_task_completion(self, event: RuntimeTaskCompletionEvent) -> None:
-        state = self._state_for_session(event.owner_session_id)
-        if state is None:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._enqueue_task_completion(state, event))
-        except RuntimeError:
-            return
-
-    async def _enqueue_task_completion(self, state: TelegramConversationState, event: RuntimeTaskCompletionEvent) -> None:
-        if not state.source:
-            return
-        claim_id = None
-        if self._task_worker is not None:
-            claim = self._task_worker.claim_pending_event(event.event_id, owner_id="bridge:telegram:enqueue")
-            if claim is None:
-                return
-            claim_id = claim.claim_id
-        inbound = _task_completion_inbound(
-            event,
-            channel="telegram",
-            source=state.source,
-            reply_to=state.reply_to,
-            conversation_key=state.conversation_key,
-            metadata=state.metadata,
-            claim_id=claim_id,
+        await self._conversation_lifecycle.cancel_active(
+            state,
+            before_cancel=lambda: self._cancel_pending_approval(state, reason="telegram turn stopped")
         )
-        if state.active_task and not state.active_task.done():
-            await state.queue.put(inbound)
-            return
-        if not state.queue.empty():
-            await state.queue.put(inbound)
-            await self._drain_next_queued_input(state)
-            return
-        self._start_turn(state, inbound)
 
     def _state_for_session(self, session_id: str) -> TelegramConversationState | None:
-        for state in self._conversations.values():
-            runner = getattr(state.runtime, "runner", None)
-            if getattr(runner, "session_id", None) == session_id:
-                return state
-        return None
-
-    def _sessions_text(self, records, active_session_id: str | None) -> str:
-        if not records:
-            return "No sessions found."
-        lines = ["# Sessions"]
-        for index, record in enumerate(records, start=1):
-            marker = "*" if record.session_id == active_session_id else " "
-            preview = f" - {record.preview}" if record.preview else ""
-            lines.append(f"{index}. {marker} `{record.session_id}` - {record.updated_at} - {record.message_count} msg{preview}")
-        return "\n".join(lines)
+        return self._conversation_lifecycle.state_for_session(session_id)
 
     async def _send_text(
         self,
@@ -1338,123 +860,51 @@ class TelegramInteractionBridge:
         with contextlib.suppress(Exception):
             await asyncio.to_thread(self.api.answer_callback_query, callback_query_id=callback_query_id, text=text)
 
-    def _consume_pending_choice(self, conversation_key: str, text: str) -> str:
-        choices = self._pending_choices.get(conversation_key)
-        if not choices:
-            return text
-        value = text.strip()
-        self._pending_choices.pop(conversation_key, None)
-        if value.isdigit():
-            index = int(value) - 1
-            if 0 <= index < len(choices):
-                return choices[index]
-        return text
-
-    def _prompt_text(self, prompt: UserPromptRequest) -> str:
-        lines = [prompt.question]
-        for index, choice in enumerate(prompt.choices, start=1):
-            lines.append(f"{index}. {choice}")
-        return "\n".join(lines)
-
-    def _choice_reply_markup(self, choices: list[str]) -> dict[str, Any]:
-        buttons = []
-        for index, choice in enumerate(choices):
-            label = f"{index + 1}. {self._shorten(choice, limit=32)}"
-            buttons.append([{"text": label, "callback_data": f"choice:{index}"}])
-        return {"inline_keyboard": buttons}
-
-    def _next_approval_id(self) -> str:
-        self._approval_counter += 1
-        return str(self._approval_counter)
-
-    def _approval_reply_markup(self, approval_id: str) -> dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [{"text": "Allow once", "callback_data": f"approval:{approval_id}:allow"}],
-                [{"text": "Allow for session", "callback_data": f"approval:{approval_id}:session"}],
-                [{"text": "Deny", "callback_data": f"approval:{approval_id}:deny"}],
-            ]
-        }
-
-    def _approval_text(self, request: ApprovalRequest) -> str:
-        lines = [
-            "## Approval required",
-            "",
-            f"**Summary:** {request.summary}",
-            f"**Tool:** `{request.tool_name}`",
-            f"**Risk:** `{request.risk}`",
-            f"**Capability:** `{request.capability}`",
-            f"**Action:** `{request.action}`",
-        ]
-        if request.target:
-            lines.append(f"**Target:** `{request.target}`")
-        if request.command:
-            lines.extend(["", "**Command**", "```", self._shorten(request.command, limit=1000), "```"])
-        if request.arguments_preview:
-            preview = json.dumps(request.arguments_preview, ensure_ascii=False, sort_keys=True, indent=2)
-            lines.extend(["", "**Arguments**", "```json", self._shorten(preview, limit=1000), "```"])
-        lines.extend(["", "This request expires in 10 minutes.", "Choose **Allow once**, **Allow for session**, or **Deny**."])
-        return "\n".join(lines)
-
-    def _resolved_approval_text(self, request: ApprovalRequest, *, title: str, detail: str) -> str:
-        lines = [
-            f"## {title}",
-            "",
-            detail,
-            "",
-            f"**Summary:** {request.summary}",
-            f"**Tool:** `{request.tool_name}`",
-        ]
-        if request.command:
-            lines.extend(["", "**Command**", "```", self._shorten(request.command, limit=1000), "```"])
-        return "\n".join(lines)
-
     async def _handle_approval_callback(self, callback: dict[str, Any]) -> None:
         callback_id = callback.get("id")
         data = str(callback.get("data") or "")
-        parts = data.split(":")
-        if len(parts) != 3:
+        parsed = parse_approval_callback_data(data)
+        if parsed is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        _, approval_id, action = parts
-        decisions = {
-            "allow": ApprovalDecision("allow", "approved by Telegram user"),
-            "session": ApprovalDecision("always_allow_for_session", "approved by Telegram user for this session"),
-            "deny": ApprovalDecision("deny", "denied by Telegram user"),
-        }
-        labels = {
-            "allow": ("Approved once", "The command was approved for this request."),
-            "session": ("Approved for session", "Matching requests are allowed for this session."),
-            "deny": ("Denied", "The command was not executed."),
-        }
-        decision = decisions.get(action)
+        decision = approval_decision_for_action(parsed.action, actor="Telegram user")
         if decision is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        if approval_id not in self._pending_approvals:
+        if self._pending_approvals.get(parsed.approval_id) is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Approval expired.")
             await self._edit_expired_callback_message(callback)
             return
-        pending = self._resolve_pending_approval(approval_id, decision)
+        pending = self._resolve_pending_approval(parsed.approval_id, decision)
         if callback_id:
-            await self._answer_callback_query(str(callback_id), text="Approved." if decision.allowed else "Denied.")
+            await self._answer_callback_query(str(callback_id), text=approval_callback_answer(decision))
         if pending is not None:
-            title, detail = labels[action]
-            await self._edit_approval_message(pending, title, detail)
+            resolution = approval_resolution(parsed.action)
+            if resolution is not None:
+                await self._edit_approval_message(pending, resolution.title, resolution.detail)
 
-    def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> TelegramPendingApproval | None:
-        pending = self._pending_approvals.pop(approval_id, None)
+    def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> PendingApproval | None:
+        pending = self._pending_approvals.resolve(approval_id, decision)
         if pending is None:
             return None
-        state = self._conversations.get(pending.conversation_key)
+        payload: TelegramPendingApproval = pending.payload
+        state = self._conversations.get(payload.conversation_key)
         if state is not None and state.pending_approval_id == approval_id:
             state.pending_approval_id = None
-        if not pending.future.done():
-            pending.future.set_result(decision)
         return pending
+
+    def _record_pending_approval_message(
+        self,
+        pending: PendingApproval,
+        sent: dict[str, Any] | None,
+        conversation_key: str,
+    ) -> None:
+        payload: TelegramPendingApproval = pending.payload
+        payload.message_id = _telegram_message_id(sent)
+        self._conversation_state(conversation_key).pending_approval_id = pending.approval_id
 
     async def _cancel_pending_approval(self, state: TelegramConversationState, *, reason: str) -> None:
         approval_id = state.pending_approval_id
@@ -1464,16 +914,17 @@ class TelegramInteractionBridge:
         if pending is not None:
             await self._edit_approval_message(pending, "Approval expired", "The turn was stopped before approval.")
 
-    async def _edit_approval_message(self, pending: TelegramPendingApproval, title: str, detail: str) -> None:
-        if pending.message_id is None or not hasattr(self.api, "edit_message_text"):
+    async def _edit_approval_message(self, pending: PendingApproval, title: str, detail: str) -> None:
+        payload: TelegramPendingApproval = pending.payload
+        if payload.message_id is None or not hasattr(self.api, "edit_message_text"):
             return
-        text = self._resolved_approval_text(pending.request, title=title, detail=detail)
+        text = format_resolved_approval_text(pending.request, title=title, detail=detail)
         formatted = format_telegram_markdown_v2(text)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(
                 self.api.edit_message_text,
-                chat_id=pending.source,
-                message_id=pending.message_id,
+                chat_id=payload.source,
+                message_id=payload.message_id,
                 text=formatted,
                 parse_mode="MarkdownV2",
                 reply_markup=None,
@@ -1482,8 +933,8 @@ class TelegramInteractionBridge:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
                     self.api.edit_message_reply_markup,
-                    chat_id=pending.source,
-                    message_id=pending.message_id,
+                    chat_id=payload.source,
+                    message_id=payload.message_id,
                     reply_markup=None,
                 )
 
@@ -1530,7 +981,7 @@ class TelegramInteractionBridge:
                 return rest
             if self._telegram_command_mentioned_bot(command_token):
                 return f"/{command.name}" + (f" {rest}" if rest else "")
-            if not self.bot_username and command.name in {spec.name for spec in specs_for_surface("telegram")}:
+            if not self.bot_username and command.name in command_names_for_surface("telegram"):
                 return stripped
             return None
         if self.bot_username and f"@{self.bot_username}".lower() in stripped.lower():
@@ -1602,39 +1053,10 @@ def build_telegram_gateway_bridge(app: Any, config: TelegramChannelConfig) -> Te
     return TelegramInteractionBridge.from_config(
         None,
         config,
-        runtime_factory=_runtime_factory_for_app(app),
+        runtime_factory=runtime_factory_for_app(app),
         tool_display=getattr(app, "tool_display", "summary"),
         busy_mode=getattr(app, "channel_busy_mode", "interrupt"),
     )
-
-
-def _runtime_factory_for_app(app: Any) -> Callable[[str], InteractionRuntime]:
-    if not all(hasattr(app, name) for name in ("home", "version_store", "core_loader", "tool_runtime")):
-        runtime = InteractionRuntime(app.runner)
-        return lambda _conversation_key: runtime
-
-    def make_runtime(_conversation_key: str) -> InteractionRuntime:
-        runner = SessionTurnStepRunner(
-            home=app.home,
-            version_store=app.version_store,
-            core_loader=app.core_loader,
-            provider=app.runner.provider,
-            tool_runtime=app.tool_runtime,
-            core_id=app.runner.core_id,
-            model_override=app.runner.model_override,
-            model_resolver=app.runner.model_resolver,
-            provider_name=app.runner.provider_name,
-            workspace=app.runner.workspace,
-            show_system_prompt=app.runner.show_system_prompt,
-            runtime_timezone=app.runtime_timezone,
-            task_worker=app.task_worker,
-            session_runtime=app.session_runtime,
-            interaction_router=app.runner.interaction_router,
-            prepare_live_core=app.prepare_live_core,
-        )
-        return InteractionRuntime(runner)
-
-    return make_runtime
 
 
 def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
@@ -1643,64 +1065,6 @@ def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
         if value:
             return value
     return config.bot_token
-
-
-def _task_completion_inbound(
-    event: RuntimeTaskCompletionEvent,
-    *,
-    channel: str,
-    source: str,
-    reply_to: str | None,
-    conversation_key: str | None,
-    metadata: dict[str, Any] | None = None,
-    claim_id: str | None = None,
-) -> InteractionInbound:
-    event_metadata = event.to_metadata()
-    if claim_id is not None:
-        event_metadata["completion_claim_id"] = claim_id
-    return InteractionInbound(
-        channel=channel,
-        text=event.to_inbound_text(),
-        source=source,
-        reply_to=reply_to,
-        conversation_key=conversation_key,
-        metadata={**dict(metadata or {}), **event_metadata},
-    )
-
-
-def _is_background_completion(inbound: InteractionInbound) -> bool:
-    return inbound.metadata.get("trigger") == "background_task"
-
-
-def _merge_completion_inbounds(user_inbound: InteractionInbound, completions: list[InteractionInbound]) -> InteractionInbound:
-    metadata = dict(user_inbound.metadata)
-    metadata["merged_background_tasks"] = [
-        item.metadata.get("task_id") for item in completions if item.metadata.get("task_id")
-    ]
-    metadata["completion_claims"] = [
-        {"event_id": item.metadata.get("event_id"), "claim_id": item.metadata.get("completion_claim_id")}
-        for item in completions
-        if item.metadata.get("event_id") and item.metadata.get("completion_claim_id")
-    ]
-    completion_text = "\n\n".join(item.text for item in completions if item.text)
-    text = "\n\n".join(
-        part
-        for part in [
-            user_inbound.text,
-            "[SYSTEM: Pending background task events merged into this user turn]",
-            completion_text,
-        ]
-        if part
-    )
-    return InteractionInbound(
-        channel=user_inbound.channel,
-        text=text,
-        source=user_inbound.source,
-        reply_to=user_inbound.reply_to,
-        conversation_key=user_inbound.conversation_key,
-        metadata=metadata,
-        attachments=list(user_inbound.attachments),
-    )
 
 
 def _is_markdown_error(exc: Exception) -> bool:

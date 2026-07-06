@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from demiurge.runtime.text_format import format_table, shorten_text
 from demiurge.runtime.tasks import RuntimeTaskWorker
 
 
@@ -37,7 +38,15 @@ async def subagents_command_text(task_worker: RuntimeTaskWorker, *, session_id: 
         )
         for record in records
     ]
-    return _format_table(["task_id", "status", "core", "session", "summary"], rows, title="Subagents")
+    return format_table(
+        ["task_id", "status", "core", "session", "summary"],
+        rows,
+        title="Subagents",
+        title_level=1,
+        max_column_width=36,
+        truncation_marker="...",
+        normalize_whitespace=False,
+    )
 
 
 def _format_task(payload: dict[str, Any], *, title: str) -> str:
@@ -59,20 +68,5 @@ def _format_task(payload: dict[str, Any], *, title: str) -> str:
     return "\n".join(lines)
 
 
-def _format_table(headers: list[str], rows: list[tuple[Any, ...]], *, title: str) -> str:
-    widths = [len(header) for header in headers]
-    for row in rows:
-        for index, cell in enumerate(row):
-            widths[index] = min(36, max(widths[index], len(str(cell))))
-    lines = [f"# {title}", "", " | ".join(header.ljust(widths[index]) for index, header in enumerate(headers))]
-    lines.append(" | ".join("-" * width for width in widths))
-    for row in rows:
-        lines.append(" | ".join(_shorten(str(cell), widths[index]).ljust(widths[index]) for index, cell in enumerate(row)))
-    return "\n".join(lines)
-
-
 def _shorten(text: str, limit: int = 36) -> str:
-    value = str(text)
-    if len(value) <= limit:
-        return value
-    return value[: max(0, limit - 3)] + "..."
+    return shorten_text(text, limit=limit, marker="...", normalize_whitespace=False)

@@ -37,6 +37,9 @@ ctx.output.send_file("report.pdf", summary="Report PDF", history_text="Sent a re
 artifacts. Input deliveries default to transient history because input slots run
 before the assistant response.
 
+Artifacts produced by foreground delivery are stored as host-owned records tied
+to the current turn through `owner_turn_id`.
+
 ## `send_text`
 
 ```python

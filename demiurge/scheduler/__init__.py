@@ -10,8 +10,9 @@ from typing import Any
 from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
-from demiurge.runtime.control import ActionSource, ActionSpec, RuntimeControlPlane
-from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkRuntime, DurableWorkSpec
+from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
+from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict
+from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
@@ -99,26 +100,23 @@ class SchedulerRuntime:
         core_id: str,
         *,
         runtime_timezone: RuntimeTimezone | None = None,
+        work_lifecycle: HostWorkLifecycleRuntime | None = None,
     ):
         self.control_plane = control_plane
         self.core_id = core_id
         self.runtime_timezone = runtime_timezone or resolve_runtime_timezone()
-        self.work = DurableWorkRuntime(control_plane.store)
+        self.work = work_lifecycle or HostWorkLifecycleRuntime(store=control_plane.store)
 
     def set_next_run(self, schedule: ScheduleDefinition, next_run_at: datetime) -> None:
         work_id = self._work_id(schedule, next_run_at.astimezone(UTC))
-        self.work.enqueue(
-            DurableWorkSpec(
-                work_id=work_id,
-                kind="schedule.fire",
-                payload={
-                    "core_id": self.core_id,
-                    "schedule_id": schedule.schedule_id,
-                    "due_at": format_instant(next_run_at),
-                },
-                next_attempt_at=format_instant(next_run_at),
-                idempotency_key=f"scheduler:{work_id}:work",
-            )
+        due_at = format_instant(next_run_at)
+        self.work.enqueue_schedule_fire(
+            work_id,
+            core_id=self.core_id,
+            schedule_id=schedule.schedule_id,
+            due_at=due_at,
+            next_attempt_at=due_at,
+            idempotency_key=f"scheduler:{work_id}:work",
         )
         self._record_instance(
             schedule,
@@ -152,7 +150,7 @@ class SchedulerRuntime:
         row = due_rows[0]
         due_at = parse_instant(str(row["due_at"]))
         work_id = self._work_id(schedule, due_at)
-        durable_claim = self.work.claim(work_id, owner_id="host.scheduler", now=now, lease_seconds=60)
+        durable_claim = self.work.claim_schedule_fire(work_id, owner_id="host.scheduler", now=now, lease_seconds=60)
         if durable_claim is None:
             return None
         run_id = utc_id("schedule_run_")
@@ -213,9 +211,9 @@ class SchedulerRuntime:
         )
         try:
             if status == "completed":
-                self.work.succeed(durable_claim)
+                self.work.complete_schedule_fire(durable_claim)
             else:
-                self.work.fail(durable_claim, error=error or "scheduled task failed")
+                self.work.fail_schedule_fire(durable_claim, error=error or "scheduled task failed")
         except DurableClaimConflict as exc:
             raise RuntimeError(f"stale scheduler claim: {claim.run_id}") from exc
         self.control_plane.store.append(
@@ -329,61 +327,22 @@ class SchedulerRuntime:
         return int(rows[-1]["seq"])
 
 
-class SchedulerService:
+class ScheduleFireRuntime:
+    """Execute one claimed schedule fire through the normal turn pipeline."""
+
     def __init__(
         self,
         app: Any,
+        store: SchedulerRuntime,
         *,
         delivery_route: Any | None = None,
-        poll_interval_seconds: float = 30.0,
     ):
         self.app = app
+        self.store = store
         self.delivery_route = delivery_route
-        self.poll_interval_seconds = poll_interval_seconds
-        self.store = SchedulerRuntime(app.control_plane, app.runner.core_id, runtime_timezone=app.runtime_timezone)
-        self._task: asyncio.Task[None] | None = None
         self._bridges: dict[str, Any] = {}
 
-    @property
-    def running(self) -> bool:
-        return self._task is not None and not self._task.done()
-
-    def start(self) -> None:
-        if not self.running:
-            self._task = asyncio.create_task(self._loop())
-
-    async def stop(self) -> None:
-        task = self._task
-        self._task = None
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    async def run_due_once(self, *, now: datetime | None = None) -> list[ScheduleRunResult]:
-        core = await self._load_core()
-        results: list[ScheduleRunResult] = []
-        for schedule in core.schedules:
-            if not schedule.enabled:
-                continue
-            claim = self.store.claim_due(schedule, now=now)
-            if claim is None:
-                continue
-            results.append(await self._run_claim(core, schedule, claim))
-        return results
-
-    async def _loop(self) -> None:
-        while True:
-            try:
-                await self.run_due_once()
-            except Exception:
-                pass
-            await asyncio.sleep(self.poll_interval_seconds)
-
-    async def _load_core(self) -> LoadedCore:
-        return await self.app.load_active_core()
-
-    async def _run_claim(
+    async def run(
         self,
         core: LoadedCore,
         schedule: ScheduleDefinition,
@@ -409,7 +368,7 @@ class SchedulerService:
                     output_slot_ids=schedule.modules.output,
                     route_binding=route_binding,
                 )
-                await runner.drain_background_tasks(include_task_worker=False)
+                await runner.background_tasks.drain(include_runtime_tasks=False)
             finally:
                 if route_binding is not None:
                     route_binding.unbind(runner.interaction_router)
@@ -505,8 +464,8 @@ class SchedulerService:
         if control_plane is None:
             return
         idempotency_key = f"schedule:{core.core_id}:{schedule.schedule_id}:{format_instant(claim.due_at)}"
-        control_plane.submit(
-            ActionSpec(
+        control_plane.submit_task(
+            TaskSpec(
                 kind="schedule.fire",
                 payload={
                     "task_id": task_id,
@@ -519,11 +478,11 @@ class SchedulerService:
                 },
                 idempotency_key=idempotency_key,
             ),
-            source=ActionSource(actor="host.scheduler", core_id=core.core_id),
+            source=TaskSource(actor="host.scheduler", core_id=core.core_id),
         )
         control_plane.mark_started(
             task_id,
-            source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+            source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
         )
 
     def _record_claim_completed(
@@ -544,13 +503,13 @@ class SchedulerService:
             control_plane.succeed(
                 task_id,
                 result_ref=result_ref,
-                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+                source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
             )
         else:
             control_plane.fail(
                 task_id,
                 error=error or "scheduled task failed",
-                source=ActionSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
+                source=TaskSource(actor="host.scheduler", core_id=core.core_id, task_id=task_id),
             )
 
     def _schedule_inbound(self, schedule: ScheduleDefinition, claim: ScheduleRunClaim) -> InteractionInbound:
@@ -626,6 +585,65 @@ class SchedulerService:
         validate_schedule_target(channel, config, schedule.delivery)
 
 
+class SchedulerService:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        delivery_route: Any | None = None,
+        poll_interval_seconds: float = 30.0,
+    ):
+        self.app = app
+        self.poll_interval_seconds = poll_interval_seconds
+        self.store = SchedulerRuntime(
+            app.control_plane,
+            app.runner.core_id,
+            runtime_timezone=app.runtime_timezone,
+            work_lifecycle=getattr(app, "host_work", None),
+        )
+        self.fire_runtime = ScheduleFireRuntime(app, self.store, delivery_route=delivery_route)
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        if not self.running:
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def run_due_once(self, *, now: datetime | None = None) -> list[ScheduleRunResult]:
+        core = await self._load_core()
+        results: list[ScheduleRunResult] = []
+        for schedule in core.schedules:
+            if not schedule.enabled:
+                continue
+            claim = self.store.claim_due(schedule, now=now)
+            if claim is None:
+                continue
+            results.append(await self.fire_runtime.run(core, schedule, claim))
+        return results
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self.run_due_once()
+            except Exception:
+                pass
+            await asyncio.sleep(self.poll_interval_seconds)
+
+    async def _load_core(self) -> LoadedCore:
+        return await self.app.load_active_core()
+
+
 def start_scheduler_for_app(
     app: Any,
     *,
@@ -642,6 +660,7 @@ def start_scheduler_for_app(
 
 
 __all__ = [
+    "ScheduleFireRuntime",
     "ScheduleRunClaim",
     "ScheduleRunResult",
     "SchedulerService",

@@ -27,49 +27,6 @@ class ContextContribution:
 
 
 @dataclass(slots=True)
-class StateProposal:
-    """Requested state mutation for the host to validate and commit."""
-
-    target: str
-    operation: str
-    patch: JsonValue
-
-
-@dataclass(slots=True)
-class EffectRequest:
-    """Low-level host effect request returned by authored slots.
-
-    New modules should prefer ctx.input/ctx.output send methods for delivery and use effects for
-    state, tool, or evolution requests.
-    """
-
-    type: str
-    content: str | None = None
-    visible: bool = True
-    payload: JsonValue | None = None
-    attachments: list[JsonValue] = field(default_factory=list)
-    history_policy: str = "persist"
-    proposal: StateProposal | Mapping[str, Any] | None = None
-    tool_name: str | None = None
-    arguments: Mapping[str, Any] | None = None
-    goal: str | None = None
-    reason: str | None = None
-    target: str | None = None
-
-
-@dataclass(slots=True)
-class DeliverEffect:
-    """Legacy delivery-shaped effect normalized into a host DeliveryRequest."""
-
-    payload: JsonValue
-    attachments: list[ArtifactRef | Mapping[str, Any]] = field(default_factory=list)
-    visible: bool = True
-    history_policy: str = "persist"
-    target: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
 class InputEnvelope:
     raw_text: str
     metadata: dict[str, Any] = field(default_factory=dict)

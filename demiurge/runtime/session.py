@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.host_work import delivery_work_enqueued_event
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.storage import SessionMessage, SessionRecord, utc_now
 from demiurge.util import utc_id
@@ -364,7 +364,6 @@ class SessionRuntime:
         role: str,
         content: str,
         delivery_id: str,
-        task_id: str | None,
         channel: str | None,
         target: dict[str, Any],
         delivery_payload: dict[str, Any],
@@ -402,7 +401,7 @@ class SessionRuntime:
                     aggregate_type="delivery",
                     aggregate_id=delivery_id,
                     payload={
-                        "task_id": task_id,
+                        "owner_turn_id": turn_id,
                         "channel": channel,
                         "target": dict(target),
                         "status": delivery_status,
@@ -410,21 +409,17 @@ class SessionRuntime:
                         "payload": payload,
                     },
                 ),
-                durable_work_enqueued_event(
-                    DurableWorkSpec(
-                        work_id=delivery_id,
-                        kind="delivery.send",
-                        owner_session_id=session_id,
-                        owner_turn_id=turn_id,
-                        parent_work_id=task_id,
-                        payload={
-                            "task_id": task_id,
-                            "channel": channel,
-                            "target": dict(target),
-                            "idempotency_key": delivery_idempotency_key or delivery_id,
-                            **payload,
-                        },
-                    )
+                delivery_work_enqueued_event(
+                    delivery_id,
+                    owner_session_id=session_id,
+                    owner_turn_id=turn_id,
+                    payload={
+                        "owner_turn_id": turn_id,
+                        "channel": channel,
+                        "target": dict(target),
+                        "idempotency_key": delivery_idempotency_key or delivery_id,
+                        **payload,
+                    },
                 ),
             ],
             idempotency_key=f"delivery:{delivery_id}:message_outbox",
@@ -554,7 +549,6 @@ class SessionRuntime:
         *,
         session_id: str,
         turn_id: str,
-        task_id: str | None = None,
         input_ref: str | None = None,
     ) -> None:
         self._append_runtime_event(
@@ -564,7 +558,6 @@ class SessionRuntime:
                 aggregate_id=turn_id,
                 payload={
                     "session_id": session_id,
-                    "task_id": task_id,
                     "status": "running",
                     "input_ref": input_ref,
                 },

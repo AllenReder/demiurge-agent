@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from demiurge.runtime.control import ActionSource, ActionSpec, EventCursor, EventFilter, RuntimeControlPlane, TaskFilter
+from demiurge.runtime.control import EventCursor, EventFilter, RuntimeControlPlane, TaskFilter, TaskSource, TaskSpec
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 
 
@@ -48,12 +48,12 @@ def test_runtime_store_releases_sqlite_handles_before_temp_directory_cleanup():
 def test_control_plane_submit_control_read_and_stream(tmp_path):
     control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
 
-    handle = control.submit(
-        ActionSpec(kind="agent.spawn", payload={"core_id": "evolver"}),
-        source=ActionSource(actor="model", session_id="session_1", turn_id="turn_1", core_id="assistant"),
+    handle = control.submit_task(
+        TaskSpec(kind="agent.spawn", payload={"core_id": "evolver"}),
+        source=TaskSource(actor="model", session_id="session_1", turn_id="turn_1", core_id="assistant"),
     )
     record = control.read(handle.task_id, view="debug")
-    control.control(handle.task_id, "cancel")
+    control.cancel(handle.task_id)
     cancelled = control.read(handle.task_id)
     batch = control.stream(EventCursor(), EventFilter(aggregate_type="task", aggregate_id=handle.task_id))
 
@@ -84,16 +84,9 @@ def test_control_plane_stream_applies_cursor_before_limit(tmp_path):
     assert batch.next_cursor.seq == 200
 
 
-def test_control_plane_rejects_unsupported_task_control(tmp_path):
-    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
-    handle = control.submit(
-        ActionSpec(kind="agent.spawn", payload={"task_id": "task_1", "notify_policy": "return_to_parent"}),
-        source=ActionSource(actor="model"),
-    )
-
-    with pytest.raises(ValueError):
-        control.control(handle.task_id, "mute")  # type: ignore[arg-type]
-    assert control.read(handle.task_id)["notify_policy"] == "return_to_parent"
+def test_task_spec_rejects_non_task_kinds():
+    with pytest.raises(ValueError, match="unsupported task kind"):
+        TaskSpec(kind="tool.call")  # type: ignore[arg-type]
 
 
 def test_runtime_store_projects_blocked_task_status(tmp_path):

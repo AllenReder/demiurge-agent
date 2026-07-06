@@ -10,10 +10,13 @@ events, artifacts, and channel items.
 
 Every output `send_*` call also writes a delivery intent into the SQLite
 runtime `outbox` projection and a matching `delivery.send` durable work item.
-`DeliveryRuntime` owns dispatch through `SessionInteractionRouter`, which looks
-up the active route for `InteractionOutbound.session_id`. Channel adapters are
-bound to sessions; they adapt payloads to platform APIs but do not own durable
-delivery state.
+Outbox rows are owned by the foreground turn through `owner_turn_id`; delivery
+work does not use the foreground turn id as a task id or parent work id.
+`DeliveryRuntime` claims and completes the durable work through
+`HostWorkLifecycleRuntime`, then owns dispatch through
+`SessionInteractionRouter`, which looks up the active route for
+`InteractionOutbound.session_id`. Channel adapters are bound to sessions; they
+adapt payloads to platform APIs but do not own durable delivery state.
 
 The in-memory `InteractionItem.dispatch_status` lifecycle is
 `pending -> scheduled -> delivered/failed/unrouted`. The durable outbox
@@ -40,6 +43,9 @@ useful for progress, notices, and live-only output.
 
 Artifacts are represented by host-owned records. Output modules may request
 artifact delivery, but the host owns paths, metadata, and persistence.
+Foreground delivery artifacts are owned by the session turn through
+`owner_turn_id`; they are not task artifacts unless a real detached task creates
+them through a future explicit task-artifact seam.
 
 ## Session Routes
 
@@ -79,6 +85,11 @@ after `sending` and before a platform result is durably recorded, recovery marks
 that delivery `unknown` instead of replaying it automatically. A channel that
 can reconcile platform state may resolve `unknown`; otherwise it remains
 operator-visible state.
+
+Operator-facing status should be read through `HostWorkLifecycleRuntime`
+instead of separately joining `outbox` and `runtime_work_items`. The lifecycle
+view reports the effective delivery status while retaining the underlying
+durable claim state for debugging.
 
 ## Subagents
 

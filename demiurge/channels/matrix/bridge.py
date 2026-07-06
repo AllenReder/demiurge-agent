@@ -4,9 +4,10 @@ import asyncio
 import time
 from typing import Any
 
-from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value, runtime_factory_for_app
+from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.matrix.api import MatrixApi
 from demiurge.core import MatrixChannelConfig
+from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
 

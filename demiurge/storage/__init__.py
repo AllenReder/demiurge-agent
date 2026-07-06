@@ -11,7 +11,6 @@ import yaml
 
 from demiurge.core_repository import CommitResult, CorePointer, CoreRepository
 from demiurge.runtime.delivery import ArtifactRef
-from demiurge.sdk import StateProposal
 from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
 
 
@@ -120,6 +119,15 @@ class ArtifactRecord:
     url: str | None = None
     summary: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class StateProposal:
+    """Internal state mutation request validated and committed by StateStore."""
+
+    target: str
+    operation: str
+    patch: Any
 
 
 class ArtifactStore:
