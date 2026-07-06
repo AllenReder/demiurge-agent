@@ -103,7 +103,9 @@ def process(ctx):
 ```
 
 Bootstrap return values are ignored. Use `ctx.bootstrap.add(...)` to add
-session-stable context.
+session-stable context. Slot return values are never a host-effect channel; use
+the phase-specific `ctx.*` clients for delivery, context, state, tools, child
+agents, and result data.
 
 Bootstrap receives session metadata, slot metadata, `ctx.capability`, and
 `ctx.bootstrap`. It does not receive turn-time clients such as `ctx.history`,

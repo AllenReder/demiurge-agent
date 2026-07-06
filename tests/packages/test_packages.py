@@ -25,7 +25,7 @@ from demiurge.packages import (
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.security.approval import ApprovalDecision
-from demiurge.ui_gateway import TuiInteractionBridge
+from demiurge.ui_gateway import OperatorGatewayRuntime
 
 
 def _manager(app, repository_root: Path | None = None) -> PackageManager:
@@ -70,7 +70,7 @@ class _EventSink:
     def text(self):
         values = []
         for event, payload in self.items:
-            if event != "interaction.deliver":
+            if event != "operator.deliver":
                 continue
             for delivery in payload.get("deliveries", []):
                 values.append(delivery.get("text") or delivery.get("fallback_text") or "")
@@ -1832,7 +1832,7 @@ def test_wizard_repo_remove_referenced_repo_requires_force_source_removal(tmp_pa
 async def test_tui_packages_command_lists_details_and_installs(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     sink = _EventSink()
-    bridge = TuiInteractionBridge(app, emit=sink)
+    bridge = OperatorGatewayRuntime(app, emit=sink)
 
     assert (await bridge.command("/packages"))["handled"] is True
     assert (await bridge.command("/packages tts_minimax"))["handled"] is True

@@ -317,17 +317,17 @@ class RuntimeTaskWorker:
         return [event for event in self._pending_completion_events() if event.owner_session_id == session_id]
 
     def claim_pending_event(self, event_id: str, *, owner_id: str) -> DurableClaim | None:
-        return self.host_work.claim(event_id, owner_id=owner_id)
+        return self.host_work.claim_task_completion(event_id, owner_id=owner_id)
 
     def ack_pending_event(self, claim: DurableClaim) -> bool:
         try:
-            self.host_work.acknowledge(claim)
+            self.host_work.acknowledge_task_completion(claim)
         except Exception:
             return False
         return True
 
     def ack_pending_event_id(self, event_id: str, *, claim_id: str) -> bool:
-        return self.host_work.acknowledge_by_id(event_id, claim_id=claim_id)
+        return self.host_work.acknowledge_task_completion_by_id(event_id, claim_id=claim_id)
 
     def ack_pending_event_for_task(self, task_id: str) -> bool:
         acknowledged = False

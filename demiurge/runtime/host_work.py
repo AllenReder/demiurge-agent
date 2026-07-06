@@ -4,7 +4,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
-from demiurge.runtime.durable_work import DurableClaim, DurableWorkItem, DurableWorkOutcome, DurableWorkRuntime, DurableWorkSpec
+from demiurge.runtime.durable_work import (
+    DurableClaim,
+    DurableWorkItem,
+    DurableWorkOutcome,
+    DurableWorkRuntime,
+    DurableWorkSpec,
+    durable_work_enqueued_event,
+)
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 
 
@@ -60,6 +67,73 @@ class HostWorkItem:
         return self.status in {"queued", "claimed", "running", "sending", "retry_scheduled", "blocked_needs_user"}
 
 
+def delivery_work_enqueued_event(
+    delivery_id: str,
+    *,
+    owner_session_id: str | None = None,
+    owner_turn_id: str | None = None,
+    payload: Mapping[str, Any] | None = None,
+    created_at: datetime | str | None = None,
+    actor: str | None = None,
+) -> RuntimeEvent:
+    return durable_work_enqueued_event(
+        _delivery_work_spec(
+            delivery_id,
+            owner_session_id=owner_session_id,
+            owner_turn_id=owner_turn_id,
+            payload=payload,
+        ),
+        created_at=created_at,
+        actor=actor,
+    )
+
+
+def task_completion_ready_events(
+    *,
+    event_id: str,
+    task_id: str,
+    payload: Mapping[str, Any],
+    actor: str | None = None,
+) -> list[RuntimeEvent]:
+    completion_payload = {"task_id": task_id, **dict(payload)}
+    return [
+        RuntimeEvent(
+            type="task.completion_ready",
+            aggregate_type="task_completion",
+            aggregate_id=event_id,
+            actor=actor,
+            payload=completion_payload,
+        ),
+        durable_work_enqueued_event(
+            DurableWorkSpec(
+                work_id=event_id,
+                kind="task.completion",
+                owner_session_id=payload.get("owner_session_id"),
+                owner_turn_id=payload.get("owner_turn_id"),
+                parent_work_id=task_id,
+                payload=completion_payload,
+            ),
+            actor=actor,
+        ),
+    ]
+
+
+def _delivery_work_spec(
+    delivery_id: str,
+    *,
+    owner_session_id: str | None = None,
+    owner_turn_id: str | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> DurableWorkSpec:
+    return DurableWorkSpec(
+        work_id=delivery_id,
+        kind="delivery.send",
+        owner_session_id=owner_session_id,
+        owner_turn_id=owner_turn_id,
+        payload=dict(payload or {}),
+    )
+
+
 class HostWorkLifecycleRuntime:
     """Unified host-owned lifecycle and observation facade for detached work."""
 
@@ -72,49 +146,58 @@ class HostWorkLifecycleRuntime:
         self.store = store
         self.durable_work = durable_work or DurableWorkRuntime(store)
 
-    def enqueue(self, spec: DurableWorkSpec, *, now: datetime | None = None) -> DurableWorkItem:
-        return self.durable_work.enqueue(spec, now=now)
-
-    def ensure(self, spec: DurableWorkSpec, *, now: datetime | None = None) -> DurableWorkItem:
-        rows = self.store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": spec.work_id}, limit=1)).rows
-        if rows:
-            return self.durable_work.get(spec.work_id)
-        return self.enqueue(spec, now=now)
-
-    def claim_due(
+    def enqueue_delivery(
         self,
+        delivery_id: str,
         *,
-        kind: str | None = None,
-        owner_id: str,
+        owner_session_id: str | None = None,
+        owner_turn_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
         now: datetime | None = None,
-        lease_seconds: int = 60,
-        limit: int = 1,
-    ) -> list[DurableClaim]:
-        return self.durable_work.claim_due(
-            kind=kind,
-            owner_id=owner_id,
+    ) -> DurableWorkItem:
+        return self.durable_work.enqueue(
+            _delivery_work_spec(
+                delivery_id,
+                owner_session_id=owner_session_id,
+                owner_turn_id=owner_turn_id,
+                payload=payload,
+            ),
             now=now,
-            lease_seconds=lease_seconds,
-            limit=limit,
         )
 
-    def claim(
+    def ensure_delivery(
         self,
-        work_id: str,
+        delivery_id: str,
+        *,
+        owner_session_id: str | None = None,
+        owner_turn_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> DurableWorkItem:
+        return self._ensure_work(
+            _delivery_work_spec(
+                delivery_id,
+                owner_session_id=owner_session_id,
+                owner_turn_id=owner_turn_id,
+                payload=payload,
+            ),
+            now=now,
+        )
+
+    def claim_delivery(
+        self,
+        delivery_id: str,
         *,
         owner_id: str,
         now: datetime | None = None,
         lease_seconds: int = 60,
     ) -> DurableClaim | None:
-        return self.durable_work.claim(work_id, owner_id=owner_id, now=now, lease_seconds=lease_seconds)
+        return self.durable_work.claim(delivery_id, owner_id=owner_id, now=now, lease_seconds=lease_seconds)
 
-    def running(self, claim: DurableClaim, *, now: datetime | None = None) -> DurableWorkItem:
-        return self.durable_work.mark_running(claim, now=now)
-
-    def sending(self, claim: DurableClaim, *, now: datetime | None = None) -> DurableWorkItem:
+    def mark_delivery_sending(self, claim: DurableClaim, *, now: datetime | None = None) -> DurableWorkItem:
         return self.durable_work.mark_sending(claim, now=now)
 
-    def complete(
+    def complete_delivery(
         self,
         claim: DurableClaim,
         *,
@@ -123,7 +206,7 @@ class HostWorkLifecycleRuntime:
     ) -> DurableWorkOutcome:
         return self.durable_work.succeed(claim, external_ref=external_ref, now=now)
 
-    def fail(
+    def fail_delivery(
         self,
         claim: DurableClaim,
         *,
@@ -133,39 +216,84 @@ class HostWorkLifecycleRuntime:
     ) -> DurableWorkOutcome:
         return self.durable_work.fail(claim, error=error, retry_at=retry_at, now=now)
 
-    def cancel(
+    def recover_delivery(self, *, now: datetime | None = None) -> dict[str, int]:
+        return self.durable_work.recover(now=now)
+
+    def enqueue_schedule_fire(
+        self,
+        work_id: str,
+        *,
+        core_id: str,
+        schedule_id: str,
+        due_at: str,
+        next_attempt_at: str,
+        idempotency_key: str | None = None,
+        now: datetime | None = None,
+    ) -> DurableWorkItem:
+        return self.durable_work.enqueue(
+            DurableWorkSpec(
+                work_id=work_id,
+                kind="schedule.fire",
+                payload={"core_id": core_id, "schedule_id": schedule_id, "due_at": due_at},
+                next_attempt_at=next_attempt_at,
+                idempotency_key=idempotency_key,
+            ),
+            now=now,
+        )
+
+    def claim_schedule_fire(
+        self,
+        work_id: str,
+        *,
+        owner_id: str,
+        now: datetime | None = None,
+        lease_seconds: int = 60,
+    ) -> DurableClaim | None:
+        return self.durable_work.claim(work_id, owner_id=owner_id, now=now, lease_seconds=lease_seconds)
+
+    def complete_schedule_fire(
         self,
         claim: DurableClaim,
         *,
-        reason: str = "cancelled",
+        external_ref: str | None = None,
         now: datetime | None = None,
     ) -> DurableWorkOutcome:
-        return self.durable_work.cancel(claim, reason=reason, now=now)
+        return self.durable_work.succeed(claim, external_ref=external_ref, now=now)
 
-    def mark_unknown(
+    def fail_schedule_fire(
         self,
         claim: DurableClaim,
         *,
-        reason: str,
+        error: str,
+        retry_at: datetime | None = None,
         now: datetime | None = None,
     ) -> DurableWorkOutcome:
-        return self.durable_work.mark_unknown(claim, reason=reason, now=now)
+        return self.durable_work.fail(claim, error=error, retry_at=retry_at, now=now)
 
-    def acknowledge(self, claim: DurableClaim, *, now: datetime | None = None) -> DurableWorkOutcome:
+    def claim_task_completion(
+        self,
+        event_id: str,
+        *,
+        owner_id: str,
+        now: datetime | None = None,
+        lease_seconds: int = 60,
+    ) -> DurableClaim | None:
+        return self.durable_work.claim(event_id, owner_id=owner_id, now=now, lease_seconds=lease_seconds)
+
+    def acknowledge_task_completion(self, claim: DurableClaim, *, now: datetime | None = None) -> DurableWorkOutcome:
         outcome = self.durable_work.acknowledge(claim, now=now)
-        if claim.kind == "task.completion":
-            self._acknowledge_task_completion(claim.work_id)
+        self._acknowledge_task_completion(claim.work_id)
         return outcome
 
-    def acknowledge_by_id(self, work_id: str, *, claim_id: str) -> bool:
-        rows = self.store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": work_id}, limit=1)).rows
+    def acknowledge_task_completion_by_id(self, event_id: str, *, claim_id: str) -> bool:
+        rows = self.store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": event_id}, limit=1)).rows
         if not rows:
             return False
         row = rows[0]
         if str(row.get("claim_id") or "") != claim_id:
             return False
         claim = DurableClaim(
-            work_id=work_id,
+            work_id=event_id,
             kind=str(row.get("kind") or ""),
             claim_id=claim_id,
             owner_id=str(row.get("owner_id") or "host.work_lifecycle"),
@@ -173,13 +301,16 @@ class HostWorkLifecycleRuntime:
             attempt=int(row.get("attempts") or 0),
         )
         try:
-            self.acknowledge(claim)
+            self.acknowledge_task_completion(claim)
         except Exception:
             return False
         return True
 
-    def recover(self, *, now: datetime | None = None) -> dict[str, int]:
-        return self.durable_work.recover(now=now)
+    def _ensure_work(self, spec: DurableWorkSpec, *, now: datetime | None = None) -> DurableWorkItem:
+        rows = self.store.query(RuntimeQuery(table="runtime_work_items", where={"work_id": spec.work_id}, limit=1)).rows
+        if rows:
+            return self.durable_work.get(spec.work_id)
+        return self.durable_work.enqueue(spec, now=now)
 
     def status(self, work_id: str) -> HostWorkItem:
         row = self._first("runtime_work_items", work_id=work_id)

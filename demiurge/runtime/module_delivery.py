@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from demiurge.core import SlotDefinition
 from demiurge.runtime.delivery import (
@@ -13,13 +13,12 @@ from demiurge.runtime.delivery import (
     DeliveryRequest,
     artifact_input_to_dict,
 )
-from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
+from demiurge.runtime.host_work import delivery_work_enqueued_event
 from demiurge.runtime.interactions import InteractionDelivery
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeEvent
-from demiurge.sdk import EffectRequest, TurnContext
+from demiurge.sdk import TurnContext
 from demiurge.storage import ArtifactStore
-from demiurge.util import utc_id
 
 
 class ModuleDeliveryHost(Protocol):
@@ -253,20 +252,17 @@ class ModuleDeliveryRuntime:
                             "payload": delivery_payload,
                         },
                     ),
-                    durable_work_enqueued_event(
-                        DurableWorkSpec(
-                            work_id=request.delivery_id,
-                            kind="delivery.send",
-                            owner_session_id=self.host.session_id,
-                            owner_turn_id=turn.turn_id,
-                            payload={
-                                "owner_turn_id": turn.turn_id,
-                                "channel": interaction_metadata.get("channel"),
-                                "target": delivery_target,
-                                "idempotency_key": request.delivery_id,
-                                **delivery_payload,
-                            },
-                        )
+                    delivery_work_enqueued_event(
+                        request.delivery_id,
+                        owner_session_id=self.host.session_id,
+                        owner_turn_id=turn.turn_id,
+                        payload={
+                            "owner_turn_id": turn.turn_id,
+                            "channel": interaction_metadata.get("channel"),
+                            "target": delivery_target,
+                            "idempotency_key": request.delivery_id,
+                            **delivery_payload,
+                        },
                     ),
                 ]
             )
@@ -317,47 +313,6 @@ class ModuleDeliveryRuntime:
             )
         return None
 
-    def apply_deliver_effect(
-        self,
-        effect: EffectRequest,
-        *,
-        turn: TurnContext,
-        slot: SlotDefinition,
-        interaction_metadata: dict[str, Any],
-    ) -> InteractionDelivery | None:
-        request = self.request_from_deliver_effect(effect, slot=slot)
-        return self.apply_request(
-            request,
-            turn=turn,
-            slot=slot,
-            interaction_metadata=interaction_metadata,
-        )
-
-    def request_from_deliver_effect(
-        self,
-        effect: EffectRequest,
-        *,
-        slot: SlotDefinition,
-    ) -> DeliveryRequest:
-        payload = effect.payload if effect.payload is not None else {"type": "text", "text": effect.content or ""}
-        text = self._payload_text(payload)
-        blocks: list[ContentBlock] = []
-        if text:
-            blocks.append(ContentBlock(type="text", text=text))
-        for attachment in effect.attachments:
-            kind = "file"
-            if isinstance(attachment, Mapping):
-                kind = str(attachment.get("kind") or kind)
-            blocks.append(ContentBlock(type=kind if kind in CONTENT_BLOCK_TYPES else "file", artifact=attachment))
-        return DeliveryRequest(
-            delivery_id=utc_id("delivery_"),
-            blocks=blocks,
-            history_policy=effect.history_policy or slot.history_policy,
-            visible=effect.visible,
-            target=effect.target or "current",
-            metadata={"payload": payload, "legacy_effect": True},
-        )
-
     def _delivery_artifact_dict(self, artifact: ArtifactRef) -> dict[str, Any]:
         data = asdict(artifact)
         path = artifact.path
@@ -370,15 +325,3 @@ class ModuleDeliveryRuntime:
                     (self.host.home / "runtime" / "artifacts" / self.host.session_id / path).resolve()
                 )
         return data
-
-    def _payload_text(self, payload: Any) -> str:
-        if isinstance(payload, str):
-            return payload
-        if isinstance(payload, dict):
-            if payload.get("type") == "text":
-                return str(payload.get("text") or "")
-            if "text" in payload:
-                return str(payload.get("text") or "")
-            if "content" in payload:
-                return str(payload.get("content") or "")
-        return ""

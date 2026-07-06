@@ -47,7 +47,7 @@ export function createInitialState(): AppState {
 export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppState {
   const event = frame.event
   const payload = frame.payload
-  if (event === "operator.ready" || event === "interaction.ready") {
+  if (event === "operator.ready") {
     return {
       ...state,
       ready: true,
@@ -70,13 +70,13 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       slashCommands: slashCommandsFromPayload(payload.slash_commands),
     }
   }
-  if (event === "operator.status" || event === "interaction.status") {
+  if (event === "operator.status") {
     return { ...state, status: { ...state.status, ...statusFromPayload(payload) } }
   }
-  if (event === "operator.history" || event === "interaction.history") {
+  if (event === "operator.history") {
     return { ...state, transcript: transcriptItemsFromPayload(payload.items) }
   }
-  if (event === "interaction.message") {
+  if (event === "operator.message") {
     const role = stringValue(payload.role) === "user" ? "user" : "system"
     return appendItem(state, {
       id: nextId(state, "message"),
@@ -85,7 +85,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       text: stringValue(payload.text),
     })
   }
-  if (event === "interaction.deliver") {
+  if (event === "operator.deliver") {
     let next = state
     const rawTools = arrayValue(payload.tool_calls)
     const tools = (rawTools.length ? rawTools : arrayValue(payload.tool_results)).map(toolRecordFromPayload)
@@ -127,7 +127,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
     }
     return next
   }
-  if (event === "operator.prompt.opened" || event === "interaction.prompt.request") {
+  if (event === "operator.prompt.opened") {
     const prompt: PromptPanel = {
       type: "prompt",
       prompt_id: stringValue(payload.prompt_id),
@@ -139,7 +139,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
     }
     return { ...state, prompt }
   }
-  if (event === "operator.approval.opened" || event === "interaction.approval.request") {
+  if (event === "operator.approval.opened") {
     const request = (recordValue(payload.request) ?? {}) as ApprovalRequest
     return {
       ...state,
@@ -152,14 +152,14 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       },
     }
   }
-  if (event === "operator.error" || event === "interaction.error") {
+  if (event === "operator.error") {
     const message = stringValue(payload.message)
     return appendItem(
       { ...state, status: { ...state.status, last_error: message } },
       { id: nextId(state, "notice"), type: "notice", text: message, level: "error" },
     )
   }
-  if (event === "channel.shutdown") {
+  if (event === "operator.shutdown") {
     return { ...state, status: { ...state.status, status: "idle" } }
   }
   return state

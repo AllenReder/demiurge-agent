@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
+from demiurge.runtime.host_work import task_completion_ready_events
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
 from demiurge.util import utc_id
 
@@ -17,9 +17,6 @@ TaskKind = Literal[
     "evolver.run",
     "schedule.fire",
 ]
-
-TaskCommand = Literal["cancel"]
-
 
 @dataclass(frozen=True, slots=True)
 class TaskSpec:
@@ -111,11 +108,6 @@ class RuntimeControlPlane:
         result = self.store.append([event], idempotency_key=spec.idempotency_key)
         row = result.events[-1]
         return TaskHandle(task_id=str(row["aggregate_id"]), kind=spec.kind, status="queued")
-
-    def control(self, task_id: str, command: TaskCommand) -> TaskRecord:
-        if command != "cancel":
-            raise ValueError(f"unsupported task control command: {command}")
-        return self.cancel(task_id)
 
     def mark_started(self, task_id: str, *, source: TaskSource | None = None) -> TaskRecord:
         self._append_task_event(
@@ -233,27 +225,14 @@ class RuntimeControlPlane:
         source: TaskSource | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        actor = self._source_actor(source) if source is not None else None
         result = self.store.append(
-            [
-                RuntimeEvent(
-                    type="task.completion_ready",
-                    aggregate_type="task_completion",
-                    aggregate_id=event_id,
-                    actor=self._source_actor(source) if source is not None else None,
-                    payload={"task_id": task_id, **payload},
-                ),
-                durable_work_enqueued_event(
-                    DurableWorkSpec(
-                        work_id=event_id,
-                        kind="task.completion",
-                        owner_session_id=payload.get("owner_session_id"),
-                        owner_turn_id=payload.get("owner_turn_id"),
-                        parent_work_id=task_id,
-                        payload={"task_id": task_id, **payload},
-                    ),
-                    actor=self._source_actor(source) if source is not None else None,
-                ),
-            ],
+            task_completion_ready_events(
+                event_id=event_id,
+                task_id=task_id,
+                payload=payload,
+                actor=actor,
+            ),
             idempotency_key=idempotency_key,
         )
         return dict(result.events[0])

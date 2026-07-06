@@ -19,13 +19,13 @@ export function App(props: { client: GatewayClient }) {
   useEffect(() => {
     const unsubscribe = props.client.onEvent((event) => {
       setState((current) => reduceGatewayEvent(current, event))
-      if (event.event === "channel.shutdown") app.exit()
+      if (event.event === "operator.shutdown") app.exit()
     })
     props.client.start()
-    void props.client.request("interaction.initialize").catch((error) => {
+    void props.client.request("operator.initialize").catch((error) => {
       setState((current) =>
         reduceGatewayEvent(current, {
-          event: "interaction.error",
+          event: "operator.error",
           payload: { message: error instanceof Error ? error.message : String(error), source: "gateway" },
         }),
       )
@@ -39,7 +39,7 @@ export function App(props: { client: GatewayClient }) {
   const prompt = state.prompt
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
-      if (state.status.status === "running") void props.client.request("channel.interrupt", { reason: "Ctrl-C" })
+      if (state.status.status === "running") void props.client.request("operator.interrupt", { reason: "Ctrl-C" })
       else {
         props.client.shutdown()
         app.exit()
@@ -61,7 +61,7 @@ export function App(props: { client: GatewayClient }) {
     }
     if (key.escape) {
       if (prompt.type === "approval") {
-        void props.client.request("interaction.reply_approval", { approval_id: prompt.approval_id, decision: "deny" })
+        void props.client.request("operator.reply_approval", { approval_id: prompt.approval_id, decision: "deny" })
       }
       setState(clearPrompt)
       return

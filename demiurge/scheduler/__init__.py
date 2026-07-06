@@ -11,7 +11,7 @@ from croniter import croniter
 
 from demiurge.core import LoadedCore, ScheduleDefinition
 from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
-from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict, DurableWorkSpec
+from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
@@ -109,18 +109,14 @@ class SchedulerRuntime:
 
     def set_next_run(self, schedule: ScheduleDefinition, next_run_at: datetime) -> None:
         work_id = self._work_id(schedule, next_run_at.astimezone(UTC))
-        self.work.enqueue(
-            DurableWorkSpec(
-                work_id=work_id,
-                kind="schedule.fire",
-                payload={
-                    "core_id": self.core_id,
-                    "schedule_id": schedule.schedule_id,
-                    "due_at": format_instant(next_run_at),
-                },
-                next_attempt_at=format_instant(next_run_at),
-                idempotency_key=f"scheduler:{work_id}:work",
-            )
+        due_at = format_instant(next_run_at)
+        self.work.enqueue_schedule_fire(
+            work_id,
+            core_id=self.core_id,
+            schedule_id=schedule.schedule_id,
+            due_at=due_at,
+            next_attempt_at=due_at,
+            idempotency_key=f"scheduler:{work_id}:work",
         )
         self._record_instance(
             schedule,
@@ -154,7 +150,7 @@ class SchedulerRuntime:
         row = due_rows[0]
         due_at = parse_instant(str(row["due_at"]))
         work_id = self._work_id(schedule, due_at)
-        durable_claim = self.work.claim(work_id, owner_id="host.scheduler", now=now, lease_seconds=60)
+        durable_claim = self.work.claim_schedule_fire(work_id, owner_id="host.scheduler", now=now, lease_seconds=60)
         if durable_claim is None:
             return None
         run_id = utc_id("schedule_run_")
@@ -215,9 +211,9 @@ class SchedulerRuntime:
         )
         try:
             if status == "completed":
-                self.work.complete(durable_claim)
+                self.work.complete_schedule_fire(durable_claim)
             else:
-                self.work.fail(durable_claim, error=error or "scheduled task failed")
+                self.work.fail_schedule_fire(durable_claim, error=error or "scheduled task failed")
         except DurableClaimConflict as exc:
             raise RuntimeError(f"stale scheduler claim: {claim.run_id}") from exc
         self.control_plane.store.append(

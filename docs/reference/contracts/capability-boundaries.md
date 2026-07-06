@@ -5,8 +5,9 @@ description: Stable rules for effects, approvals, workspace scope, and host-owne
 
 # Capability Boundary Contract
 
-Demiurge capabilities are host-owned. Authored files may request effects; the
-host decides whether those effects run.
+Demiurge capabilities are host-owned. Authored files request host-mediated work
+through `ctx.*` clients, host tools, MCP calls, schedules, or package-provided
+components; the host decides whether those effects run.
 
 ## Host-Mediated Effects
 

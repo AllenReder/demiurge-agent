@@ -11,7 +11,7 @@ from demiurge.runtime.delivery import ContentBlock, DeliveryRequest
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery, RuntimeStore
-from demiurge.sdk import AgentInput, EffectRequest, TurnContext
+from demiurge.sdk import AgentInput, TurnContext
 
 
 def _turn() -> TurnContext:
@@ -225,53 +225,3 @@ def test_invalid_delivery_request_fields_raise(tmp_path, kwargs, message):
             slot=_slot(tmp_path),
             interaction_metadata={"channel": "tui"},
         )
-
-
-def test_legacy_deliver_effect_uses_same_delivery_request_path(tmp_path):
-    host = _Host(tmp_path)
-    runtime = ModuleDeliveryRuntime(host)
-
-    delivery = runtime.apply_deliver_effect(
-        EffectRequest(
-            type="deliver",
-            payload={"type": "text", "text": "legacy"},
-            history_policy="model_hidden",
-        ),
-        turn=_turn(),
-        slot=_slot(tmp_path),
-        interaction_metadata={"channel": "tui"},
-    )
-
-    messages = host.session_runtime.read_messages("session_1")
-    assert [(message.content, message.model_visible) for message in messages] == [("legacy", False)]
-    assert delivery is not None
-    assert delivery.text == "legacy"
-    assert delivery.metadata["legacy_effect"] is True
-    assert delivery.metadata["payload"] == {"type": "text", "text": "legacy"}
-
-
-def test_legacy_deliver_effect_conversion_normalizes_attachments(tmp_path):
-    host = _Host(tmp_path)
-    runtime = ModuleDeliveryRuntime(host)
-
-    request = runtime.request_from_deliver_effect(
-        EffectRequest(
-            type="deliver",
-            payload={"content": "legacy content"},
-            attachments=[{"kind": "unknown", "url": "https://example.com/file.bin"}],
-            target="current",
-        ),
-        slot=_slot(tmp_path, history_policy="model_hidden"),
-    )
-
-    assert request.history_policy == "persist"
-    assert request.target == "current"
-    assert [block.type for block in request.blocks] == ["text", "file"]
-    assert request.blocks[0].text == "legacy content"
-    assert request.metadata["legacy_effect"] is True
-
-    fallback_request = runtime.request_from_deliver_effect(
-        EffectRequest(type="deliver", payload="fallback", history_policy=None),
-        slot=_slot(tmp_path, history_policy="model_hidden"),
-    )
-    assert fallback_request.history_policy == "model_hidden"

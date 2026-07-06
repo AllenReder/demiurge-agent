@@ -53,9 +53,9 @@ Expired `sending` work is marked `unknown`; the host must not blindly replay an
 external send after a crash.
 
 Runtime modules that need a cross-subsystem view use
-`HostWorkLifecycleRuntime`. It wraps `DurableWorkRuntime` for claim, running,
-sending, complete, fail, cancel, acknowledge, and recovery actions, and it
-projects operator-readable status from `runtime_work_items`, `tasks`,
+`HostWorkLifecycleRuntime`. It wraps `DurableWorkRuntime` behind domain
+methods for delivery sends, schedule fires, and task-completion notifications,
+and it projects operator-readable status from `runtime_work_items`, `tasks`,
 `task_logs`, `outbox`, `scheduler_instances`, and task-completion events. This
 is an observation and lifecycle facade, not a replacement for the specialized
 owners:
@@ -141,10 +141,13 @@ runner does not own a separate background-task ledger.
 `OperatorGatewayRuntime` owns the local operator product surface for TUI and
 future dashboard clients. It projects `operator.ready`, `operator.status`,
 `operator.history`, `operator.work.updated`, `operator.prompt.opened`,
-`operator.approval.opened`, and `operator.error` events from the runtime store,
-session runtime, conversation lifecycle, approval runtime, and
-`HostWorkLifecycleRuntime`. The TUI adapter is only an RPC adapter over this
-operator module; messaging channels remain separate platform adapters.
+`operator.approval.opened`, `operator.message`, `operator.deliver`,
+`operator.error`, and `operator.shutdown` events from the runtime store, session
+runtime, conversation lifecycle, approval runtime, and
+`HostWorkLifecycleRuntime`. The NDJSON entrypoint is only transport plumbing
+over this operator module; messaging channels remain separate platform
+adapters. Operator clients do not receive legacy `interaction.*` or
+`channel.*` compatibility frames.
 
 `DeliveryRuntime` dispatches queued delivery intents through the
 session-scoped interaction router after claiming the matching durable work item.

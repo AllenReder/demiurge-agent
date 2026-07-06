@@ -21,9 +21,8 @@ The operator gateway owns local product state and control-plane views:
 - busy, queue, and interrupt handling through `ConversationLifecycleRuntime`;
 - interaction route binding for the active operator session.
 
-`TuiInteractionBridge` is now a narrow adapter. It forwards TUI RPC methods to
-`OperatorGatewayRuntime` and keeps the existing RPC-facing class name for the
-launcher and tests.
+The NDJSON launcher instantiates `OperatorGatewayRuntime` directly. There is no
+compatibility bridge class or legacy TUI protocol facade.
 
 ## Event Shape
 
@@ -36,16 +35,14 @@ Operator clients should prefer product events for UI state:
 - `operator.prompt.opened`
 - `operator.approval.opened`
 - `operator.error`
+- `operator.message`
+- `operator.deliver`
+- `operator.shutdown`
 
-`interaction.*` events remain the transcript and compatibility stream:
-
-- user and assistant transcript delivery;
-- tool-call display records;
-- current TUI reducer compatibility with older gateway frames.
-
-The TUI reducer accepts both `operator.*` and legacy `interaction.*` state
-events. New dashboard code should use the `operator.*` names for product state
-and keep `interaction.deliver` for transcript output.
+The TUI reducer consumes only `operator.*` frames. Internal
+`InteractionInbound` and `InteractionOutbound` objects are still shared with
+messaging channels below the gateway, but those names are not the operator wire
+protocol.
 
 ## Boundary With Channels
 

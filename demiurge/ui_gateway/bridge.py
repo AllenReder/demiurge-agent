@@ -198,7 +198,7 @@ class OperatorGatewayRuntime:
 
     async def _emit_deliveries(self, outbound: InteractionOutbound, deliveries) -> None:
         await self.emit(
-            "interaction.deliver",
+            "operator.deliver",
             {
                 "channel": outbound.channel,
                 "session_id": outbound.session_id,
@@ -217,7 +217,6 @@ class OperatorGatewayRuntime:
         pending = self._pending_approvals.open(request)
         payload = {"approval_id": pending.approval_id, "request": asdict(request)}
         await self.emit("operator.approval.opened", payload)
-        await self.emit("interaction.approval.request", payload)
         await self._emit_status()
         try:
             return await self._pending_approvals.wait(pending)
@@ -282,7 +281,7 @@ class OperatorGatewayRuntime:
                 prompt.future.set_result("")
         self._conversation_lifecycle.close()
         self._route_binding.unbind(self.app.runner.interaction_router)
-        await self.emit("channel.shutdown", {})
+        await self.emit("operator.shutdown", {})
 
     def _start_scheduler(self) -> None:
         if self._scheduler is None:
@@ -328,7 +327,7 @@ class OperatorGatewayRuntime:
     async def _run_inbound(self, state: ConversationIngressState, inbound: InteractionInbound) -> None:
         try:
             if not is_background_completion(inbound):
-                await self.emit("interaction.message", {"role": "user", "text": inbound.text})
+                await self.emit("operator.message", {"role": "user", "text": inbound.text})
             result = await self.runtime.handle(inbound, route_binding=state.route_binding)
             await self.deliver(result)
         except asyncio.CancelledError:
@@ -336,7 +335,6 @@ class OperatorGatewayRuntime:
         except Exception as exc:
             self._last_error = str(exc)
             await self.emit("operator.error", {"message": str(exc), "source": "operator_gateway"})
-            await self.emit("interaction.error", {"message": str(exc), "source": "tui_bridge"})
 
     async def _after_turn(self, state: ConversationIngressState, drained: bool) -> None:
         await self._emit_status()
@@ -382,10 +380,6 @@ class OperatorGatewayRuntime:
             "metadata": json_safe(prompt.metadata),
         }
         await self.emit("operator.prompt.opened", payload)
-        await self.emit(
-            "interaction.prompt.request",
-            payload,
-        )
         await self._emit_status()
         return pending
 
@@ -409,12 +403,10 @@ class OperatorGatewayRuntime:
             "slash_commands": [_slash_spec_dict(spec) for spec in specs_for_surface("tui")],
         }
         await self.emit("operator.ready", payload)
-        await self.emit("interaction.ready", payload)
 
     async def _emit_status(self) -> None:
         payload = self._status_payload()
         await self.emit("operator.status", payload)
-        await self.emit("interaction.status", payload)
 
     async def _emit_history_snapshot(self, session_id: str) -> None:
         payload = {
@@ -422,7 +414,6 @@ class OperatorGatewayRuntime:
             "items": self._history_items(session_id),
         }
         await self.emit("operator.history", payload)
-        await self.emit("interaction.history", payload)
 
     def _history_items(self, session_id: str) -> list[dict[str, Any]]:
         return build_history_items(
@@ -461,7 +452,7 @@ class OperatorGatewayRuntime:
 
     async def _emit_notice(self, text: str, *, level: str = "info") -> None:
         await self.emit(
-            "interaction.deliver",
+            "operator.deliver",
             {
                 "channel": "tui",
                 "deliveries": [
@@ -486,7 +477,7 @@ class OperatorGatewayRuntime:
         if self.tool_display == "quiet":
             return
         await self.emit(
-            "interaction.deliver",
+            "operator.deliver",
             {
                 "channel": "tui",
                 "session_id": outbound.session_id if outbound is not None else self.app.runner.session_id,
@@ -760,10 +751,6 @@ class OperatorGatewayRuntime:
                 "metadata": {"kind": "resume"},
             }
             await self.emit("operator.prompt.opened", payload)
-            await self.emit(
-                "interaction.prompt.request",
-                payload,
-            )
             await self._emit_status()
             return True
         resolution = resolve_session_choice(raw, view)
@@ -862,7 +849,7 @@ class OperatorGatewayRuntime:
 
     async def _emit_command_output(self, command: str, text: str) -> None:
         await self.emit(
-            "interaction.deliver",
+            "operator.deliver",
             {
                 "channel": "tui",
                 "deliveries": [
@@ -976,70 +963,6 @@ class OperatorGatewayRuntime:
             user_input=AgentInput(content=""),
             metadata={"channel": "tui", "source": "local", "target": "local"},
         )
-
-
-class TuiInteractionBridge:
-    """Narrow adapter between TUI RPC calls and OperatorGatewayRuntime."""
-
-    def __init__(
-        self,
-        app: DemiurgeApp,
-        *,
-        emit: JsonEventSink,
-        tool_display: str | None = None,
-        busy_mode: str | None = None,
-    ):
-        self.operator = OperatorGatewayRuntime(
-            app,
-            emit=emit,
-            tool_display=tool_display,
-            busy_mode=busy_mode,
-        )
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.operator, name)
-
-    @property
-    def runtime(self) -> InteractionRuntime:
-        return self.operator.runtime
-
-    @runtime.setter
-    def runtime(self, value: InteractionRuntime) -> None:
-        self.operator.runtime = value
-        self.operator._sync_ingress_state()
-
-    @property
-    def tool_display(self) -> str:
-        return self.operator.tool_display
-
-    @tool_display.setter
-    def tool_display(self, value: str) -> None:
-        self.operator.tool_display = value
-
-    @property
-    def busy_mode(self) -> str:
-        return self.operator.busy_mode
-
-    @busy_mode.setter
-    def busy_mode(self, value: str) -> None:
-        self.operator.busy_mode = value
-        self.operator._ingress_state.busy_mode = value
-
-    @property
-    def should_exit(self) -> bool:
-        return self.operator.should_exit
-
-    @should_exit.setter
-    def should_exit(self, value: bool) -> None:
-        self.operator.should_exit = value
-
-    @property
-    def running(self) -> bool:
-        return self.operator.running
-
-    @property
-    def _queued_inputs(self):
-        return self.operator._queued_inputs
 
 
 def _delivery_dict(delivery: Any) -> dict[str, Any]:

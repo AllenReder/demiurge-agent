@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from demiurge.runtime.durable_work import DurableWorkSpec, durable_work_enqueued_event
 from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.host_work import delivery_work_enqueued_event
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.storage import SessionMessage, SessionRecord, utc_now
 from demiurge.util import utc_id
@@ -409,20 +409,17 @@ class SessionRuntime:
                         "payload": payload,
                     },
                 ),
-                durable_work_enqueued_event(
-                    DurableWorkSpec(
-                        work_id=delivery_id,
-                        kind="delivery.send",
-                        owner_session_id=session_id,
-                        owner_turn_id=turn_id,
-                        payload={
-                            "owner_turn_id": turn_id,
-                            "channel": channel,
-                            "target": dict(target),
-                            "idempotency_key": delivery_idempotency_key or delivery_id,
-                            **payload,
-                        },
-                    )
+                delivery_work_enqueued_event(
+                    delivery_id,
+                    owner_session_id=session_id,
+                    owner_turn_id=turn_id,
+                    payload={
+                        "owner_turn_id": turn_id,
+                        "channel": channel,
+                        "target": dict(target),
+                        "idempotency_key": delivery_idempotency_key or delivery_id,
+                        **payload,
+                    },
                 ),
             ],
             idempotency_key=f"delivery:{delivery_id}:message_outbox",

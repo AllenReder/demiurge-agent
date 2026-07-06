@@ -53,7 +53,7 @@ def test_control_plane_submit_control_read_and_stream(tmp_path):
         source=TaskSource(actor="model", session_id="session_1", turn_id="turn_1", core_id="assistant"),
     )
     record = control.read(handle.task_id, view="debug")
-    control.control(handle.task_id, "cancel")
+    control.cancel(handle.task_id)
     cancelled = control.read(handle.task_id)
     batch = control.stream(EventCursor(), EventFilter(aggregate_type="task", aggregate_id=handle.task_id))
 
@@ -82,18 +82,6 @@ def test_control_plane_stream_applies_cursor_before_limit(tmp_path):
     assert len(batch.events) == 100
     assert [int(event["seq"]) for event in batch.events] == list(range(101, 201))
     assert batch.next_cursor.seq == 200
-
-
-def test_control_plane_rejects_unsupported_task_control(tmp_path):
-    control = RuntimeControlPlane(RuntimeStore(tmp_path / "runtime.sqlite3"))
-    handle = control.submit_task(
-        TaskSpec(kind="agent.spawn", payload={"task_id": "task_1", "notify_policy": "return_to_parent"}),
-        source=TaskSource(actor="model"),
-    )
-
-    with pytest.raises(ValueError):
-        control.control(handle.task_id, "mute")  # type: ignore[arg-type]
-    assert control.read(handle.task_id)["notify_policy"] == "return_to_parent"
 
 
 def test_task_spec_rejects_non_task_kinds():

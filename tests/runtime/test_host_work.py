@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import pytest
 
 from demiurge.runtime.control import RuntimeControlPlane
-from demiurge.runtime.durable_work import DurableWorkSpec
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeEvent, RuntimeStore
@@ -36,9 +35,9 @@ def test_host_work_status_merges_delivery_work_and_outbox(tmp_path):
     lifecycle = HostWorkLifecycleRuntime(store=store)
 
     queued = lifecycle.status("delivery_1")
-    claim = lifecycle.claim("delivery_1", owner_id="test.delivery")
+    claim = lifecycle.claim_delivery("delivery_1", owner_id="test.delivery")
     assert claim is not None
-    lifecycle.sending(claim)
+    lifecycle.mark_delivery_sending(claim)
     sending = lifecycle.status("delivery_1")
     session_work = lifecycle.list_session_work("session_1")
     event_types = [event.type for event in lifecycle.list_events(work_id="delivery_1")]
@@ -75,9 +74,9 @@ async def test_host_work_observes_and_acknowledges_task_completion_work(tmp_path
     completion = worker.pending_events_for_session("session_1")[0]
 
     item = lifecycle.status(completion.event_id)
-    claim = lifecycle.claim(completion.event_id, owner_id="test.completion")
+    claim = lifecycle.claim_task_completion(completion.event_id, owner_id="test.completion")
     assert claim is not None
-    lifecycle.acknowledge(claim)
+    lifecycle.acknowledge_task_completion(claim)
     acknowledged = lifecycle.status(completion.event_id)
     task_events = [event.type for event in lifecycle.list_events(task_id=record.task_id)]
 
@@ -143,13 +142,12 @@ def test_host_work_status_merges_schedule_fire_projection(tmp_path):
     lifecycle = HostWorkLifecycleRuntime(store=store)
     due_at = "2026-06-28T10:00:00Z"
     work_id = f"schedule:assistant:daily:{due_at}"
-    lifecycle.enqueue(
-        DurableWorkSpec(
-            work_id=work_id,
-            kind="schedule.fire",
-            payload={"core_id": "assistant", "schedule_id": "daily", "due_at": due_at},
-            next_attempt_at=due_at,
-        ),
+    lifecycle.enqueue_schedule_fire(
+        work_id,
+        core_id="assistant",
+        schedule_id="daily",
+        due_at=due_at,
+        next_attempt_at=due_at,
         now=datetime(2026, 6, 28, 9, 59, tzinfo=UTC),
     )
     store.append(

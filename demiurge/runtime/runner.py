@@ -173,8 +173,6 @@ class SessionTurnStepRunner:
             module_delivery=self.module_delivery,
             dispatch=self.interaction_dispatch,
             on_history_changed=self._refresh_history,
-            execute_tool_effect=self._execute_slot_effect_tool,
-            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
         )
         self.slot_context = SlotContextRuntime(RunnerSlotContextHost(self), effects=self.slot_effects)
         self.slot_pipeline = SlotPipelineRuntime(
@@ -415,23 +413,6 @@ class SessionTurnStepRunner:
             capability=capability,
             emit_event=self.event_log.emit,
             output_factory=output_factory,
-        )
-
-    async def _execute_slot_effect_tool(
-        self,
-        call: ToolCall,
-        core: LoadedCore,
-        turn: TurnContext,
-        capability: CapabilityFacade,
-    ) -> ToolResult:
-        if call.name == "evolve_core":
-            return await self.tool_runtime._execute_builtin(call, core=core, turn=turn, capability=capability)
-        return await self.execute_tool(
-            call,
-            core=core,
-            turn=turn,
-            capability=capability,
-            emit_event=self.event_log.emit,
         )
 
     def _append_runtime_event(self, event: RuntimeEvent) -> None:

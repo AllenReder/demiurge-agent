@@ -30,12 +30,11 @@ from demiurge.sdk import (
     InputContext,
     OutputContext,
     RawInput,
-    StateProposal,
     ToolResult,
     TurnContext,
 )
 from demiurge.security.capabilities import CapabilityFacade
-from demiurge.storage import StateStore
+from demiurge.storage import StateProposal, StateStore
 from demiurge.util import utc_id
 
 

@@ -13,7 +13,7 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.child_agents import ChildAgentRunRequest
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
-from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.security.capabilities import CapabilityDenied
 from demiurge.sdk import AgentInput, OutputContext, TurnContext
 from demiurge.storage import StateStore
 
@@ -1248,41 +1248,6 @@ async def test_output_context_state_slice_is_not_supported(tmp_path):
 def test_turn_and_output_context_remove_legacy_state_snapshot_fields():
     assert "state" not in TurnContext.__dataclass_fields__
     assert "state_slice" not in OutputContext.__dataclass_fields__
-
-
-@pytest.mark.asyncio
-async def test_legacy_state_proposal_effect_is_ignored(tmp_path):
-    app = create_app(home=tmp_path / "home", provider_name="fake")
-    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    turn = TurnContext(
-        session_id=app.runner.session_id,
-        turn_id="turn_legacy_effect",
-        core_id=core.core_id,
-        core_revision=core.revision,
-        user_input=AgentInput(content="legacy", metadata={}),
-        metadata={},
-    )
-
-    deliveries = await app.runner.slot_effects.handle_effects(
-        [
-            {
-                "type": "state_proposal",
-                "proposal": {"target": "legacy.value", "operation": "set", "patch": "bad"},
-            }
-        ],
-        core=core,
-        turn=turn,
-        capability=CapabilityFacade(core),
-        slot=core.output_slots[0],
-        interaction_metadata={},
-    )
-
-    assert deliveries == []
-    assert StateStore.core(app.home, "assistant").read_target("legacy.value") is None
-    assert any(
-        event["type"] == "effect.ignored" and event.get("effect_type") == "state_proposal"
-        for event in app.runner.event_log.tail(20)
-    )
 
 
 @pytest.mark.asyncio
