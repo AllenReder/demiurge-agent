@@ -35,6 +35,7 @@ from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRuntime, PromptDebugRequest
 from demiurge.runtime.session_compaction import CompactionResult, SessionCompactionRuntime
 from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
 from demiurge.runtime.slot_execution import SlotExecutionRuntime
 from demiurge.runtime.slot_effects import SlotEffectRuntime
 from demiurge.runtime.slot_context import (
@@ -147,6 +148,13 @@ class SessionTurnStepRunner:
             complete_provider=self.complete_turn_provider,
             emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
             refresh_history=self._refresh_history,
+        )
+        self.session_routes = SessionRoutingRuntime(
+            sessions=self.sessions,
+            session_id=lambda: self.session_id,
+            activate_session=self._activate_session,
+            runtime_timezone=self.runtime_timezone,
+            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
         )
         self.history: list[LLMMessage] = []
         self.display_turns: list[dict[str, Any]] = []
@@ -304,6 +312,15 @@ class SessionTurnStepRunner:
         await self.prepare_live_core()
         return self.core_loader.load(self.version_store.active_core_path(self.core_id))
 
+    def _session_core_binding(self, core: LoadedCore) -> SessionCoreBinding:
+        return SessionCoreBinding(
+            core_id=core.core_id,
+            core_revision=self._core_revision(core),
+            provider=self.provider_name,
+            model=self._resolve_model_name(core),
+            workspace=self.workspace,
+        )
+
     def start_new_session(
         self,
         *,
@@ -314,148 +331,32 @@ class SessionTurnStepRunner:
         replace_conversation_binding: bool = False,
     ) -> str:
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
-        core_revision = self._core_revision(core)
-        metadata = {key: value for key, value in {"source": source, "reply_to": reply_to}.items() if value is not None}
-        bind_immediately = not (replace_conversation_binding and channel and conversation_key)
-        record = self.session_runtime.create_session(
-            core_id=core.core_id,
-            core_revision=core_revision,
-            channel=channel if bind_immediately else None,
-            conversation_key=conversation_key if bind_immediately else None,
-            workspace=self.workspace,
-            provider=self.provider_name,
-            model=self._resolve_model_name(core),
-            metadata=metadata,
-        )
-        if not bind_immediately:
-            record = self.session_runtime.rebind_interaction_session(
-                record.session_id,
-                core_id=core.core_id,
-                core_revision=core_revision,
-                channel=channel,
-                conversation_key=conversation_key,
-                metadata=metadata,
-            )
-        self._switch_session(record.session_id, emit_resumed=False)
-        self.event_log.emit(
-            "session.created",
-            core_id=core.core_id,
-            core_revision=core_revision,
+        record = self.session_routes.start_new(
+            self._session_core_binding(core),
             channel=channel,
             conversation_key=conversation_key,
+            source=source,
+            reply_to=reply_to,
+            replace_conversation_binding=replace_conversation_binding,
         )
         return record.session_id
 
     def resume_session(self, session_id: str) -> None:
-        self._switch_session(session_id, emit_resumed=True)
+        self.session_routes.resume(session_id)
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
         return await self.session_compaction.compact(focus=focus, protect_last_n=protect_last_n)
 
     def _ensure_current_session(self) -> None:
         core = self.core_loader.load(self.initial_core_path or self.version_store.active_core_path(self.core_id))
-        _, created = self.session_runtime.ensure_session(
-            self.session_id,
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-            workspace=self.workspace,
-            provider=self.provider_name,
-            model=self._resolve_model_name(core),
-        )
-        self._bind_event_log()
-        self.event_log.emit(
-            "session.created" if created else "session.resumed",
-            core_id=core.core_id,
-            core_revision=self._core_revision(core),
-        )
-        self.history = self._session_history_messages()
+        self.session_routes.ensure_current(self._session_core_binding(core))
 
-    def _switch_session(self, session_id: str, *, emit_resumed: bool) -> None:
+    def _activate_session(self, session_id: str) -> None:
         if not self.sessions.exists(session_id):
             raise FileNotFoundError(f"session not found: {session_id}")
         self.session_id = session_id
         self._bind_event_log()
         self.history = self._session_history_messages()
-        if emit_resumed:
-            record = self.sessions.get_session(session_id)
-            self.event_log.emit(
-                "session.resumed",
-                core_id=record.core_id,
-                core_revision=record.core_revision,
-                channel=record.channel,
-                conversation_key=record.conversation_key,
-            )
-
-    def _interaction_metadata(self, interaction: InteractionInbound | None) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        if interaction is not None:
-            metadata.update(
-                {
-                    "channel": interaction.channel,
-                    "source": interaction.source,
-                    "reply_to": interaction.reply_to,
-                    "conversation_key": interaction.conversation_key,
-                    **dict(interaction.metadata or {}),
-                }
-            )
-        metadata.update(self.runtime_timezone.metadata())
-        return {key: value for key, value in metadata.items() if value is not None}
-
-    def _resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
-        channel = interaction_metadata.get("channel")
-        conversation_key = interaction_metadata.get("conversation_key")
-        if not channel:
-            return
-        if not conversation_key:
-            if self.sessions.can_bind_session(
-                self.session_id,
-                channel=str(channel),
-                conversation_key=None,
-            ):
-                self.session_runtime.update_session(
-                    self.session_id,
-                    core_id=core.core_id,
-                    core_revision=self._core_revision(core),
-                    channel=str(channel),
-                    conversation_key=None,
-                    metadata={
-                        key: value
-                        for key, value in interaction_metadata.items()
-                        if key not in {"channel", "conversation_key"}
-                    },
-                )
-            return
-        existing = self.sessions.resolve_interaction_session(
-            core_id=core.core_id,
-            channel=str(channel),
-            conversation_key=str(conversation_key),
-        )
-        if existing:
-            if existing != self.session_id:
-                self._switch_session(existing, emit_resumed=True)
-            return
-        if self.sessions.can_bind_session(
-            self.session_id,
-            channel=str(channel),
-            conversation_key=str(conversation_key),
-        ):
-            self.session_runtime.update_session(
-                self.session_id,
-                core_id=core.core_id,
-                core_revision=self._core_revision(core),
-                channel=str(channel),
-                conversation_key=str(conversation_key),
-                metadata={
-                    key: value for key, value in interaction_metadata.items() if key not in {"channel", "conversation_key"}
-                },
-            )
-            return
-        self.start_new_session(
-            channel=str(channel),
-            conversation_key=str(conversation_key),
-            source=interaction_metadata.get("source"),
-            reply_to=interaction_metadata.get("reply_to"),
-        )
 
     def _resolve_phase_slots(
         self,

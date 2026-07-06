@@ -203,10 +203,13 @@ class RunnerTurnPipelineHost:
         return await self.runner.load_active_core()
 
     def interaction_metadata(self, interaction: InteractionInbound | None) -> dict[str, Any]:
-        return self.runner._interaction_metadata(interaction)
+        return self.runner.session_routes.metadata_for(interaction)
 
     def resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
-        self.runner._resolve_session_for_interaction(core, interaction_metadata)
+        self.runner.session_routes.resolve_for_interaction(
+            self.runner._session_core_binding(core),
+            interaction_metadata,
+        )
 
     def bind_route(self, route_binding: SessionRouteBinding) -> None:
         route_binding.bind(self.runner.interaction_router, self.runner.session_id)
