@@ -42,7 +42,7 @@ SessionTurnStepRunner
 | Core repository | Own the Git-backed runtime agents tree, refs, change sets, package transactions, and rollback commits. |
 | Evolution runtime | Start, review, promote, and discard isolated agents-tree change sets through the core repository and gates. |
 | Gate runner | Run host-owned checks for path safety, artifacts, dependency files, core loading, package provenance, drift warnings, and cross-core references. |
-| Runtime control plane | Submit actions, project tasks/events, and expose task/session/scheduler/outbox state from SQLite. |
+| Runtime control plane | Submit detached task specs, project task events, and expose task/session/scheduler/outbox state from SQLite. |
 | Runtime task worker | Hold active process handles and live completion subscribers; pending completions are recovered from SQLite events. |
 | Delivery runtime | Dispatch authored delivery intents and update outbox status. |
 | Session runtime | Read and write session, turn, message, bootstrap, and compaction projections. |

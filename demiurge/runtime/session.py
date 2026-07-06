@@ -364,7 +364,6 @@ class SessionRuntime:
         role: str,
         content: str,
         delivery_id: str,
-        task_id: str | None,
         channel: str | None,
         target: dict[str, Any],
         delivery_payload: dict[str, Any],
@@ -402,7 +401,7 @@ class SessionRuntime:
                     aggregate_type="delivery",
                     aggregate_id=delivery_id,
                     payload={
-                        "task_id": task_id,
+                        "owner_turn_id": turn_id,
                         "channel": channel,
                         "target": dict(target),
                         "status": delivery_status,
@@ -416,9 +415,8 @@ class SessionRuntime:
                         kind="delivery.send",
                         owner_session_id=session_id,
                         owner_turn_id=turn_id,
-                        parent_work_id=task_id,
                         payload={
-                            "task_id": task_id,
+                            "owner_turn_id": turn_id,
                             "channel": channel,
                             "target": dict(target),
                             "idempotency_key": delivery_idempotency_key or delivery_id,

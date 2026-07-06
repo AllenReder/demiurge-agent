@@ -326,14 +326,14 @@ class RuntimeStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO outbox (
-                    delivery_id, task_id, channel, target_json, status, idempotency_key,
+                    delivery_id, owner_turn_id, channel, target_json, status, idempotency_key,
                     payload_json, attempts, last_error, created_at, sent_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["aggregate_id"],
-                    payload.get("task_id"),
+                    payload.get("owner_turn_id"),
                     payload.get("channel"),
                     json.dumps(payload.get("target") or {}, ensure_ascii=False, sort_keys=True),
                     payload.get("status", "queued"),
@@ -877,7 +877,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 
 CREATE TABLE IF NOT EXISTS outbox (
     delivery_id TEXT PRIMARY KEY,
-    task_id TEXT,
+    owner_turn_id TEXT,
     channel TEXT,
     target_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL,

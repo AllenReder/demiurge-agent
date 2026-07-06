@@ -216,7 +216,6 @@ class ModuleDeliveryRuntime:
                 role="assistant",
                 content=content,
                 delivery_id=request.delivery_id,
-                task_id=turn.turn_id,
                 channel=interaction_metadata.get("channel"),
                 target=delivery_target,
                 delivery_payload=delivery_payload,
@@ -246,7 +245,7 @@ class ModuleDeliveryRuntime:
                         aggregate_type="delivery",
                         aggregate_id=request.delivery_id,
                         payload={
-                            "task_id": turn.turn_id,
+                            "owner_turn_id": turn.turn_id,
                             "channel": interaction_metadata.get("channel"),
                             "target": delivery_target,
                             "status": "queued",
@@ -260,9 +259,8 @@ class ModuleDeliveryRuntime:
                             kind="delivery.send",
                             owner_session_id=self.host.session_id,
                             owner_turn_id=turn.turn_id,
-                            parent_work_id=turn.turn_id,
                             payload={
-                                "task_id": turn.turn_id,
+                                "owner_turn_id": turn.turn_id,
                                 "channel": interaction_metadata.get("channel"),
                                 "target": delivery_target,
                                 "idempotency_key": request.delivery_id,

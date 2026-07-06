@@ -89,7 +89,6 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
         content="hello",
         turn_id="turn_1",
         delivery_id="delivery_1",
-        task_id="turn_1",
         channel="tui",
         target={"conversation_key": "local"},
         delivery_payload={"fallback_text": "hello"},
@@ -104,10 +103,13 @@ def test_session_runtime_appends_delivery_message_and_outbox_atomically(tmp_path
 
     assert [event["type"] for event in events] == ["message.persisted", "delivery.queued", "work.enqueued"]
     assert events[0]["aggregate_id"] == message.id
+    assert outbox["owner_turn_id"] == "turn_1"
     assert outbox["payload"]["message_id"] == message.id
     assert work["kind"] == "delivery.send"
     assert work["status"] == "queued"
     assert work["owner_turn_id"] == "turn_1"
+    assert work["parent_work_id"] is None
+    assert work["payload"]["owner_turn_id"] == "turn_1"
     assert work["payload"]["message_id"] == message.id
 
 
@@ -158,7 +160,6 @@ def test_create_app_recovers_stale_delivery_work_once(tmp_path):
         content="hello",
         turn_id="turn_1",
         delivery_id="delivery_1",
-        task_id="turn_1",
         channel="tui",
         target={"conversation_key": "local"},
         delivery_payload={"fallback_text": "hello"},
@@ -203,7 +204,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
     message_rows = app.runtime_store.query(
         RuntimeQuery(table="messages", where={"session_id": result.session_id}, order_by="created_at", limit=10)
     ).rows
-    outbox_rows = app.runtime_store.query(RuntimeQuery(table="outbox", where={"task_id": result.turn_id}, limit=10)).rows
+    outbox_rows = app.runtime_store.query(RuntimeQuery(table="outbox", where={"owner_turn_id": result.turn_id}, limit=10)).rows
 
     assert session_rows[0]["core_id"] == "assistant"
     with pytest.raises(KeyError, match="task not found"):

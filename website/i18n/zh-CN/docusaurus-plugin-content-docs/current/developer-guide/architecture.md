@@ -42,7 +42,7 @@ SessionTurnStepRunner
 | Core repository | 拥有 Git-backed runtime agents tree、refs、change sets、package transactions 和 rollback commits。 |
 | Evolution runtime | 通过 core repository 和 gates 管理 isolated agents-tree change sets 的 start、review、promote 和 discard。 |
 | Gate runner | 运行 host-owned checks：path safety、artifacts、dependency files、core loading、package provenance、drift warnings 和 cross-core references。 |
-| Runtime control plane | 提交 actions，投影 tasks/events，并从 SQLite 暴露 task/session/scheduler/outbox state。 |
+| Runtime control plane | 提交 detached task specs，投影 task events，并从 SQLite 暴露 task/session/scheduler/outbox state。 |
 | Runtime task worker | 持有 active process handles 和 live completion subscribers；pending completions 从 SQLite events 恢复。 |
 | Delivery runtime | Dispatch authored delivery intents 并更新 outbox status。 |
 | Session runtime | 读写 session、turn、message、bootstrap 和 compaction projections。 |

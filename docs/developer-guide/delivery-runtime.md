@@ -10,6 +10,8 @@ events, artifacts, and channel items.
 
 Every output `send_*` call also writes a delivery intent into the SQLite
 runtime `outbox` projection and a matching `delivery.send` durable work item.
+Outbox rows are owned by the foreground turn through `owner_turn_id`; delivery
+work does not use the foreground turn id as a task id or parent work id.
 `DeliveryRuntime` owns dispatch through `SessionInteractionRouter`, which looks
 up the active route for `InteractionOutbound.session_id`. Channel adapters are
 bound to sessions; they adapt payloads to platform APIs but do not own durable

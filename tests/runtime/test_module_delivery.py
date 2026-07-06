@@ -91,8 +91,11 @@ def test_persisted_text_delivery_writes_history_outbox_and_visible_delivery(tmp_
     work = host.rows("runtime_work_items", work_id="delivery_text")[0]
     assert outbox["payload"]["fallback_text"] == "hello"
     assert outbox["payload"]["message_id"] == messages[0].id
+    assert outbox["owner_turn_id"] == "turn_1"
     assert work["kind"] == "delivery.send"
     assert work["owner_turn_id"] == "turn_1"
+    assert work["parent_work_id"] is None
+    assert work["payload"]["owner_turn_id"] == "turn_1"
     assert delivery is not None
     assert delivery.text == "hello"
     assert delivery.metadata["message_id"] == messages[0].id
@@ -120,7 +123,11 @@ def test_transient_delivery_enqueues_outbox_without_assistant_history(tmp_path):
     work = host.rows("runtime_work_items", work_id="delivery_transient")[0]
     assert outbox["payload"]["history_policy"] == "transient"
     assert outbox["payload"]["message_id"] is None
+    assert outbox["owner_turn_id"] == "turn_1"
     assert work["status"] == "queued"
+    assert work["owner_turn_id"] == "turn_1"
+    assert work["parent_work_id"] is None
+    assert work["payload"]["owner_turn_id"] == "turn_1"
     assert delivery is not None
     assert delivery.kind == "progress"
     assert delivery.history_policy == "transient"
