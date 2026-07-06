@@ -47,7 +47,7 @@ export function createInitialState(): AppState {
 export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppState {
   const event = frame.event
   const payload = frame.payload
-  if (event === "interaction.ready") {
+  if (event === "operator.ready" || event === "interaction.ready") {
     return {
       ...state,
       ready: true,
@@ -70,10 +70,10 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       slashCommands: slashCommandsFromPayload(payload.slash_commands),
     }
   }
-  if (event === "interaction.status") {
+  if (event === "operator.status" || event === "interaction.status") {
     return { ...state, status: { ...state.status, ...statusFromPayload(payload) } }
   }
-  if (event === "interaction.history") {
+  if (event === "operator.history" || event === "interaction.history") {
     return { ...state, transcript: transcriptItemsFromPayload(payload.items) }
   }
   if (event === "interaction.message") {
@@ -127,7 +127,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
     }
     return next
   }
-  if (event === "interaction.prompt.request") {
+  if (event === "operator.prompt.opened" || event === "interaction.prompt.request") {
     const prompt: PromptPanel = {
       type: "prompt",
       prompt_id: stringValue(payload.prompt_id),
@@ -139,7 +139,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
     }
     return { ...state, prompt }
   }
-  if (event === "interaction.approval.request") {
+  if (event === "operator.approval.opened" || event === "interaction.approval.request") {
     const request = (recordValue(payload.request) ?? {}) as ApprovalRequest
     return {
       ...state,
@@ -152,7 +152,7 @@ export function reduceGatewayEvent(state: AppState, frame: GatewayEvent): AppSta
       },
     }
   }
-  if (event === "interaction.error") {
+  if (event === "operator.error" || event === "interaction.error") {
     const message = stringValue(payload.message)
     return appendItem(
       { ...state, status: { ...state.status, last_error: message } },

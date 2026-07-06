@@ -2,6 +2,59 @@ import { describe, expect, it } from "vitest"
 import { clearPrompt, createInitialState, reduceGatewayEvent, selectPromptChoice } from "../app/state"
 
 describe("interaction reducer", () => {
+  it("tracks operator product events", () => {
+    let state = reduceGatewayEvent(createInitialState(), {
+      event: "operator.ready",
+      payload: {
+        core_id: "assistant",
+        core_revision: "0002",
+        session_id: "session_2",
+        slash_commands: [{ name: "status", description: "Show status", group: "Core" }],
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.status",
+      payload: {
+        core_id: "assistant",
+        core_revision: "0002",
+        session_id: "session_2",
+        status: "running",
+        queued_inputs: 2,
+        pending_prompts: 1,
+      },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.prompt.opened",
+      payload: { prompt_id: "prompt_2", kind: "resume", question: "Resume?", choices: ["session_1"] },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.approval.opened",
+      payload: { approval_id: "approval_1", request: { tool_name: "terminal", risk: "critical", action: "exec" } },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.history",
+      payload: { items: [{ id: "history_1", type: "message", role: "assistant", text: "old answer" }] },
+    })
+    state = reduceGatewayEvent(state, {
+      event: "operator.error",
+      payload: { message: "boom" },
+    })
+
+    expect(state.ready).toBe(true)
+    expect(state.status).toMatchObject({
+      core_id: "assistant",
+      core_revision: "0002",
+      session_id: "session_2",
+      status: "running",
+      queued_inputs: 2,
+      pending_prompts: 1,
+      last_error: "boom",
+    })
+    expect(state.slashCommands[0]).toMatchObject({ name: "status" })
+    expect(state.transcript).toContainEqual(expect.objectContaining({ type: "message", role: "assistant", text: "old answer" }))
+    expect(state.transcript).toContainEqual(expect.objectContaining({ type: "notice", text: "boom", level: "error" }))
+  })
+
   it("tracks core revision from ready events", () => {
     const state = reduceGatewayEvent(createInitialState(), {
       event: "interaction.ready",

@@ -14,6 +14,9 @@ from demiurge.ui_gateway.protocol import NdjsonRpcEndpoint
 from demiurge.util import default_home
 
 
+LONG_OPERATOR_COMMANDS = frozenset({"/doctor", "/packages", "/evolve", "/rollback", "/compact"})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m demiurge.ui_gateway.entry")
     parser.add_argument("--config-json", default=None, help="JSON config produced by the demiurge TUI launcher")
@@ -53,25 +56,55 @@ async def async_main(argv: list[str] | None = None) -> None:
         await endpoint.write_event("interaction.error", {"message": str(exc), "source": "gateway_startup"})
         return
 
+    pending_handlers: set[asyncio.Task[None]] = set()
     try:
         async for request in endpoint.iter_requests():
             message_id = request.get("id")
             method = str(request.get("method") or "")
             params = request.get("params") if isinstance(request.get("params"), dict) else {}
-            try:
-                result = await _dispatch(bridge, method, params)
-            except Exception as exc:
-                print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
-                await endpoint.write_error(message_id, str(exc)) if message_id is not None else await endpoint.write_event(
-                    "interaction.error", {"message": str(exc), "source": "gateway_dispatch", "method": method}
-                )
+            if _is_long_operator_request(method, params):
+                task = asyncio.create_task(_handle_request(endpoint, bridge, message_id, method, params))
+                pending_handlers.add(task)
+                task.add_done_callback(pending_handlers.discard)
                 continue
-            if message_id is not None:
-                await endpoint.write_result(message_id, result)
+            await _handle_request(endpoint, bridge, message_id, method, params)
             if bridge.should_exit:
                 return
     finally:
+        for task in pending_handlers:
+            task.cancel()
+        if pending_handlers:
+            await asyncio.gather(*pending_handlers, return_exceptions=True)
         await app.close()
+
+
+async def _handle_request(
+    endpoint: NdjsonRpcEndpoint,
+    bridge: TuiInteractionBridge,
+    message_id: object,
+    method: str,
+    params: dict[str, Any],
+) -> None:
+    try:
+        result = await _dispatch(bridge, method, params)
+    except Exception as exc:
+        print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        if message_id is not None:
+            await endpoint.write_error(message_id, str(exc))
+        else:
+            payload = {"message": str(exc), "source": "gateway_dispatch", "method": method}
+            await endpoint.write_event("operator.error", payload)
+            await endpoint.write_event("interaction.error", payload)
+        return
+    if message_id is not None:
+        await endpoint.write_result(message_id, result)
+
+
+def _is_long_operator_request(method: str, params: dict[str, Any]) -> bool:
+    if method != "channel.command":
+        return False
+    text = str(params.get("text") or "").strip()
+    return any(text == command or text.startswith(f"{command} ") for command in LONG_OPERATOR_COMMANDS)
 
 
 async def _dispatch(bridge: TuiInteractionBridge, method: str, params: dict[str, Any]) -> Any:

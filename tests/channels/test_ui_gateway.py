@@ -10,7 +10,8 @@ from demiurge.security.approval import ApprovalRequest
 from demiurge.sdk import ToolResult
 from demiurge.slash import specs_for_surface
 from demiurge.tools.records import ToolExecutionRecord
-from demiurge.ui_gateway import TuiInteractionBridge, parse_approval_response, parse_tool_display_level
+from demiurge.ui_gateway import OperatorGatewayRuntime, TuiInteractionBridge, parse_approval_response, parse_tool_display_level
+from demiurge.ui_gateway.entry import _is_long_operator_request
 from demiurge.util import write_json
 
 
@@ -160,6 +161,14 @@ def test_parse_tool_display_level():
     assert parse_tool_display_level("bad") is None
 
 
+def test_operator_gateway_long_command_isolation_predicate():
+    assert _is_long_operator_request("channel.command", {"text": "/evolve improve this"})
+    assert _is_long_operator_request("channel.command", {"text": "/packages install memory_basic"})
+    assert _is_long_operator_request("channel.command", {"text": "/doctor"})
+    assert not _is_long_operator_request("channel.command", {"text": "/exit"})
+    assert not _is_long_operator_request("interaction.submit", {"text": "/evolve improve this"})
+
+
 @pytest.mark.asyncio
 async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     sink = EventSink()
@@ -201,6 +210,28 @@ async def test_tui_bridge_ready_includes_tui_slash_command_catalog(tmp_path):
     assert sink.payloads("interaction.status")[-1]["user_message_align"] == "left"
     assert sink.payloads("interaction.status")[-1]["demiurge_theme_color"] == "#ff9afc"
     assert sink.payloads("interaction.status")[-1]["user_theme_color"] == "#9cc9ff"
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_emits_operator_product_events(tmp_path):
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    bridge = TuiInteractionBridge(app, emit=sink)
+
+    await bridge.initialize()
+
+    ready = sink.payloads("operator.ready")[-1]
+    status = sink.payloads("operator.status")[-1]
+
+    assert isinstance(bridge.operator, OperatorGatewayRuntime)
+    assert ready["session"] == {
+        "session_id": app.runner.session_id,
+        "channel": "operator",
+        "source": "tui",
+        "conversation_key": f"tui:{app.runner.session_id}",
+    }
+    assert status["session"] == ready["session"]
+    assert status["work"] == []
 
 
 @pytest.mark.asyncio
@@ -367,6 +398,7 @@ async def test_tui_bridge_prompt_user_waits_for_reply(tmp_path):
     await bridge.reply_prompt(prompt["prompt_id"], "2")
 
     assert await task == "b"
+    assert sink.payloads("operator.prompt.opened")[-1]["prompt_id"] == prompt["prompt_id"]
 
 
 @pytest.mark.asyncio
@@ -389,6 +421,7 @@ async def test_tui_bridge_approval_request_round_trip(tmp_path):
     await _wait_for(lambda: bool(sink.payloads("interaction.approval.request")))
     payload = sink.payloads("interaction.approval.request")[-1]
     assert payload["request"]["tool_name"] == "terminal"
+    assert sink.payloads("operator.approval.opened")[-1] == payload
 
     await bridge.reply_approval(payload["approval_id"], "2")
 

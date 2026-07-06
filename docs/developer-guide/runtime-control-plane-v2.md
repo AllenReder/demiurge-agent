@@ -138,6 +138,14 @@ parallel slots and delivery dispatch. It composes those local tasks with the
 durable `RuntimeTaskWorker` for drain and active-count behavior; the foreground
 runner does not own a separate background-task ledger.
 
+`OperatorGatewayRuntime` owns the local operator product surface for TUI and
+future dashboard clients. It projects `operator.ready`, `operator.status`,
+`operator.history`, `operator.work.updated`, `operator.prompt.opened`,
+`operator.approval.opened`, and `operator.error` events from the runtime store,
+session runtime, conversation lifecycle, approval runtime, and
+`HostWorkLifecycleRuntime`. The TUI adapter is only an RPC adapter over this
+operator module; messaging channels remain separate platform adapters.
+
 `DeliveryRuntime` dispatches queued delivery intents through the
 session-scoped interaction router after claiming the matching durable work item.
 The outbox lifecycle is `queued -> sending -> sent/failed/unknown/unrouted`.

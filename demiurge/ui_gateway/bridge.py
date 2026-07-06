@@ -58,6 +58,22 @@ class PendingPrompt:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorSessionContext:
+    session_id: str
+    channel: str
+    source: str
+    conversation_key: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "session_id": self.session_id,
+            "channel": self.channel,
+            "source": self.source,
+            "conversation_key": self.conversation_key,
+        }
+
+
 def parse_tool_display_level(text: str) -> str | None:
     normalized = text.strip().lower()
     aliases = {
@@ -73,14 +89,8 @@ def parse_tool_display_level(text: str) -> str | None:
     return aliases.get(normalized)
 
 
-class TuiInteractionBridge:
-    """Local TUI channel adapter.
-
-    This class is intentionally the Python-side channel adapter, mirroring
-    TelegramInteractionBridge's boundary. TypeScript renders the terminal and
-    sends interaction intents; this class owns the conversion to
-    InteractionInbound/InteractionOutbound and implements SessionInteractionRoute.
-    """
+class OperatorGatewayRuntime:
+    """Python-side operator product gateway for local TUI/dashboard clients."""
 
     def __init__(
         self,
@@ -205,7 +215,9 @@ class TuiInteractionBridge:
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
         pending = self._pending_approvals.open(request)
-        await self.emit("interaction.approval.request", {"approval_id": pending.approval_id, "request": asdict(request)})
+        payload = {"approval_id": pending.approval_id, "request": asdict(request)}
+        await self.emit("operator.approval.opened", payload)
+        await self.emit("interaction.approval.request", payload)
         await self._emit_status()
         try:
             return await self._pending_approvals.wait(pending)
@@ -323,6 +335,7 @@ class TuiInteractionBridge:
             raise
         except Exception as exc:
             self._last_error = str(exc)
+            await self.emit("operator.error", {"message": str(exc), "source": "operator_gateway"})
             await self.emit("interaction.error", {"message": str(exc), "source": "tui_bridge"})
 
     async def _after_turn(self, state: ConversationIngressState, drained: bool) -> None:
@@ -335,6 +348,7 @@ class TuiInteractionBridge:
         inbound: InteractionInbound,
     ) -> None:
         await self._emit_notice(f"background task {event.task_id} {event.status}: {shorten_text(event.summary, 100)}")
+        await self._emit_work_updated(event.event_id)
 
     async def _after_completion_enqueue(
         self,
@@ -342,6 +356,7 @@ class TuiInteractionBridge:
         event,
         result: CompletionEnqueueResult,
     ) -> None:
+        await self._emit_work_updated(event.event_id)
         if result.inbound is None:
             return
         await self._emit_status()
@@ -359,52 +374,55 @@ class TuiInteractionBridge:
             metadata=dict(prompt.metadata or {}),
         )
         self._pending_prompts[prompt_id] = pending
+        payload = {
+            "prompt_id": prompt_id,
+            "kind": kind,
+            "question": prompt.question,
+            "choices": list(prompt.choices),
+            "metadata": json_safe(prompt.metadata),
+        }
+        await self.emit("operator.prompt.opened", payload)
         await self.emit(
             "interaction.prompt.request",
-            {
-                "prompt_id": prompt_id,
-                "kind": kind,
-                "question": prompt.question,
-                "choices": list(prompt.choices),
-                "metadata": json_safe(prompt.metadata),
-            },
+            payload,
         )
         await self._emit_status()
         return pending
 
     async def _emit_ready(self) -> None:
         pointer = self.app.version_store.active_pointer(self.app.runner.core_id)
-        await self.emit(
-            "interaction.ready",
-            {
-                "core_id": pointer.core_id,
-                "core_revision": pointer.active_revision,
-                "session_id": self.app.runner.session_id,
-                "workspace": str(self.app.workspace.root),
-                "provider": self.app.provider_name,
-                "model": self.app.model_name,
-                "runtime_timezone": self.app.runtime_timezone.name,
-                "runtime_timezone_source": self.app.runtime_timezone.source,
-                "tool_display": self.tool_display,
-                "user_message_align": self.app.user_message_align,
-                "demiurge_theme_color": self.app.demiurge_theme_color,
-                "user_theme_color": self.app.user_theme_color,
-                "busy_mode": self.busy_mode,
-                "slash_commands": [_slash_spec_dict(spec) for spec in specs_for_surface("tui")],
-            },
-        )
+        payload = {
+            "core_id": pointer.core_id,
+            "core_revision": pointer.active_revision,
+            "session_id": self.app.runner.session_id,
+            "session": self._operator_session_context().as_dict(),
+            "workspace": str(self.app.workspace.root),
+            "provider": self.app.provider_name,
+            "model": self.app.model_name,
+            "runtime_timezone": self.app.runtime_timezone.name,
+            "runtime_timezone_source": self.app.runtime_timezone.source,
+            "tool_display": self.tool_display,
+            "user_message_align": self.app.user_message_align,
+            "demiurge_theme_color": self.app.demiurge_theme_color,
+            "user_theme_color": self.app.user_theme_color,
+            "busy_mode": self.busy_mode,
+            "slash_commands": [_slash_spec_dict(spec) for spec in specs_for_surface("tui")],
+        }
+        await self.emit("operator.ready", payload)
+        await self.emit("interaction.ready", payload)
 
     async def _emit_status(self) -> None:
-        await self.emit("interaction.status", self._status_payload())
+        payload = self._status_payload()
+        await self.emit("operator.status", payload)
+        await self.emit("interaction.status", payload)
 
     async def _emit_history_snapshot(self, session_id: str) -> None:
-        await self.emit(
-            "interaction.history",
-            {
-                "session_id": session_id,
-                "items": self._history_items(session_id),
-            },
-        )
+        payload = {
+            "session_id": session_id,
+            "items": self._history_items(session_id),
+        }
+        await self.emit("operator.history", payload)
+        await self.emit("interaction.history", payload)
 
     def _history_items(self, session_id: str) -> list[dict[str, Any]]:
         return build_history_items(
@@ -425,6 +443,7 @@ class TuiInteractionBridge:
             "model": self.app.model_name,
             "runtime_timezone": self.app.runtime_timezone.name,
             "runtime_timezone_source": self.app.runtime_timezone.source,
+            "session": self._operator_session_context().as_dict(),
             "status": view.status_text,
             "tool_display": self.tool_display,
             "user_message_align": self.app.user_message_align,
@@ -437,6 +456,7 @@ class TuiInteractionBridge:
             "pending_prompts": len(self._pending_prompts),
             "pending_approvals": self._pending_approvals.count,
             "last_error": self._last_error,
+            "work": self._work_summary_payload(),
         }
 
     async def _emit_notice(self, text: str, *, level: str = "info") -> None:
@@ -731,16 +751,18 @@ class TuiInteractionBridge:
                 metadata={"kind": "resume"},
             )
             self._pending_prompts[prompt_id] = pending
+            payload = {
+                "prompt_id": prompt_id,
+                "kind": "resume",
+                "question": "Resume session",
+                "choices": view.session_ids,
+                "records": [choice.as_dict() for choice in view.choices],
+                "metadata": {"kind": "resume"},
+            }
+            await self.emit("operator.prompt.opened", payload)
             await self.emit(
                 "interaction.prompt.request",
-                {
-                    "prompt_id": prompt_id,
-                    "kind": "resume",
-                    "question": "Resume session",
-                    "choices": view.session_ids,
-                    "records": [choice.as_dict() for choice in view.choices],
-                    "metadata": {"kind": "resume"},
-                },
+                payload,
             )
             await self._emit_status()
             return True
@@ -859,6 +881,14 @@ class TuiInteractionBridge:
     def _conversation_key(self) -> str:
         return f"tui:{self.app.runner.session_id}"
 
+    def _operator_session_context(self) -> OperatorSessionContext:
+        return OperatorSessionContext(
+            session_id=self.app.runner.session_id,
+            channel="operator",
+            source="tui",
+            conversation_key=self._conversation_key(),
+        )
+
     def _new_ingress_state(self, conversation_key: str) -> ConversationIngressState:
         return ConversationIngressState(
             runtime=self.runtime,
@@ -898,6 +928,42 @@ class TuiInteractionBridge:
             queued_inputs=self._queued_inputs.qsize(),
         )
 
+    def _work_summary_payload(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "work_id": item.work_id,
+                "kind": item.kind,
+                "status": item.status,
+                "source": item.source,
+                "task_id": item.task_id,
+                "delivery_id": item.delivery_id,
+                "schedule_id": item.schedule_id,
+                "summary": item.summary,
+                "updated_at": item.updated_at,
+            }
+            for item in self.app.host_work.list_session_work(self.app.runner.session_id, limit=20)
+        ]
+
+    async def _emit_work_updated(self, work_id: str) -> None:
+        try:
+            item = self.app.host_work.status(work_id)
+        except KeyError:
+            return
+        await self.emit(
+            "operator.work.updated",
+            {
+                "work_id": item.work_id,
+                "kind": item.kind,
+                "status": item.status,
+                "source": item.source,
+                "task_id": item.task_id,
+                "delivery_id": item.delivery_id,
+                "schedule_id": item.schedule_id,
+                "summary": item.summary,
+                "updated_at": item.updated_at,
+            },
+        )
+
     async def _active_core(self):
         return await self.app.load_active_core()
 
@@ -910,6 +976,71 @@ class TuiInteractionBridge:
             user_input=AgentInput(content=""),
             metadata={"channel": "tui", "source": "local", "target": "local"},
         )
+
+
+class TuiInteractionBridge:
+    """Narrow adapter between TUI RPC calls and OperatorGatewayRuntime."""
+
+    def __init__(
+        self,
+        app: DemiurgeApp,
+        *,
+        emit: JsonEventSink,
+        tool_display: str | None = None,
+        busy_mode: str | None = None,
+    ):
+        self.operator = OperatorGatewayRuntime(
+            app,
+            emit=emit,
+            tool_display=tool_display,
+            busy_mode=busy_mode,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.operator, name)
+
+    @property
+    def runtime(self) -> InteractionRuntime:
+        return self.operator.runtime
+
+    @runtime.setter
+    def runtime(self, value: InteractionRuntime) -> None:
+        self.operator.runtime = value
+        self.operator._sync_ingress_state()
+
+    @property
+    def tool_display(self) -> str:
+        return self.operator.tool_display
+
+    @tool_display.setter
+    def tool_display(self, value: str) -> None:
+        self.operator.tool_display = value
+
+    @property
+    def busy_mode(self) -> str:
+        return self.operator.busy_mode
+
+    @busy_mode.setter
+    def busy_mode(self, value: str) -> None:
+        self.operator.busy_mode = value
+        self.operator._ingress_state.busy_mode = value
+
+    @property
+    def should_exit(self) -> bool:
+        return self.operator.should_exit
+
+    @should_exit.setter
+    def should_exit(self, value: bool) -> None:
+        self.operator.should_exit = value
+
+    @property
+    def running(self) -> bool:
+        return self.operator.running
+
+    @property
+    def _queued_inputs(self):
+        return self.operator._queued_inputs
+
 
 def _delivery_dict(delivery: Any) -> dict[str, Any]:
     return {
