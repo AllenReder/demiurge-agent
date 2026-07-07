@@ -57,6 +57,12 @@ Telegram is allowlist-required. Private chats require the Telegram user id in
 `allowed_users`. Group chats require both the user id in `allowed_users` and the
 chat id in `allowed_chats`.
 
+In private chats, Telegram photos, voice messages, audio, video, and documents
+are downloaded under the runtime workspace's `.demiurge-telegram/` cache and
+exposed to input slots through `ctx.input.attachments`. The channel only
+normalizes attachment metadata and local paths; transcription, OCR, image
+understanding, and other interpretation belong in input-slot packages.
+
 ## Webhook
 
 ```yaml

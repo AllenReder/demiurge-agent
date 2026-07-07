@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import urllib.error
+from pathlib import Path
 
 import pytest
 import yaml
@@ -184,10 +185,13 @@ class FakeApi:
         self.reply_markup_edits = []
         self.media_sent = []
         self.voice_sent = []
+        self.files = {}
+        self.downloads = {}
         self.next_message_id = 1000
         self.fail_markdown = False
         self.fail_rich: Exception | None = None
         self.fail_media = False
+        self.fail_download = False
 
     def send_message(self, *, chat_id, text, reply_to_message_id=None, parse_mode=None, reply_markup=None):
         if self.fail_markdown and parse_mode == "MarkdownV2":
@@ -290,6 +294,16 @@ class FakeApi:
     def set_my_commands(self, commands):
         self.commands.append(commands)
         return {"ok": True}
+
+    def get_file(self, file_id):
+        if self.fail_download:
+            raise RuntimeError("download failed")
+        return self.files[file_id]
+
+    def download_file(self, file_path):
+        if self.fail_download:
+            raise RuntimeError("download failed")
+        return self.downloads[file_path]
 
 
 class PollingFakeApi(FakeApi):
@@ -415,6 +429,43 @@ def test_telegram_bot_api_retries_transient_urlopen_error(monkeypatch):
     assert len(attempts) == 2
     assert attempts[0]["request"].full_url == "https://api.telegram.org/bottoken/getUpdates"
     assert sleeps == [0.5]
+
+
+def test_telegram_bot_api_get_file_and_download_file(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self.payload
+
+    def fake_urlopen(request, timeout):
+        calls.append({"url": request.full_url, "data": request.data, "timeout": timeout})
+        if request.full_url.endswith("/getFile"):
+            return FakeResponse(
+                json.dumps({"ok": True, "result": {"file_path": "photos/file 1.jpg"}}).encode("utf-8")
+            )
+        return FakeResponse(b"IMAGE-DATA")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    api = TelegramBotApi("token")
+    file_info = api.get_file("file_1")
+    content = api.download_file(file_info["file_path"])
+
+    assert file_info == {"file_path": "photos/file 1.jpg"}
+    assert content == b"IMAGE-DATA"
+    assert calls[0]["url"] == "https://api.telegram.org/bottoken/getFile"
+    assert b"file_id=file_1" in calls[0]["data"]
+    assert calls[1]["url"] == "https://api.telegram.org/file/bottoken/photos/file%201.jpg"
 
 
 def test_telegram_bot_api_does_not_retry_http_error(monkeypatch):
@@ -657,6 +708,263 @@ def test_telegram_normalizes_private_group_command_mention_and_reply():
     assert reply.text == "continue"
     assert private.metadata["telegram_user_id"] == 42
     assert private.metadata["telegram_chat_id"] == 1
+
+
+def _media_bridge(tmp_path):
+    runner = FakeRunner()
+    api = FakeApi()
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+        media_cache_root=tmp_path / "telegram-cache",
+    )
+    return runner, api, bridge
+
+
+async def _await_active_turn(bridge, conversation_key):
+    state = bridge._conversations[conversation_key]
+    await state.active_task
+
+
+@pytest.mark.asyncio
+async def test_telegram_private_photo_media_only_downloads_attachment(tmp_path):
+    runner, api, bridge = _media_bridge(tmp_path)
+    api.files["photo_big"] = {"file_path": "photos/file_1.jpg", "file_size": 10}
+    api.downloads["photos/file_1.jpg"] = b"IMAGE-DATA"
+
+    await bridge.handle_update(
+        _message(
+            None,
+            chat_id=123,
+            message_id=77,
+            photo=[
+                {"file_id": "photo_small", "file_unique_id": "small", "file_size": 1, "width": 10, "height": 10},
+                {"file_id": "photo_big", "file_unique_id": "big", "file_size": 10, "width": 100, "height": 100},
+            ],
+        )
+    )
+    await _await_active_turn(bridge, "telegram:123")
+
+    inbound = runner.kwargs["interaction"]
+    attachment = inbound.attachments[0]
+    attachment_path = Path(attachment["path"])
+    assert runner.texts == ["[telegram attachment]"]
+    assert inbound.conversation_key == "telegram:123"
+    assert attachment["kind"] == "image"
+    assert attachment["filename"] == "file_1.jpg"
+    assert attachment["media_type"] == "image/jpeg"
+    assert attachment["size_bytes"] == len(b"IMAGE-DATA")
+    assert attachment["source"] == "telegram"
+    assert attachment["telegram"]["chat_id"] == 123
+    assert attachment["telegram"]["message_id"] == 77
+    assert attachment["telegram"]["file_id"] == "photo_big"
+    assert attachment_path.read_bytes() == b"IMAGE-DATA"
+    assert tmp_path / "telegram-cache" in attachment_path.parents
+    assert "_telegram_pending_media" not in inbound.metadata
+
+
+@pytest.mark.parametrize(
+    ("field", "payload", "file_path", "content", "expected_kind", "expected_media_type", "expected_filename"),
+    [
+        (
+            "voice",
+            {"file_id": "voice_1", "file_unique_id": "voice_unique", "mime_type": "audio/ogg", "duration": 2, "file_size": 9},
+            "voice/file_1.ogg",
+            b"VOICE-DATA",
+            "audio",
+            "audio/ogg",
+            "file_1.ogg",
+        ),
+        (
+            "audio",
+            {
+                "file_id": "audio_1",
+                "file_unique_id": "audio_unique",
+                "mime_type": "audio/mpeg",
+                "file_name": "song.mp3",
+                "duration": 3,
+                "file_size": 10,
+            },
+            "music/file_2.mp3",
+            b"AUDIO-DATA",
+            "audio",
+            "audio/mpeg",
+            "song.mp3",
+        ),
+        (
+            "video",
+            {
+                "file_id": "video_1",
+                "file_unique_id": "video_unique",
+                "mime_type": "video/mp4",
+                "file_name": "clip.mp4",
+                "width": 640,
+                "height": 480,
+                "duration": 4,
+                "file_size": 10,
+            },
+            "video/file_3.mp4",
+            b"VIDEO-DATA",
+            "video",
+            "video/mp4",
+            "clip.mp4",
+        ),
+        (
+            "document",
+            {
+                "file_id": "doc_1",
+                "file_unique_id": "doc_unique",
+                "mime_type": "application/pdf",
+                "file_name": "report.pdf",
+                "file_size": 8,
+            },
+            "documents/file_4.pdf",
+            b"PDF-DATA",
+            "document",
+            "application/pdf",
+            "report.pdf",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_telegram_private_media_with_caption_downloads_attachment(
+    tmp_path,
+    field,
+    payload,
+    file_path,
+    content,
+    expected_kind,
+    expected_media_type,
+    expected_filename,
+):
+    runner, api, bridge = _media_bridge(tmp_path)
+    api.files[payload["file_id"]] = {"file_path": file_path, "file_size": len(content)}
+    api.downloads[file_path] = content
+
+    await bridge.handle_update(
+        _message(
+            None,
+            chat_id=123,
+            message_id=78,
+            caption="please inspect",
+            **{field: payload},
+        )
+    )
+    await _await_active_turn(bridge, "telegram:123")
+
+    inbound = runner.kwargs["interaction"]
+    attachment = inbound.attachments[0]
+    assert runner.texts == ["please inspect"]
+    assert attachment["kind"] == expected_kind
+    assert attachment["filename"] == expected_filename
+    assert attachment["media_type"] == expected_media_type
+    assert Path(attachment["path"]).read_bytes() == content
+    if field in {"voice", "audio", "video"}:
+        assert attachment["duration_seconds"] == payload["duration"]
+    if field == "video":
+        assert attachment["width"] == 640
+        assert attachment["height"] == 480
+
+
+@pytest.mark.asyncio
+async def test_telegram_private_text_turn_continues_when_media_download_fails(tmp_path):
+    runner, api, bridge = _media_bridge(tmp_path)
+    api.files["photo_1"] = {"file_path": "photos/file_1.jpg", "file_size": 10}
+    api.fail_download = True
+
+    await bridge.handle_update(
+        _message(
+            "see attached",
+            chat_id=123,
+            message_id=79,
+            photo=[{"file_id": "photo_1", "file_unique_id": "photo_unique", "file_size": 10}],
+        )
+    )
+    await _await_active_turn(bridge, "telegram:123")
+
+    inbound = runner.kwargs["interaction"]
+    assert runner.texts == ["see attached"]
+    assert inbound.attachments == []
+    assert inbound.metadata["telegram_attachment_errors"] == ["download failed"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_private_text_turn_continues_when_media_is_too_large(tmp_path):
+    runner, api, bridge = _media_bridge(tmp_path)
+    api.files["doc_1"] = {"file_path": "documents/big.pdf", "file_size": 25 * 1024 * 1024}
+    api.downloads["documents/big.pdf"] = b""
+
+    await bridge.handle_update(
+        _message(
+            "see attached",
+            chat_id=123,
+            message_id=80,
+            document={
+                "file_id": "doc_1",
+                "file_unique_id": "doc_unique",
+                "file_name": "big.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 25 * 1024 * 1024,
+            },
+        )
+    )
+    await _await_active_turn(bridge, "telegram:123")
+
+    inbound = runner.kwargs["interaction"]
+    assert runner.texts == ["see attached"]
+    assert inbound.attachments == []
+    assert "too large" in inbound.metadata["telegram_attachment_errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_telegram_private_media_only_failure_sends_notice_without_turn(tmp_path):
+    runner, api, bridge = _media_bridge(tmp_path)
+    api.files["photo_1"] = {"file_path": "photos/file_1.jpg", "file_size": 10}
+    api.fail_download = True
+
+    await bridge.handle_update(
+        _message(
+            None,
+            chat_id=123,
+            message_id=81,
+            photo=[{"file_id": "photo_1", "file_unique_id": "photo_unique", "file_size": 10}],
+        )
+    )
+
+    assert runner.texts == []
+    assert bridge._conversations == {}
+    assert "attachment could not be downloaded" in api.sent[-1]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_telegram_non_private_media_stays_ignored(tmp_path):
+    runner, api, bridge = _media_bridge(tmp_path)
+
+    await bridge.handle_update(
+        _message(
+            None,
+            chat_type="group",
+            chat_id=-100,
+            message_id=82,
+            photo=[{"file_id": "photo_1", "file_unique_id": "photo_unique", "file_size": 10}],
+        )
+    )
+    await bridge.handle_update(
+        _message(
+            None,
+            chat_type="group",
+            chat_id=-100,
+            message_id=83,
+            caption="@demiurge_bot inspect",
+            photo=[{"file_id": "photo_1", "file_unique_id": "photo_unique", "file_size": 10}],
+        )
+    )
+
+    assert runner.texts == []
+    assert bridge._conversations == {}
+    assert api.sent == []
 
 
 @pytest.mark.asyncio

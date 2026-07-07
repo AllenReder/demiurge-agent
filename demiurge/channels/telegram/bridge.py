@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import http.client
 import logging
+import mimetypes
 import os
 import re
 import socket
@@ -82,12 +84,45 @@ class TelegramPendingApproval:
     message_id: int | None = None
 
 
+class TelegramInboundMediaError(RuntimeError):
+    pass
+
+
 TELEGRAM_APPROVAL_TIMEOUT_SECONDS = 600
 TELEGRAM_POLL_NETWORK_BASE_DELAY_SECONDS = 1.0
 TELEGRAM_POLL_NETWORK_MAX_DELAY_SECONDS = 30.0
 TELEGRAM_POLL_CONFLICT_BASE_DELAY_SECONDS = 15.0
 TELEGRAM_POLL_CONFLICT_STEP_DELAY_SECONDS = 10.0
 TELEGRAM_POLL_CONFLICT_MAX_RETRIES = 5
+TELEGRAM_ATTACHMENT_PLACEHOLDER = "[telegram attachment]"
+TELEGRAM_INBOUND_MEDIA_MAX_BYTES = 20 * 1024 * 1024
+TELEGRAM_INBOUND_MEDIA_CACHE_DIR = ".demiurge-telegram"
+_TELEGRAM_DEFAULT_MEDIA_TYPES = {
+    "image": "image/jpeg",
+    "audio": "audio/ogg",
+    "video": "video/mp4",
+    "document": "application/octet-stream",
+}
+_TELEGRAM_DEFAULT_EXTENSIONS = {
+    "image": ".jpg",
+    "audio": ".ogg",
+    "video": ".mp4",
+    "document": ".bin",
+}
+_TELEGRAM_MIME_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mp4": ".m4a",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
 
 
 class TelegramInteractionBridge:
@@ -110,6 +145,8 @@ class TelegramInteractionBridge:
         unauthorized_response: str = "brief",
         approval_timeout_seconds: float = TELEGRAM_APPROVAL_TIMEOUT_SECONDS,
         tool_display: str = "summary",
+        workspace_root: str | Path | None = None,
+        media_cache_root: str | Path | None = None,
     ):
         if runtime is None and runtime_factory is None:
             raise ValueError("TelegramInteractionBridge requires runtime or runtime_factory")
@@ -128,6 +165,10 @@ class TelegramInteractionBridge:
         self.unauthorized_response = unauthorized_response
         self.approval_timeout_seconds = approval_timeout_seconds
         self.tool_display = normalize_tool_display(tool_display)
+        self.media_cache_root = _resolve_media_cache_root(
+            workspace_root=workspace_root,
+            media_cache_root=media_cache_root,
+        )
         self._command_runtime = ChannelCommandRuntime(
             command_names=command_names_for_surface("telegram"),
             unavailable_template="Command not available on Telegram: /{name}",
@@ -181,6 +222,7 @@ class TelegramInteractionBridge:
         runtime_factory: Callable[[str], InteractionRuntime] | None = None,
         tool_display: str = "summary",
         busy_mode: str = "interrupt",
+        workspace_root: str | Path | None = None,
     ) -> "TelegramInteractionBridge":
         token = _resolve_telegram_token(config)
         if not token:
@@ -201,6 +243,7 @@ class TelegramInteractionBridge:
             allowed_chats=list(config.allowed_chats),
             unauthorized_response=config.unauthorized_response,
             tool_display=tool_display,
+            workspace_root=workspace_root,
         )
 
     async def run_forever(self) -> None:
@@ -311,6 +354,9 @@ class TelegramInteractionBridge:
         if not await self._authorize_inbound(inbound):
             return
         inbound = self._prompt_delivery.resolve_inbound(inbound)
+        inbound = await self._resolve_inbound_media(inbound)
+        if inbound is None:
+            return
         await self.handle_inbound(inbound)
 
     def normalize_update(self, update: dict[str, Any]) -> InteractionInbound | None:
@@ -318,9 +364,6 @@ class TelegramInteractionBridge:
         if isinstance(callback, dict):
             return self._normalize_callback_query(update, callback)
         message = update.get("message") or {}
-        text = message.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return None
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         if chat_id is None:
@@ -328,23 +371,219 @@ class TelegramInteractionBridge:
         chat_type = chat.get("type") or "private"
         user_id = (message.get("from") or {}).get("id")
         message_id = message.get("message_id")
-        normalized = self._normalize_text_for_chat(text, chat_type=chat_type, message=message)
+        pending_media = self._telegram_media_descriptors(message) if chat_type == "private" else []
+        raw_text = self._telegram_message_text(message, include_caption=chat_type == "private")
+        media_only = raw_text is None and bool(pending_media)
+        if raw_text is None and not pending_media:
+            return None
+        normalized = self._normalize_text_for_chat(
+            raw_text or TELEGRAM_ATTACHMENT_PLACEHOLDER,
+            chat_type=chat_type,
+            message=message,
+        )
         if normalized is None or not normalized.strip():
             return None
         conversation_key = f"telegram:{chat_id}"
+        metadata: dict[str, Any] = {
+            "telegram_chat_id": chat_id,
+            "telegram_chat_type": chat_type,
+            "telegram_user_id": user_id,
+            "telegram_update_id": update.get("update_id"),
+            "telegram_message_id": message_id,
+        }
+        if pending_media:
+            metadata["_telegram_pending_media"] = pending_media
+            metadata["telegram_attachment_count"] = len(pending_media)
+            metadata["telegram_media_only"] = media_only
         return InteractionInbound(
             channel="telegram",
             text=normalized.strip(),
             source=str(chat_id),
             reply_to=str(message_id) if message_id is not None else None,
             conversation_key=conversation_key,
-            metadata={
-                "telegram_chat_id": chat_id,
-                "telegram_chat_type": chat_type,
-                "telegram_user_id": user_id,
-                "telegram_update_id": update.get("update_id"),
-            },
+            metadata=metadata,
         )
+
+    def _telegram_message_text(self, message: dict[str, Any], *, include_caption: bool) -> str | None:
+        text = message.get("text")
+        if isinstance(text, str) and text.strip():
+            return text
+        if not include_caption:
+            return None
+        caption = message.get("caption")
+        if isinstance(caption, str) and caption.strip():
+            return caption
+        return None
+
+    def _telegram_media_descriptors(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        photo = message.get("photo")
+        if isinstance(photo, list) and photo:
+            candidates = [item for item in photo if isinstance(item, dict)]
+            if candidates:
+                selected = max(candidates, key=_telegram_photo_score)
+                descriptor = self._telegram_file_descriptor(
+                    selected,
+                    telegram_kind="photo",
+                    kind="image",
+                    default_media_type="image/jpeg",
+                )
+                return [descriptor] if descriptor is not None else []
+        for telegram_kind, kind, default_media_type in (
+            ("voice", "audio", "audio/ogg"),
+            ("audio", "audio", "audio/mpeg"),
+            ("video", "video", "video/mp4"),
+            ("document", "document", None),
+        ):
+            value = message.get(telegram_kind)
+            if isinstance(value, dict):
+                descriptor = self._telegram_file_descriptor(
+                    value,
+                    telegram_kind=telegram_kind,
+                    kind=kind,
+                    default_media_type=default_media_type,
+                )
+                return [descriptor] if descriptor is not None else []
+        return []
+
+    def _telegram_file_descriptor(
+        self,
+        value: dict[str, Any],
+        *,
+        telegram_kind: str,
+        kind: str,
+        default_media_type: str | None,
+    ) -> dict[str, Any] | None:
+        file_id = value.get("file_id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            return None
+        filename = _optional_text(value.get("file_name"))
+        media_type = _optional_text(value.get("mime_type")) or default_media_type
+        if telegram_kind == "document":
+            kind = _kind_from_media_type(media_type, filename=filename, default=kind)
+        descriptor: dict[str, Any] = {
+            "telegram_kind": telegram_kind,
+            "kind": kind,
+            "file_id": file_id,
+            "file_unique_id": _optional_text(value.get("file_unique_id")),
+            "filename": filename,
+            "media_type": media_type,
+            "size_bytes": _optional_int(value.get("file_size")),
+            "duration_seconds": _optional_number(value.get("duration")),
+            "width": _optional_int(value.get("width")),
+            "height": _optional_int(value.get("height")),
+        }
+        return {key: item for key, item in descriptor.items() if item is not None}
+
+    async def _resolve_inbound_media(self, inbound: InteractionInbound) -> InteractionInbound | None:
+        metadata = dict(inbound.metadata)
+        pending = metadata.pop("_telegram_pending_media", [])
+        if not pending:
+            return inbound
+        if not isinstance(pending, list):
+            return InteractionInbound(
+                channel=inbound.channel,
+                text=inbound.text,
+                source=inbound.source,
+                reply_to=inbound.reply_to,
+                conversation_key=inbound.conversation_key,
+                metadata=metadata,
+                attachments=list(inbound.attachments),
+            )
+
+        attachments = list(inbound.attachments)
+        errors: list[str] = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            try:
+                attachment = await asyncio.to_thread(self._download_inbound_media, inbound, item)
+            except TelegramInboundMediaError as exc:
+                logger.warning("telegram inbound media skipped: %s", exc)
+                errors.append(str(exc))
+            except Exception as exc:
+                logger.warning("telegram inbound media download failed: %s", exc)
+                errors.append(str(exc))
+            else:
+                attachments.append(attachment)
+
+        if errors:
+            metadata["telegram_attachment_errors"] = errors
+        if not attachments and metadata.get("telegram_media_only"):
+            await self._send_text(
+                inbound.source,
+                "Telegram attachment could not be downloaded.",
+                reply_to=inbound.reply_to,
+            )
+            return None
+        metadata["telegram_attachment_count"] = len(attachments)
+        return InteractionInbound(
+            channel=inbound.channel,
+            text=inbound.text,
+            source=inbound.source,
+            reply_to=inbound.reply_to,
+            conversation_key=inbound.conversation_key,
+            metadata=metadata,
+            attachments=attachments,
+        )
+
+    def _download_inbound_media(self, inbound: InteractionInbound, media: dict[str, Any]) -> dict[str, Any]:
+        file_id = str(media["file_id"])
+        file_info = self.api.get_file(file_id)
+        file_path = _optional_text(file_info.get("file_path"))
+        if not file_path:
+            raise TelegramInboundMediaError(f"telegram getFile returned no file_path for {file_id}")
+        declared_size = _optional_int(media.get("size_bytes")) or _optional_int(file_info.get("file_size"))
+        if declared_size is not None and declared_size > TELEGRAM_INBOUND_MEDIA_MAX_BYTES:
+            raise TelegramInboundMediaError(
+                f"telegram attachment is too large ({declared_size} bytes, max {TELEGRAM_INBOUND_MEDIA_MAX_BYTES})"
+            )
+        content = self.api.download_file(file_path)
+        if len(content) > TELEGRAM_INBOUND_MEDIA_MAX_BYTES:
+            raise TelegramInboundMediaError(
+                f"telegram attachment is too large ({len(content)} bytes, max {TELEGRAM_INBOUND_MEDIA_MAX_BYTES})"
+            )
+        filename = _telegram_attachment_filename(media, file_path=file_path)
+        path = self._write_inbound_media_cache(inbound, media, filename=filename, content=content)
+        media_type = _telegram_media_type(media, filename=filename)
+        attachment: dict[str, Any] = {
+            "id": _telegram_attachment_id(inbound, media),
+            "kind": _kind_from_media_type(media_type, filename=filename, default=str(media.get("kind") or "document")),
+            "filename": filename,
+            "media_type": media_type,
+            "path": str(path),
+            "size_bytes": len(content),
+            "source": "telegram",
+            "telegram": {
+                "chat_id": inbound.metadata.get("telegram_chat_id"),
+                "message_id": inbound.metadata.get("telegram_message_id"),
+                "file_id": file_id,
+                "file_unique_id": media.get("file_unique_id"),
+                "file_path": file_path,
+                "kind": media.get("telegram_kind"),
+            },
+        }
+        for key in ("duration_seconds", "width", "height"):
+            if media.get(key) is not None:
+                attachment[key] = media[key]
+        return attachment
+
+    def _write_inbound_media_cache(
+        self,
+        inbound: InteractionInbound,
+        media: dict[str, Any],
+        *,
+        filename: str,
+        content: bytes,
+    ) -> Path:
+        chat = _safe_path_component(str(inbound.metadata.get("telegram_chat_id") or inbound.source or "chat"))
+        message = _safe_path_component(str(inbound.metadata.get("telegram_message_id") or inbound.reply_to or "message"))
+        digest_source = str(media.get("file_unique_id") or media.get("file_id") or filename)
+        digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
+        directory = self.media_cache_root / chat / f"{message}-{digest}"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        path.write_bytes(content)
+        return path
 
     async def _authorize_callback(self, callback: dict[str, Any]) -> bool:
         message = callback.get("message") or {}
@@ -1050,13 +1289,27 @@ def _convert_audio_to_ogg_opus(source: Path, target: Path) -> None:
 
 
 def build_telegram_gateway_bridge(app: Any, config: TelegramChannelConfig) -> TelegramInteractionBridge:
+    workspace = getattr(getattr(app, "workspace", None), "root", None)
     return TelegramInteractionBridge.from_config(
         None,
         config,
         runtime_factory=runtime_factory_for_app(app),
         tool_display=getattr(app, "tool_display", "summary"),
         busy_mode=getattr(app, "channel_busy_mode", "interrupt"),
+        workspace_root=workspace,
     )
+
+
+def _resolve_media_cache_root(
+    *,
+    workspace_root: str | Path | None,
+    media_cache_root: str | Path | None,
+) -> Path:
+    if media_cache_root is not None:
+        return Path(media_cache_root).expanduser().resolve()
+    if workspace_root is not None:
+        return (Path(workspace_root).expanduser().resolve() / TELEGRAM_INBOUND_MEDIA_CACHE_DIR).resolve()
+    return (Path.cwd() / TELEGRAM_INBOUND_MEDIA_CACHE_DIR).resolve()
 
 
 def _resolve_telegram_token(config: TelegramChannelConfig) -> str | None:
@@ -1086,6 +1339,110 @@ def _is_transient_telegram_transport_error(exc: Exception) -> bool:
             http.client.RemoteDisconnected,
         ),
     )
+
+
+def _telegram_photo_score(item: dict[str, Any]) -> int:
+    size = _optional_int(item.get("file_size"))
+    if size is not None:
+        return size
+    width = _optional_int(item.get("width")) or 0
+    height = _optional_int(item.get("height")) or 0
+    return width * height
+
+
+def _telegram_attachment_filename(media: dict[str, Any], *, file_path: str) -> str:
+    raw = _optional_text(media.get("filename")) or Path(file_path).name
+    extension = _telegram_extension(media, raw_filename=raw, file_path=file_path)
+    fallback = f"{media.get('telegram_kind') or media.get('kind') or 'attachment'}{extension}"
+    filename = _safe_filename(raw or fallback)
+    if not Path(filename).suffix:
+        filename = f"{filename}{extension}"
+    return filename
+
+
+def _telegram_extension(media: dict[str, Any], *, raw_filename: str | None, file_path: str) -> str:
+    for candidate in (raw_filename, file_path):
+        if candidate:
+            suffix = Path(candidate).suffix.lower()
+            if suffix and len(suffix) <= 12:
+                return suffix
+    media_type = _optional_text(media.get("media_type"))
+    if media_type and media_type.lower() in _TELEGRAM_MIME_EXTENSIONS:
+        return _TELEGRAM_MIME_EXTENSIONS[media_type.lower()]
+    if media_type:
+        guessed = mimetypes.guess_extension(media_type)
+        if guessed:
+            return guessed
+    return _TELEGRAM_DEFAULT_EXTENSIONS.get(str(media.get("kind") or "document"), ".bin")
+
+
+def _telegram_media_type(media: dict[str, Any], *, filename: str) -> str:
+    media_type = _optional_text(media.get("media_type"))
+    if media_type:
+        return media_type
+    guessed = mimetypes.guess_type(filename)[0]
+    if guessed:
+        return guessed
+    return _TELEGRAM_DEFAULT_MEDIA_TYPES.get(str(media.get("kind") or "document"), "application/octet-stream")
+
+
+def _kind_from_media_type(media_type: str | None, *, filename: str | None = None, default: str = "document") -> str:
+    normalized = (media_type or mimetypes.guess_type(filename or "")[0] or "").lower()
+    if normalized.startswith("image/"):
+        return "image"
+    if normalized.startswith("audio/"):
+        return "audio"
+    if normalized.startswith("video/"):
+        return "video"
+    return default
+
+
+def _telegram_attachment_id(inbound: InteractionInbound, media: dict[str, Any]) -> str:
+    chat = inbound.metadata.get("telegram_chat_id") or inbound.source
+    message = inbound.metadata.get("telegram_message_id") or inbound.reply_to
+    digest_source = str(media.get("file_unique_id") or media.get("file_id") or "")
+    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
+    return f"telegram:{chat}:{message}:{digest}"
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_number(value: Any) -> int | float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.is_integer():
+        return int(parsed)
+    return parsed
+
+
+def _safe_filename(value: str) -> str:
+    filename = Path(value).name
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+    return filename or "attachment.bin"
+
+
+def _safe_path_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "unknown"
 
 
 def _is_rich_capability_error(exc: Exception) -> bool:
