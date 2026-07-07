@@ -7,6 +7,7 @@ from typing import Any
 from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.matrix.api import MatrixApi
 from demiurge.core import MatrixChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
@@ -89,7 +90,7 @@ class MatrixInteractionBridge(TextChannelBridgeBase):
             text=text,
             source=room_id,
             reply_to=event_id,
-            conversation_key=f"matrix:{room_id}",
+            conversation_key=build_conversation_key("matrix", "room", room_id),
             metadata={
                 "matrix_room_id": room_id,
                 "matrix_event_id": event_id,

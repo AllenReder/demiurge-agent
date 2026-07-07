@@ -56,7 +56,7 @@ def test_metadata_for_interaction_adds_route_and_timezone(tmp_path):
             text="hello",
             source="chat_1",
             reply_to="msg_1",
-            conversation_key="telegram:chat_1",
+            conversation_key="telegram:dm:chat_1",
             metadata={"native_message_id": "native_1"},
         )
     )
@@ -64,7 +64,7 @@ def test_metadata_for_interaction_adds_route_and_timezone(tmp_path):
     assert metadata["channel"] == "telegram"
     assert metadata["source"] == "chat_1"
     assert metadata["reply_to"] == "msg_1"
-    assert metadata["conversation_key"] == "telegram:chat_1"
+    assert metadata["conversation_key"] == "telegram:dm:chat_1"
     assert metadata["native_message_id"] == "native_1"
     assert metadata["runtime_timezone"] == "UTC"
     assert metadata["runtime_timezone_source"] == "test"
@@ -91,7 +91,7 @@ def test_resolve_for_interaction_binds_current_empty_session(tmp_path):
         binding,
         {
             "channel": "telegram",
-            "conversation_key": "telegram:chat_1",
+            "conversation_key": "telegram:dm:chat_1",
             "source": "chat_1",
             "runtime_timezone": "UTC",
         },
@@ -101,7 +101,7 @@ def test_resolve_for_interaction_binds_current_empty_session(tmp_path):
     assert record.session_id == state["session_id"]
     persisted = sessions.get_session(state["session_id"])
     assert persisted.channel == "telegram"
-    assert persisted.conversation_key == "telegram:chat_1"
+    assert persisted.conversation_key == "telegram:dm:chat_1"
     assert persisted.metadata == {"source": "chat_1", "runtime_timezone": "UTC"}
 
 
@@ -114,7 +114,7 @@ def test_resolve_for_interaction_switches_to_existing_route_session(tmp_path):
         core_id="assistant",
         core_revision="rev_1",
         channel="telegram",
-        conversation_key="telegram:chat_1",
+        conversation_key="telegram:dm:chat_1",
         workspace="/workspace",
         provider="fake",
         model="fake/model",
@@ -122,7 +122,7 @@ def test_resolve_for_interaction_switches_to_existing_route_session(tmp_path):
 
     record = runtime.resolve_for_interaction(
         binding,
-        {"channel": "telegram", "conversation_key": "telegram:chat_1", "source": "chat_1"},
+        {"channel": "telegram", "conversation_key": "telegram:dm:chat_1", "source": "chat_1"},
     )
 
     assert record == existing
@@ -133,7 +133,7 @@ def test_resolve_for_interaction_switches_to_existing_route_session(tmp_path):
         "core_id": "assistant",
         "core_revision": "rev_1",
         "channel": "telegram",
-        "conversation_key": "telegram:chat_1",
+        "conversation_key": "telegram:dm:chat_1",
     }
 
 
@@ -144,7 +144,7 @@ def test_resolve_for_interaction_creates_new_session_when_current_route_is_busy(
     sessions.update_session(
         current.session_id,
         channel="telegram",
-        conversation_key="telegram:old",
+        conversation_key="telegram:dm:old",
     )
     sessions.append_message(current.session_id, role="user", content="old message")
 
@@ -152,7 +152,7 @@ def test_resolve_for_interaction_creates_new_session_when_current_route_is_busy(
         binding,
         {
             "channel": "telegram",
-            "conversation_key": "telegram:new",
+            "conversation_key": "telegram:dm:new",
             "source": "chat_new",
             "reply_to": "msg_new",
         },
@@ -162,7 +162,7 @@ def test_resolve_for_interaction_creates_new_session_when_current_route_is_busy(
     assert record.session_id != current.session_id
     assert state["session_id"] == record.session_id
     assert record.channel == "telegram"
-    assert record.conversation_key == "telegram:new"
+    assert record.conversation_key == "telegram:dm:new"
     assert record.metadata == {"source": "chat_new", "reply_to": "msg_new"}
     assert events[-1]["type"] == "session.created"
 
@@ -175,14 +175,14 @@ def test_start_new_can_replace_conversation_binding(tmp_path):
         core_id="assistant",
         core_revision="rev_1",
         channel="telegram",
-        conversation_key="telegram:chat_1",
+        conversation_key="telegram:dm:chat_1",
     )
     sessions.append_message(old.session_id, role="user", content="old")
 
     new = runtime.start_new(
         binding,
         channel="telegram",
-        conversation_key="telegram:chat_1",
+        conversation_key="telegram:dm:chat_1",
         source="chat_1",
         replace_conversation_binding=True,
     )
@@ -192,11 +192,84 @@ def test_start_new_can_replace_conversation_binding(tmp_path):
         sessions.resolve_interaction_session(
             core_id="assistant",
             channel="telegram",
-            conversation_key="telegram:chat_1",
+            conversation_key="telegram:dm:chat_1",
         )
         == new.session_id
     )
     assert new.metadata == {"source": "chat_1"}
+
+
+def test_resume_can_replace_conversation_binding(tmp_path):
+    runtime, sessions, state, activations, events = _routing(tmp_path)
+    target = sessions.create_session(
+        session_id="session_target",
+        core_id="assistant",
+        core_revision="rev_1",
+        channel="telegram",
+        conversation_key="telegram:dm:old",
+    )
+    sessions.create_session(
+        session_id="session_old",
+        core_id="assistant",
+        core_revision="rev_1",
+        channel="telegram",
+        conversation_key="telegram:dm:chat_1",
+    )
+
+    record = runtime.resume(
+        target.session_id,
+        channel="telegram",
+        conversation_key="telegram:dm:chat_1",
+        source="chat_1",
+        reply_to="msg_1",
+        replace_conversation_binding=True,
+    )
+
+    assert record.session_id == target.session_id
+    assert record.conversation_key == "telegram:dm:chat_1"
+    assert record.metadata == {"source": "chat_1", "reply_to": "msg_1"}
+    assert (
+        sessions.resolve_interaction_session(
+            core_id="assistant",
+            channel="telegram",
+            conversation_key="telegram:dm:chat_1",
+        )
+        == target.session_id
+    )
+    assert state["session_id"] == target.session_id
+    assert activations[-1] == target.session_id
+    assert events[-1] == {
+        "type": "session.resumed",
+        "core_id": "assistant",
+        "core_revision": "rev_1",
+        "channel": "telegram",
+        "conversation_key": "telegram:dm:chat_1",
+    }
+
+
+def test_resume_without_conversation_key_only_activates_session(tmp_path):
+    runtime, sessions, state, _, _ = _routing(tmp_path)
+    target = sessions.create_session(
+        session_id="session_target",
+        core_id="assistant",
+        core_revision="rev_1",
+        channel="telegram",
+        conversation_key="telegram:dm:old",
+    )
+
+    record = runtime.resume(target.session_id, channel="telegram", replace_conversation_binding=True)
+
+    assert record.session_id == target.session_id
+    assert record.conversation_key == "telegram:dm:old"
+    assert state["session_id"] == target.session_id
+    assert (
+        sessions.resolve_interaction_session(
+            core_id="assistant",
+            channel="telegram",
+            conversation_key="telegram:dm:old",
+        )
+        == target.session_id
+    )
 
 
 def test_resume_missing_session_raises(tmp_path):

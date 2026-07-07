@@ -40,9 +40,19 @@ def test_webhook_normalizes_json_request_with_callback_allowed_private():
     assert inbound.text == "hello"
     assert inbound.source == "alice"
     assert inbound.reply_to == "r1"
-    assert inbound.conversation_key == "webhook:alice"
+    assert inbound.conversation_key == "webhook:source:alice"
     assert inbound.metadata["webhook_callback_url"] == "http://127.0.0.1:9999/callback"
     assert inbound.metadata["k"] == "v"
+
+
+def test_webhook_explicit_conversation_key_wins():
+    config = WebhookChannelConfig(enabled=True, allow_unauthenticated=True)
+    bridge = WebhookInteractionBridge.from_config(InteractionRuntime(FakeRunner()), config)
+
+    inbound = bridge.normalize_request({"text": "hello", "source": "alice", "conversation_key": "custom:key"})
+
+    assert inbound is not None
+    assert inbound.conversation_key == "custom:key"
 
 
 @pytest.mark.asyncio

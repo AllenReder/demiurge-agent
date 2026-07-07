@@ -700,7 +700,7 @@ def test_telegram_normalizes_private_group_command_mention_and_reply():
 
     assert private.text == "hello"
     assert private.reply_to == "10"
-    assert private.conversation_key == "telegram:1"
+    assert private.conversation_key == "telegram:dm:1"
     assert ignored is None
     assert command.text == "explain this"
     assert command_at.text == "explain that"
@@ -745,13 +745,13 @@ async def test_telegram_private_photo_media_only_downloads_attachment(tmp_path):
             ],
         )
     )
-    await _await_active_turn(bridge, "telegram:123")
+    await _await_active_turn(bridge, "telegram:dm:123")
 
     inbound = runner.kwargs["interaction"]
     attachment = inbound.attachments[0]
     attachment_path = Path(attachment["path"])
     assert runner.texts == ["[telegram attachment]"]
-    assert inbound.conversation_key == "telegram:123"
+    assert inbound.conversation_key == "telegram:dm:123"
     assert attachment["kind"] == "image"
     assert attachment["filename"] == "file_1.jpg"
     assert attachment["media_type"] == "image/jpeg"
@@ -852,7 +852,7 @@ async def test_telegram_private_media_with_caption_downloads_attachment(
             **{field: payload},
         )
     )
-    await _await_active_turn(bridge, "telegram:123")
+    await _await_active_turn(bridge, "telegram:dm:123")
 
     inbound = runner.kwargs["interaction"]
     attachment = inbound.attachments[0]
@@ -882,7 +882,7 @@ async def test_telegram_private_text_turn_continues_when_media_download_fails(tm
             photo=[{"file_id": "photo_1", "file_unique_id": "photo_unique", "file_size": 10}],
         )
     )
-    await _await_active_turn(bridge, "telegram:123")
+    await _await_active_turn(bridge, "telegram:dm:123")
 
     inbound = runner.kwargs["interaction"]
     assert runner.texts == ["see attached"]
@@ -910,7 +910,7 @@ async def test_telegram_private_text_turn_continues_when_media_is_too_large(tmp_
             },
         )
     )
-    await _await_active_turn(bridge, "telegram:123")
+    await _await_active_turn(bridge, "telegram:dm:123")
 
     inbound = runner.kwargs["interaction"]
     assert runner.texts == ["see attached"]
@@ -993,7 +993,7 @@ async def test_telegram_access_policy_allows_private_user():
     )
 
     await bridge.handle_update(_message("hello", chat_id=123, user_id=42))
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     await state.active_task
 
     assert runner.texts == ["hello"]
@@ -1015,7 +1015,7 @@ async def test_telegram_run_forever_recovers_from_transient_polling_error():
     task = asyncio.create_task(bridge.run_forever())
     try:
         await _wait_until(lambda: runner.texts == ["hello"])
-        state = bridge._conversations["telegram:123"]
+        state = bridge._conversations["telegram:dm:123"]
         if state.active_task is not None:
             await state.active_task
     finally:
@@ -1049,7 +1049,7 @@ async def test_telegram_run_forever_waits_out_polling_conflict():
     task = asyncio.create_task(bridge.run_forever())
     try:
         await _wait_until(lambda: runner.texts == ["hello"])
-        state = bridge._conversations["telegram:123"]
+        state = bridge._conversations["telegram:dm:123"]
         if state.active_task is not None:
             await state.active_task
     finally:
@@ -1088,7 +1088,7 @@ async def test_telegram_run_forever_honors_retry_after(monkeypatch):
     task = asyncio.create_task(bridge.run_forever())
     try:
         await _wait_until(lambda: runner.texts == ["hello"])
-        state = bridge._conversations["telegram:123"]
+        state = bridge._conversations["telegram:dm:123"]
         if state.active_task is not None:
             await state.active_task
     finally:
@@ -1117,7 +1117,7 @@ async def test_telegram_access_policy_group_requires_allowed_chat_user_and_menti
     assert bridge._conversations == {}
 
     await bridge.handle_update(_message("@demiurge_bot summarize", chat_type="supergroup", chat_id=-100, user_id=42))
-    state = bridge._conversations["telegram:-100"]
+    state = bridge._conversations["telegram:group:-100"]
     await state.active_task
 
     assert runner.texts == ["summarize"]
@@ -1161,16 +1161,16 @@ async def test_telegram_access_policy_unauthorized_choice_callback_does_not_cons
             prompt=UserPromptRequest(
                 question="Which path?",
                 choices=["fast", "careful"],
-                conversation_key="telegram:123",
+                conversation_key="telegram:dm:123",
                 metadata={"source": "123", "reply_to": "456"},
             ),
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
     await bridge.handle_update(_callback("choice:1", chat_id=123, user_id=99, message_id=456, callback_id="cb_bad"))
 
-    assert bridge._prompt_delivery.pending_choices("telegram:123") == ["fast", "careful"]
+    assert bridge._prompt_delivery.pending_choices("telegram:dm:123") == ["fast", "careful"]
     assert runner.texts == []
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
 
@@ -1192,7 +1192,7 @@ async def test_telegram_access_policy_unauthorized_approval_callback_does_not_re
             text="run",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
@@ -1208,7 +1208,7 @@ async def test_telegram_access_policy_unauthorized_approval_callback_does_not_re
     assert approval_id in bridge._pending_approvals.pending_ids()
     assert runner.decision is None
     assert api.callbacks[-1] == {"callback_query_id": "cb_bad", "text": "Telegram access denied."}
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     await bridge._cancel_active(state)
 
 
@@ -1352,7 +1352,7 @@ async def test_telegram_delivery_calls_send_message():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="hello")],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1379,7 +1379,7 @@ async def test_telegram_delivery_sends_progress_and_notice_as_text():
                 InteractionDelivery(kind="progress", type="text", text="working"),
                 InteractionDelivery(kind="notice", type="text", text="done"),
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1417,7 +1417,7 @@ async def test_telegram_delivery_sends_media_blocks_in_order():
                     artifacts=[{"artifact_id": "a1", "kind": "image", "url": "https://example.com/plot.png"}],
                 )
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1472,7 +1472,7 @@ async def test_telegram_delivery_sends_audio_blocks_as_voice(tmp_path, monkeypat
                     artifacts=[{"artifact_id": "a1", "kind": "audio", "resolved_path": str(source)}],
                 )
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1518,7 +1518,7 @@ async def test_telegram_delivery_media_falls_back_to_text():
                     artifacts=[{"artifact_id": "a1", "kind": "file", "resolved_path": "/tmp/report.pdf"}],
                 )
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1560,7 +1560,7 @@ async def test_telegram_delivery_audio_conversion_failure_falls_back_to_text(tmp
                     artifacts=[{"artifact_id": "a1", "kind": "audio", "resolved_path": str(source)}],
                 )
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1578,7 +1578,7 @@ async def test_telegram_delivery_falls_back_to_plain_on_markdown_parse_error():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="**hello**")],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1603,7 +1603,7 @@ async def test_telegram_rich_table_sends_raw_markdown_without_legacy_formatting(
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1634,7 +1634,7 @@ async def test_telegram_rich_only_markdown_constructs_use_rich_path(content):
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=content)],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1657,7 +1657,7 @@ async def test_telegram_plain_format_skips_rich_messages():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1680,7 +1680,7 @@ async def test_telegram_rich_endpoint_failure_falls_back_and_latches_off():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
     api.fail_rich = None
@@ -1688,7 +1688,7 @@ async def test_telegram_rich_endpoint_failure_falls_back_and_latches_off():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1708,7 +1708,7 @@ async def test_telegram_rich_bad_request_falls_back_to_markdownv2():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="| A | B |\n| --- | --- |\n| C | D |")],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1727,7 +1727,7 @@ async def test_telegram_rich_transient_failure_does_not_legacy_resend():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="| A | B |\n| --- | --- |\n| C | D |")],
-            metadata={"source": "123", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1749,7 +1749,7 @@ async def test_telegram_single_chunk_reply_to_mode_controls_reply_to_message_id(
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="hello")],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1780,7 +1780,7 @@ async def test_telegram_multi_chunk_first_mode_threads_only_first_chunk():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=long_text)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1805,7 +1805,7 @@ async def test_telegram_multi_chunk_all_mode_threads_every_chunk():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=long_text)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1828,7 +1828,7 @@ async def test_telegram_multi_chunk_off_mode_threads_no_chunk():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=long_text)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1851,7 +1851,7 @@ async def test_telegram_rich_message_off_mode_omits_reply_parameters():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1880,7 +1880,7 @@ async def test_telegram_rich_message_first_mode_includes_reply_parameters():
         _outbound(
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text=table)],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -1952,10 +1952,10 @@ async def test_telegram_prompt_sends_choices_and_maps_next_number():
             prompt=UserPromptRequest(
                 question="Which path?",
                 choices=["fast", "careful"],
-                conversation_key="telegram:123",
+                conversation_key="telegram:dm:123",
                 metadata={"source": "123", "reply_to": "456"},
             ),
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
     assert api.sent == [
@@ -1973,7 +1973,7 @@ async def test_telegram_prompt_sends_choices_and_maps_next_number():
         }
     ]
     await bridge.handle_update(_message("2", chat_id=123, message_id=457))
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
 
     await state.active_task
     assert state.runtime.runner.texts == ["careful"]
@@ -1995,15 +1995,15 @@ async def test_telegram_prompt_choice_callback_maps_to_next_answer():
             prompt=UserPromptRequest(
                 question="Which path?",
                 choices=["fast", "careful"],
-                conversation_key="telegram:123",
+                conversation_key="telegram:dm:123",
                 metadata={"source": "123", "reply_to": "456"},
             ),
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
     await bridge.handle_update(_callback("choice:1", chat_id=123, message_id=456, callback_id="cb_2"))
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     assert api.callbacks == [{"callback_query_id": "cb_2", "text": None}]
     await state.active_task
     assert state.runtime.runner.texts == ["careful"]
@@ -2034,7 +2034,7 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
             text="run",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
@@ -2042,7 +2042,7 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     await _wait_until(lambda: bool(api.sent))
     await _wait_until(lambda: bridge._pending_approvals.count > 0)
     approval_id = bridge._pending_approvals.pending_ids()[0]
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     task = state.active_task
 
     assert task is not None and not task.done()
@@ -2081,11 +2081,11 @@ async def test_telegram_group_approval_fails_closed():
             text="run",
             source="-123",
             reply_to="456",
-            conversation_key="telegram:-123",
+            conversation_key="telegram:group:-123",
             metadata={"telegram_chat_type": "group"},
         )
     )
-    state = bridge._conversations["telegram:-123"]
+    state = bridge._conversations["telegram:group:-123"]
     await state.active_task
 
     assert runner.decision.value == "deny"
@@ -2111,11 +2111,11 @@ async def test_telegram_approval_times_out_and_denies():
             text="run",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     await state.active_task
 
     assert runner.decision.value == "deny"
@@ -2143,7 +2143,7 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
             text="run",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
@@ -2151,14 +2151,14 @@ async def test_telegram_stop_cancels_pending_approval_and_expires_callback():
     await _wait_until(lambda: bridge._pending_approvals.count > 0)
     await _wait_until(lambda: bool(api.sent))
     approval_id = bridge._pending_approvals.pending_ids()[0]
-    task = bridge._conversations["telegram:123"].active_task
+    task = bridge._conversations["telegram:dm:123"].active_task
     await bridge.handle_inbound(
         InteractionInbound(
             channel="telegram",
             text="/stop",
             source="123",
             reply_to="457",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
@@ -2209,7 +2209,7 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
             text="run terminal",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_type": "private"},
         )
     )
@@ -2219,7 +2219,7 @@ async def test_telegram_terminal_does_not_execute_before_approval_and_deny_block
 
     assert not (workspace / "out.txt").exists()
 
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     task = state.active_task
     await bridge.handle_update(_callback(approval_callback_data(approval_id, "deny"), chat_id=123, message_id=456, callback_id="cb_deny"))
     if task is not None:
@@ -2249,7 +2249,7 @@ async def test_telegram_tool_display_quiet_suppresses_tool_results():
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="done")],
             tool_result_list=[record],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -2270,7 +2270,7 @@ async def test_telegram_tool_display_summary_sends_before_assistant_delivery():
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="done")],
             tool_result_list=[record],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -2294,7 +2294,7 @@ async def test_telegram_tool_lifecycle_edits_started_message():
                 InteractionItem.tool_call_item(ToolInteractionRecord.started(call)),
                 InteractionItem.tool_call_item(ToolInteractionRecord.finished(ToolExecutionRecord(call=call, result=result))),
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -2321,7 +2321,7 @@ async def test_telegram_delivery_before_tool_result_preserves_item_order():
                 InteractionItem.delivery_item(InteractionDelivery(type="text", text="done")),
                 InteractionItem.tool_result_item(record),
             ],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -2349,7 +2349,7 @@ async def test_telegram_tool_display_full_includes_arguments_and_result():
             channel="telegram",
             delivery_list=[InteractionDelivery(type="text", text="done")],
             tool_result_list=[record],
-            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:123"},
+            metadata={"source": "123", "reply_to": "456", "conversation_key": "telegram:dm:123"},
         )
     )
 
@@ -2390,7 +2390,7 @@ async def test_telegram_status_slash_bypasses_model_turn():
             text="/status",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
             metadata={"telegram_chat_id": 123, "telegram_user_id": 42, "telegram_chat_type": "private"},
         )
     )
@@ -2421,10 +2421,10 @@ async def test_telegram_new_rebinds_conversation_to_fresh_session(tmp_path):
             text="old telegram message",
             source="123",
             reply_to="1",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
     )
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     await state.active_task
     old_session_id = state.runtime.runner.session_id
 
@@ -2434,7 +2434,7 @@ async def test_telegram_new_rebinds_conversation_to_fresh_session(tmp_path):
             text="/new",
             source="123",
             reply_to="2",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
     )
     new_session_id = state.runtime.runner.session_id
@@ -2445,7 +2445,7 @@ async def test_telegram_new_rebinds_conversation_to_fresh_session(tmp_path):
             text="fresh telegram message",
             source="123",
             reply_to="3",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
     )
     await state.active_task
@@ -2456,7 +2456,7 @@ async def test_telegram_new_rebinds_conversation_to_fresh_session(tmp_path):
         app.session_runtime.resolve_interaction_session(
             core_id=app.runner.core_id,
             channel="telegram",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
         == new_session_id
     )
@@ -2478,10 +2478,10 @@ async def test_telegram_queue_command_runs_prompt_not_command():
             text="/queue queued prompt",
             source="123",
             reply_to="456",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
     )
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     await state.active_task
 
     assert runner.texts == ["queued prompt"]
@@ -2500,18 +2500,18 @@ async def test_telegram_queue_busy_mode_runs_followup_after_current_turn():
     )
 
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:dm:123")
     )
     await asyncio.wait_for(runner.first_started.wait(), timeout=1)
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:dm:123")
     )
 
     assert runner.texts == ["first"]
     assert any("Queued for next turn" in sent["text"] for sent in api.sent)
     runner.release.set()
     await asyncio.wait_for(runner.second_started.wait(), timeout=1)
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     if state.active_task is not None:
         await state.active_task
     assert runner.texts == ["first", "second"]
@@ -2524,15 +2524,15 @@ async def test_telegram_interrupt_busy_mode_cancels_current_turn_and_runs_latest
     bridge = TelegramInteractionBridge(runtime=InteractionRuntime(runner), api=api, bot_username="demiurge_bot")
 
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:dm:123")
     )
     await asyncio.wait_for(runner.first_started.wait(), timeout=1)
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:dm:123")
     )
 
     await asyncio.wait_for(runner.second_started.wait(), timeout=1)
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     if state.active_task is not None:
         await state.active_task
     assert runner.cancelled is True
@@ -2551,17 +2551,17 @@ async def test_telegram_stop_command_cancels_active_turn_and_clears_queue():
     )
 
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="first", source="123", reply_to="1", conversation_key="telegram:dm:123")
     )
     await asyncio.wait_for(runner.first_started.wait(), timeout=1)
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="second", source="123", reply_to="2", conversation_key="telegram:dm:123")
     )
     await bridge.handle_inbound(
-        InteractionInbound(channel="telegram", text="/stop", source="123", reply_to="3", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="/stop", source="123", reply_to="3", conversation_key="telegram:dm:123")
     )
 
-    state = bridge._conversations["telegram:123"]
+    state = bridge._conversations["telegram:dm:123"]
     assert runner.cancelled is True
     assert state.queue.empty()
     assert any("Stopped current turn" in sent["text"] for sent in api.sent)

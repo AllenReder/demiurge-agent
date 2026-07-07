@@ -113,8 +113,26 @@ class SessionRoutingRuntime:
         )
         return record
 
-    def resume(self, session_id: str) -> SessionRecord:
+    def resume(
+        self,
+        session_id: str,
+        *,
+        channel: str | None = None,
+        conversation_key: str | None = None,
+        source: str | None = None,
+        reply_to: str | None = None,
+        replace_conversation_binding: bool = False,
+    ) -> SessionRecord:
         record = self.sessions.get_session(session_id)
+        if replace_conversation_binding and channel and conversation_key:
+            record = self.sessions.rebind_interaction_session(
+                record.session_id,
+                core_id=record.core_id,
+                core_revision=record.core_revision,
+                channel=str(channel),
+                conversation_key=str(conversation_key),
+                metadata=self._record_metadata(source=source, reply_to=reply_to),
+            )
         self._activate_session(record.session_id)
         self._emit_event(
             "session.resumed",

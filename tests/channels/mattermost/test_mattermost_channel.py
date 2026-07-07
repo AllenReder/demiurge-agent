@@ -36,7 +36,62 @@ def test_mattermost_normalizes_webhook_payload_and_strips_trigger_word():
     assert inbound.channel == "mattermost"
     assert inbound.text == "hello"
     assert inbound.source == "C1"
-    assert inbound.conversation_key == "mattermost:C1"
+    assert inbound.conversation_key == "mattermost:channel:C1"
+
+
+def test_mattermost_thread_root_uses_thread_conversation_key():
+    bridge = _bridge(
+        MattermostChannelConfig(
+            enabled=True,
+            base_url="https://mattermost.example",
+            token="token",
+            webhook_token="secret",
+            allowed_channels=["C1"],
+        )
+    )
+
+    inbound = bridge.normalize_request(
+        {
+            "token": "secret",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "root_id": "root:1",
+            "post_id": "post:1",
+            "text": "hello",
+        }
+    )
+
+    assert inbound is not None
+    assert inbound.reply_to == "root:1"
+    assert inbound.conversation_key == "mattermost:channel:C1:thread:root%3A1"
+    assert inbound.metadata["mattermost_root_id"] == "root:1"
+
+
+def test_mattermost_post_id_does_not_create_thread_conversation_key():
+    bridge = _bridge(
+        MattermostChannelConfig(
+            enabled=True,
+            base_url="https://mattermost.example",
+            token="token",
+            webhook_token="secret",
+            allowed_channels=["C1"],
+        )
+    )
+
+    inbound = bridge.normalize_request(
+        {
+            "token": "secret",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "post_id": "post:1",
+            "text": "hello",
+        }
+    )
+
+    assert inbound is not None
+    assert inbound.reply_to == "post:1"
+    assert inbound.conversation_key == "mattermost:channel:C1"
+    assert inbound.metadata["mattermost_root_id"] is None
 
 
 def test_mattermost_rejects_unauthorized_request():

@@ -51,7 +51,7 @@ def test_matrix_normalizes_sync_events_and_ignores_self():
     assert inbound[0].channel == "matrix"
     assert inbound[0].text == "hello"
     assert inbound[0].source == "!room:example"
-    assert inbound[0].conversation_key == "matrix:!room:example"
+    assert inbound[0].conversation_key == "matrix:room:%21room%3Aexample"
 
 
 @pytest.mark.asyncio

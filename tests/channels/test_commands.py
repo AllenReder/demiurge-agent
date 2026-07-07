@@ -6,6 +6,7 @@ from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRun
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.storage import SessionRecord
 
 
 def _runtime(**kwargs) -> ChannelCommandRuntime:
@@ -72,6 +73,18 @@ def _executor(sent, ran, **kwargs) -> ChannelCommandExecutor:
         send_text=send_text,
         lifecycle=lifecycle,
         **kwargs,
+    )
+
+
+def _record(session_id: str) -> SessionRecord:
+    return SessionRecord(
+        session_id=session_id,
+        core_id="assistant",
+        core_revision="rev_1",
+        created_at="2026-07-06T03:00:00Z",
+        updated_at="2026-07-06T04:00:00Z",
+        channel="telegram",
+        message_count=1,
     )
 
 
@@ -203,6 +216,58 @@ async def test_channel_command_executor_formats_status_with_adapter_extras():
     assert "- core: `assistant`" in text
     assert "- busy mode: `queue`" in text
     assert "- access: `restricted`" in text
+
+
+@pytest.mark.asyncio
+async def test_channel_command_executor_resume_rebinds_current_conversation():
+    sent = []
+    ran = []
+
+    class Runner:
+        core_id = "assistant"
+        session_id = "session_1"
+        provider_name = "fake"
+        interaction_router = object()
+
+        def __init__(self):
+            self.resume_calls = []
+
+        def resume_session(self, session_id: str, **kwargs):
+            self.resume_calls.append({"session_id": session_id, **kwargs})
+
+    class RouteBinding:
+        def __init__(self):
+            self.binds = []
+
+        def bind(self, router, session_id: str):
+            self.binds.append((router, session_id))
+
+    runner = Runner()
+    route_binding = RouteBinding()
+    state = ConversationIngressState(
+        runtime=SimpleNamespace(
+            runner=runner,
+            session_runtime=SimpleNamespace(list_sessions=lambda *, core_id, limit: [_record("session_1"), _record("session_2")]),
+        ),
+        busy_mode="interrupt",
+        route_binding=route_binding,
+    )
+    executor = _executor(sent, ran, channel_name="telegram")
+
+    await executor.handlers()["resume"]("2", _inbound("/resume 2"), state)
+
+    assert runner.resume_calls == [
+        {
+            "session_id": "session_2",
+            "channel": "telegram",
+            "conversation_key": "conversation_1",
+            "source": "source_1",
+            "reply_to": "reply_1",
+            "replace_conversation_binding": True,
+        }
+    ]
+    assert route_binding.binds == [(runner.interaction_router, "session_2")]
+    assert sent == [("source_1", "reply_1", "Resumed session: `session_2`")]
 
 
 @pytest.mark.asyncio

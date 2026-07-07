@@ -181,7 +181,16 @@ class ChannelCommandExecutor:
             await self._send(inbound, resolution.message or "Invalid session selection.")
             return
         assert resolution.session_id is not None
-        result = resume_bound_session(state.runtime.runner, state.route_binding, resolution.session_id)
+        result = resume_bound_session(
+            state.runtime.runner,
+            state.route_binding,
+            resolution.session_id,
+            channel=self.channel_name,
+            conversation_key=inbound.conversation_key,
+            source=inbound.source,
+            reply_to=inbound.reply_to,
+            replace_conversation_binding=True,
+        )
         if not result.ok:
             await self._send(inbound, result.message)
             return

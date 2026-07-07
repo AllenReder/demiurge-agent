@@ -62,6 +62,18 @@ Route 会防御性拒绝任何非自身绑定 session 的 outbound payload。
 `InteractionRuntime.handle()` 会在 runner 解析出最终 session 后绑定 inbound route。
 `/new`、`/resume` 和 session switch 路径必须重新绑定到新的 session。
 
+Durable channel ownership 与 live routes 分开记录。Runtime 会保存
+`(core_id, channel, conversation_key) -> session_id`，其中 `conversation_key`
+是 host-owned external route key，例如 `telegram:dm:123`、
+`slack:channel:T1:C1:thread:123.4` 或
+`matrix:room:%21room%3Aexample`。Channel adapters 必须通过共享 runtime helper
+构造这些 key，不要手写字符串。Canonical 格式有意不兼容旧 binding，例如
+`telegram:123`；旧 channel conversation 会重新开始，除非用户显式 resume。
+
+Channel `/resume` 同时是 live route switch 和 durable conversation rebind。
+用户从 external channel 恢复某个 session 后，同一 `conversation_key` 的后续
+inbound messages 会继续进入该 resumed session。
+
 ## Channels
 
 Channel adapters 会把 delivery 适配为平台特定消息。它们不再作为嵌套 work

@@ -60,8 +60,8 @@ class FakeRunner:
         self.start_calls.append(kwargs)
         return self.start_session_id
 
-    def resume_session(self, session_id: str) -> None:
-        self.resume_calls.append(session_id)
+    def resume_session(self, session_id: str, **kwargs) -> None:
+        self.resume_calls.append({"session_id": session_id, **kwargs})
         if self.missing:
             raise FileNotFoundError(f"session not found: {session_id}")
 
@@ -147,7 +147,7 @@ async def test_start_bound_session_prepares_starts_and_binds_route():
         runner,
         binding,
         channel="telegram",
-        conversation_key="telegram:1",
+        conversation_key="telegram:dm:1",
         source="1",
         reply_to="2",
         replace_conversation_binding=True,
@@ -159,7 +159,7 @@ async def test_start_bound_session_prepares_starts_and_binds_route():
     assert runner.start_calls == [
         {
             "channel": "telegram",
-            "conversation_key": "telegram:1",
+            "conversation_key": "telegram:dm:1",
             "source": "1",
             "reply_to": "2",
             "replace_conversation_binding": True,
@@ -183,11 +183,29 @@ def test_resume_bound_session_resumes_and_binds_route():
     runner = FakeRunner()
     binding = FakeRouteBinding()
 
-    result = resume_bound_session(runner, binding, "session_existing")
+    result = resume_bound_session(
+        runner,
+        binding,
+        "session_existing",
+        channel="telegram",
+        conversation_key="telegram:dm:1",
+        source="1",
+        reply_to="2",
+        replace_conversation_binding=True,
+    )
 
     assert result.ok is True
     assert result.session_id == "session_existing"
-    assert runner.resume_calls == ["session_existing"]
+    assert runner.resume_calls == [
+        {
+            "session_id": "session_existing",
+            "channel": "telegram",
+            "conversation_key": "telegram:dm:1",
+            "source": "1",
+            "reply_to": "2",
+            "replace_conversation_binding": True,
+        }
+    ]
     assert binding.binds == [(runner.interaction_router, "session_existing")]
 
 

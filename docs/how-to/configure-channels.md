@@ -25,6 +25,32 @@ uv run demiurge gateway --core assistant
 
 Only channels with `enabled: true` are started.
 
+## Conversation binding
+
+Each inbound channel conversation is bound to a durable Demiurge session through
+a host-owned `conversation_key`. Keys are canonical route keys, not adapter-local
+strings. Older bindings are not migrated, so a channel conversation that used an
+older key shape starts fresh until you explicitly resume the intended session.
+
+The current canonical keys are:
+
+- Telegram private chat: `telegram:dm:<chat_id>`
+- Telegram group or supergroup: `telegram:group:<chat_id>`
+- Slack channel: `slack:channel:<team_id>:<channel_id>`
+- Slack thread: `slack:channel:<team_id>:<channel_id>:thread:<thread_ts>`
+- Mattermost channel: `mattermost:channel:<channel_id>`
+- Mattermost thread: `mattermost:channel:<channel_id>:thread:<root_id>`
+- Matrix room: `matrix:room:<room_id>`
+- Email sender: `email:sender:<sender>`
+- Webhook fallback source: `webhook:source:<source>`
+
+Route ids are URL-encoded in the stored key. Webhook requests can still provide
+an explicit `conversation_key`; when present, that value is used as-is.
+
+Channel `/resume` changes both the live route and the durable conversation
+binding. After `/resume` succeeds in a channel, the next message from the same
+external conversation continues in the resumed session.
+
 ## Telegram
 
 Add or edit `channels.telegram` in `~/.demiurge/agents/assistant/agent.yaml`:

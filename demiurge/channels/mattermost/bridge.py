@@ -7,6 +7,7 @@ from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.mattermost.api import MattermostApi
 from demiurge.channels.webhook_server import WebhookHttpServer
 from demiurge.core import MattermostChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
@@ -74,13 +75,19 @@ class MattermostInteractionBridge(TextChannelBridgeBase):
             text = text[len(trigger_word):].strip()
         if not text:
             return None
-        root_id = str(body.get("root_id") or body.get("post_id") or "") or None
+        root_id = str(body.get("root_id") or "") or None
+        reply_to = root_id or str(body.get("post_id") or "") or None
         return InteractionInbound(
             channel="mattermost",
             text=text,
             source=channel_id,
-            reply_to=root_id,
-            conversation_key=f"mattermost:{channel_id}",
+            reply_to=reply_to,
+            conversation_key=build_conversation_key(
+                "mattermost",
+                "channel",
+                channel_id,
+                thread_id=root_id,
+            ),
             metadata={
                 "mattermost_channel_id": channel_id,
                 "mattermost_user_id": user_id,

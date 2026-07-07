@@ -331,8 +331,24 @@ class SessionTurnStepRunner:
         )
         return record.session_id
 
-    def resume_session(self, session_id: str) -> None:
-        self.session_routes.resume(session_id)
+    def resume_session(
+        self,
+        session_id: str,
+        *,
+        channel: str | None = None,
+        conversation_key: str | None = None,
+        source: str | None = None,
+        reply_to: str | None = None,
+        replace_conversation_binding: bool = False,
+    ) -> None:
+        self.session_routes.resume(
+            session_id,
+            channel=channel,
+            conversation_key=conversation_key,
+            source=source,
+            reply_to=reply_to,
+            replace_conversation_binding=replace_conversation_binding,
+        )
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
         return await self.session_compaction.compact(focus=focus, protect_last_n=protect_last_n)

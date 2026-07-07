@@ -263,19 +263,19 @@ async def test_conversation_key_routes_to_durable_session(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     first = await runtime.handle(
-        InteractionInbound(channel="telegram", text="chat one", source="1", conversation_key="telegram:1")
+        InteractionInbound(channel="telegram", text="chat one", source="1", conversation_key="telegram:dm:1")
     )
     second = await runtime.handle(
-        InteractionInbound(channel="telegram", text="chat two", source="2", conversation_key="telegram:2")
+        InteractionInbound(channel="telegram", text="chat two", source="2", conversation_key="telegram:dm:2")
     )
     third = await runtime.handle(
-        InteractionInbound(channel="telegram", text="chat one again", source="1", conversation_key="telegram:1")
+        InteractionInbound(channel="telegram", text="chat one again", source="1", conversation_key="telegram:dm:1")
     )
 
     assert first.session_id != second.session_id
     assert third.session_id == first.session_id
-    assert app.session_runtime.get_session(first.session_id).conversation_key == "telegram:1"
-    assert app.session_runtime.get_session(second.session_id).conversation_key == "telegram:2"
+    assert app.session_runtime.get_session(first.session_id).conversation_key == "telegram:dm:1"
+    assert app.session_runtime.get_session(second.session_id).conversation_key == "telegram:dm:2"
 
 
 @pytest.mark.asyncio
@@ -286,16 +286,16 @@ async def test_new_session_can_replace_conversation_binding(tmp_path):
     runtime = InteractionRuntime(app.runner)
 
     first = await runtime.handle(
-        InteractionInbound(channel="telegram", text="old chat message", source="123", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="old chat message", source="123", conversation_key="telegram:dm:123")
     )
     new_session_id = app.runner.start_new_session(
         channel="telegram",
-        conversation_key="telegram:123",
+        conversation_key="telegram:dm:123",
         source="123",
         replace_conversation_binding=True,
     )
     followup = await runtime.handle(
-        InteractionInbound(channel="telegram", text="fresh chat message", source="123", conversation_key="telegram:123")
+        InteractionInbound(channel="telegram", text="fresh chat message", source="123", conversation_key="telegram:dm:123")
     )
 
     assert new_session_id != first.session_id
@@ -304,7 +304,7 @@ async def test_new_session_can_replace_conversation_binding(tmp_path):
         app.session_runtime.resolve_interaction_session(
             core_id=app.runner.core_id,
             channel="telegram",
-            conversation_key="telegram:123",
+            conversation_key="telegram:dm:123",
         )
         == new_session_id
     )

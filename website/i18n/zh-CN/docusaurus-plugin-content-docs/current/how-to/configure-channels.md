@@ -24,6 +24,32 @@ uv run demiurge gateway --core assistant
 
 只有设置了 `enabled: true` 的 channels 会被启动。
 
+## Conversation binding
+
+每个 inbound channel conversation 都会通过 host-owned `conversation_key`
+绑定到一个持久 Demiurge session。Key 是规范 route key，不是各 adapter
+自行拼出的本地字符串。旧 binding 不会迁移，所以使用旧 key 形状的 channel
+conversation 会重新开始，除非你显式 resume 到目标 session。
+
+当前规范 key 是：
+
+- Telegram private chat：`telegram:dm:<chat_id>`
+- Telegram group 或 supergroup：`telegram:group:<chat_id>`
+- Slack channel：`slack:channel:<team_id>:<channel_id>`
+- Slack thread：`slack:channel:<team_id>:<channel_id>:thread:<thread_ts>`
+- Mattermost channel：`mattermost:channel:<channel_id>`
+- Mattermost thread：`mattermost:channel:<channel_id>:thread:<root_id>`
+- Matrix room：`matrix:room:<room_id>`
+- Email sender：`email:sender:<sender>`
+- Webhook fallback source：`webhook:source:<source>`
+
+Route ids 会在存储的 key 中做 URL encoding。Webhook requests 仍然可以显式提供
+`conversation_key`；提供时会原样使用这个值。
+
+Channel `/resume` 会同时切换 live route 和持久 conversation binding。Channel 中
+`/resume` 成功后，同一个 external conversation 的下一条消息会继续进入被 resume 的
+session。
+
 ## Telegram
 
 在 `~/.demiurge/agents/assistant/agent.yaml` 中添加或编辑 `channels.telegram`：

@@ -46,7 +46,7 @@ def test_email_normalizes_plain_message_sender():
     assert inbound.text == "hello"
     assert inbound.source == "alice@example.com"
     assert inbound.reply_to == "<m1>"
-    assert inbound.conversation_key == "email:alice@example.com"
+    assert inbound.conversation_key == "email:sender:alice%40example.com"
 
 
 def test_email_rejects_disallowed_sender():
