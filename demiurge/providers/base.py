@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from demiurge.providers.profiles import ProviderRuntimeProfile
 from demiurge.providers.types import LLMRequest, LLMResponse
 
 
@@ -18,6 +19,7 @@ class ProviderFactoryConfig:
     api_mode: str
     base_url: str | None = None
     api_key: str | None = None
+    runtime_profile: ProviderRuntimeProfile | None = None
 
 
 class ProviderTransport(Protocol):

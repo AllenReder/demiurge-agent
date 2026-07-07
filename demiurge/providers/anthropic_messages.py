@@ -5,12 +5,16 @@ import json
 import urllib.request
 from typing import Any
 
+from demiurge.providers.profiles import ProviderRuntimeProfile
 from demiurge.providers.types import LLMMessage, LLMRequest, LLMResponse, ToolCall, ToolDefinition
 
 
 class AnthropicMessagesTransport:
     api_mode = "anthropic-messages"
     default_max_tokens = 4096
+
+    def __init__(self, *, runtime_profile: ProviderRuntimeProfile | None = None) -> None:
+        self.runtime_profile = runtime_profile
 
     def build_payload(self, request: LLMRequest) -> dict[str, Any]:
         system, messages = self.convert_messages(request.messages)
@@ -103,6 +107,8 @@ class AnthropicMessagesTransport:
         value = request.metadata.get("max_tokens") or request.metadata.get("max_output_tokens")
         if isinstance(value, int) and value > 0:
             return value
+        if self.runtime_profile and self.runtime_profile.default_max_tokens:
+            return self.runtime_profile.default_max_tokens
         return self.default_max_tokens
 
 
@@ -114,11 +120,13 @@ class AnthropicMessagesProvider:
         base_url: str | None = None,
         anthropic_version: str = "2023-06-01",
         transport: AnthropicMessagesTransport | None = None,
+        runtime_profile: ProviderRuntimeProfile | None = None,
     ):
         self.api_key = api_key
         self.base_url = (base_url or "https://api.anthropic.com/v1").rstrip("/")
         self.anthropic_version = anthropic_version
-        self.transport = transport or AnthropicMessagesTransport()
+        self.runtime_profile = runtime_profile
+        self.transport = transport or AnthropicMessagesTransport(runtime_profile=runtime_profile)
         if not self.api_key:
             raise RuntimeError("API key is required for the Anthropic Messages provider")
 
@@ -141,6 +149,7 @@ class AnthropicMessagesProvider:
                 "accept": "application/json",
                 "x-api-key": self.api_key or "",
                 "anthropic-version": self.anthropic_version,
+                **(self.runtime_profile.default_headers if self.runtime_profile else {}),
             },
         )
         with urllib.request.urlopen(request, timeout=120) as response:

@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from demiurge.app import load_host_config
+from demiurge.app import load_host_config, resolve_host_provider_profile
 from demiurge.core import AgentFallbackConfig, CoreLoadError, CoreLoader, LoadedCore
 from demiurge.env_file import load_runtime_env
 from demiurge.storage import VersionStore
@@ -361,7 +361,11 @@ class DoctorRuntime:
                 )
             )
             return
-        for provider_id, profile in sorted(host_config.providers.profiles.items()):
+        for provider_id in sorted({*host_config.providers.builtin, *host_config.providers.custom}):
+            try:
+                profile = resolve_host_provider_profile(host_config, provider_id)
+            except ValueError:
+                continue
             if profile.api_key or not profile.api_key_env or os.environ.get(profile.api_key_env):
                 continue
             report.findings.append(

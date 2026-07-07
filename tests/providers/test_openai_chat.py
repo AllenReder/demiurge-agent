@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from demiurge.providers import LLMMessage, LLMRequest, OpenAIChatTransport, ToolCall, ToolDefinition
+from demiurge.providers.profiles import get_builtin_provider_profile
 
 
 def test_openai_chat_transport_serializes_messages_tools_and_tool_results():
@@ -110,3 +111,38 @@ def test_openai_chat_transport_keeps_malformed_tool_arguments_as_raw_text():
     normalized = transport.normalize_response(response)
 
     assert normalized.tool_calls == [ToolCall(id="call_1", name="broken", arguments={"_raw": "{not-json"})]
+
+
+def test_openai_chat_transport_adds_deepseek_thinking_for_reasoning_models():
+    profile = get_builtin_provider_profile("deepseek")
+    transport = OpenAIChatTransport(runtime_profile=profile, base_url=profile.base_url)
+    for model in ("deepseek-v4-pro", "deepseek-reasoner"):
+        request = LLMRequest(model=model, messages=[LLMMessage(role="user", content="Hi")])
+
+        payload = transport.build_payload(request)
+
+        assert payload["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_openai_chat_transport_leaves_deepseek_v3_payload_unchanged():
+    profile = get_builtin_provider_profile("deepseek")
+    transport = OpenAIChatTransport(runtime_profile=profile, base_url=profile.base_url)
+    request = LLMRequest(model="deepseek-chat", messages=[LLMMessage(role="user", content="Hi")])
+
+    payload = transport.build_payload(request)
+
+    assert "extra_body" not in payload
+
+
+def test_openai_chat_transport_metadata_max_tokens_wins_over_profile_default():
+    profile = get_builtin_provider_profile("moonshot")
+    transport = OpenAIChatTransport(runtime_profile=profile, base_url=profile.base_url)
+    request = LLMRequest(
+        model="kimi-k2.7-code",
+        messages=[LLMMessage(role="user", content="Hi")],
+        metadata={"max_tokens": 2048},
+    )
+
+    payload = transport.build_payload(request)
+
+    assert payload["max_tokens"] == 2048

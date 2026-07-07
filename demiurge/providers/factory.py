@@ -16,7 +16,17 @@ def create_provider_from_config(
     if config.provider_id == "fake" or config.api_mode == "fake":
         return FakeProvider(fake_script), "fake"
     if config.api_mode == "openai-chat":
-        return OpenAIChatProvider(api_key=config.api_key, base_url=config.base_url), config.provider_id
+        return (
+            OpenAIChatProvider(api_key=config.api_key, base_url=config.base_url, runtime_profile=config.runtime_profile),
+            config.provider_id,
+        )
     if config.api_mode == "anthropic-messages":
-        return AnthropicMessagesProvider(api_key=config.api_key, base_url=config.base_url), config.provider_id
+        return (
+            AnthropicMessagesProvider(
+                api_key=config.api_key,
+                base_url=config.base_url,
+                runtime_profile=config.runtime_profile,
+            ),
+            config.provider_id,
+        )
     raise ValueError(f"unknown provider api_mode: {config.api_mode}")

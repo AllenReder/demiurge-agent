@@ -99,9 +99,9 @@ agent edits remain; save or discard them first.
 uv run demiurge setup status
 uv run demiurge setup providers list
 uv run demiurge setup providers add openai --preset openai --set-default
-uv run demiurge setup providers edit openai --base-url https://api.openai.com/v1
-uv run demiurge setup providers add anthropic --api-mode anthropic-messages --base-url https://api.anthropic.com/v1
-uv run demiurge setup providers remove openai
+uv run demiurge setup providers edit openai --base-url https://proxy.example.test/v1
+uv run demiurge setup providers add local-anthropic --api-mode anthropic-messages --base-url https://llm.example.test/v1
+uv run demiurge setup providers remove local-anthropic
 uv run demiurge setup providers set-default openai
 uv run demiurge setup providers test openai --model <model-name>
 uv run demiurge setup model set --core assistant --provider openai --model <model-name>

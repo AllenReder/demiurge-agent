@@ -13,9 +13,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from demiurge.app import (
+    HostBuiltinProviderOverride,
     HostConfig,
+    HostCustomProviderProfile,
     HostProvidersConfig,
-    HostProviderProfile,
+    ResolvedHostProviderProfile,
     create_provider,
     ensure_runtime_defaults,
     load_agent_fallback,
@@ -35,6 +37,7 @@ from demiurge.gates import GateResult, GateRunner
 from demiurge.package_wizard import PromptToolkitPackagePrompt, SelectChoice
 from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, ProviderPreset, get_provider_preset
 from demiurge.providers import LLMMessage, LLMRequest
+from demiurge.providers.profiles import get_builtin_provider_profile, is_builtin_provider
 from demiurge.runtime_timezone import resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.util import default_home
@@ -158,23 +161,34 @@ class SetupWizard:
 
     def _add_provider(self) -> None:
         choices = [
-            SelectChoice(preset.preset_id, preset.label, preset.base_url) for preset in BUILTIN_PROVIDER_PRESETS
+            SelectChoice(preset.preset_id, preset.label, "Built-in provider") for preset in BUILTIN_PROVIDER_PRESETS
         ]
         choices.append(SelectChoice("custom", "Custom", "Any OpenAI Chat-compatible endpoint"))
         preset_id = self.prompt.select("Provider preset", choices)
         preset = get_provider_preset(preset_id)
-        default_id = preset.preset_id if preset else "custom"
-        provider_id = _normalize_setup_provider_id(self.prompt.input("Profile id", default=default_id))
-        default_base_url = preset.base_url if preset else "http://localhost:11434/v1"
-        default_env = preset.api_key_env if preset else f"{provider_id.upper().replace('-', '_')}_API_KEY"
-        api_mode = preset.api_mode if preset else "openai-chat"
-        base_url = self.prompt.input("Base URL", default=default_base_url).strip()
-        api_key_env = self.prompt.input("API key environment variable", default=default_env).strip()
+        if preset:
+            provider_id = preset.preset_id
+            runtime_profile = preset.runtime_profile
+            default_env = runtime_profile.env_vars[0] if runtime_profile.env_vars else ""
+            base_url = None
+            api_key_env = default_env
+        else:
+            provider_id = _normalize_setup_provider_id(self.prompt.input("Profile id", default="custom"))
+            default_env = f"{provider_id.upper().replace('-', '_')}_API_KEY"
+            base_url = self.prompt.input("Base URL", default="http://localhost:11434/v1").strip()
+            api_key_env = self.prompt.input("API key environment variable", default=default_env).strip()
         api_key = self.prompt.input("API key", secret=True).strip()
+        if preset:
+            profile = HostBuiltinProviderOverride()
+        else:
+            profile = HostCustomProviderProfile(
+                base_url=base_url or "",
+                api_key_env=api_key_env or None,
+            )
         write_provider_profile(
             self.context,
             provider_id=provider_id,
-            profile=HostProviderProfile(api_mode=api_mode, base_url=base_url, api_key_env=api_key_env or None),
+            profile=profile,
             set_default=self.prompt.confirm(f"Use {provider_id} as default provider?", default=False),
         )
         if api_key and api_key_env:
@@ -279,19 +293,26 @@ def setup_status(context: SetupContext, *, core_id: str | None = None, timezone_
 
 def provider_profiles_dict(host_config: HostConfig) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
-    for provider_id, profile in sorted(host_config.providers.profiles.items()):
+    for preset in BUILTIN_PROVIDER_PRESETS:
+        profile = resolve_host_provider_profile(host_config, preset.preset_id)
+        result[preset.preset_id] = provider_profile_dict(profile)
+    for provider_id in sorted(host_config.providers.custom):
+        profile = resolve_host_provider_profile(host_config, provider_id)
         result[provider_id] = provider_profile_dict(profile)
     return result
 
 
-def provider_profile_dict(profile: HostProviderProfile) -> dict[str, object]:
-    _, resolved_source = resolve_profile_api_key(profile, provider_id="profile")
+def provider_profile_dict(profile: ResolvedHostProviderProfile) -> dict[str, object]:
+    _, resolved_source = resolve_profile_api_key(profile, provider_id=profile.provider_id)
     api_key_source = resolved_source
     if not api_key_source and profile.api_key_env:
         api_key_source = f"env:{profile.api_key_env} (missing)"
     return {
+        "type": profile.profile_kind,
         "api_mode": profile.api_mode,
+        "api_mode_source": profile.api_mode_source,
         "base_url": profile.base_url,
+        "base_url_source": profile.base_url_source,
         "api_key_env": profile.api_key_env,
         "api_key": "<redacted>" if profile.api_key else None,
         "api_key_source": api_key_source or "not configured",
@@ -299,27 +320,38 @@ def provider_profile_dict(profile: HostProviderProfile) -> dict[str, object]:
 
 
 def provider_profile_ids(host_config: HostConfig) -> list[str]:
-    ids = sorted(host_config.providers.profiles)
-    return ids or [preset.preset_id for preset in BUILTIN_PROVIDER_PRESETS]
+    return sorted({*(preset.preset_id for preset in BUILTIN_PROVIDER_PRESETS), *host_config.providers.custom})
 
 
 def write_provider_profile(
     context: SetupContext,
     *,
     provider_id: str,
-    profile: HostProviderProfile,
+    profile: HostBuiltinProviderOverride | HostCustomProviderProfile,
     set_default: bool = False,
 ) -> dict[str, object]:
     provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
-    profiles = dict(host_config.providers.profiles)
-    profiles[provider_id] = profile
-    host_config.providers = HostProvidersConfig(default=host_config.providers.default, profiles=profiles)
+    builtin = dict(host_config.providers.builtin)
+    custom = dict(host_config.providers.custom)
+    if is_builtin_provider(provider_id):
+        if not isinstance(profile, HostBuiltinProviderOverride):
+            raise SystemExit(f"builtin provider `{provider_id}` cannot be written as a custom provider")
+        if _has_builtin_override(profile):
+            builtin[provider_id] = profile
+        else:
+            builtin.pop(provider_id, None)
+    else:
+        if isinstance(profile, HostBuiltinProviderOverride):
+            raise SystemExit(f"custom provider `{provider_id}` requires --base-url")
+        custom[provider_id] = profile
+    host_config.providers = HostProvidersConfig(default=host_config.providers.default, builtin=builtin, custom=custom)
     if set_default:
         host_config.providers.default = provider_id
     write_host_config(context.host_config_path, host_config)
     context.host_config = host_config
-    return {"provider": provider_id, "profile": provider_profile_dict(profile), "default": host_config.providers.default}
+    resolved = resolve_host_provider_profile(host_config, provider_id)
+    return {"provider": provider_id, "profile": provider_profile_dict(resolved), "default": host_config.providers.default}
 
 
 def set_default_provider(context: SetupContext, provider_id: str) -> dict[str, object]:
@@ -357,11 +389,15 @@ def clear_runtime_timezone(context: SetupContext) -> dict[str, object]:
 def remove_provider_profile(context: SetupContext, provider_id: str) -> dict[str, object]:
     provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
-    if provider_id not in host_config.providers.profiles:
+    builtin = dict(host_config.providers.builtin)
+    custom = dict(host_config.providers.custom)
+    if provider_id in builtin:
+        builtin.pop(provider_id)
+    elif provider_id in custom:
+        custom.pop(provider_id)
+    else:
         raise SystemExit(f"provider profile not found: {provider_id}")
-    profiles = dict(host_config.providers.profiles)
-    profiles.pop(provider_id)
-    host_config.providers.profiles = profiles
+    host_config.providers = HostProvidersConfig(default=host_config.providers.default, builtin=builtin, custom=custom)
     if host_config.providers.default == provider_id:
         host_config.providers.default = None
     write_host_config(context.host_config_path, host_config)
@@ -415,25 +451,35 @@ def _gate_failure_summary(gates: GateResult) -> str:
     return "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
 
 
-def provider_profile_from_args(args: argparse.Namespace, *, existing: HostProviderProfile | None = None) -> HostProviderProfile:
+def provider_profile_from_args(
+    args: argparse.Namespace,
+    *,
+    provider_id: str,
+    existing_builtin: HostBuiltinProviderOverride | None = None,
+    existing_custom: HostCustomProviderProfile | None = None,
+) -> HostBuiltinProviderOverride | HostCustomProviderProfile:
     preset = get_provider_preset(args.preset) if getattr(args, "preset", None) else None
-    base_url = args.base_url or (preset.base_url if preset else None) or (existing.base_url if existing else None)
+    if preset and preset.preset_id != provider_id:
+        raise SystemExit("--preset must match the builtin provider id")
+    if preset or is_builtin_provider(provider_id):
+        if getattr(args, "api_mode", None):
+            raise SystemExit("--api-mode is only supported for custom provider profiles")
+        if args.api_key_env is not None:
+            raise SystemExit("--api-key-env is only supported for custom provider profiles")
+        if args.api_key and not args.write_env:
+            raise SystemExit("--api-key for builtin providers requires --write-env")
+        base_url = args.base_url if args.base_url is not None else (existing_builtin.base_url if existing_builtin else None)
+        return HostBuiltinProviderOverride(base_url=base_url)
+
+    base_url = args.base_url or (existing_custom.base_url if existing_custom else None)
     if not base_url:
         raise SystemExit("--base-url is required for custom provider profiles")
-    api_mode = getattr(args, "api_mode", None) or (preset.api_mode if preset else None)
-    if api_mode is None and existing is not None:
-        api_mode = existing.api_mode
-    api_mode = api_mode or "openai-chat"
-    api_key_env = args.api_key_env if args.api_key_env is not None else (preset.api_key_env if preset else None)
-    if api_key_env is None and existing is not None:
-        api_key_env = existing.api_key_env
-    api_key = args.api_key if args.api_key is not None else (existing.api_key if existing else None)
-    return HostProviderProfile(
-        api_mode=api_mode,
-        base_url=base_url,
-        api_key_env=api_key_env,
-        api_key=api_key,
+    api_mode = getattr(args, "api_mode", None) or (existing_custom.api_mode if existing_custom else "openai-chat")
+    api_key_env = args.api_key_env if args.api_key_env is not None else (
+        existing_custom.api_key_env if existing_custom else None
     )
+    api_key = args.api_key if args.api_key is not None else (existing_custom.api_key if existing_custom else None)
+    return HostCustomProviderProfile(api_mode=api_mode, base_url=base_url, api_key_env=api_key_env, api_key=api_key)
 
 
 def _handle_provider_command(context: SetupContext, args: argparse.Namespace) -> None:
@@ -444,21 +490,24 @@ def _handle_provider_command(context: SetupContext, args: argparse.Namespace) ->
         return
     if args.provider_command == "show":
         provider_id = _normalize_setup_provider_id(args.provider_id)
-        profile, _ = resolve_host_provider_profile(host_config, provider_id)
+        profile = resolve_host_provider_profile(host_config, provider_id)
         _print_result({"provider": provider_id, "profile": provider_profile_dict(profile)}, as_json=args.json)
         return
     if args.provider_command in {"add", "edit"}:
         provider_id = _normalize_setup_provider_id(args.provider_id)
-        existing_profile = None
-        if args.provider_command == "edit":
-            try:
-                existing_profile = resolve_host_provider_profile(host_config, provider_id)[0]
-            except ValueError:
-                existing_profile = None
-        profile = provider_profile_from_args(args, existing=existing_profile)
-        if args.api_key and args.api_key_env and args.write_env:
-            profile.api_key = None
-            upsert_env_value(runtime_env_path(context.home), args.api_key_env, args.api_key)
+        existing_builtin = host_config.providers.builtin.get(provider_id)
+        existing_custom = host_config.providers.custom.get(provider_id)
+        profile = provider_profile_from_args(
+            args,
+            provider_id=provider_id,
+            existing_builtin=existing_builtin,
+            existing_custom=existing_custom,
+        )
+        write_env_name = _write_env_name_for_provider(provider_id, args)
+        if args.api_key and write_env_name and args.write_env:
+            if hasattr(profile, "api_key"):
+                profile.api_key = None
+            upsert_env_value(runtime_env_path(context.home), write_env_name, args.api_key)
             load_runtime_env(context.home)
         data = write_provider_profile(context, provider_id=provider_id, profile=profile, set_default=args.set_default)
         _print_result(data, as_json=args.json)
@@ -495,7 +544,7 @@ def _handle_timezone_command(context: SetupContext, args: argparse.Namespace) ->
 def _test_provider(context: SetupContext, provider_id: str, *, model: str | None = None) -> dict[str, object]:
     provider_id = _normalize_setup_provider_id(provider_id)
     host_config = load_host_config(context.host_config_path)[0]
-    profile, _ = resolve_host_provider_profile(host_config, provider_id)
+    profile = resolve_host_provider_profile(host_config, provider_id)
     preset = get_provider_preset(provider_id)
     test_model = model or _suggested_model_for_provider(provider_id, preset=preset) or "provider-test"
     provider_config = resolve_provider_config(
@@ -524,6 +573,19 @@ def _normalize_setup_provider_id(value: str | None) -> str:
         return normalize_provider_profile_id(value)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
+
+
+def _has_builtin_override(profile: HostBuiltinProviderOverride) -> bool:
+    return bool(profile.base_url)
+
+
+def _write_env_name_for_provider(provider_id: str, args: argparse.Namespace) -> str | None:
+    if not args.write_env:
+        return None
+    if is_builtin_provider(provider_id):
+        profile = get_builtin_provider_profile(provider_id)
+        return profile.env_vars[0] if profile and profile.env_vars else None
+    return args.api_key_env
 
 
 def _suggested_model_for_provider(provider_id: str, *, preset: ProviderPreset | None) -> str | None:

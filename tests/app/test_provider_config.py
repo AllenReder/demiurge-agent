@@ -2,11 +2,11 @@ import pytest
 
 from demiurge.app import (
     HostConfig,
-    HostProviderProfile,
     create_app,
     create_provider,
     resolve_model_name,
     resolve_model_options,
+    resolve_host_provider_profile,
     resolve_profile_api_key,
     resolve_provider_config,
     resolve_tool_display,
@@ -19,28 +19,28 @@ def _host_config_with_profile(
     provider_id: str = "deepseek",
     *,
     base_url: str = "https://llm.example.test/v1",
-    api_key_env: str | None = "DEMIURGE_TEST_API_KEY",
+    api_key_env: str | None = "TEST_API_KEY",
     api_key: str | None = None,
     default: str | None = None,
+    custom: bool = False,
     api_mode: str = "openai-chat",
 ) -> HostConfig:
+    section = "custom" if custom else "builtin"
+    profile: dict[str, object | None] = {"base_url": base_url}
+    if custom:
+        profile["api_mode"] = api_mode
+        profile["api_key_env"] = api_key_env
+        profile["api_key"] = api_key
     return HostConfig(
         providers={
             "default": default,
-            "profiles": {
-                provider_id: {
-                    "api_mode": api_mode,
-                    "base_url": base_url,
-                    "api_key_env": api_key_env,
-                    "api_key": api_key,
-                }
-            },
+            section: {provider_id: profile},
         }
     )
 
 
 def test_create_provider_uses_host_profile_base_url_and_key(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     config = _host_config_with_profile()
     resolved = resolve_provider_config(config, ModelInfo(provider="deepseek", model_name="custom-model"))
 
@@ -51,12 +51,13 @@ def test_create_provider_uses_host_profile_base_url_and_key(monkeypatch):
     assert provider.base_url == "https://llm.example.test/v1"
     assert provider.api_key == "test-key"
     assert resolved.api_mode == "openai-chat"
-    assert resolved.api_mode_source == "config.yaml:providers.profiles.deepseek.api_mode"
-    assert resolved.api_key_source == "env:DEMIURGE_TEST_API_KEY"
+    assert resolved.api_mode_source == "builtin:deepseek.api_mode"
+    assert resolved.base_url_source == "config.yaml:providers.builtin.deepseek.base_url"
+    assert resolved.api_key_source == "env:DEEPSEEK_API_KEY"
 
 
 def test_cli_provider_choice_overrides_core_provider(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     config = _host_config_with_profile()
     resolved = resolve_provider_config(config, ModelInfo(provider="deepseek"), override="fake")
 
@@ -67,7 +68,7 @@ def test_cli_provider_choice_overrides_core_provider(monkeypatch):
 
 
 def test_host_default_provider_is_used_when_core_provider_is_auto(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     config = _host_config_with_profile(default="deepseek")
     resolved = resolve_provider_config(config, ModelInfo(provider="auto"))
 
@@ -99,10 +100,11 @@ def test_builtin_provider_profile_can_be_selected_with_standard_env(monkeypatch)
 
 
 def test_anthropic_provider_profile_selects_messages_api_mode(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "test-key")
+    monkeypatch.setenv("TEST_API_KEY", "test-key")
     config = _host_config_with_profile(
         provider_id="claude",
         base_url="https://api.anthropic.com/v1",
+        custom=True,
         api_mode="anthropic-messages",
     )
     resolved = resolve_provider_config(config, ModelInfo(provider="claude", model_name="claude-test"))
@@ -127,23 +129,67 @@ def test_builtin_anthropic_preset_uses_messages_api_mode(monkeypatch):
     assert resolved.api_mode == "anthropic-messages"
 
 
+def test_builtin_minimax_uses_anthropic_messages_route(monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", "minimax-key")
+    resolved = resolve_provider_config(HostConfig(), ModelInfo(provider="minimax"))
+
+    provider, name = create_provider(provider_config=resolved)
+
+    assert name == "minimax"
+    assert isinstance(provider, AnthropicMessagesProvider)
+    assert provider.endpoint == "https://api.minimax.io/anthropic/messages"
+    assert resolved.api_mode == "anthropic-messages"
+    assert resolved.base_url_source == "builtin:minimax.base_url"
+
+
+def test_builtin_provider_rejects_api_mode_override():
+    with pytest.raises(ValueError, match="api_mode"):
+        HostConfig(
+            providers={
+                "builtin": {
+                    "deepseek": {
+                        "api_mode": "anthropic-messages",
+                    }
+                }
+            }
+        )
+
+
+def test_builtin_provider_rejects_secret_overrides():
+    with pytest.raises(ValueError, match="api_key_env"):
+        HostConfig(providers={"builtin": {"deepseek": {"api_key_env": "DEEPSEEK_PROXY_API_KEY"}}})
+    with pytest.raises(ValueError, match="api_key"):
+        HostConfig(providers={"builtin": {"deepseek": {"api_key": "secret"}}})
+
+
+def test_unknown_provider_id_is_not_treated_as_custom():
+    with pytest.raises(ValueError, match="unknown provider profile"):
+        resolve_provider_config(HostConfig(), ModelInfo(provider="typo-provider"))
+
+
 def test_env_api_key_wins_over_direct_api_key(monkeypatch):
-    profile = HostProviderProfile(
+    config = _host_config_with_profile(
+        provider_id="custom-one",
         base_url="https://direct.example.test/v1",
-        api_key_env="DEMIURGE_TEST_API_KEY",
+        api_key_env="TEST_API_KEY",
         api_key="direct-key",
+        custom=True,
     )
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "env-key")
+    profile = resolve_host_provider_profile(config, "custom-one")
+    monkeypatch.setenv("TEST_API_KEY", "env-key")
 
-    assert resolve_profile_api_key(profile, provider_id="test") == ("env-key", "env:DEMIURGE_TEST_API_KEY")
+    assert resolve_profile_api_key(profile, provider_id="test") == ("env-key", "env:TEST_API_KEY")
 
-    monkeypatch.delenv("DEMIURGE_TEST_API_KEY", raising=False)
-    assert resolve_profile_api_key(profile, provider_id="test") == ("direct-key", "config.yaml:providers.profile.api_key")
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+    assert resolve_profile_api_key(profile, provider_id="test") == (
+        "direct-key",
+        "config.yaml:providers.custom.custom-one.api_key",
+    )
 
 
 def test_cli_api_key_override_wins_over_profile_values(monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "env-key")
-    config = _host_config_with_profile(api_key="direct-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "env-key")
+    config = _host_config_with_profile()
     resolved = resolve_provider_config(
         config,
         ModelInfo(provider="deepseek"),
@@ -195,17 +241,16 @@ def test_tool_display_rejects_invalid_config_value():
 
 
 def test_create_app_loads_runtime_env_file_over_shell_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEMIURGE_TEST_API_KEY", "shell-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "shell-key")
     home = tmp_path / "home"
     home.mkdir()
-    (home / ".env").write_text('DEMIURGE_TEST_API_KEY="file-key"\n', encoding="utf-8")
+    (home / ".env").write_text('DEEPSEEK_API_KEY="file-key"\n', encoding="utf-8")
     (home / "config.yaml").write_text(
         "providers:\n"
         "  default: deepseek\n"
-        "  profiles:\n"
+        "  builtin:\n"
         "    deepseek:\n"
-        "      base_url: https://env.example.test/v1\n"
-        "      api_key_env: DEMIURGE_TEST_API_KEY\n",
+        "      base_url: https://env.example.test/v1\n",
         encoding="utf-8",
     )
 
@@ -213,6 +258,6 @@ def test_create_app_loads_runtime_env_file_over_shell_env(tmp_path, monkeypatch)
 
     assert app.provider_name == "deepseek"
     assert app.base_url == "https://env.example.test/v1"
-    assert app.api_key_source == "env:DEMIURGE_TEST_API_KEY"
+    assert app.api_key_source == "env:DEEPSEEK_API_KEY"
     assert isinstance(app.runner.provider, OpenAIChatProvider)
     assert app.runner.provider.api_key == "file-key"

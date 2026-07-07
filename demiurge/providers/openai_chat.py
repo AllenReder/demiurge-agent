@@ -3,18 +3,56 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from demiurge.providers.profiles import ProviderRuntimeProfile
 from demiurge.providers.types import LLMMessage, LLMRequest, LLMResponse, ToolCall, ToolDefinition
 
 
 class OpenAIChatTransport:
     api_mode = "openai-chat"
 
+    def __init__(
+        self,
+        *,
+        runtime_profile: ProviderRuntimeProfile | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        self.runtime_profile = runtime_profile
+        self.base_url = base_url
+
     def build_payload(self, request: LLMRequest) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": request.model,
             "messages": [self.to_message(message) for message in request.messages],
             "tools": [self.to_tool(tool) for tool in request.tools] or None,
         }
+        if self.runtime_profile is None:
+            return payload
+
+        request_max_tokens = request.metadata.get("max_tokens") or request.metadata.get("max_output_tokens")
+        if _positive_int(request_max_tokens):
+            payload["max_tokens"] = request_max_tokens
+        elif self.runtime_profile.default_max_tokens:
+            payload["max_tokens"] = self.runtime_profile.default_max_tokens
+
+        extras = self.runtime_profile.build_request_extras(request, base_url=self.base_url)
+        top_level_kwargs = dict(extras.top_level_kwargs)
+        top_level_extra_body = top_level_kwargs.pop("extra_body", None)
+        top_level_extra_headers = top_level_kwargs.pop("extra_headers", None)
+        if extras.extra_body or isinstance(top_level_extra_body, dict):
+            payload["extra_body"] = {
+                **dict(payload.get("extra_body") or {}),
+                **extras.extra_body,
+                **(top_level_extra_body if isinstance(top_level_extra_body, dict) else {}),
+            }
+        headers = {
+            **self.runtime_profile.default_headers,
+            **extras.extra_headers,
+            **(top_level_extra_headers if isinstance(top_level_extra_headers, dict) else {}),
+        }
+        if headers:
+            payload["extra_headers"] = {**dict(payload.get("extra_headers") or {}), **headers}
+        payload.update(top_level_kwargs)
+        return payload
 
     def normalize_response(self, response: Any) -> LLMResponse:
         raw = _response_dump(response)
@@ -81,10 +119,12 @@ class OpenAIChatProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         transport: OpenAIChatTransport | None = None,
+        runtime_profile: ProviderRuntimeProfile | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url
-        self.transport = transport or OpenAIChatTransport()
+        self.runtime_profile = runtime_profile
+        self.transport = transport or OpenAIChatTransport(runtime_profile=runtime_profile, base_url=base_url)
         if not self.api_key:
             raise RuntimeError("API key is required for the OpenAI Chat provider")
 
@@ -114,3 +154,7 @@ def _value(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(key, default)
     return getattr(item, key, default)
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and value > 0
