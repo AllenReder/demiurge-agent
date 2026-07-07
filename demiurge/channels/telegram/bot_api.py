@@ -55,6 +55,26 @@ class TelegramBotApi:
         result = data.get("result", [])
         return result if isinstance(result, list) else []
 
+    def get_file(self, file_id: str) -> dict[str, Any]:
+        data = self._request("getFile", {"file_id": file_id}, retry_policy="safe")
+        result = data.get("result", {})
+        return result if isinstance(result, dict) else {}
+
+    def download_file(self, file_path: str, *, timeout: int | float = 30) -> bytes:
+        path = urllib.parse.quote(file_path.lstrip("/"), safe="/")
+        request = urllib.request.Request(f"{self.base_url}/file/bot{self.token}/{path}", method="GET")
+        try:
+            response = self._urlopen_with_retry(
+                request,
+                timeout,
+                method="downloadFile",
+                retry_policy="safe",
+            )
+        except urllib.error.HTTPError as exc:
+            raise self._api_error_from_http_error("downloadFile", exc) from exc
+        with response:
+            return response.read()
+
     def delete_webhook(self, *, drop_pending_updates: bool = False) -> dict[str, Any]:
         return self._request(
             "deleteWebhook",
