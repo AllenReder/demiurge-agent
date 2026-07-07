@@ -1752,7 +1752,8 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     assert api.callbacks == [
         {"callback_query_id": "cb_approval", "text": "Approved." if expected != "deny" else "Denied."}
     ]
-    assert api.edits
+    await _wait_until(lambda: bool(api.edits))
+    await _wait_until(lambda: bool(api.reply_markup_edits))
     edited = api.edits[-1]
     assert edited["message_id"] == 1000
     assert edited["reply_markup"] is None
