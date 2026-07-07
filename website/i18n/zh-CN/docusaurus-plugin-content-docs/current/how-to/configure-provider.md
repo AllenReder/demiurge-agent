@@ -36,23 +36,39 @@ uv run demiurge setup status --json
 
 `setup status` 报告 secret sources，不报告 secret values。
 
-## 3. 添加 Provider Profile
+## 3. 添加 Provider
 
 如果你的 provider 匹配 built-in preset，请从该 preset 开始：
 
 ```bash
 uv run demiurge setup providers add <provider-id> \
   --preset <preset-id> \
-  --api-key-env <API_KEY_ENV> \
   --set-default
 ```
 
-如果你的 provider 是自定义 OpenAI-compatible endpoint，请提供 base URL：
+Built-in provider 的标准 base URL、默认环境变量和 wire protocol 都由 Demiurge
+内部 provider profile 拥有。请使用 provider 官方/生态通用的 API key 环境变量，例如
+`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY` 或
+`MINIMAX_API_KEY`；provider request 凭据不会额外加 `DEMIURGE_` 前缀。
+
+只有在有意走代理或区域 endpoint 时，才给 built-in provider 设置 `--base-url`。
+Built-in provider config 没有 `api_key_env`、`api_key` 或 `api_mode` override
+字段：
 
 ```bash
-uv run demiurge setup providers add <provider-id> \
-  --base-url https://<provider-host>/v1 \
-  --api-key-env <API_KEY_ENV> \
+uv run demiurge setup providers edit deepseek \
+  --base-url https://<provider-host>/v1
+```
+
+Built-in provider 不接受 `--api-mode` override。如果需要不同 wire protocol，请配置
+custom provider。Custom provider 必须提供 base URL，并可选择 `openai-chat` 或
+`anthropic-messages`：
+
+```bash
+uv run demiurge setup providers add local-anthropic \
+  --base-url https://llm.example.test/v1 \
+  --api-mode anthropic-messages \
+  --api-key-env LOCAL_ANTHROPIC_API_KEY \
   --set-default
 ```
 
@@ -67,7 +83,7 @@ export <API_KEY_ENV>=<api-key>
 ```bash
 uv run demiurge setup providers add <provider-id> \
   --preset <preset-id> \
-  --api-key "$<API_KEY_ENV>" \
+  --api-key "<api-key>" \
   --write-env \
   --set-default
 ```
@@ -118,6 +134,27 @@ Demiurge 按以下顺序选择 provider：
 
 当你需要区分 runtime 问题和 live provider 问题时，请使用 `--provider fake`。
 
+## Host Config 形状
+
+Provider config 是 host-owned，并且刻意保持 sparse：
+
+```yaml
+providers:
+  default: deepseek
+  builtin:
+    deepseek:
+      base_url: https://proxy.example.test/v1
+  custom:
+    local-openai:
+      base_url: http://localhost:11434/v1
+      api_mode: openai-chat
+      api_key_env: LOCAL_OPENAI_API_KEY
+```
+
+`providers.builtin.<id>` 只能覆盖 `base_url`。`providers.custom.<id>` 必须提供
+`base_url`，并且可以设置 `api_mode`、`api_key_env` 或 `api_key`。旧的
+`providers.profiles` map 不再被该 schema 支持。
+
 ## 常用命令
 
 ```bash
@@ -134,4 +171,6 @@ uv run demiurge setup timezone clear
 
 Provider profiles 是 host-owned configuration。Agent Core 可以在 `agent.yaml`
 中声明 model defaults，但 Agent Slots 不应该直接构造 provider requests 或读取
-secrets。API keys 优先使用环境变量或 `~/.demiurge/.env`。
+secrets。Host 会解析 provider profile，provider transports 会把内部 `LLMRequest`
+转成 provider-native payload，并把 response 归一回 `LLMResponse`。API keys 优先
+使用环境变量或 `~/.demiurge/.env`。

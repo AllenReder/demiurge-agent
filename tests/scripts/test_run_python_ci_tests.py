@@ -61,6 +61,7 @@ def test_pytest_args_rest_shard_covers_remaining_test_directories():
         "tests/core",
         "tests/diagnostics",
         "tests/evolution",
+        "tests/providers",
         "tests/scheduler",
         "tests/scripts",
         "tests/security",

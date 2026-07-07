@@ -11,7 +11,6 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
 from demiurge.env_file import load_runtime_env
-from demiurge.provider_presets import get_provider_preset
 from demiurge.security.approval import ApprovalRuntime
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
@@ -24,7 +23,12 @@ from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInterac
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
-from demiurge.providers import FakeProvider, OpenAICompatibleProvider, Provider
+from demiurge.providers import Provider, ProviderFactoryConfig, create_provider_from_config
+from demiurge.providers.profiles import (
+    ProviderRuntimeProfile,
+    get_builtin_provider_profile,
+    is_builtin_provider,
+)
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
@@ -83,13 +87,47 @@ class HostDebugConfig(BaseModel):
     show_system_prompt: StrictBool = False
 
 
-class HostProviderProfile(BaseModel):
+class HostBuiltinProviderOverride(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    adapter: Literal["openai-compatible"] = "openai-compatible"
+    base_url: str | None = None
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"providers builtin override {info.field_name} must be a string")
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"https?://\S+", value):
+            raise ValueError("providers builtin override base_url must be an http(s) URL")
+        return value.rstrip("/")
+
+
+class HostCustomProviderProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    api_mode: Literal["openai-chat", "anthropic-messages"] = "openai-chat"
     base_url: str
     api_key_env: str | None = None
     api_key: str | None = None
+
+    @field_validator("api_mode", mode="before")
+    @classmethod
+    def _api_mode(cls, value: Any) -> Any:
+        if value is None:
+            return "openai-chat"
+        if not isinstance(value, str):
+            raise ValueError("providers custom profile api_mode must be a string")
+        return value.strip()
 
     @field_validator("base_url", "api_key_env", "api_key", mode="before")
     @classmethod
@@ -97,7 +135,7 @@ class HostProviderProfile(BaseModel):
         if value is None:
             return None if info.field_name != "base_url" else value
         if not isinstance(value, str):
-            raise ValueError(f"providers profile {info.field_name} must be a string")
+            raise ValueError(f"providers custom profile {info.field_name} must be a string")
         normalized = value.strip()
         if not normalized:
             return None if info.field_name != "base_url" else normalized
@@ -107,9 +145,9 @@ class HostProviderProfile(BaseModel):
     @classmethod
     def _base_url(cls, value: str) -> str:
         if not value:
-            raise ValueError("providers profile base_url must not be empty")
+            raise ValueError("providers custom profile base_url must not be empty")
         if not re.fullmatch(r"https?://\S+", value):
-            raise ValueError("providers profile base_url must be an http(s) URL")
+            raise ValueError("providers custom profile base_url must be an http(s) URL")
         return value.rstrip("/")
 
 
@@ -117,7 +155,8 @@ class HostProvidersConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
     default: str | None = None
-    profiles: dict[str, HostProviderProfile] = Field(default_factory=dict)
+    builtin: dict[str, HostBuiltinProviderOverride] = Field(default_factory=dict)
+    custom: dict[str, HostCustomProviderProfile] = Field(default_factory=dict)
 
     @field_validator("default", mode="before")
     @classmethod
@@ -129,11 +168,22 @@ class HostProvidersConfig(BaseModel):
         normalized = value.strip()
         return normalized or None
 
-    @field_validator("profiles")
+    @field_validator("builtin")
     @classmethod
-    def _profiles(cls, value: dict[str, HostProviderProfile]) -> dict[str, HostProviderProfile]:
+    def _builtin(cls, value: dict[str, HostBuiltinProviderOverride]) -> dict[str, HostBuiltinProviderOverride]:
+        for provider_id in value:
+            _validate_provider_id(provider_id)
+            if not is_builtin_provider(provider_id):
+                raise ValueError(f"unknown builtin provider id: {provider_id}")
+        return value
+
+    @field_validator("custom")
+    @classmethod
+    def _custom(cls, value: dict[str, HostCustomProviderProfile]) -> dict[str, HostCustomProviderProfile]:
         for profile_id in value:
             _validate_provider_id(profile_id)
+            if profile_id == "fake" or is_builtin_provider(profile_id):
+                raise ValueError(f"custom provider id cannot shadow builtin provider: {profile_id}")
         return value
 
 
@@ -205,14 +255,32 @@ class HostConfig(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedHostProviderProfile:
+    provider_id: str
+    profile_kind: Literal["builtin", "custom"]
+    profile_source: str
+    runtime_profile: ProviderRuntimeProfile
+    api_mode: str
+    api_mode_source: str
+    base_url: str
+    base_url_source: str
+    api_key_env: str | None
+    api_key_env_source: str | None
+    api_key: str | None
+    api_key_source: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedProviderConfig:
     provider_id: str
     provider_source: str
-    adapter: str
+    api_mode: str
+    api_mode_source: str | None
     base_url: str | None
     base_url_source: str | None
     api_key: str | None
     api_key_source: str | None
+    runtime_profile: ProviderRuntimeProfile | None = None
 
 
 @dataclass(slots=True)
@@ -236,6 +304,7 @@ class DemiurgeApp:
     runner: SessionTurnStepRunner
     provider_name: str
     provider_source: str
+    provider_api_mode: str
     model_name: str
     model_name_source: str
     base_url: str | None
@@ -292,6 +361,7 @@ class DemiurgeApp:
             "workspace": str(self.workspace.root),
             "provider": self.provider_name,
             "provider_source": self.provider_source,
+            "provider_api_mode": self.provider_api_mode,
             "model": self.model_name,
             "model_source": self.model_name_source,
             "base_url": self.base_url,
@@ -655,6 +725,7 @@ def create_app(
         runner=runner,
         provider_name=resolved_provider_name,
         provider_source=provider_config.provider_source,
+        provider_api_mode=provider_config.api_mode,
         model_name=resolved_model,
         model_name_source=resolved_model_source,
         base_url=provider_config.base_url,
@@ -833,7 +904,8 @@ def default_host_config_dict() -> dict[str, object]:
         },
         "providers": {
             "default": None,
-            "profiles": {},
+            "builtin": {},
+            "custom": {},
         },
         "packages": {
             "repositories": {
@@ -878,12 +950,19 @@ def _host_config_sources(raw: dict[str, Any]) -> dict[str, str]:
         raw_section = raw.get(section)
         if isinstance(raw_section, dict) and key in raw_section:
             sources[f"{section}.{key}"] = f"config.yaml:{section}.{key}"
-    raw_profiles = raw.get("providers", {}).get("profiles") if isinstance(raw.get("providers"), dict) else None
-    if isinstance(raw_profiles, dict):
-        for profile_id, profile in raw_profiles.items():
+    raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else None
+    raw_builtin = raw_providers.get("builtin") if isinstance(raw_providers, dict) else None
+    if isinstance(raw_builtin, dict):
+        for provider_id, profile in raw_builtin.items():
             if isinstance(profile, dict):
                 for key in profile:
-                    sources[f"providers.profiles.{profile_id}.{key}"] = f"config.yaml:providers.profiles.{profile_id}.{key}"
+                    sources[f"providers.builtin.{provider_id}.{key}"] = f"config.yaml:providers.builtin.{provider_id}.{key}"
+    raw_custom = raw_providers.get("custom") if isinstance(raw_providers, dict) else None
+    if isinstance(raw_custom, dict):
+        for profile_id, profile in raw_custom.items():
+            if isinstance(profile, dict):
+                for key in profile:
+                    sources[f"providers.custom.{profile_id}.{key}"] = f"config.yaml:providers.custom.{profile_id}.{key}"
     raw_repositories = raw.get("packages", {}).get("repositories") if isinstance(raw.get("packages"), dict) else None
     if isinstance(raw_repositories, dict):
         for alias, repository in raw_repositories.items():
@@ -934,14 +1013,16 @@ def create_provider(
     provider_config: ResolvedProviderConfig,
     fake_script: Path | None = None,
 ) -> tuple[Provider, str]:
-    if provider_config.provider_id == "fake":
-        return FakeProvider(fake_script), "fake"
-    if provider_config.adapter == "openai-compatible":
-        return (
-            OpenAICompatibleProvider(api_key=provider_config.api_key, base_url=provider_config.base_url),
-            provider_config.provider_id,
-        )
-    raise ValueError(f"unknown provider adapter: {provider_config.adapter}")
+    return create_provider_from_config(
+        config=ProviderFactoryConfig(
+            provider_id=provider_config.provider_id,
+            api_mode=provider_config.api_mode,
+            base_url=provider_config.base_url,
+            api_key=provider_config.api_key,
+            runtime_profile=provider_config.runtime_profile,
+        ),
+        fake_script=fake_script,
+    )
 
 
 def resolve_provider_config(
@@ -962,27 +1043,29 @@ def resolve_provider_config(
         return ResolvedProviderConfig(
             provider_id="fake",
             provider_source=provider_source,
-            adapter="fake",
+            api_mode="fake",
+            api_mode_source=None,
             base_url=None,
             base_url_source=None,
             api_key=None,
             api_key_source=None,
         )
-    profile, profile_source = resolve_host_provider_profile(host_config, provider_id)
+    profile = resolve_host_provider_profile(host_config, provider_id)
     api_key, api_key_source = resolve_profile_api_key(
         profile,
         provider_id=provider_id,
-        profile_source=profile_source,
         override=api_key_override,
     )
     return ResolvedProviderConfig(
         provider_id=provider_id,
         provider_source=provider_source,
-        adapter=profile.adapter,
+        api_mode=profile.api_mode,
+        api_mode_source=profile.api_mode_source,
         base_url=profile.base_url,
-        base_url_source=f"{profile_source}.base_url",
+        base_url_source=profile.base_url_source,
         api_key=api_key,
         api_key_source=api_key_source,
+        runtime_profile=profile.runtime_profile,
     )
 
 
@@ -1009,31 +1092,69 @@ def resolve_provider_id(
     return "fake", "default"
 
 
-def resolve_host_provider_profile(host_config: HostConfig, provider_id: str) -> tuple[HostProviderProfile, str]:
+def resolve_host_provider_profile(host_config: HostConfig, provider_id: str) -> ResolvedHostProviderProfile:
     provider_id = _normalize_provider_id(provider_id) or ""
     _validate_provider_id(provider_id)
-    profile = host_config.providers.profiles.get(provider_id)
-    if profile:
-        return profile, f"config.yaml:providers.profiles.{provider_id}"
-    preset = get_provider_preset(provider_id)
-    if preset:
-        return (
-            HostProviderProfile(
-                adapter="openai-compatible",
-                base_url=preset.base_url,
-                api_key_env=preset.api_key_env,
-                api_key=None,
-            ),
-            f"builtin:{provider_id}",
+    runtime_profile = get_builtin_provider_profile(provider_id)
+    if runtime_profile is not None:
+        override = host_config.providers.builtin.get(provider_id)
+        api_key_env = runtime_profile.env_vars[0] if runtime_profile.env_vars else None
+        api_key_env_source = f"builtin:{provider_id}.env_vars[0]" if api_key_env else None
+        base_url = runtime_profile.base_url
+        base_url_source = f"builtin:{provider_id}.base_url"
+        api_key = None
+        api_key_source = None
+        profile_source = f"builtin:{provider_id}"
+        if override is not None:
+            profile_source = f"config.yaml:providers.builtin.{provider_id}"
+            if override.base_url:
+                base_url = override.base_url
+                base_url_source = f"{profile_source}.base_url"
+        return ResolvedHostProviderProfile(
+            provider_id=provider_id,
+            profile_kind="builtin",
+            profile_source=profile_source,
+            runtime_profile=runtime_profile,
+            api_mode=runtime_profile.api_mode,
+            api_mode_source=f"builtin:{provider_id}.api_mode",
+            base_url=base_url,
+            base_url_source=base_url_source,
+            api_key_env=api_key_env,
+            api_key_env_source=api_key_env_source,
+            api_key=api_key,
+            api_key_source=api_key_source,
+        )
+    custom = host_config.providers.custom.get(provider_id)
+    if custom is not None:
+        profile_source = f"config.yaml:providers.custom.{provider_id}"
+        runtime_profile = ProviderRuntimeProfile(
+            provider_id=provider_id,
+            display_name=provider_id,
+            api_mode=custom.api_mode,
+            base_url=custom.base_url,
+            env_vars=(custom.api_key_env,) if custom.api_key_env else (),
+        )
+        return ResolvedHostProviderProfile(
+            provider_id=provider_id,
+            profile_kind="custom",
+            profile_source=profile_source,
+            runtime_profile=runtime_profile,
+            api_mode=custom.api_mode,
+            api_mode_source=f"{profile_source}.api_mode",
+            base_url=custom.base_url,
+            base_url_source=f"{profile_source}.base_url",
+            api_key_env=custom.api_key_env,
+            api_key_env_source=f"{profile_source}.api_key_env" if custom.api_key_env else None,
+            api_key=custom.api_key,
+            api_key_source=f"{profile_source}.api_key" if custom.api_key else None,
         )
     raise ValueError(f"unknown provider profile: {provider_id}")
 
 
 def resolve_profile_api_key(
-    profile: HostProviderProfile,
+    profile: ResolvedHostProviderProfile,
     *,
     provider_id: str,
-    profile_source: str = "config.yaml:providers.profile",
     override: str | None = None,
 ) -> tuple[str | None, str | None]:
     if override:
@@ -1043,7 +1164,7 @@ def resolve_profile_api_key(
         if value:
             return value, f"env:{profile.api_key_env}"
     if profile.api_key:
-        return profile.api_key, f"{profile_source}.api_key"
+        return profile.api_key, profile.api_key_source or f"{profile.profile_source}.api_key"
     return None, None
 
 

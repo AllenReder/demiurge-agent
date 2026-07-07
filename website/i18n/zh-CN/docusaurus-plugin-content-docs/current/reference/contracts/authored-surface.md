@@ -78,6 +78,8 @@ Agent Core authors 可以编辑：
 Agent Core authors 不得接管：
 
 - provider request construction
+- provider profile resolution、provider-native request construction 和
+  provider wire protocol conversion
 - provider calls
 - session、turn、step、message、artifact 和 runtime event storage
 - tool registry and dispatch

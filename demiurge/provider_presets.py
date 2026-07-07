@@ -2,81 +2,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from demiurge.providers.profiles import BUILTIN_PROVIDER_PROFILES, ProviderRuntimeProfile, get_builtin_provider_profile
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderPreset:
     preset_id: str
     label: str
-    base_url: str
-    api_key_env: str
     suggested_model: str | None
-    adapter: str = "openai-compatible"
+
+    @property
+    def runtime_profile(self) -> ProviderRuntimeProfile:
+        profile = get_builtin_provider_profile(self.preset_id)
+        if profile is None:
+            raise KeyError(self.preset_id)
+        return profile
 
 
-BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
+BUILTIN_PROVIDER_PRESETS: tuple[ProviderPreset, ...] = tuple(
     ProviderPreset(
-        preset_id="openai",
-        label="OpenAI",
-        base_url="https://api.openai.com/v1",
-        api_key_env="OPENAI_API_KEY",
-        suggested_model="gpt-5.5",
-    ),
-    ProviderPreset(
-        preset_id="deepseek",
-        label="DeepSeek",
-        base_url="https://api.deepseek.com",
-        api_key_env="DEEPSEEK_API_KEY",
-        suggested_model="deepseek-v4-pro",
-    ),
-    ProviderPreset(
-        preset_id="moonshot",
-        label="Kimi/Moonshot",
-        base_url="https://api.moonshot.ai/v1",
-        api_key_env="MOONSHOT_API_KEY",
-        suggested_model="kimi-k2.7-code",
-    ),
-    ProviderPreset(
-        preset_id="minimax",
-        label="MiniMax",
-        base_url="https://api.minimax.io/v1",
-        api_key_env="MINIMAX_API_KEY",
-        suggested_model="MiniMax-M3",
-    ),
-    ProviderPreset(
-        preset_id="minimax-cn",
-        label="MiniMax-CN",
-        base_url="https://api.minimaxi.com/v1",
-        api_key_env="MINIMAX_CN_API_KEY",
-        suggested_model="MiniMax-M3",
-    ),
-    ProviderPreset(
-        preset_id="dashscope",
-        label="Alibaba DashScope/百炼",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        api_key_env="DASHSCOPE_API_KEY",
-        suggested_model="qwen3.7-max",
-    ),
-    ProviderPreset(
-        preset_id="zai",
-        label="Zhipu/Z.ai",
-        base_url="https://api.z.ai/api/paas/v4",
-        api_key_env="ZAI_API_KEY",
-        suggested_model="glm-5.2",
-    ),
-    ProviderPreset(
-        preset_id="siliconflow",
-        label="SiliconFlow",
-        base_url="https://api.siliconflow.cn/v1",
-        api_key_env="SILICONFLOW_API_KEY",
-        suggested_model=None,
-    ),
-    ProviderPreset(
-        preset_id="openrouter",
-        label="OpenRouter",
-        base_url="https://openrouter.ai/api/v1",
-        api_key_env="OPENROUTER_API_KEY",
-        suggested_model="openai/gpt-5.5",
-    ),
+        preset_id=profile.provider_id,
+        label=profile.display_name,
+        suggested_model=profile.suggested_model,
+    )
+    for profile in BUILTIN_PROVIDER_PROFILES
 )
 
 BUILTIN_PROVIDER_PRESETS_BY_ID = {preset.preset_id: preset for preset in BUILTIN_PROVIDER_PRESETS}

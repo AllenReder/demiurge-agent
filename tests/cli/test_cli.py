@@ -261,10 +261,104 @@ def test_setup_provider_add_writes_host_config(tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert '"provider": "deepseek"' in output
+    assert '"base_url_source": "builtin:deepseek.base_url"' in output
     raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert raw["providers"]["default"] == "deepseek"
-    assert raw["providers"]["profiles"]["deepseek"]["base_url"] == "https://api.deepseek.com"
-    assert raw["providers"]["profiles"]["deepseek"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert raw["providers"]["builtin"] == {}
+    assert raw["providers"]["custom"] == {}
+
+
+def test_setup_provider_add_accepts_explicit_api_mode_for_custom_provider(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "claude",
+            "--api-mode",
+            "anthropic-messages",
+            "--base-url",
+            "https://api.anthropic.com/v1",
+            "--api-key-env",
+            "ANTHROPIC_API_KEY",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert '"api_mode": "anthropic-messages"' in output
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["custom"]["claude"]["api_mode"] == "anthropic-messages"
+
+
+def test_setup_provider_add_rejects_builtin_api_mode_override(tmp_path):
+    home = tmp_path / "home"
+
+    with pytest.raises(SystemExit, match="--api-mode is only supported for custom provider profiles"):
+        cli.main(
+            [
+                "--home",
+                str(home),
+                "setup",
+                "providers",
+                "add",
+                "deepseek",
+                "--preset",
+                "deepseek",
+                "--api-mode",
+                "anthropic-messages",
+            ]
+        )
+
+
+def test_setup_provider_add_rejects_builtin_secret_env_override(tmp_path):
+    home = tmp_path / "home"
+
+    with pytest.raises(SystemExit, match="--api-key-env is only supported for custom provider profiles"):
+        cli.main(
+            [
+                "--home",
+                str(home),
+                "setup",
+                "providers",
+                "add",
+                "deepseek",
+                "--preset",
+                "deepseek",
+                "--api-key-env",
+                "DEEPSEEK_PROXY_API_KEY",
+            ]
+        )
+
+
+def test_setup_provider_add_writes_builtin_secret_to_official_env(tmp_path, capsys):
+    home = tmp_path / "home"
+
+    cli.main(
+        [
+            "--home",
+            str(home),
+            "setup",
+            "providers",
+            "add",
+            "openai",
+            "--preset",
+            "openai",
+            "--api-key",
+            "secret-value",
+            "--write-env",
+            "--json",
+        ]
+    )
+
+    capsys.readouterr()
+    raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["providers"]["builtin"] == {}
+    assert 'OPENAI_API_KEY="secret-value"' in (home / ".env").read_text(encoding="utf-8")
 
 
 def test_setup_model_set_commits_core_revision_and_leaves_live_clean(tmp_path):
@@ -317,6 +411,7 @@ def test_setup_wizard_add_provider_sets_core_model_with_preset_default(tmp_path)
     host_config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     core_model = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))["model"]
     assert host_config["providers"]["default"] == "deepseek"
+    assert host_config["providers"]["builtin"] == {}
     assert core_model["provider"] == "deepseek"
     assert core_model["model_name"] == "deepseek-v4-pro"
     assert prompt.input_defaults[-1] == "deepseek-v4-pro"
@@ -345,6 +440,8 @@ def test_setup_wizard_custom_provider_requires_explicit_model(tmp_path):
     )
 
     core_model = yaml.safe_load((home / "agents" / "assistant" / "agent.yaml").read_text(encoding="utf-8"))["model"]
+    host_config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert host_config["providers"]["custom"]["customapi"]["base_url"] == "https://llm.example.test/v1"
     assert core_model["provider"] == "customapi"
     assert core_model["model_name"] == "custom-model"
     assert prompt.input_defaults[-1] is None
@@ -354,8 +451,10 @@ def test_domestic_provider_presets_use_latest_flagship_defaults():
     assert get_provider_preset("deepseek").suggested_model == "deepseek-v4-pro"
     assert get_provider_preset("moonshot").suggested_model == "kimi-k2.7-code"
     assert get_provider_preset("minimax").suggested_model == "MiniMax-M3"
-    assert get_provider_preset("minimax-cn").base_url == "https://api.minimaxi.com/v1"
-    assert get_provider_preset("minimax-cn").api_key_env == "MINIMAX_CN_API_KEY"
+    assert get_provider_preset("minimax").runtime_profile.base_url == "https://api.minimax.io/anthropic"
+    assert get_provider_preset("minimax").runtime_profile.api_mode == "anthropic-messages"
+    assert get_provider_preset("minimax-cn").runtime_profile.base_url == "https://api.minimaxi.com/anthropic"
+    assert get_provider_preset("minimax-cn").runtime_profile.env_vars[0] == "MINIMAX_CN_API_KEY"
     assert get_provider_preset("minimax-cn").suggested_model == "MiniMax-M3"
     assert get_provider_preset("dashscope").suggested_model == "qwen3.7-max"
     assert get_provider_preset("zai").suggested_model == "glm-5.2"
@@ -386,8 +485,8 @@ def test_setup_provider_add_normalizes_profile_id(tmp_path, capsys):
     assert '"provider": "customapi"' in output
     raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert raw["providers"]["default"] == "customapi"
-    assert raw["providers"]["profiles"]["customapi"]["base_url"] == "https://llm.example.test/v1"
-    assert "CustomAPI" not in raw["providers"]["profiles"]
+    assert raw["providers"]["custom"]["customapi"]["base_url"] == "https://llm.example.test/v1"
+    assert "CustomAPI" not in raw["providers"]["custom"]
 
 
 def test_setup_provider_write_env_keeps_secret_out_of_config(tmp_path, capsys):
@@ -415,7 +514,7 @@ def test_setup_provider_write_env_keeps_secret_out_of_config(tmp_path, capsys):
     output = capsys.readouterr().out
     assert '"api_key_source": "env:CUSTOM_ONE_API_KEY"' in output
     raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
-    assert raw["providers"]["profiles"]["custom-one"]["api_key"] is None
+    assert raw["providers"]["custom"]["custom-one"]["api_key"] is None
     assert 'CUSTOM_ONE_API_KEY="secret-value"' in (home / ".env").read_text(encoding="utf-8")
 
 
@@ -450,20 +549,27 @@ def test_setup_provider_edit_preserves_existing_fields(tmp_path):
     )
 
     raw = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
-    profile = raw["providers"]["profiles"]["custom-one"]
+    profile = raw["providers"]["custom"]["custom-one"]
     assert profile["base_url"] == "https://custom.example.test/v1"
     assert profile["api_key_env"] == "CUSTOM_TWO_API_KEY"
 
 
 def test_setup_provider_status_reports_direct_key_when_env_missing(monkeypatch):
     monkeypatch.delenv("CUSTOM_ONE_API_KEY", raising=False)
-    profile = setup_cli.HostProviderProfile(
-        base_url="https://custom.example.test/v1",
-        api_key_env="CUSTOM_ONE_API_KEY",
-        api_key="direct-secret",
+    host_config = setup_cli.HostConfig(
+        providers={
+            "custom": {
+                "custom-one": {
+                    "base_url": "https://custom.example.test/v1",
+                    "api_key_env": "CUSTOM_ONE_API_KEY",
+                    "api_key": "direct-secret",
+                }
+            }
+        }
     )
+    profile = setup_cli.resolve_host_provider_profile(host_config, "custom-one")
 
-    assert setup_cli.provider_profile_dict(profile)["api_key_source"] == "config.yaml:providers.profile.api_key"
+    assert setup_cli.provider_profile_dict(profile)["api_key_source"] == "config.yaml:providers.custom.custom-one.api_key"
 
 
 def test_setup_model_set_updates_runtime_core_without_legacy_model_keys(tmp_path):
@@ -511,7 +617,7 @@ def test_setup_provider_test_is_explicit_and_mockable(monkeypatch, tmp_path, cap
     (home).mkdir()
     (home / "config.yaml").write_text(
         "providers:\n"
-        "  profiles:\n"
+        "  custom:\n"
         "    local:\n"
         "      base_url: https://local.example.test/v1\n"
         "      api_key: direct-key\n",
