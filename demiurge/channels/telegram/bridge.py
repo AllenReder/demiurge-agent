@@ -873,18 +873,18 @@ class TelegramInteractionBridge:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Invalid approval action.")
             return
-        if self._pending_approvals.get(parsed.approval_id) is None:
+        pending = self._pending_approvals.get(parsed.approval_id)
+        if pending is None:
             if callback_id:
                 await self._answer_callback_query(str(callback_id), text="Approval expired.")
             await self._edit_expired_callback_message(callback)
             return
-        pending = self._resolve_pending_approval(parsed.approval_id, decision)
         if callback_id:
             await self._answer_callback_query(str(callback_id), text=approval_callback_answer(decision))
-        if pending is not None:
-            resolution = approval_resolution(parsed.action)
-            if resolution is not None:
-                await self._edit_approval_message(pending, resolution.title, resolution.detail)
+        resolution = approval_resolution(parsed.action)
+        if resolution is not None:
+            await self._edit_approval_message(pending, resolution.title, resolution.detail)
+        self._resolve_pending_approval(parsed.approval_id, decision)
 
     def _resolve_pending_approval(self, approval_id: str, decision: ApprovalDecision) -> PendingApproval | None:
         pending = self._pending_approvals.resolve(approval_id, decision)
