@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionInbound,
@@ -98,7 +99,9 @@ class TextChannelBridgeBase:
         raise NotImplementedError
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
-        state = self._conversation_state(inbound.conversation_key or f"{self.channel_name}:{inbound.source}")
+        state = self._conversation_state(
+            inbound.conversation_key or build_conversation_key(self.channel_name, "source", inbound.source)
+        )
         self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_command(inbound, state)
         if command_outcome.handled:

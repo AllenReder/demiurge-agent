@@ -11,6 +11,7 @@ from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.slack.api import SlackApi
 from demiurge.channels.webhook_server import WebhookHttpServer
 from demiurge.core import SlackChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
@@ -87,7 +88,13 @@ class SlackInteractionBridge(TextChannelBridgeBase):
                 text=text,
                 source=channel_id,
                 reply_to=str(body.get("thread_ts") or "") or None,
-                conversation_key=f"slack:{team_id}:{channel_id}",
+                conversation_key=build_conversation_key(
+                    "slack",
+                    "channel",
+                    team_id,
+                    channel_id,
+                    thread_id=str(body.get("thread_ts") or "") or None,
+                ),
                 metadata={
                     "slack_team_id": team_id,
                     "slack_channel_id": channel_id,
@@ -119,12 +126,19 @@ class SlackInteractionBridge(TextChannelBridgeBase):
             if event_type == "app_mention":
                 text = text.replace(mention, "").strip()
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "") or None
+        conversation_thread_ts = str(event.get("thread_ts") or "") or None
         return InteractionInbound(
             channel="slack",
             text=text,
             source=channel_id,
             reply_to=thread_ts,
-            conversation_key=f"slack:{team_id}:{channel_id}",
+            conversation_key=build_conversation_key(
+                "slack",
+                "channel",
+                team_id,
+                channel_id,
+                thread_id=conversation_thread_ts,
+            ),
             metadata={
                 "slack_team_id": team_id,
                 "slack_channel_id": channel_id,

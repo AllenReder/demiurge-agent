@@ -114,9 +114,22 @@ def resume_bound_session(
     runner: Any,
     route_binding: SessionRouteBindingRuntime,
     session_id: str,
+    *,
+    channel: str | None = None,
+    conversation_key: str | None = None,
+    source: str | None = None,
+    reply_to: str | None = None,
+    replace_conversation_binding: bool = False,
 ) -> SessionSwitchResult:
     try:
-        runner.resume_session(session_id)
+        runner.resume_session(
+            session_id,
+            channel=channel,
+            conversation_key=conversation_key,
+            source=source,
+            reply_to=reply_to,
+            replace_conversation_binding=replace_conversation_binding,
+        )
     except FileNotFoundError as exc:
         return SessionSwitchResult(message=str(exc))
     route_binding.bind(runner.interaction_router, session_id)

@@ -423,7 +423,7 @@ async def test_immediate_delivery_commits_history_and_avoids_final_outbound_dupl
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=bridge,
     )
     await app.runner.background_tasks.drain()
@@ -842,7 +842,7 @@ async def test_parallel_output_runs_in_background_and_uses_active_bridge(tmp_pat
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=bridge,
     )
     outbound.mark_delivered()
@@ -876,7 +876,7 @@ async def test_progress_flushes_immediately_without_persisting_history(tmp_path)
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=bridge,
     )
     outbound.mark_delivered()
@@ -902,7 +902,7 @@ async def test_immediate_delivery_failure_is_nonfatal_and_keeps_history(tmp_path
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=FailingBridge(),
     )
     await app.runner.background_tasks.drain()
@@ -942,7 +942,7 @@ async def test_output_send_commits_history_and_schedules_delivery_immediately(tm
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=bridge,
     )
     outbound.mark_delivered()
@@ -976,7 +976,7 @@ async def test_parallel_output_without_bridge_writes_delivery_failed_event(tmp_p
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
     )
     await app.runner.background_tasks.drain()
 
@@ -1010,7 +1010,7 @@ async def test_parallel_output_bridge_failure_writes_delivery_failed_event(tmp_p
     runtime = InteractionRuntime(app.runner)
 
     outbound = await runtime.handle(
-        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:123"),
+        InteractionInbound(channel="telegram", text="hello", source="123", reply_to="456", conversation_key="telegram:dm:123"),
         route=FailingBridge(),
     )
     outbound.mark_delivered()

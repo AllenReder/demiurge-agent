@@ -65,6 +65,13 @@ adapter 作为 `SessionRouteBinding` 传入；runner 解析出 inbound 的最终
 把该 route 绑定到 `runner.session_id`。TUI 和 channel 的 `/new`、`/resume` 以及
 session switch 路径必须把同一个 adapter route 重新绑定到新的 session。
 
+External channel conversations 还有一层 durable binding，key 为
+`(core_id, channel, conversation_key)`。`conversation_key` 是从明确 platform facts
+构造的 canonical host-owned route key，例如 `telegram:dm:123` 或
+`slack:channel:T1:C1:thread:123.4`。Channel `/resume` 会把当前 conversation key
+重新绑定到 resumed session，因此同一 external conversation 的下一条 inbound
+message 会继续进入同一个 transcript。
+
 Ordinary output、tool lifecycle events 和 background output flushes 都会创建带必填
 `session_id` 的 `InteractionOutbound`。Router 只投递到绑定了该 session 的 route。
 如果没有 route，items 会被标记为 `unrouted`，并且不视为 adapter call failure。

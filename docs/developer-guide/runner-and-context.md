@@ -77,6 +77,13 @@ the final session for the inbound, it binds that route to `runner.session_id`.
 TUI and channel `/new`, `/resume`, and session switch paths must rebind the
 same adapter route to the new session.
 
+External channel conversations also have a durable binding keyed by
+`(core_id, channel, conversation_key)`. `conversation_key` is a canonical
+host-owned route key built from explicit platform facts, for example
+`telegram:dm:123` or `slack:channel:T1:C1:thread:123.4`. Channel `/resume`
+rebinds the current conversation key to the resumed session so the next inbound
+message from that external conversation continues in the same transcript.
+
 Ordinary output, tool lifecycle events, and background output flushes create
 `InteractionOutbound` objects with a required `session_id`. The router delivers
 only to the route bound for that session. If no route is bound, items are marked

@@ -129,7 +129,7 @@ def test_interaction_response_runtime_builds_pending_outbound_and_prompt():
         text="hello",
         source="123",
         reply_to="456",
-        conversation_key="telegram:123",
+        conversation_key="telegram:dm:123",
         metadata={"platform": "telegram"},
     )
 
@@ -142,7 +142,7 @@ def test_interaction_response_runtime_builds_pending_outbound_and_prompt():
     assert outbound.metadata == {
         "source": "123",
         "reply_to": "456",
-        "conversation_key": "telegram:123",
+        "conversation_key": "telegram:dm:123",
         "platform": "telegram",
     }
     assert outbound.prompt is not None
@@ -150,7 +150,7 @@ def test_interaction_response_runtime_builds_pending_outbound_and_prompt():
     assert outbound.prompt.choices == ["1", "two"]
     assert outbound.prompt.session_id == "session_1"
     assert outbound.prompt.turn_id == "turn_1"
-    assert outbound.prompt.conversation_key == "telegram:123"
+    assert outbound.prompt.conversation_key == "telegram:dm:123"
     assert outbound.prompt.metadata == {
         "channel": "telegram",
         "source": "123",

@@ -23,6 +23,7 @@ from typing import Any, Callable
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.core import TelegramChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
@@ -383,7 +384,7 @@ class TelegramInteractionBridge:
         )
         if normalized is None or not normalized.strip():
             return None
-        conversation_key = f"telegram:{chat_id}"
+        conversation_key = build_conversation_key("telegram", "dm" if chat_type == "private" else "group", chat_id)
         metadata: dict[str, Any] = {
             "telegram_chat_id": chat_id,
             "telegram_chat_type": chat_type,
@@ -641,7 +642,7 @@ class TelegramInteractionBridge:
             return None
         chat_type = chat.get("type") or "private"
         user_id = (callback.get("from") or {}).get("id")
-        conversation_key = f"telegram:{chat_id}"
+        conversation_key = build_conversation_key("telegram", "dm" if chat_type == "private" else "group", chat_id)
         resolution = self._prompt_delivery.consume_callback_data(conversation_key, data)
         if resolution is None:
             return None
@@ -663,7 +664,7 @@ class TelegramInteractionBridge:
         )
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
-        state = self._conversation_state(inbound.conversation_key or f"telegram:{inbound.source}")
+        state = self._conversation_state(inbound.conversation_key or build_conversation_key("telegram", "dm", inbound.source))
         self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_telegram_command(inbound, state)
         if command_outcome.handled:
@@ -713,7 +714,7 @@ class TelegramInteractionBridge:
             )
             return ApprovalDecision("deny", "telegram approval is only supported in private chat")
 
-        conversation_key = inbound.conversation_key or f"telegram:{inbound.source}"
+        conversation_key = inbound.conversation_key or build_conversation_key("telegram", "dm", inbound.source)
         payload = TelegramPendingApproval(
             source=inbound.source,
             reply_to=inbound.reply_to,

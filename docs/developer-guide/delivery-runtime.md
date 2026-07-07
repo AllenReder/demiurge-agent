@@ -67,6 +67,19 @@ they are bound to. `InteractionRuntime.handle()` binds the inbound route after
 the runner resolves the final session. `/new`, `/resume`, and session switch
 paths must rebind to the new session.
 
+Durable channel ownership is tracked separately from live routes. The runtime
+stores `(core_id, channel, conversation_key) -> session_id`, where
+`conversation_key` is a host-owned external route key such as
+`telegram:dm:123`, `slack:channel:T1:C1:thread:123.4`, or
+`matrix:room:%21room%3Aexample`. Channel adapters must build those keys through
+the shared runtime helper, not by hand. The canonical format intentionally does
+not preserve older bindings such as `telegram:123`; old channel conversations
+start fresh unless explicitly resumed.
+
+Channel `/resume` is both a live route switch and a durable conversation
+rebind. After a user resumes a session from an external channel, later inbound
+messages from the same `conversation_key` resolve to that resumed session.
+
 ## Channels
 
 Channel adapters adapt delivery into platform-specific messages. They no longer

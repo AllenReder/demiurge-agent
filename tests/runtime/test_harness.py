@@ -282,7 +282,7 @@ async def test_interaction_metadata_is_written_to_events(tmp_path):
             text="hello",
             source="chat-1",
             reply_to="message-1",
-            conversation_key="telegram:chat-1",
+            conversation_key="telegram:dm:chat-1",
         ),
     )
 
@@ -291,7 +291,7 @@ async def test_interaction_metadata_is_written_to_events(tmp_path):
     assert received["channel"] == "telegram"
     assert received["source"] == "chat-1"
     assert received["reply_to"] == "message-1"
-    assert received["conversation_key"] == "telegram:chat-1"
+    assert received["conversation_key"] == "telegram:dm:chat-1"
 
 
 @pytest.mark.asyncio
@@ -316,11 +316,11 @@ async def test_approval_events_include_channel_metadata(tmp_path):
             text="read",
             source="chat-1",
             reply_to="message-1",
-            conversation_key="telegram:chat-1",
+            conversation_key="telegram:dm:chat-1",
         ),
     )
 
     approval = next(event for event in app.runner.event_log.tail(20) if event["type"] == "approval.decided")
     assert approval["channel"] == "telegram"
     assert approval["source"] == "chat-1"
-    assert approval["conversation_key"] == "telegram:chat-1"
+    assert approval["conversation_key"] == "telegram:dm:chat-1"

@@ -7,6 +7,7 @@ from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.http import json_request, require_public_http_url
 from demiurge.channels.webhook_server import WebhookHttpServer
 from demiurge.core import WebhookChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
@@ -66,7 +67,7 @@ class WebhookInteractionBridge(TextChannelBridgeBase):
         source = str(body.get("source") or body.get("user") or client or "webhook")
         if self.allowed_sources and source not in self.allowed_sources:
             return None
-        conversation_key = str(body.get("conversation_key") or f"webhook:{source}")
+        conversation_key = str(body.get("conversation_key") or build_conversation_key("webhook", "source", source))
         metadata = dict(body.get("metadata") if isinstance(body.get("metadata"), dict) else {})
         callback_url = body.get("callback_url") or body.get("response_url") or self.callback_url
         if callback_url:

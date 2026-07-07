@@ -63,7 +63,31 @@ def test_slack_normalizes_event_callback():
     assert inbound.text == "hello"
     assert inbound.source == "C1"
     assert inbound.reply_to == "123.4"
-    assert inbound.conversation_key == "slack:T1:C1"
+    assert inbound.conversation_key == "slack:channel:T1:C1"
+
+
+def test_slack_thread_event_uses_thread_conversation_key():
+    config = SlackChannelConfig(enabled=True, signing_secret="secret", bot_token="token", bot_user_id="Ubot", allowed_channels=["C1"])
+    bridge = _bridge(config)
+
+    inbound = bridge.normalize_request(
+        {
+            "team_id": "T1",
+            "event_id": "E1",
+            "event": {
+                "type": "app_mention",
+                "channel": "C1",
+                "user": "U1",
+                "text": "<@Ubot> hello",
+                "thread_ts": "123.4",
+                "ts": "125.6",
+            },
+        }
+    )
+
+    assert inbound is not None
+    assert inbound.reply_to == "123.4"
+    assert inbound.conversation_key == "slack:channel:T1:C1:thread:123.4"
 
 
 def test_slack_app_mentions_only_ignores_plain_message_without_mention():

@@ -7,6 +7,7 @@ from typing import Any
 from demiurge.channels.base import TextChannelBridgeBase, resolve_env_value
 from demiurge.channels.email.client import EmailClient, EmailInboundMessage
 from demiurge.core import EmailChannelConfig
+from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.interaction_factory import runtime_factory_for_app
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
 
@@ -79,7 +80,7 @@ class EmailInteractionBridge(TextChannelBridgeBase):
         text = message.body.strip()
         if not text:
             return None
-        conversation_key = f"email:{sender}"
+        conversation_key = build_conversation_key("email", "sender", sender)
         return InteractionInbound(
             channel="email",
             text=text,
