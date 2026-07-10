@@ -1,66 +1,74 @@
 ---
 title: 安全模型
-description: 理解 host-owned capabilities、approvals、secrets 和 workspace scope。
+description: 理解 workspace scope、approvals、capabilities、secrets 与 channel trust。
 ---
 
 # 安全模型
 
-Demiurge 把 capabilities 视为 host-owned。Agent Core code 可以请求效果，但是否执行由
-host 决定。
+Demiurge 把 capabilities 与危险的 model-triggered effects 视为 Host-owned。受支持的
+`ctx.*`、builtin-tool 与 MCP-call 路径通过 Host 接口请求 effect。在默认
+`host_shared` 运行时中，imported Agent Core Python 是可信代码，也能使用普通 Python/OS
+API；当前 alpha 运行时不是 sandbox。
 
 ## Workspace Scope
 
-File writes、patches 和 terminal working directories scoped 到 resolved workspace。Workspace 可以来自 process override、environment variable、core manifest、local run context，或 fallback `~/.demiurge/workspace`。
+File write、patch 与 terminal working directory 都限制在解析出的 workspace 中。
+Workspace 可以来自 process override、environment variable、core manifest、local run
+context，或 fallback `~/.demiurge/workspace`。
 
-Built-in file reads 可以指向 workspace 外的 host-visible paths。Workspace 外 reads，以及所有 sensitive reads，都会在打开文件前要求 approval。
+Built-in file read 可以读取 workspace 之外 Host 可见的路径。这类 workspace 外读取以及
+所有 sensitive read，都必须在打开文件前获得 approval。
 
-## Capability 边界
+Workspace scope 不是唯一防线。Sensitive path 与危险操作仍可能需要 approval 或被拒绝。
 
-这些效果必须经过 host-owned interfaces：
+## Capabilities
 
-- 文件系统读写
-- 终端命令
-- 网络获取
-- 状态变更
-- agent evolution
-- Git revision promotion 和 rollback
+Capabilities 描述以下 effect class：
 
-声明 capability 不等于获得权限。Host 会在执行前检查 capabilities 和 approval policy。
+- `fs.read`
+- `fs.write`
+- `terminal.exec`
+- `task.control`
+- `network.fetch`
+- `schedule.manage`
+- `tool.call:evolve_core`
+- `tool.call:rollback_core`
 
-## Approval Policy
+Builtin file、terminal、network、schedule 与 skill handlers 会在受保护操作前解析适用的
+capability/approval checks，MCP tool call 也会在 call 前执行。仍有 alpha 缺口：authored
+tool 的单数 registry policy 不会在 entrypoint 运行前自动强制执行；MCP
+spawn/connect/discovery 可能发生在 call approval 之前；`evolve_core` / `rollback_core`
+会要求 capabilities，却尚未在修改 core refs 前解析其 registry `prompt` policy。目标
+`EffectRuntime` 用同一套顺序封闭这些路径；参见
+[Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)。
 
-Approval policy 可以配置在：
-
-- global host config
-- Agent Core manifest
-- tool metadata
-- risk defaults
-
-高风险操作应该默认需要 approval。拒绝时，host 不应该把高风险效果交给 Agent Core
-绕过执行。
+Background completion turn 使用原 session 的正常 capabilities，不会仅仅因为在后台运行
+就获得 approval。当前 `evolve_core` registry-policy 缺口同样影响 background start，
+因此 alpha 运行时尚不能保证每个危险 background action 都会在执行前进入 approval。
 
 ## Secrets
 
-Provider secrets 应该放在 host config、environment variables 或 `~/.demiurge/.env`。
-Packages 可以把 secret option 写入 installed component config，但 `packages.yaml` 只
-记录 `<redacted>`。其中的 provenance hashes 用于 drift reporting 和 uninstall
-safety；runtime truth 仍然是已提交的 agents tree。
+Provider secret 应放在 Host config、environment variables 或 `~/.demiurge/.env` 中。
+Status command 应报告 secret source，但不打印 secret value。
 
-Slots 和 tools 不应该打印 secrets。
+类型为 `secret` 的 package component option 可以写入 component-local config，但
+`packages.yaml` 只保存脱敏后的 option value。该文件中的 package provenance hash 用于
+drift reporting 与 uninstall safety；runtime truth 仍是已提交的 agents tree。
 
-## Workspace
+## Channels
 
-Workspace scope 限制 filesystem 和 terminal operations。Core-authored code 不应该假设
-可以访问任意本地路径。
+External channel 默认禁用。Channel bridge 必须在接受 inbound event 前验证 token、
+signature、allowlist 或 room/user constraint。
 
-## Channel Allowlist
-
-Telegram 默认 deny。必须通过 `allowed_users` 或 `allowed_chats` 明确允许。
+Telegram 通过 `allowed_users` 与 `allowed_chats` 默认拒绝。
 
 ## Non-Goals
 
-当前 alpha runtime 不承诺 hardened multi-tenant sandbox。Agent Slot code 默认运行在
-host-shared Python environment 中。Per-core environments 和 subprocess workers 是未来
-isolation options，不是当前默认模式。Runtime task records、logs、scheduler
-instances 和 delivery outbox status 存在 SQLite runtime database 中；in-process
-workers 仍负责 live execution。
+当前 alpha 运行时不承诺 hardened multi-tenant sandbox。Agent Slot 代码默认运行在
+host-shared Python environment 中。Per-core environment 与 subprocess worker 是未来
+isolation option，不是默认运行模式。Capability grant 不授予 session/operator authority；
+在冻结目标中，拥有 session、task、approval 与 effect 的 module 将强制执行
+`PrincipalScope` 携带的 predicate；当前 alpha 尚未提供这种统一 owner scope。Runtime
+task records、logs、scheduler instances 与 delivery outbox status 存储在 SQLite runtime
+database 中；in-process worker 仍负责 live execution，并且不会在 Host process restart
+后重放已经开始的危险 side effect。

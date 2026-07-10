@@ -5,9 +5,13 @@ description: Map the current Demiurge host runtime for contributors.
 
 # Architecture
 
-This guide maps the current implementation. It is not a stable plugin API.
+This guide maps both the current alpha implementation and the Host runtime
+interfaces that later hardening work must converge on. It is not a stable
+plugin API.
 
 ## System Overview
+
+The current implementation is runner-centered:
 
 ```text
 CLI / TUI / Gateway
@@ -31,6 +35,44 @@ SessionTurnStepRunner
         +--> SessionRuntime
         +--> SchedulerService
 ```
+
+The frozen target ownership is module-centered:
+
+```text
+authenticated inbound
+        |
+        v
+ChannelInbox --> TurnExecution --> ContextManager --> ProviderRuntime
+                         |
+                         +-------> EffectRuntime
+                         +-------> SlotRuntime
+                         +-------> DeliveryRuntime / durable task runtime
+```
+
+`PrincipalScope` and an immutable `TurnExecutionContext` carry authority and
+turn identity across those Host interfaces. Agent Core authors still use the
+smaller `ctx.*` SDK and Agent Slot interfaces; they do not call these Host
+interfaces directly.
+
+## Current and Target Contracts
+
+The complete interface, ordering, error, cancellation, restart, performance,
+and finding-owner rules are frozen in
+[Host Runtime Contracts](runtime-contracts.md). In particular, see its
+[primary finding owner map](runtime-contracts.md#primary-finding-owners) before
+adding another policy or lifecycle owner.
+
+| Contract | Current alpha implementation | Frozen target |
+| --- | --- | --- |
+| `PrincipalScope` | Authority is inferred separately by channel, session, task, and approval callers. | One immutable owner predicate reaches every session, task, approval, history, and effect operation. |
+| `TurnExecutionContext` | `TurnExecutionScope` captures some turn data but still contains mutable objects and runner-backed paths. | Immutable principal, session, revision, capability, route, admission, cancellation, and trace bindings. |
+| `TurnExecution` | `SessionTurnStepRunner` delegates to admission, pipeline, persistence, IO, slot, and delivery helpers. | `run(TurnRequest) -> TurnResult` and owner-checked `cancel(...)` hide the full lifecycle. |
+| `EffectRuntime` | `ToolRuntime`, `McpRuntime`, security helpers, and inline file/process/network code own different parts of dispatch. | One resolved effect entry and one policy/dispatch order for builtin, authored, and MCP effects. |
+| `ContextManager` | Layer assembly and manual compaction are separate; there is no automatic model-window budget. | `prepare()` and `observe()` own budgeting, pruning, compaction, usage calibration, and overflow semantics. |
+| `ChannelInbox` | Platform adapters pass inbound events directly to the runner; there is no shared durable inbound owner. | Durable accept, dedup, cursor, claim, complete/fail, retry, and DLQ semantics behind one interface. |
+
+These target names are contributor contracts, not claims that the corresponding
+production classes already exist.
 
 ## Major Subsystems
 
@@ -76,13 +118,14 @@ SessionTurnStepRunner
 
 ## Reading Order
 
-1. [runner-and-context.md](runner-and-context.md)
-2. [tool-runtime.md](tool-runtime.md)
-3. [delivery-runtime.md](delivery-runtime.md)
-4. [package-installer.md](package-installer.md)
-5. [scheduler.md](scheduler.md)
-6. [operator-gateway.md](operator-gateway.md)
-7. [mcp-runtime.md](mcp-runtime.md)
+1. [Host Runtime Contracts](runtime-contracts.md)
+2. [Runner and Context](runner-and-context.md)
+3. [Tool Runtime](tool-runtime.md)
+4. [Delivery Runtime](delivery-runtime.md)
+5. [Package Installer](package-installer.md)
+6. [Scheduler](scheduler.md)
+7. [Operator Gateway](operator-gateway.md)
+8. [MCP Runtime](mcp-runtime.md)
 
 ## Boundary
 

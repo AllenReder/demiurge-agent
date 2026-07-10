@@ -8,8 +8,20 @@ description: Reference for host-owned capability and approval behavior.
 Capabilities are host-owned grants for effect classes. Approval policy decides
 whether a requested effect can run automatically, must prompt, or is denied.
 
-Declaring a tool, slot, schedule, or MCP server is not enough to run dangerous
-effects. The host checks capabilities at execution time.
+Declaring a tool, slot, schedule, or MCP server does not grant a capability by
+itself. Builtin and MCP call handlers generally check their required
+capabilities at execution time, and authored SDK clients enforce explicit
+`ctx.capability.require(...)` calls.
+
+Current alpha limitations: authored tool singular `capability`, `risk`, and
+`approval_policy` registry fields are not automatically enforced before the
+entrypoint runs, and MCP spawn/connect/discovery occurs before the later call
+capability and approval check. The `evolve_core` and `rollback_core` builtin
+branches require capabilities but do not yet resolve their registry `prompt`
+policy before mutation. See
+[Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime)
+for the single target ordering. Capabilities are not principal authorization or
+a Python sandbox.
 
 ## Capability Grants
 
@@ -100,10 +112,12 @@ Risk values are:
 low < medium < high < critical
 ```
 
-For most tools, the host starts from tool metadata, then applies core approval
-overrides, then global fallback approval. More restrictive core policy wins over
-tool metadata. Global fallback approval is host-level policy and can be used as
-the final default.
+For builtin handlers that use the approval runtime, and for MCP calls, the Host
+starts from tool metadata, then applies core approval overrides, then global
+fallback approval. More restrictive core policy wins over tool metadata.
+Global fallback approval is Host-level policy and can be used as the final
+default. Authored singular metadata and the core-mutation builtin exceptions
+above are not yet passed through this resolution path.
 
 ## Core Approval Config
 
@@ -135,10 +149,13 @@ tools:
 ```
 
 Built-in tools cannot be made less restrictive by core metadata. Authored and
-MCP tools can be fully overridden because they are core-declared surfaces.
+MCP registry entries can be overridden because they are core-declared surfaces,
+but the authored enforcement limitation above still applies.
 
 ## Boundary
 
-Capabilities are not a sandbox by themselves. The host still enforces workspace
-scope, sensitive path checks, command guards, approval prompts, channel policy,
-and tool runtime rules before effects execute.
+Capabilities are not a sandbox by themselves. The Host's supported builtin and
+SDK paths also apply workspace, sensitive-path, command, approval, channel, and
+tool rules. In the default `host_shared` mode, imported authored Python can use
+ordinary Python/OS APIs outside those SDK paths. The target `EffectRuntime`
+centralizes model-triggered effect policy without claiming process isolation.

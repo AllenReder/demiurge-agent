@@ -1,11 +1,18 @@
 ---
 title: 配置 MCP Server
-description: 向 Agent Core 添加 MCP server declaration。
+description: 为 Agent Core 添加 MCP server declaration。
 ---
 
 # 配置 MCP Server
 
-Agent Cores 使用 YAML 文件声明 MCP servers。Host 拥有 transport startup、tool discovery、namespacing、approvals、capability checks 和 tool execution。
+Agent Core 使用 YAML 文件声明 MCP server。Host 拥有 transport startup、tool discovery、
+namespacing、approvals、capability checks 与 tool execution。
+
+当前 alpha 安全边界：catalog cache miss 时，Host 可能在之后的 `mcp.call:*` capability
+与 approval check 之前 spawn/connect 并调用 `list_tools()`。启用 declaration 前，应把
+其中的 command、package runner、URL、cwd、environment 与 headers 当作可信代码/配置
+审查。目标运行时会增加独立的 `mcp.connect:<server_id>` effect，并在任何 connect 或
+discovery side effect 前执行。
 
 默认情况下，loader 会查找：
 
@@ -41,9 +48,11 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: stdio` 需要 `command`。`args`、`env` 和 `cwd` 是可选的。相对 `cwd` 值会从 runtime workspace 解析。
+`transport: stdio` 必须包含 `command`。`args`、`env` 与 `cwd` 可选。相对 `cwd` 会从
+runtime workspace 解析。
 
-构建 MCP catalog 时会解析 `${DOCS_TOKEN}` 这样的环境引用。如果缺少环境变量，host 会记录 diagnostic，并在当前 turn 跳过该 server。
+`${DOCS_TOKEN}` 之类的 environment reference 会在构建 MCP catalog 时解析。如果缺少
+environment variable，Host 会记录 diagnostic，并在该 turn 跳过对应 server。
 
 ## 添加 Streamable HTTP Server
 
@@ -66,13 +75,16 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: streamable_http` 需要 `http://` 或 `https://` URL。
+`transport: streamable_http` 必须使用 `http://` 或 `https://` URL。
 
 ## 授予 MCP Capability
 
-Server manifest 中的 `capability` 命名调用该 server 上 tools 所需的 capability。它本身不会授予该 capability。
+Server manifest 的 `capability` 指定调用该 server tools 所需的 capability。它本身不会
+授予 capability。
 
-把 capability 添加到具体 core manifest 中现有的 `capabilities.defaults` map 下：
+目前这是一个 **call** capability，尚不能授权或拒绝更早的 spawn/connect/discovery step。
+
+在具体 core manifest 现有的 `capabilities.defaults` map 下添加 capability：
 
 ```yaml
 capabilities:
@@ -85,7 +97,7 @@ capabilities:
 
 ## 过滤 Tools
 
-使用 `tools.include` 和 `tools.exclude` 限制 tool catalog：
+使用 `tools.include` 与 `tools.exclude` 限制 tool catalog：
 
 ```yaml
 tools:
@@ -96,7 +108,8 @@ tools:
     - fetch_private
 ```
 
-Filters 会在 host 暴露 MCP server tools 之前匹配其 tool names。暴露出来的 tool names 是 host-safe 且带 namespace 的，例如 `docs__search_docs`。
+Filter 会在 Host 暴露 tool 前匹配 MCP server tool name。暴露的 tool name 是 Host-safe
+且 namespaced 的，例如 `docs__search_docs`。
 
 ## 验证
 
@@ -107,13 +120,13 @@ uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-在 TUI 中：
+在 TUI 中运行：
 
 ```text
 /tools
 ```
 
-如果 server 启动了但 tool discovery 失败，请检查运行时 MCP stderr log：
+如果 server 已启动但 tool discovery 失败，检查 runtime MCP stderr log：
 
 ```text
 ~/.demiurge/logs/mcp-stderr.log
@@ -121,4 +134,8 @@ uv run demiurge --provider fake
 
 ## 边界
 
-Agent Core 声明 MCP servers。Host 拥有 process startup、HTTP transport sessions、environment interpolation、catalog caching、approval prompts、capability enforcement、result conversion 和 runtime cleanup。
+Agent Core 声明 MCP servers。Host 拥有 process startup、HTTP transport sessions、
+environment interpolation、catalog caching、approval prompts、capability enforcement、
+result conversion 与 runtime cleanup。该 ownership statement 描述目标 Host policy
+owner；在实现 `EffectRuntime` 前，上述 alpha connect/discovery ordering limitation 仍然
+存在。

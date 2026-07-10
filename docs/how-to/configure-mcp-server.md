@@ -9,6 +9,13 @@ Agent Cores declare MCP servers with YAML files. The host owns transport
 startup, tool discovery, namespacing, approvals, capability checks, and tool
 execution.
 
+Current alpha security boundary: on a catalog cache miss, the Host may
+spawn/connect and call `list_tools()` before the later `mcp.call:*` capability
+and approval check. Review a declaration's command, package runner, URL, cwd,
+environment, and headers as trusted code/configuration before enabling it. The
+target runtime adds a separate `mcp.connect:<server_id>` effect before any
+connect or discovery side effect.
+
 By default, the loader looks under:
 
 ```text
@@ -78,6 +85,9 @@ supports_parallel_tool_calls: false
 The server manifest's `capability` names the capability required to call tools
 from that server. It does not grant the capability by itself.
 
+This is currently a **call** capability. It does not yet authorize or deny the
+earlier spawn/connect/discovery step.
+
 Add the capability under the existing `capabilities.defaults` map in the
 concrete core manifest:
 
@@ -131,4 +141,7 @@ If a server starts but tool discovery fails, inspect the runtime MCP stderr log:
 
 An Agent Core declares MCP servers. The host owns process startup, HTTP
 transport sessions, environment interpolation, catalog caching, approval
-prompts, capability enforcement, result conversion, and runtime cleanup.
+prompts, capability enforcement, result conversion, and runtime cleanup. The
+ownership statement describes the intended Host policy owner; the alpha
+connect/discovery ordering limitation above remains until `EffectRuntime` is
+implemented.

@@ -48,7 +48,7 @@ If you are new to Demiurge, read these in order:
 | Local operator | [Troubleshoot](how-to/troubleshoot.md), [Configure channels](how-to/configure-channels.md), [Install packages](how-to/install-packages.md) |
 | Agent Core author | [Host and Agent Core](explanation/host-and-agent-core.md), [Customize an Agent Core](tutorials/customize-agent-core.md), [Write an Agent Slot](how-to/write-slot-module.md), [Slot Context SDK](reference/slot-context-sdk.md), [Authored surface contract](reference/contracts/authored-surface.md) |
 | Package author | [Package model](explanation/package-model.md), [Write a package recipe](how-to/write-package-recipe.md), [Create an external package repository](tutorials/external-package-repository.md), [Publish a package repository](how-to/publish-package-repository.md), [Package recipe reference](reference/package-recipes.md) |
-| Contributor | [Architecture](developer-guide/architecture.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
+| Contributor | [Architecture](developer-guide/architecture.md), [Host runtime contracts](developer-guide/runtime-contracts.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
 
 ## Install Paths
 

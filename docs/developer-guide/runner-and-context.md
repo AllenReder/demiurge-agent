@@ -5,13 +5,21 @@ description: Contributor notes for turn execution and provider context assembly.
 
 # Runner and Context
 
-The runner wires the turn lifecycle modules. `TurnAdmissionRuntime` resolves the
-core/session route and starts the turn, `TurnPipelineRuntime` runs the authored
-input -> model/tool -> output path, and `TurnPersistenceRuntime` records input,
-assistant output, display state, completion, and interruption. Agent Core slots
-participate through controlled interfaces; they do not own the lifecycle.
+The current alpha runner wires the turn lifecycle modules.
+`TurnAdmissionRuntime` resolves the core/session route and starts the turn,
+`TurnPipelineRuntime` runs the authored input -> model/tool -> output path, and
+`TurnPersistenceRuntime` records input, assistant output, display state,
+completion, and interruption. Agent Core slots participate through controlled
+interfaces; they do not own the lifecycle.
+
+This layout is the precursor to the frozen `TurnExecution`, `PrincipalScope`,
+immutable `TurnExecutionContext`, and `ContextManager` interfaces. See
+[Host Runtime Contracts](runtime-contracts.md) for the authoritative target
+contract. The current runner does not yet satisfy every invariant below.
 
 ## Turn Flow
+
+The current flow is:
 
 ```text
 inbound interaction
@@ -25,6 +33,53 @@ inbound interaction
   -> persist input, assistant output, display state, completion, and session events
 ```
 
+## Target TurnExecution Interface
+
+The external Host seam is deliberately small:
+
+```text
+TurnExecution.run(TurnRequest) -> TurnResult
+TurnExecution.cancel(TurnId, PrincipalScope) -> CancelResult
+```
+
+`TurnExecution` must hide session admission, core-revision pinning, context
+preparation, provider/tool steps, slot execution, persistence, delivery, and
+cleanup. A caller supplies immutable request values, not a mutable runner,
+loaded core, store, provider client, or capability facade.
+
+The module owns these observable contracts:
+
+- same-session turns are serialized by admission, while different sessions can
+  run concurrently;
+- the session, core revision, capability snapshot, route, and trace identity
+  captured for a turn do not change after an await;
+- provider, slot, effect, cancellation, and unexpected failures create one
+  terminal turn state before resources are released;
+- restart marks or recovers orphaned admissions explicitly and never silently
+  replays a dangerous provider/effect step;
+- detached work is a separately owned runtime task, not a late mutation of a
+  completed turn.
+
+The current alpha implementation does **not** yet enforce one active turn per
+session. `SessionTurnStepRunner.session_id` is mutable, and prompt, IO, slot,
+event, and delivery helpers still read it after admission. Until
+`TurnExecution` is implemented, callers must not treat the existing runner as
+a concurrency-isolation guarantee.
+
+## Principal and Execution Context
+
+`PrincipalScope` is Host authority, not an Agent Core capability grant. It is
+derived from authenticated channel/operator/system facts plus durable
+conversation/session bindings, and it supplies the owner predicate for session,
+history, task, wait, cancel, resume, search, and approval-cache operations.
+
+`TurnExecutionContext` binds that principal to one session, turn, core revision,
+capability snapshot, workspace, route token, admission lease, cancellation
+token, and trace. Those bindings are immutable for the turn. Agent Slots and
+authored tools continue to receive the reduced author-facing SDK contexts;
+where applicable those contexts contain `TurnContext`. They do not receive
+operator authority, Host stores, or admission internals.
+
 ## Context Layers
 
 Provider context can include:
@@ -37,7 +92,16 @@ Provider context can include:
 - current user turn
 - tool call and tool result history
 
-The context assembler decides final provider message order and content.
+The current `ContextAssembler` decides final provider message order and content.
+It does not know the model context window, reserve an output budget, or trigger
+automatic compaction.
+
+The target `ContextManager.prepare()` owns layer budgets, full-request
+estimation, cheap pruning, compaction lease and fallback, and typed overflow
+before provider IO. `ContextManager.observe()` consumes normalized usage and
+finish-reason observations without relying on ambient mutable session state.
+Manual `/compact` remains the current alpha mechanism until that module is
+implemented.
 
 ## Bootstrap
 
@@ -46,12 +110,12 @@ within a session and safe to quote as reference context.
 
 ## Background Task Completion Turns
 
-The runner preserves one active turn per session. Background task completion is
-modeled as a synthetic inbound event for the originating session rather than as
-direct channel output. Channel bridges use live subscription as a wakeup path
-and recover pending completion events from SQLite. If user input and completion
-are both pending, the user input runs first and pending completion summaries are
-merged into that user turn. Completion notifications use durable work state:
+Background task completion is modeled as a synthetic inbound event for the
+originating session rather than as direct channel output. Channel bridges use
+live subscription as a wakeup path and recover pending completion events from
+SQLite. If user input and completion are both pending, the user input runs first
+and pending completion summaries are merged into that user turn. Completion
+notifications use durable work state:
 `ready` work is claimed before a bridge queues or merges the synthetic inbound,
 and it is acknowledged only through the task-worker seam. A successful
 `yield_until` call claims and acknowledges the matching pending completion, so
@@ -61,7 +125,9 @@ result.
 Parallel input and output slots are still scheduled concurrently, but the
 runner waits for their host-managed work to finish before marking the parent
 turn terminal. Detached slot work must be modeled as a child runtime task rather
-than mutating after the parent turn is complete.
+than mutating after the parent turn is complete. Here **parallel** means
+concurrent-but-joined within the parent turn; it is not detached or
+restart-durable.
 
 `/stop` and foreground cancellation affect only the active turn. Background
 tasks continue until they finish or a user calls `task_control(command="cancel")`.
@@ -83,6 +149,11 @@ host-owned route key built from explicit platform facts, for example
 `telegram:dm:123` or `slack:channel:T1:C1:thread:123.4`. Channel `/resume`
 rebinds the current conversation key to the resumed session so the next inbound
 message from that external conversation continues in the same transcript.
+
+This describes the current route implementation, not the target concurrency
+contract. The final route token must be captured in `TurnExecutionContext` and
+delivery must use that captured identity rather than rereading
+`runner.session_id`.
 
 Ordinary output, tool lifecycle events, and background output flushes create
 `InteractionOutbound` objects with a required `session_id`. The router delivers
@@ -110,14 +181,25 @@ looked up by `turn.session_id`; when no interactive route is bound, the approval
 provider denies with `no_interactive_route` unless a host, global, or core
 policy has already auto-allowed the action.
 
+The current session-allow cache is not yet principal/session scoped. The target
+cache key and lookup are owned by `ApprovalRuntime`, which consumes an immutable
+`PrincipalScope`. Route lookup alone is not authorization.
+
 ## Failure Handling
 
-Slot `failure_policy` determines whether a failed slot is soft or hard. Provider
-errors and cancellation after a turn starts write terminal turn and task state
-before the exception is re-raised. Tool errors, channel delivery errors, and
-schedule errors are handled at their host-owned layers.
+In the current alpha runner, slot `failure_policy` determines whether a failed
+slot is soft or hard. Exceptions/cancellation inside the guarded input,
+provider/model-loop, and output stages write terminal turn state before being
+re-raised. Tool-catalog preparation currently sits outside those guarded
+regions, so its failure does not yet have the same guarantee. A foreground turn
+is not a `RuntimeTask`; channel delivery, background task, and schedule errors
+remain owned by their respective Host modules.
+
+The target `TurnExecution` interface returns typed failed/cancelled product
+outcomes and exposes only typed rejection or infrastructure failures. Adapter
+exceptions do not become part of its caller interface.
 
 ## Boundary
 
-Do not move provider request construction or session ownership into Agent Core
-code.
+Do not move provider request construction, context budgeting, principal
+authority, or session ownership into Agent Core code.

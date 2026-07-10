@@ -5,8 +5,11 @@ description: Understand workspace scope, approvals, capabilities, secrets, and c
 
 # Security Model
 
-Demiurge treats capabilities as host-owned. Agent Core code can request effects
-only through controlled interfaces.
+Demiurge treats capabilities and dangerous model-triggered effects as
+Host-owned. The supported `ctx.*`, builtin-tool, and MCP-call paths request
+effects through Host interfaces. In the default `host_shared` runtime, imported
+Agent Core Python is trusted code and can also use ordinary Python/OS APIs; the
+current alpha runtime is not a sandbox.
 
 ## Workspace Scope
 
@@ -34,11 +37,21 @@ Capabilities describe effect classes such as:
 - `tool.call:evolve_core`
 - `tool.call:rollback_core`
 
-The host resolves capabilities and applies approval policy before the effect
-runs.
+Builtin file, terminal, network, schedule, and skill handlers resolve their
+applicable capability/approval checks before guarded operations, and MCP tool
+calls do so before the call. Alpha gaps remain: authored tool singular registry
+policy is not enforced automatically before its entrypoint runs; MCP
+spawn/connect/discovery can occur before call approval; and `evolve_core` /
+`rollback_core` require capabilities but do not yet resolve their registry
+`prompt` policy before mutating core refs. The target `EffectRuntime` closes
+these paths with one ordering; see
+[Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 Background completion turns use the originating session's normal capabilities
-and approvals. Background tasks do not auto-approve dangerous actions.
+and do not gain approval merely by running in the background. The current
+`evolve_core` registry-policy gap also affects background start, so the alpha
+runtime does not yet guarantee that every dangerous background action reaches
+approval before execution.
 
 ## Secrets
 
@@ -64,7 +77,11 @@ Telegram is deny-by-default through `allowed_users` and `allowed_chats`.
 The current alpha runtime does not promise a hardened multi-tenant sandbox.
 Agent Slot code runs in the host-shared Python environment by default.
 Per-core environments and subprocess workers are future isolation options, not
-the default runtime mode. Runtime task records, logs, scheduler instances, and
-delivery outbox status are stored in the SQLite runtime database; in-process
-workers are still responsible for live execution and do not replay already
-started dangerous side effects after host process restart.
+the default runtime mode. Capability grants do not confer session/operator
+authority. In the frozen target, owning session, task, approval, and effect
+modules will enforce predicates carried by `PrincipalScope`; the current alpha
+runtime does not yet provide that uniform owner scope. Runtime task records,
+logs, scheduler instances, and delivery outbox status are stored in the SQLite
+runtime database; in-process workers are still responsible for live execution
+and do not replay already started dangerous side effects after host process
+restart.

@@ -1,17 +1,28 @@
 ---
 title: Capabilities 和 Approvals
-description: Host-owned capability 和 approval behavior 的参考。
+description: Host-owned capability 与 approval 行为参考。
 ---
 
 # Capabilities 和 Approvals
 
-Capabilities 是 host-owned grants，用于 effect classes。Approval policy 决定某个 requested effect 是可以自动运行、必须提示，还是被拒绝。
+Capability 是 Host-owned 的 effect class grant。Approval policy 决定请求的 effect 能否
+自动运行、必须 prompt，或被拒绝。
 
-仅声明 tool、slot、schedule 或 MCP server，并不足以运行危险 effects。Host 会在执行时检查 capabilities。
+声明 tool、slot、schedule 或 MCP server 本身不会授予 capability。Builtin 与 MCP call
+handler 通常会在执行时检查所需 capability；authored SDK client 会强制执行显式
+`ctx.capability.require(...)` 调用。
+
+当前 alpha 限制：authored tool 的单数 `capability`、`risk` 与 `approval_policy`
+registry 字段不会在 entrypoint 运行前自动强制执行；MCP spawn/connect/discovery 会发生
+在之后的 call capability 与 approval check 之前；`evolve_core` 与 `rollback_core`
+builtin 分支会要求 capability，却尚未在 mutation 前解析 registry `prompt` policy。
+统一的目标顺序见
+[Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)。Capability 既不是
+principal authorization，也不是 Python sandbox。
 
 ## Capability Grants
 
-Capabilities 可以全局授予给 core：
+Capability 可以全局授予 core：
 
 ```yaml
 capabilities:
@@ -22,7 +33,7 @@ capabilities:
       scope: workspace
 ```
 
-也可以授予给某个 authored component path：
+也可以授予某个 authored component path：
 
 ```yaml
 capabilities:
@@ -32,7 +43,7 @@ capabilities:
         scope: workspace
 ```
 
-Slot 和 authored-tool manifests 也可以声明本地 `capabilities` 列表：
+Slot 与 authored-tool manifest 也可以声明本地 `capabilities` list：
 
 ```yaml
 capabilities:
@@ -40,17 +51,17 @@ capabilities:
   - tool.call:project_note
 ```
 
-运行时，authored code 调用：
+运行时 authored code 调用：
 
 ```python
 ctx.capability.require("fs.read", slot_path=ctx.slot_path)
 ```
 
-如果未声明该 capability，host 会抛出 `capability denied`。
+如果未声明 capability，Host 会抛出 `capability denied`。
 
 ## Prefix Grants
 
-Capability checker 支持精确 keys 和 prefix wildcards：
+Capability checker 支持精确 key 与 prefix wildcard：
 
 ```yaml
 capabilities:
@@ -63,42 +74,45 @@ capabilities:
 
 ## 常见 Capabilities
 
-| Capability | Meaning |
+| Capability | 含义 |
 | --- | --- |
-| `fs.read` | 通过 host checks 或需要它的 authored component 读取 host-visible files。workspace 外和 sensitive reads 需要 approval。 |
+| `fs.read` | 通过 Host check 或要求该 capability 的 authored component 读取 Host-visible files。Workspace 外与 sensitive read 需要 approval。 |
 | `fs.write` | 写入 workspace files。 |
-| `terminal.exec` | 在 workspace scope 中运行 terminal commands。 |
+| `terminal.exec` | 在 workspace scope 运行 terminal command。 |
 | `network.fetch` | 获取 network content。 |
 | `schedule.manage` | 管理 core schedule YAML files。 |
 | `task.control` | 列出、检查、等待或取消 background runtime tasks。 |
-| `tool.call:<tool>` | 允许 authored code 通过 `ctx.tools.call(...)` 调用 visible tool。 |
-| `mcp.call:<server>` | 允许模型调用某个 MCP server 上的 tools。 |
-| `skill.activate` | 允许 input slots 激活 skills。 |
-| `skill.activate:<skill>` | 允许 input slots 激活特定 skill。 |
-| `state.core.read` | 通过 `ctx.state.core` 读取 core-scoped host state。 |
-| `state.core.write` | 通过 `ctx.state.core` 写入 core-scoped host state。 |
-| `state.session.read` | 通过 `ctx.state.session` 读取 session-scoped host state。 |
-| `state.session.write` | 通过 `ctx.state.session` 写入 session-scoped host state。 |
+| `tool.call:<tool>` | 允许 authored code 通过 `ctx.tools.call(...)` 调用可见 tool。 |
+| `mcp.call:<server>` | 允许 model 调用 MCP server 的 tools。 |
+| `skill.activate` | 允许 input slot 激活 skills。 |
+| `skill.activate:<skill>` | 允许 input slot 激活指定 skill。 |
+| `state.core.read` | 通过 `ctx.state.core` 读取 core-scoped Host state。 |
+| `state.core.write` | 通过 `ctx.state.core` 写入 core-scoped Host state。 |
+| `state.session.read` | 通过 `ctx.state.session` 读取 session-scoped Host state。 |
+| `state.session.write` | 通过 `ctx.state.session` 写入 session-scoped Host state。 |
 | `agents.run:<core>` | 同步运行 child agent。 |
-| `agents.spawn:<core>` | 生成 child agent task。 |
-| `tool.call:evolve_core` | Start、review、promote 或 discard host-owned evolve run。 |
+| `agents.spawn:<core>` | Spawn child agent task。 |
+| `tool.call:evolve_core` | 启动、审查、promote 或 discard Host-owned evolve run。 |
 | `tool.call:rollback_core` | 为 live Agent Core tree 创建 rollback commit。 |
 
 ## Approval Policy
 
-Approval policy values 是：
+Approval policy values：
 
 ```text
 auto < prompt < deny
 ```
 
-Risk values 是：
+Risk values：
 
 ```text
 low < medium < high < critical
 ```
 
-对于大多数 tools，host 会从 tool metadata 开始，然后应用 core approval overrides，再应用 global fallback approval。更严格的 core policy 会优先于 tool metadata。Global fallback approval 是 host-level policy，可作为最终 default。
+对于使用 approval runtime 的 builtin handler 与 MCP call，Host 从 tool metadata 开始，
+再应用 core approval overrides，最后应用 global fallback approval。更严格的 core policy
+优先于 tool metadata。Global fallback approval 是 Host-level policy，可作为最终默认值。
+Authored 单数 metadata 与上面的 core-mutation builtin 例外尚未进入该 resolution path。
 
 ## Core Approval Config
 
@@ -113,11 +127,12 @@ approval:
     critical: deny
 ```
 
-`tools` 匹配 tool names。`capabilities` 匹配 request 使用的 capability。`risks` 匹配 request risk。
+`tools` 匹配 tool name。`capabilities` 匹配 request 使用的 capability。`risks` 匹配
+request risk。
 
 ## Tool Registry Metadata
 
-`tools.metadata` 会改变 registry metadata：
+`tools.metadata` 修改 registry metadata：
 
 ```yaml
 tools:
@@ -128,8 +143,12 @@ tools:
       capability: network.fetch
 ```
 
-Built-in tools 不能通过 core metadata 变得更宽松。Authored 和 MCP tools 可以被完全覆盖，因为它们是 core-declared surfaces。
+Core metadata 不能降低 built-in tool 的限制。Authored 与 MCP registry entry 可被覆盖，
+因为它们是 core-declared surface；但上面的 authored enforcement limitation 仍适用。
 
 ## 边界
 
-Capabilities 本身不是 sandbox。Effects 执行前，host 仍会强制执行 workspace scope、sensitive path checks、command guards、approval prompts、channel policy 和 tool runtime rules。
+Capability 本身不是 sandbox。Host 支持的 builtin 与 SDK 路径还会应用 workspace、
+sensitive-path、command、approval、channel 与 tool rules。在默认 `host_shared` 模式中，
+imported authored Python 可以在这些 SDK 路径之外使用普通 Python/OS APIs。目标
+`EffectRuntime` 会集中 model-triggered effect policy，但不宣称提供 process isolation。

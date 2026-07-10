@@ -11,9 +11,15 @@ The host builds the visible tool registry for each turn from:
 - authored tools under `slots.tools`
 - MCP tools discovered from `slots.mcp`
 
-The Agent Core declares tool surfaces. The host owns selection, dispatch,
-capability checks, approvals, workspace scope, task control, and result
-conversion.
+The Agent Core declares tool surfaces. The Host is the product owner for
+selection, dispatch, capability checks, approvals, workspace scope, task
+control, and result conversion. The current alpha implementation still has
+separate builtin, authored, and MCP paths: authored singular registry policy is
+not yet enforced before invocation, and MCP connect/discovery occurs before
+call approval. The `evolve_core` and `rollback_core` builtin branches also
+require their capabilities but do not yet resolve their registry `prompt`
+policy before mutation. These gaps are frozen for removal in
+[Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 ## Built-In Toolsets
 
@@ -30,7 +36,7 @@ Unknown toolset names fail core loading.
 Built-in tools have host-defined risk, capability, and approval defaults. For
 example:
 
-| Tool | Capability | Default approval |
+| Tool | Capability | Registry approval metadata |
 | --- | --- | --- |
 | `read_file` | `fs.read` | `auto` for non-sensitive workspace reads; `prompt` outside workspace or for sensitive paths |
 | `write_file` | `fs.write` | `prompt` |
@@ -41,8 +47,9 @@ example:
 | `evolve_core` | `tool.call:evolve_core` | `prompt` |
 | `rollback_core` | `tool.call:rollback_core` | `prompt` |
 
-Core metadata can make built-in tools stricter, but it cannot lower their risk
-or weaken their approval policy.
+For builtin handlers that use approval resolution, core metadata can make the
+effective policy stricter but cannot lower risk or weaken the registry policy.
+The core-mutation alpha exception is described below.
 
 ## Authored Tools
 
@@ -63,9 +70,9 @@ Accepted `tool.yaml` fields are:
 | `entrypoint` | `module:execute` | Callable loaded from the tool directory. |
 | `description` | `""` | Model-visible tool description. |
 | `input_schema` | `{}` | Model-visible JSON schema. |
-| `risk` | `medium` | Registry risk metadata. |
-| `capability` | `null` | Primary registry capability for this tool's approval metadata. |
-| `approval_policy` | `prompt` | Tool-level approval metadata. |
+| `risk` | `medium` | Registry risk metadata; currently not enforced by authored dispatch. |
+| `capability` | `null` | Primary registry capability metadata; currently not required automatically before authored invocation. |
+| `approval_policy` | `prompt` | Tool-level registry metadata; currently not resolved automatically before authored invocation. |
 | `display_policy` | `summary` | Operator display hint. |
 | `model_output_policy` | `content` | Model-output conversion hint. |
 | `capabilities` | `[]` | Capabilities the implementation may require through `ctx.capability.require(...)`. |
@@ -77,6 +84,13 @@ The singular `capability` and the `capabilities` list are separate:
 
 - `capability` identifies the tool in registry and approval metadata.
 - `capabilities` grants effect capabilities to the tool implementation.
+
+Current alpha limitation: the authored dispatcher does not yet enforce the
+singular `capability`, `risk`, or `approval_policy` before importing and calling
+the entrypoint. The `capabilities` list is still enforced when authored code or
+an SDK client calls `ctx.capability.require(...)`. Because `host_shared` Python
+can also call ordinary Python/OS APIs directly, these declarations are not a
+sandbox.
 
 Authored tools are not listed in `agent/pipelines.yaml`.
 
@@ -127,6 +141,10 @@ For each enabled server, the host:
 
 MCP tool calls require the server capability, defaulting to
 `mcp.call:<server_id>` unless the server manifest sets `capability`.
+
+Current alpha limitation: steps 1 and 2 happen while the catalog is prepared,
+before the later `mcp.call:*` capability and approval check. A future
+`mcp.connect:<server_id>` effect will govern spawn/connect/discovery separately.
 
 ## Tool Metadata Overrides
 
@@ -183,9 +201,12 @@ does not hot-reload the active core.
 | `promote` | `run_id` | Reruns gates and advances `refs/demiurge/previous` and `refs/demiurge/live`. |
 | `discard` | `run_id` | Removes the run worktree and metadata. |
 
-`promote` is a high-risk operation and requires approval. `rollback_core`
-creates a new rollback commit for the live Agent Core tree; the new revision
-takes effect on the next turn.
+`promote` is classified as a high-risk, prompt-policy operation, and
+`rollback_core` has the same prompt-policy intent. Current alpha limitation:
+both builtin branches require their capabilities but do not yet invoke the
+approval runtime before mutating core refs. `rollback_core` creates a new
+rollback commit for the live Agent Core tree; the new revision takes effect on
+the next turn.
 
 ## Child Agent Controls
 
@@ -235,8 +256,10 @@ pipeline. Invalid ids raise `ValueError` from authored `ctx.agents` calls.
 | non-empty list | Allow only the listed tool ids from the child core's configured tools. |
 
 Tool selection only narrows the child core's configured tools; it does not grant
-missing tools or bypass capabilities and approval policy. Invalid tool ids raise
-`ValueError` from authored `ctx.agents` calls.
+missing tools or capability grants. Builtin and MCP call policy still applies;
+the authored singular-policy alpha limitation described above also applies in a
+child turn. Invalid tool ids raise `ValueError` from authored `ctx.agents`
+calls.
 
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots, create a bootstrap snapshot, or inject an existing bootstrap
