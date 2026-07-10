@@ -1,6 +1,11 @@
 import pytest
 
-from demiurge.security.approval import ApprovalRequest, ApprovalRuntime, StaticApprovalProvider
+from demiurge.security.approval import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalRuntime,
+    StaticApprovalProvider,
+)
 
 
 def _request(**overrides):
@@ -70,3 +75,36 @@ async def test_always_allow_for_session_caches_future_requests():
     assert second.allowed is True
     assert runtime.cached_allow_count == 1
     assert events[-1]["cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_auth_01_session_allow_cache_does_not_authorize_another_session():
+    """AUTH-01: a session-scoped allow decision must not bleed into another session."""
+
+    class SessionAwareProvider:
+        name = "session-aware"
+
+        def __init__(self):
+            self.requests = []
+
+        def decide(self, request):
+            self.requests.append(request)
+            if request.session_id == "session_A":
+                return ApprovalDecision("always_allow_for_session")
+            return ApprovalDecision("deny")
+
+    provider = SessionAwareProvider()
+    runtime = ApprovalRuntime(provider)
+
+    first = await runtime.decide(_request(session_id="session_A"))
+    second = await runtime.decide(_request(session_id="session_B"))
+
+    assert {
+        "first": first.value,
+        "second": second.value,
+        "provider_sessions": [request.session_id for request in provider.requests],
+    } == {
+        "first": "always_allow_for_session",
+        "second": "deny",
+        "provider_sessions": ["session_A", "session_B"],
+    }

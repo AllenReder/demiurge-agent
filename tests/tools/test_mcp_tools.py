@@ -199,6 +199,55 @@ async def test_mcp_success_prefers_structured_content(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mcp_02_tool_dispatch_stays_bound_to_originating_session_connection(tmp_path):
+    """MCP-02: dispatch must use the connection resolved for the originating session."""
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _set_capabilities(app, {"mcp.call:docs": {}})
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id="session_A",
+        turn_id="turn_A",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="probe A"),
+    )
+    turn_b = TurnContext(
+        session_id="session_B",
+        turn_id="turn_B",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="probe B"),
+    )
+    connection_a = FakeMcpConnection([FakeListedTool(name="lookup")])
+    connection_b = FakeMcpConnection([FakeListedTool(name="lookup")])
+    connections = iter([connection_a, connection_b])
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: next(connections)
+
+    await app.tool_runtime.prepare_for_turn(core, turn_a, emit_event=app.runner.event_log.emit)
+    await app.tool_runtime.prepare_for_turn(core, turn_b, emit_event=app.runner.event_log.emit)
+    result = await app.tool_runtime.execute(
+        ToolCall(name="docs__lookup", arguments={"origin": "session_A"}, id="call_A"),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is False
+    assert {"session_A": connection_a.calls, "session_B": connection_b.calls} == {
+        "session_A": [("lookup", {"origin": "session_A"})],
+        "session_B": [],
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_connection_failure_emits_diagnostic_without_breaking_builtin_tools(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     _write_mcp_server(

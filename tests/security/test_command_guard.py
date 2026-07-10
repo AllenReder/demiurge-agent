@@ -1,3 +1,5 @@
+import pytest
+
 from demiurge.security.command_guard import review_command
 
 
@@ -26,3 +28,19 @@ def test_command_guard_blocks_hardline_commands():
     assert sudo_stdin.action == "block"
     assert sudo_stdin.rule_key == "sudo-stdin"
     assert shutdown.action == "block"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('echo "$(rm -rf /)"', id="rm-root"),
+        pytest.param('echo "$(shutdown now)"', id="shutdown"),
+        pytest.param('echo "$(dd if=/dev/zero of=/dev/sda)"', id="raw-device"),
+    ],
+)
+def test_sec_01_destructive_command_substitution_is_never_auto_approved(command):
+    """SEC-01: destructive payloads inside command substitution must fail closed."""
+    decision = review_command(command)
+
+    assert decision.action != "allow"
+    assert decision.risk in {"high", "critical"}

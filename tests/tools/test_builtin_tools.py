@@ -99,6 +99,93 @@ async def _execute(app, core, name, arguments):
     )
 
 
+@pytest.mark.asyncio
+async def test_tool_01_authored_prompt_policy_denial_prevents_execution(tmp_path):
+    """TOOL-01: authored prompt policy must be enforced before module execution."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-tool-ran.txt"
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / "policy_probe"
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Authored approval policy probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n"
+        "capability: probe.effect\n"
+        "risk: medium\n"
+        "approval_policy: prompt\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "from pathlib import Path\n\n"
+        "def run(ctx, arguments):\n"
+        f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+        "    return {'content': 'probe-ran'}\n",
+        encoding="utf-8",
+    )
+    approval_provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = approval_provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "policy_probe")
+
+    result = await _execute(app, core, "policy_probe", {})
+
+    assert entry.source == "authored"
+    assert entry.capability == "probe.effect"
+    assert entry.approval_policy == "prompt"
+    assert {
+        "marker_exists": marker.exists(),
+        "is_error": result.is_error,
+        "approval_requests": len(approval_provider.requests),
+        "approval_risks": [request.risk for request in approval_provider.requests],
+    } == {
+        "marker_exists": False,
+        "is_error": True,
+        "approval_requests": 1,
+        "approval_risks": ["medium"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_missing_capability_prevents_module_import(tmp_path):
+    """TOOL-01: capability denial must happen before authored module import."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-tool-imported.txt"
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / "capability_probe"
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Authored capability probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n"
+        "capability: probe.missing\n"
+        "risk: medium\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "from pathlib import Path\n\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+        "def run(ctx, arguments):\n"
+        "    return {'content': 'probe-ran'}\n",
+        encoding="utf-8",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "capability_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+
+
 def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
@@ -658,6 +745,62 @@ async def test_terminal_injects_runtime_timezone_env(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_env_01_terminal_subprocess_does_not_inherit_host_secret(monkeypatch, tmp_path):
+    """ENV-01: terminal subprocesses do not inherit synthetic host secrets."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET"
+    sentinel = "SYNTHETIC_ENV_01_SECRET_SENTINEL"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "env"})
+
+    assert result.is_error is False
+    assert result.data["executionStarted"] is True
+    assert sentinel not in result.content
+
+
+@pytest.mark.asyncio
+async def test_env_01_project_code_execution_requires_approval(tmp_path):
+    """ENV-01: commands that execute workspace code are not automatically approved."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "test_env_01_project_code.py").write_text(
+        "def test_harmless_project_code():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "python -m pytest -q test_env_01_project_code.py"},
+    )
+    approval_events = [
+        event
+        for event in app.runner.event_log.tail(20)
+        if event["type"] == "approval.decided"
+    ]
+
+    assert {
+        "is_error": result.is_error,
+        "execution_started": result.data["executionStarted"],
+        "automatic": approval_events[-1]["automatic"],
+    } == {
+        "is_error": True,
+        "execution_started": False,
+        "automatic": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -674,6 +817,34 @@ async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
     assert [event["type"] for event in approval_events] == ["approval.decided"]
     assert approval_events[0]["automatic"] is True
     assert approval_events[0]["risk"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_sec_01_terminal_does_not_auto_execute_command_substitution(tmp_path):
+    """SEC-01: runtime must not auto-execute a harmless substitution sentinel."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    sentinel = "DEMIURGE_SEC_01_SUBSTITUTION_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": f'echo "$(printf {sentinel})"'},
+    )
+
+    assert {
+        "is_error": result.is_error,
+        "execution_started": result.data["executionStarted"],
+        "sentinel_exposed": sentinel in result.content,
+    } == {
+        "is_error": True,
+        "execution_started": False,
+        "sentinel_exposed": False,
+    }
 
 
 @pytest.mark.asyncio

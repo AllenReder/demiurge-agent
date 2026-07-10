@@ -1,8 +1,9 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import demiurge.runtime.session as session_module
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
@@ -141,6 +142,33 @@ def test_session_runtime_uses_unique_conversation_binding(tmp_path):
         channel="telegram",
         conversation_key="chat_1",
     ) == first.session_id
+
+
+def test_store_01_latest_session_limit_includes_newest(tmp_path, monkeypatch):
+    """STORE-01: a bounded latest-session query includes the newest session."""
+    store = RuntimeStore(tmp_path / "runtime.sqlite3")
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = iter(
+        (base + timedelta(seconds=index)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for index in range(105)
+    )
+    monkeypatch.setattr(session_module, "utc_now", lambda: next(timestamps))
+
+    for index in range(105):
+        runtime.create_session(
+            session_id=f"session_{index:03d}",
+            core_id="assistant",
+            core_revision="0001",
+        )
+
+    latest_session_ids = [
+        record.session_id
+        for record in runtime.list_sessions(core_id="assistant", limit=20)
+    ]
+
+    assert len(latest_session_ids) == 20
+    assert "session_104" in latest_session_ids
 
 
 def test_create_app_recovers_stale_delivery_work_once(tmp_path):

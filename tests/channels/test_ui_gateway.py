@@ -1,4 +1,7 @@
 import asyncio
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -140,6 +143,36 @@ async def _complete_background_task(app, *, summary: str = "background complete"
     )
     await app.task_worker.wait(record.task_id, timeout_seconds=1)
     return record
+
+
+def test_ui_01_gateway_startup_error_emits_operator_error_and_exits_nonzero(tmp_path):
+    """UI-01: startup errors are observable frames and failing process exits."""
+    config = {
+        "home": str(tmp_path / "home"),
+        "agents_root": str(tmp_path / "missing-agents"),
+        "provider": "fake",
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    startup_error = next(frame for frame in frames if frame.get("event") == "operator.error")
+    assert startup_error["payload"]["source"] == "gateway_startup"
+    assert startup_error["payload"]["message"]
+    assert completed.returncode != 0
 
 
 def test_parse_approval_response():

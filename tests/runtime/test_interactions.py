@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from demiurge.providers import ToolCall
+from demiurge.app import create_app
+from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import (
     InteractionDelivery,
     InteractionExecutionRuntime,
@@ -49,6 +51,36 @@ class FakeRoute:
 
     async def prompt_user(self, prompt) -> str:
         return ""
+
+    async def request_approval(self, request):
+        raise AssertionError("approval should not be requested")
+
+
+class CoordinatedSessionProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            return LLMResponse(content="assistant-A")
+        self.release_first.set()
+        return LLMResponse(content="assistant-B")
+
+
+class RecordingSessionRoute:
+    def __init__(self) -> None:
+        self.outbounds = []
+
+    async def deliver(self, outbound) -> None:
+        self.outbounds.append(outbound)
+
+    async def prompt_user(self, prompt):
+        raise AssertionError("prompt should not be requested")
 
     async def request_approval(self, request):
         raise AssertionError("approval should not be requested")
@@ -194,3 +226,74 @@ async def test_interaction_runtime_facade_runs_execution_then_response_projectio
     assert runner.background_tasks.drains == [False]
     assert outbound.items == [item]
     assert outbound.session_id == "session_1"
+
+
+@pytest.mark.asyncio
+async def test_ses_01_concurrent_turns_keep_assistant_history_isolated_by_session(tmp_path):
+    """SES-01: concurrent interaction turns keep assistant history session-local."""
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = CoordinatedSessionProvider()
+    app.runner.provider = provider
+    runtime = InteractionRuntime(app.runner)
+    inbound_a = InteractionInbound(
+        channel="probe",
+        text="user-A",
+        source="A",
+        conversation_key="probe:dm:A",
+    )
+    inbound_b = InteractionInbound(
+        channel="probe",
+        text="user-B",
+        source="B",
+        conversation_key="probe:dm:B",
+    )
+    route_a = RecordingSessionRoute()
+    route_b = RecordingSessionRoute()
+    task_a = asyncio.create_task(runtime.handle(inbound_a, route=route_a))
+
+    try:
+        await asyncio.wait_for(provider.first_started.wait(), timeout=5)
+        outbound_b = await asyncio.wait_for(runtime.handle(inbound_b, route=route_b), timeout=5)
+        outbound_a = await asyncio.wait_for(task_a, timeout=5)
+
+        def history(session_id: str) -> list[tuple[str, str]]:
+            return [
+                (message.role, message.content)
+                for message in app.session_runtime.read_messages(session_id)
+            ]
+
+        assert outbound_a.session_id != outbound_b.session_id
+        assert {
+            "A": {
+                "history": history(outbound_a.session_id),
+                "deliveries": [
+                    (outbound.session_id, [delivery.text for delivery in outbound.deliveries])
+                    for outbound in route_a.outbounds
+                ],
+                "conversation_key": outbound_a.metadata["conversation_key"],
+            },
+            "B": {
+                "history": history(outbound_b.session_id),
+                "deliveries": [
+                    (outbound.session_id, [delivery.text for delivery in outbound.deliveries])
+                    for outbound in route_b.outbounds
+                ],
+                "conversation_key": outbound_b.metadata["conversation_key"],
+            },
+        } == {
+            "A": {
+                "history": [("user", "user-A"), ("assistant", "assistant-A")],
+                "deliveries": [(outbound_a.session_id, ["assistant-A"])],
+                "conversation_key": "probe:dm:A",
+            },
+            "B": {
+                "history": [("user", "user-B"), ("assistant", "assistant-B")],
+                "deliveries": [(outbound_b.session_id, ["assistant-B"])],
+                "conversation_key": "probe:dm:B",
+            },
+        }
+    finally:
+        if not task_a.done():
+            task_a.cancel()
+            await asyncio.gather(task_a, return_exceptions=True)
+        await app.close()
