@@ -53,9 +53,11 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not stress'"
 markers = [
   "cross_platform: targeted smoke coverage for OS-sensitive behavior",
   "slow_integration: slower end-to-end integration coverage retained by the full profile",
+  "stress: explicit performance, capacity, and fault baselines excluded from ordinary Python profiles",
 ]
 
 [tool.hatch.build.targets.wheel]

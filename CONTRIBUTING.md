@@ -153,6 +153,22 @@ For OS-sensitive smoke coverage without running the full suite:
 uv run python scripts/run_python_ci_tests.py --profile cross-platform-smoke
 ```
 
+The default `uv run pytest` selection and the `full` and
+`cross-platform-smoke` profiles exclude explicit performance, capacity, and
+fault baselines. Run those separately and optionally persist the
+machine-readable summary:
+
+```bash
+DEMIURGE_BASELINE_OUTPUT=/tmp/demiurge-baseline.json \
+  uv run python scripts/run_python_ci_tests.py --profile stress
+```
+
+Known audit findings in the stress profile use strict `xfail` contracts. The
+profile exits successfully while those failures remain reproducible, and an
+unexpected pass fails the run until the finding marker and evidence are
+updated. To prove the underlying contracts are still red, run the focused
+node or suite with `-m stress --runxfail`.
+
 TUI changes:
 
 ```bash
