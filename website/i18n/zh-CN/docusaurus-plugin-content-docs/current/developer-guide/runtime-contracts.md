@@ -498,7 +498,13 @@ identifier；使用该 ID 查找其 probe 或 permanent test，以及 implementa
   DTO，而不是 durable inbox schema。
 - JSON-backed `StateStore` 只用于 containment。最终 production state semantics 归
   `StateRuntime` 所有，并在 transactional `RuntimeStore` 上实现；不会永久保留
-  JSON/SQLite 双 owner。
+  JSON/SQLite 双 owner。当前 containment 会在单进程内按 resolved state path 串行，
+  使用 content-hash CAS 做内部 stale-writer detection，并通过 atomic file 与
+  prepared/committed recovery journal 一起发布 state 和 proposal audit。POSIX state
+  path 使用显式 private mode bit；Windows 遵循平台 ACL semantics。该 containment
+  不会声称支持 cross-process locking，也不会把两个分开的 authored `get()` 与 `set()`
+  变成 transaction。现有 JSON document 不需要 schema rewrite；后续 migration 会把
+  它们导入 `StateRuntime`，然后退役 JSON writer。
 - 除非 owner table 明确移动 ownership，现有 `DeliveryRuntime`、`SessionRuntime`、
   `RuntimeStore`、task worker、scheduler、provider 与 slot modules 仍保留各自专门职责。
 - Breaking cleanup 可以删除 private forwarding methods 与旧 internal layout。

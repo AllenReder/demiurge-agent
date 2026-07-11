@@ -62,8 +62,27 @@ Common children:
 | `state/<core_id>.json` | Core-scoped JSON state read and written through `ctx.state.core`. |
 | `state/sessions/<session_id>.json` | Session-scoped JSON state read and written through `ctx.state.session`. |
 | `state/proposals.jsonl` | Audit log for accepted core and session state writes. |
+| `state/**/.*.transaction.json` | Private transient recovery journal for an in-flight state snapshot plus proposal-audit commit. |
 | `workspace/` | Default workspace when no CLI/env/core workspace is selected. |
 | `logs/` | Runtime logs such as `mcp-stderr.log`. |
+
+State files are current alpha containment, not the final production state
+engine. Within one host process, writes to the same resolved state path are
+serialized. Snapshot and proposal-audit files are published through flushed,
+same-directory temporary files and atomic replacement. On POSIX,
+runtime-owned state directories use mode `0700` and files use `0600`,
+independent of the process umask. Windows uses platform ACL semantics, so the
+numeric POSIX mode guarantee does not apply there. A prepared transaction
+journal is rolled back on the next read after an interrupted commit; a
+committed journal is completed before it is removed.
+
+The containment does not provide an inter-process lock. Do not run multiple
+Demiurge host processes against the same runtime home. The JSON document shape
+is unchanged for existing runtime homes; internal compare-and-swap revisions
+are content hashes rather than new authored-state keys. Proposal audit entries
+also carry a full-entropy transaction identity so crash recovery does not rely
+on the shorter display id. Final transactional state ownership belongs in
+`StateRuntime` on `RuntimeStore`.
 
 ## Runtime Core
 

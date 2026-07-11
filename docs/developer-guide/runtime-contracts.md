@@ -558,7 +558,15 @@ to locate its probe or permanent test and implementation history.
   and TurnExecution, not the durable inbox schema.
 - The JSON-backed `StateStore` is containment only. Final production state
   semantics belong to `StateRuntime`, implemented on the transactional
-  `RuntimeStore`; there is no permanent JSON/SQLite dual owner.
+  `RuntimeStore`; there is no permanent JSON/SQLite dual owner. The containment
+  serializes a resolved state path within one process, uses content-hash CAS for
+  internal stale-writer detection, and publishes state plus proposal audit with
+  atomic files and a prepared/committed recovery journal. POSIX state paths use
+  explicit private mode bits; Windows follows platform ACL semantics. The
+  containment deliberately does not claim cross-process locking or make separate
+  authored `get()` and `set()` calls transactional. Existing JSON documents
+  require no schema rewrite; migration later imports them into `StateRuntime` and
+  retires the JSON writer.
 - Existing `DeliveryRuntime`, `SessionRuntime`, `RuntimeStore`, task worker,
   scheduler, provider, and slot modules keep their specialized ownership unless
   the owner table explicitly moves it.

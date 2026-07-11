@@ -58,8 +58,26 @@ demiurge-agent/
 | `runtime/runtime.sqlite3` | Runtime control-plane event store 和 projections。 |
 | `runtime/artifacts/` | Runtime records 引用的 host-owned artifacts。 |
 | `runtime/session-events/` | Per-session diagnostic event logs。 |
+| `state/<core_id>.json` | 通过 `ctx.state.core` 读写的 core-scoped JSON state。 |
+| `state/sessions/<session_id>.json` | 通过 `ctx.state.session` 读写的 session-scoped JSON state。 |
+| `state/proposals.jsonl` | Core 和 session state write 的 proposal audit log。 |
+| `state/**/.*.transaction.json` | State snapshot 与 proposal audit 正在提交时使用的私有临时恢复 journal。 |
 | `workspace/` | 未选择 CLI/env/core workspace 时使用的默认 workspace。 |
 | `logs/` | Runtime logs，例如 `mcp-stderr.log`。 |
+
+这些 state file 是当前 alpha containment，不是最终 production state engine。在单个
+Host process 内，同一个 resolved state path 的 write 会串行执行。Snapshot 和 proposal
+audit 都通过已 flush 的同目录 temporary file 与 atomic replace 发布。在 POSIX 上，
+runtime-owned state directory 固定为 `0700`，file 固定为 `0600`，不受 process umask
+影响。Windows 使用平台 ACL semantics，因此不适用数字化 POSIX mode 保证。若 commit
+被中断，下次读取会回滚 prepared transaction journal；若 journal 已 committed，则先
+补全发布再删除 journal。
+
+该 containment 不提供 inter-process lock。不要让多个 Demiurge Host process 共用同一个
+runtime home。现有 runtime home 的 JSON document shape 不变；内部 compare-and-swap
+revision 使用 content hash，不会增加 authored-state key。Proposal audit entry 还会携带
+full-entropy transaction identity，因此 crash recovery 不依赖较短的 display id。最终
+transactional state ownership 归 `RuntimeStore` 上的 `StateRuntime`。
 
 ## Runtime Core
 

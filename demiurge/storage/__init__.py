@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import shutil
+import threading
 import time
+import uuid
+import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -11,7 +16,36 @@ import yaml
 
 from demiurge.core_repository import CommitResult, CorePointer, CoreRepository
 from demiurge.runtime.delivery import ArtifactRef
-from demiurge.util import append_jsonl, ensure_dir, read_json, utc_id, write_json
+from demiurge.util import (
+    append_jsonl,
+    atomic_write_private_json,
+    atomic_write_private_text,
+    ensure_dir,
+    read_json,
+    utc_id,
+    write_json,
+)
+
+
+class _StatePathLock:
+    __slots__ = ("lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+
+
+_STATE_PATH_LOCKS: weakref.WeakValueDictionary[str, _StatePathLock] = weakref.WeakValueDictionary()
+_STATE_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _state_path_lock(path: Path) -> _StatePathLock:
+    resolved = str(path.resolve())
+    with _STATE_PATH_LOCKS_GUARD:
+        path_lock = _STATE_PATH_LOCKS.get(resolved)
+        if path_lock is None:
+            path_lock = _StatePathLock()
+            _STATE_PATH_LOCKS[resolved] = path_lock
+        return path_lock
 
 
 class EventLog:
@@ -130,6 +164,26 @@ class StateProposal:
     patch: Any
 
 
+@dataclass(frozen=True, slots=True)
+class StateSnapshot:
+    document: dict[str, Any]
+    revision: str
+
+
+class StateConflictError(RuntimeError):
+    def __init__(self, *, expected_revision: str, current_revision: str):
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+        super().__init__(
+            "state revision conflict: "
+            f"expected {expected_revision}, current {current_revision}"
+        )
+
+
+class StateCommitError(RuntimeError):
+    pass
+
+
 class ArtifactStore:
     def __init__(self, home: Path, session_id: str):
         self.home = home
@@ -199,6 +253,9 @@ class StateStore:
         self.session_id = session_id
         self.path = self._path_for_scope(home, core_id, scope=scope, session_id=session_id)
         self.proposal_log = home / "state" / "proposals.jsonl"
+        self.transaction_journal = self.path.with_name(f".{self.path.name}.transaction.json")
+        self._transaction_lock = _state_path_lock(self.path)
+        self._proposal_log_lock = _state_path_lock(self.proposal_log)
 
     @classmethod
     def core(cls, home: Path, core_id: str) -> "StateStore":
@@ -214,10 +271,18 @@ class StateStore:
         return home / "state" / "sessions" / f"{session_id}.json"
 
     def read(self) -> dict[str, Any]:
-        return read_json(self.path, {"schema_version": 1})
+        with self._transaction_lock.lock:
+            if self.transaction_journal.exists():
+                with self._proposal_log_lock.lock:
+                    self._recover_transaction()
+            return read_json(self.path, {"schema_version": 1})
 
     def snapshot(self) -> dict[str, Any]:
         return self.read()
+
+    def read_snapshot(self) -> StateSnapshot:
+        document = self.read()
+        return StateSnapshot(document=document, revision=self._revision_for(document))
 
     def read_target(self, target: str, default: Any = None) -> Any:
         cursor: Any = self.read()
@@ -235,9 +300,11 @@ class StateStore:
         turn_id: str,
         accepted: bool = True,
         reason: str | None = None,
+        expected_revision: str | None = None,
     ) -> dict[str, Any]:
         entry = {
             "id": utc_id("proposal_"),
+            "transaction_id": uuid.uuid4().hex,
             "scope": self.scope,
             "core_id": self.core_id,
             "session_id": self.session_id,
@@ -254,12 +321,202 @@ class StateStore:
             "accepted": accepted,
             "reason": reason,
         }
-        if accepted:
-            document = self.read()
-            self._apply(document, proposal)
-            write_json(self.path, document)
-        append_jsonl(self.proposal_log, entry)
+        with self._transaction_lock.lock, self._proposal_log_lock.lock:
+            if accepted:
+                snapshot = self.read_snapshot()
+                entry["base_revision"] = snapshot.revision
+                if expected_revision is not None and expected_revision != snapshot.revision:
+                    entry["accepted"] = False
+                    entry["reason"] = "state revision conflict"
+                    entry["expected_revision"] = expected_revision
+                    entry["state_revision"] = snapshot.revision
+                    self._append_proposal_entry(entry)
+                    raise StateConflictError(
+                        expected_revision=expected_revision,
+                        current_revision=snapshot.revision,
+                    )
+                previous_exists = self.path.exists()
+                previous_document = snapshot.document
+                state_before = (
+                    self.path.read_text(encoding="utf-8")
+                    if previous_exists
+                    else None
+                )
+                proposal_log_exists = self.proposal_log.exists()
+                document = copy.deepcopy(previous_document)
+                self._apply(document, proposal)
+                entry["state_revision"] = self._revision_for(document)
+                state_after = self._document_text(document)
+                journal = {
+                    "schema_version": 1,
+                    "phase": "prepared",
+                    "proposal_id": entry["id"],
+                    "proposal_entry": entry,
+                    "state_existed": previous_exists,
+                    "state_before": state_before,
+                    "state_after": state_after,
+                    "proposal_log_existed": proposal_log_exists,
+                }
+                atomic_write_private_json(self.transaction_journal, journal)
+                try:
+                    atomic_write_private_text(self.path, state_after)
+                    self._append_proposal_entry(entry)
+                    journal["phase"] = "committed"
+                    atomic_write_private_json(self.transaction_journal, journal)
+                except BaseException:
+                    try:
+                        self._recover_transaction()
+                    except BaseException as recovery_error:
+                        raise StateCommitError(
+                            "state transaction failed and automatic recovery did not complete; "
+                            f"journal retained at {self.transaction_journal}"
+                        ) from recovery_error
+                    raise
+                else:
+                    self.transaction_journal.unlink(missing_ok=True)
+            else:
+                self._append_proposal_entry(entry)
         return entry
+
+    def _append_proposal_entry(
+        self,
+        entry: dict[str, Any],
+        *,
+        current_text: str | None = None,
+    ) -> None:
+        atomic_write_private_text(
+            self.proposal_log,
+            self._proposal_log_text(entry, current_text=current_text),
+        )
+
+    def _proposal_log_text(
+        self,
+        entry: dict[str, Any],
+        *,
+        current_text: str | None = None,
+    ) -> str:
+        if current_text is None:
+            current_text = (
+                self.proposal_log.read_text(encoding="utf-8")
+                if self.proposal_log.exists()
+                else ""
+            )
+        line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+        return current_text + line
+
+    def _recover_transaction(self) -> None:
+        journal = read_json(self.transaction_journal, None)
+        if not isinstance(journal, dict):
+            raise StateCommitError(f"invalid state transaction journal: {self.transaction_journal}")
+        phase = journal.get("phase")
+        if phase == "prepared":
+            state_text = journal.get("state_before")
+            state_existed = bool(journal.get("state_existed"))
+        elif phase == "committed":
+            state_text = journal.get("state_after")
+            state_existed = True
+        else:
+            raise StateCommitError(
+                f"unsupported state transaction phase {phase!r}: {self.transaction_journal}"
+            )
+
+        self._restore_file(self.path, state_text, existed=state_existed)
+        self._recover_proposal_entry(
+            journal.get("proposal_entry"),
+            phase=phase,
+            proposal_log_existed=bool(journal.get("proposal_log_existed")),
+        )
+        self.transaction_journal.unlink(missing_ok=True)
+
+    def _recover_proposal_entry(
+        self,
+        proposal_entry: Any,
+        *,
+        phase: str,
+        proposal_log_existed: bool,
+    ) -> None:
+        if not isinstance(proposal_entry, dict) or not isinstance(
+            proposal_entry.get("transaction_id"),
+            str,
+        ):
+            raise StateCommitError(
+                f"state transaction proposal entry is invalid: {self.transaction_journal}"
+            )
+        transaction_id = proposal_entry["transaction_id"]
+        entries = self._read_proposal_entries()
+        matching_indexes = [
+            index
+            for index, entry in enumerate(entries)
+            if entry.get("transaction_id") == transaction_id
+        ]
+        if phase == "prepared":
+            if not matching_indexes:
+                return
+            entries = [
+                entry
+                for entry in entries
+                if entry.get("transaction_id") != transaction_id
+            ]
+            if entries or proposal_log_existed:
+                atomic_write_private_text(
+                    self.proposal_log,
+                    self._proposal_entries_text(entries),
+                )
+            else:
+                self.proposal_log.unlink(missing_ok=True)
+            return
+        if not matching_indexes:
+            self._append_proposal_entry(proposal_entry)
+
+    def _read_proposal_entries(self) -> list[dict[str, Any]]:
+        if not self.proposal_log.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for line in self.proposal_log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if not isinstance(entry, dict):
+                raise StateCommitError(f"invalid proposal audit entry: {self.proposal_log}")
+            entries.append(entry)
+        return entries
+
+    @staticmethod
+    def _proposal_entries_text(entries: list[dict[str, Any]]) -> str:
+        return "".join(
+            json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+            for entry in entries
+        )
+
+    @staticmethod
+    def _restore_file(path: Path, value: Any, *, existed: bool) -> None:
+        if existed:
+            if not isinstance(value, str):
+                raise StateCommitError(f"state transaction recovery payload is invalid for {path}")
+            current = path.read_text(encoding="utf-8") if path.exists() else None
+            if current != value:
+                atomic_write_private_text(path, value)
+            return
+        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _document_text(document: dict[str, Any]) -> str:
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+
+    @staticmethod
+    def _revision_for(document: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
     def _apply(self, document: dict[str, Any], proposal: StateProposal) -> None:
         if not proposal.target:
