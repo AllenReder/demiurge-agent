@@ -105,8 +105,27 @@ live worker for active work:
 `task_list`, `task_status`, `task_control`, and `yield_until` are the
 model-facing runtime-task controls. `task_control` supports only
 `command="cancel"`; non-cancel commands are rejected as unsupported. Active
-execution is still live in the host runtime, while task status and logs are read
-from SQLite projections through `RuntimeControlPlane`.
+execution is still live in the host runtime, while task status and logs are
+stored in SQLite projections through `RuntimeControlPlane`. Detail, wait,
+completion consumption, and cancel use the admitted `PrincipalScope` in the
+store query. Model-facing task controls return bounded status/result fields and
+cannot request `operator` or `debug` views; full task logs remain available only
+through the independent Host/operator surface. Model payloads omit owner ids,
+write scope, arbitrary metadata, result references, and logs; summaries are
+bounded. `task_list` uses the same model projection and a store-side owned query
+restricted to the current turn session. `/subagents` uses the full operator
+projection only after the same owner check; guessing another principal's task
+id returns the same result as a missing id.
+Runner-owned delegation controls call the same `resolve_approval_scope(...)`
+seam as ordinary ToolRuntime dispatch, so they cannot apply a weaker execution
+identity check.
+
+`session_search` requires `session.read` and the resolved `prompt/medium`
+approval policy before any history read. Browse, explicit-session, and full-text
+paths use `SessionRuntime` owned list/message queries. Ordinary conversation
+scope is limited to its bound session; an audited operator scope can search all
+normally owned sessions after approval. Ambiguous `legacy_local` sessions are
+excluded and require the dedicated operator repair/status path.
 
 Each background task records `kind`, owner session/turn, `source_tool`,
 status, summary, bounded log tail, result reference, and an optional

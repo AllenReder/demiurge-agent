@@ -87,6 +87,7 @@ This grants capabilities such as `mcp.call:docs`.
 | `network.fetch` | Fetch network content. |
 | `schedule.manage` | Manage core schedule YAML files. |
 | `task.control` | List, inspect, wait for, or cancel background runtime tasks. |
+| `session.read` | Browse or search session history through owner-scoped Host queries. `session_search` also requires approval. |
 | `tool.call:<tool>` | Let authored code call a visible tool through `ctx.tools.call(...)`. |
 | `mcp.call:<server>` | Let the model call tools from an MCP server. |
 | `skill.activate` | Let input slots activate skills. |

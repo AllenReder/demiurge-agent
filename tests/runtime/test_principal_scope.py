@@ -27,6 +27,33 @@ def _host_store(path):
     return store
 
 
+def _conversation_scope_for_app(app, *, suffix: str):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    session_id = f"session_{suffix}"
+    conversation_key = f"probe:conversation:{suffix}"
+    principal_key = f"user_{suffix}"
+    issued = resolver.issue_conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+    app.session_runtime.create_session(
+        session_id=session_id,
+        core_id="assistant",
+        core_revision="rev",
+        channel="probe",
+        conversation_key=conversation_key,
+        principal_scope=issued,
+    )
+    return resolver.conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+
+
 def test_conversation_scope_is_host_derived_immutable_and_session_bounded(tmp_path):
     resolver = PrincipalScopeResolver(RuntimeStore(tmp_path / "runtime.sqlite3"))
     scope = resolver.issue_conversation(
@@ -352,12 +379,12 @@ def test_operator_owned_query_is_relational_above_sqlite_bind_limit(tmp_path):
             INSERT INTO session_owners (
                 session_id, owner_kind, principal_id, channel, conversation_key,
                 origin_session_id, origin_turn_id, created_at, updated_at
-            ) VALUES (?, 'legacy_local', ?, NULL, NULL, NULL, NULL, ?, ?)
+            ) VALUES (?, 'conversation', ?, NULL, NULL, NULL, NULL, ?, ?)
             """,
             [
                 (
                     session_id,
-                    f"principal:legacy_local:{session_id}",
+                    f"principal:conversation:probe:{session_id}",
                     "2026-07-11T00:00:00Z",
                     "2026-07-11T00:00:00Z",
                 )
@@ -383,6 +410,245 @@ def test_operator_owned_query_is_relational_above_sqlite_bind_limit(tmp_path):
     assert scope.allows_session(session_ids[0]) is False
     assert scope.allows_session(session_ids[-1]) is True
     assert [row["session_id"] for row in guessed.rows] == [session_ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_operator_owned_session_interfaces_hide_legacy_local_rows(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    legacy_session_id = "session_legacy_private"
+    private_marker = "legacy-history-must-require-repair"
+    app.session_runtime.create_session(
+        session_id=legacy_session_id,
+        core_id="assistant",
+        core_revision="legacy-rev",
+    )
+    app.session_runtime.append_message(
+        legacy_session_id,
+        role="user",
+        content=private_marker,
+    )
+    operator = PrincipalScopeResolver(app.runtime_store).local_operator(
+        active_session_id=app.runner.session_id,
+        reason="normal operator session browse must exclude legacy rows",
+    )
+
+    try:
+        listed = app.session_runtime.list_owned_sessions(operator, limit=100)
+
+        assert legacy_session_id not in {record.session_id for record in listed}
+        with pytest.raises(FileNotFoundError, match="session not found"):
+            app.session_runtime.get_owned_session(operator, legacy_session_id)
+        with pytest.raises(FileNotFoundError, match="session not found"):
+            app.session_runtime.read_owned_messages(operator, legacy_session_id)
+
+        assert app.session_runtime.get_session(legacy_session_id).session_id == legacy_session_id
+        assert [message.content for message in app.session_runtime.read_messages(legacy_session_id)] == [
+            private_marker
+        ]
+    finally:
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_status_query_requires_operator_and_is_audited(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    legacy_session_id = "session_legacy_repair"
+    app.session_runtime.create_session(
+        session_id=legacy_session_id,
+        core_id="assistant",
+        core_revision="legacy-rev",
+    )
+    app.session_runtime.append_message(
+        legacy_session_id,
+        role="user",
+        content="legacy repair history marker",
+    )
+    legacy_task = app.control_plane.submit_task(
+        TaskSpec(kind="terminal.exec"),
+        source=TaskSource(
+            actor="legacy-repair-test",
+            session_id=legacy_session_id,
+            turn_id="turn_legacy",
+        ),
+    )
+    ordinary_scope = _conversation_scope_for_app(app, suffix="legacy-repair-ordinary")
+    operator = PrincipalScopeResolver(app.runtime_store).local_operator(
+        active_session_id=app.runner.session_id,
+        reason="legacy repair status regression",
+    )
+
+    try:
+        assert app.runtime_store.query_owned(
+            operator,
+            RuntimeQuery(
+                table="tasks",
+                where={"task_id": legacy_task.task_id},
+                limit=1,
+            ),
+        ).rows == ()
+        with pytest.raises(PermissionError, match="operator authority"):
+            app.runtime_store.query_legacy_for_repair(
+                ordinary_scope,
+                RuntimeQuery(
+                    table="sessions",
+                    where={"session_id": legacy_session_id},
+                    limit=1,
+                ),
+                reason="unauthorized legacy inspection",
+            )
+
+        session_rows = app.runtime_store.query_legacy_for_repair(
+            operator,
+            RuntimeQuery(
+                table="sessions",
+                where={"session_id": legacy_session_id},
+                limit=1,
+            ),
+            reason="inspect legacy session status before owner repair",
+        ).rows
+        message_rows = app.runtime_store.query_legacy_for_repair(
+            operator,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": legacy_session_id},
+                order_by="runtime_seq",
+                limit=10,
+            ),
+            reason="inspect legacy history before owner repair",
+        ).rows
+        task_rows = app.runtime_store.query_legacy_for_repair(
+            operator,
+            RuntimeQuery(
+                table="tasks",
+                where={"task_id": legacy_task.task_id},
+                limit=1,
+            ),
+            reason="inspect legacy task status before owner repair",
+        ).rows
+
+        assert [row["session_id"] for row in session_rows] == [legacy_session_id]
+        assert message_rows[0]["content"]["text"] == "legacy repair history marker"
+        assert [row["task_id"] for row in task_rows] == [legacy_task.task_id]
+
+        audits = app.runtime_store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"type": "principal_scope.legacy_repair_accessed"},
+                order_by="seq",
+                limit=10,
+            )
+        ).rows
+        assert [event["payload"]["table"] for event in audits] == [
+            "sessions",
+            "messages",
+            "tasks",
+        ]
+        assert all(event["actor"]["principal_id"] == operator.principal_id for event in audits)
+    finally:
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_lookup_audit_preserves_missing_unauthorized_and_legacy_reason(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope_for_app(app, suffix="audit-a")
+    scope_b = _conversation_scope_for_app(app, suffix="audit-b")
+    legacy_session_id = "session_audit_legacy"
+    app.session_runtime.create_session(
+        session_id=legacy_session_id,
+        core_id="assistant",
+        core_revision="legacy-rev",
+    )
+    operator = PrincipalScopeResolver(app.runtime_store).local_operator(
+        active_session_id=app.runner.session_id,
+        reason="owner lookup forensic audit regression",
+    )
+
+    try:
+        for scope, session_id in (
+            (scope_a, scope_b.session_id),
+            (scope_a, "session_missing_probe"),
+            (operator, legacy_session_id),
+        ):
+            with pytest.raises(FileNotFoundError, match="session not found"):
+                app.session_runtime.get_owned_session(scope, session_id)
+
+        audits = app.runtime_store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"type": "principal_scope.owner_lookup_denied"},
+                order_by="seq",
+                limit=10,
+            )
+        ).rows
+        reasons = {
+            event["payload"]["lookup_id"]: event["payload"]["reason"]
+            for event in audits
+        }
+        assert reasons == {
+            scope_b.session_id: "not_authorized",
+            "session_missing_probe": "not_found",
+            legacy_session_id: "legacy_owner_requires_repair",
+        }
+    finally:
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_message_lookup_audit_uses_session_owner_not_message_rows(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope_for_app(app, suffix="message-audit-a")
+    scope_b = _conversation_scope_for_app(app, suffix="message-audit-b")
+
+    try:
+        authorized = app.runtime_store.query_owned(
+            scope_a,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": scope_a.session_id},
+                limit=10,
+            ),
+        )
+        unauthorized = app.runtime_store.query_owned(
+            scope_a,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": scope_b.session_id},
+                limit=10,
+            ),
+        )
+        missing = app.runtime_store.query_owned(
+            scope_a,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": "session_message_missing"},
+                limit=10,
+            ),
+        )
+
+        assert authorized.rows == ()
+        assert unauthorized.rows == ()
+        assert missing.rows == ()
+        audits = app.runtime_store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"type": "principal_scope.owner_lookup_denied"},
+                order_by="seq",
+                limit=20,
+            )
+        ).rows
+        message_reasons = {
+            event["payload"]["lookup_id"]: event["payload"]["reason"]
+            for event in audits
+            if event["payload"]["table"] == "messages"
+        }
+        assert scope_a.session_id not in message_reasons
+        assert message_reasons == {
+            scope_b.session_id: "not_authorized",
+            "session_message_missing": "not_found",
+        }
+    finally:
+        await app.close()
 
 
 def test_legacy_local_origin_scope_fails_closed_without_operator_repair(tmp_path):

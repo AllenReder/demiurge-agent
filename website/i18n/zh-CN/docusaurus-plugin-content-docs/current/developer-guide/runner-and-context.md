@@ -91,10 +91,10 @@ legacy session row 重新构造 authority。
 只存在于当前进程，本 task 不实现 restart recovery；`TurnRequest`/`TurnResult` 仍保留
 alpha compatibility surface，并非最终的 deeply immutable 1.0 product。Live core、
 lifecycle、state、lock 与 task control 是 private admitted-turn state，不是
-`TurnExecutionContext` 字段。PrincipalScope consumer 也会逐步
-迁移：store-owned session/message/task predicate、same-origin manual resume 与绑定
-principal/session/policy 的 approval cache 已存在，session list/search 与 task control 仍属于
-下一个 DG-P2 task。
+`TurnExecutionContext` 字段。PrincipalScope 现在已覆盖 store-owned
+session/message/task predicate、channel/operator session list/resume、`session_search`、
+task detail/wait/cancel、`/subagents`，以及绑定 principal/session/policy 的 approval cache。
+后续 EffectRuntime 工作会把同一 owner seam 扩展到每个 effect adapter。
 
 ## Principal 与 Execution Context
 
@@ -164,6 +164,15 @@ parent turn 完成后继续修改它。这里的 **parallel** 表示在 parent t
 
 `/stop` 与 foreground cancellation 只影响 active turn。Background task 会继续运行，
 直到完成或用户调用 `task_control(command="cancel")`。
+Model-facing `task_status`、`task_control`、`yield_until`，以及 `/subagents` 的
+list/detail/cancel 都会在 store-side task predicate 中使用 admitted `PrincipalScope`。
+猜中其他 principal 的 task id 与 id 不存在得到相同结果，且不能读取 log、等待或消费
+completion state，也不能取消该 task。
+Model-facing control 只返回有界 status/result 字段，不返回 task log；完整 log 检查保留在
+独立的 Host/operator surface。
+Delegation control 与普通 ToolRuntime dispatch 共用同一个
+`resolve_approval_scope(...)` identity validation，包括 session、turn、core revision 与
+capability snapshot 检查。
 
 需要用户输入的 background work 会标成 `blocked_needs_user`，且不会自动批准。
 
@@ -180,6 +189,12 @@ External channel conversation 还有一层 durable binding，key 为
 `slack:channel:T1:C1:thread:123.4`。Channel `/resume` 会把当前 conversation key 重新
 绑定到 resumed session，因此同一 external conversation 的下一条 inbound message 会继续
 进入同一 transcript。
+Channel `/sessions` 与 `/resume` 使用 owned session list/get query；普通 conversation
+authority 只能看到当前绑定 session，本地 TUI 只有通过显式且可审计的 operator scope 才能
+跨 session。Raw session id 不存在或不属于该 scope 时，会在修改 runner/route binding 前
+返回相同的外部错误。
+迁移为 `legacy_local` 的 row 不进入普通 operator browse/history query；只有专用
+repair/status path 可以检查。
 
 Containment path 现在会用 captured turn session 构造 delivery，不再重新读取
 `runner.session_id`。最终 contract 仍需把 route token 本身放进 `TurnExecutionContext`，让

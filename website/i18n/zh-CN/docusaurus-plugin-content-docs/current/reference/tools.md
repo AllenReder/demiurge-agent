@@ -307,16 +307,33 @@ delegate_task(
 - `evolve_core(action="start", background=true)`
 
 Background task tool 返回 `task_id`。使用 `task_status`、
-`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制 task。如果
-`yield_until` 返回 terminal 或 blocked status，该 tool result 会消费 task 的 pending
+`task_control(command="cancel")`、`yield_until` 或 `task_list` 检查或控制 task。
+Detail、wait、completion consumption 与 cancel 都受 admitted `PrincipalScope` 限制；
+不属于该 scope 的 id 与不存在的 id 无法区分。这些 model-facing tool 只返回有界
+status/result 字段，不接受 operator/debug view，也不返回 task log；完整 log 使用独立
+Host/operator surface。Model task payload 会省略 owner id、write scope、任意 metadata 与
+result reference，并限制 summary 长度。`task_list` 使用相同 projection，仍限制到当前
+turn session。`/subagents` 使用相同 owner check。
+如果 `yield_until` 返回 terminal 或 blocked status，该 tool result 会消费 task 的 pending
 completion notification，因此相同结果不会再触发独立 background-completion turn。如果
 `yield_until` 到达 timeout 时 task 仍在运行，它会返回带 `timed_out=true` 的当前 task
 status；timeout 不表示 task failed。`task_list` 限制在 current session。
 
+## Session History Search
+
+`session_search` 在读取 history 前要求 `session.read` capability 与 resolved
+`prompt/medium` approval。Explicit-session、browse 与 full-text path 都使用 owner-scoped
+`SessionRuntime` query。普通 channel authority 只能读取当前绑定 session。本地 operator
+只有通过显式、可审计的 operator scope 才能跨 session；不存在或未授权的 session id
+返回相同外部错误。
+含糊的 `legacy_local` session 在普通 owned query 中保持隐藏，只能通过专用 operator
+repair/status path 查看；该 Host path 要求 reason 并持久化 audit。
+
 Foreground `/stop` 只取消 foreground turn，不会取消 background tasks。
 
 `agent.spawn` task metadata 同时包含 requested child slot controls，以及 child turn 运行后
-解析出的 child pipeline slots。使用 `task_status` 或 `yield_until` 检查这些字段。
+解析出的 child pipeline slots。这些 operator-only metadata 不进入 model task payload；
+请通过 owner-checked `/subagents <task_id>` Host/operator detail surface 检查。
 
 ## Package-Provided Web Search
 

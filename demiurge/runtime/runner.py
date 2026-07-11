@@ -323,6 +323,19 @@ class SessionTurnStepRunner:
         await self.prepare_live_core()
         return self.core_loader.load(self.version_store.active_core_path(self.core_id))
 
+    async def resolve_command_principal_scope(
+        self,
+        interaction: InteractionInbound,
+    ) -> PrincipalScope:
+        core = await self.load_active_core()
+        metadata = self.session_routes.metadata_for(interaction)
+        return self.session_routes.resolve_for_interaction(
+            self._session_core_binding(core),
+            interaction,
+            metadata,
+            fixed_scope=self.principal_scope,
+        )
+
     def _session_core_binding(self, core: LoadedCore) -> SessionCoreBinding:
         return SessionCoreBinding(
             core_id=core.core_id,
@@ -474,7 +487,32 @@ class SessionTurnStepRunner:
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         if self.delegation_tools.can_handle(call.name):
-            return await self.delegation_tools.execute(call, core=core, turn=turn, capability=capability)
+            if execution_context is None and principal_scope is None:
+                principal_scope = self.task_worker.scope_for_turn(
+                    session_id=turn.session_id,
+                    turn_id=turn.turn_id,
+                )
+            try:
+                delegation_scope = self.tool_runtime.resolve_approval_scope(
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    execution_context=execution_context,
+                    principal_scope=principal_scope,
+                ).principal_scope
+            except (PermissionError, TypeError, ValueError) as exc:
+                return ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            return await self.delegation_tools.execute(
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                principal_scope=delegation_scope,
+            )
         return await self.tool_runtime.execute(
             call,
             core=core,

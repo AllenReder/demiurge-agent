@@ -309,6 +309,7 @@ class SessionRuntime:
         return self._record_from_row(rows[0])
 
     def get_owned_session(self, scope: PrincipalScope, session_id: str) -> SessionRecord:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
         rows = self.store.query_owned(
             scope,
             RuntimeQuery(table="sessions", where={"session_id": session_id}, limit=1),
@@ -332,6 +333,7 @@ class SessionRuntime:
         core_id: str | None = None,
         limit: int = 20,
     ) -> list[SessionRecord]:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
         where = {"core_id": core_id} if core_id else None
         rows = self.store.query_owned(
             scope,
@@ -511,6 +513,24 @@ class SessionRuntime:
     def read_messages(self, session_id: str) -> list[SessionMessage]:
         rows = self.store.query(
             RuntimeQuery(table="messages", where={"session_id": session_id}, order_by="runtime_seq", limit=10_000)
+        ).rows
+        return [self._message_from_row(row) for row in rows]
+
+    def read_owned_messages(
+        self,
+        scope: PrincipalScope,
+        session_id: str,
+    ) -> list[SessionMessage]:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
+        self.get_owned_session(scope, session_id)
+        rows = self.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": session_id},
+                order_by="runtime_seq",
+                limit=10_000,
+            ),
         ).rows
         return [self._message_from_row(row) for row in rows]
 

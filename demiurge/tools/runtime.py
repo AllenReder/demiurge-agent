@@ -420,7 +420,7 @@ class ToolRuntime:
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         try:
-            approval_scope = self._resolve_approval_scope(
+            approval_scope = self.resolve_approval_scope(
                 core=core,
                 turn=turn,
                 capability=capability,
@@ -498,7 +498,7 @@ class ToolRuntime:
         finally:
             self._approval_scope.reset(scope_token)
 
-    def _resolve_approval_scope(
+    def resolve_approval_scope(
         self,
         *,
         core: LoadedCore,
@@ -774,7 +774,12 @@ class ToolRuntime:
         if call.name == "terminal":
             return await self._terminal(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "task_list":
-            return self._task_list(call, turn=turn, capability=capability)
+            return self._task_list(
+                call,
+                turn=turn,
+                capability=capability,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
             return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
         if call.name == "skills_list":
@@ -790,7 +795,25 @@ class ToolRuntime:
         if call.name == "web_extract":
             return await self._web_extract(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "session_search":
-            return self._session_search(call)
+            capability.require("session.read")
+            target_session_id = str(call.arguments.get("session_id") or "").strip()
+            approval_denial = await self._approval_for_resolved_entry(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                action="session.search",
+                summary="Search session history",
+                target=target_session_id or "owned_sessions",
+                arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
+            return self._session_search(
+                call,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name == "schedule_manage":
             return await self._schedule_manage(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "tools_list":
@@ -1297,19 +1320,27 @@ class ToolRuntime:
         payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    def _task_list(self, call: ToolCall, *, turn: TurnContext, capability: CapabilityFacade) -> ToolResult:
+    def _task_list(
+        self,
+        call: ToolCall,
+        *,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        principal_scope: PrincipalScope,
+    ) -> ToolResult:
         capability.require("task.control")
         kind = call.arguments.get("kind")
         include_completed = bool(call.arguments.get("include_completed", True))
         try:
-            records = self.task_worker.list_tasks(
+            records = self.task_worker.list_owned(
+                principal_scope,
                 owner_session_id=turn.session_id,
                 kind=str(kind) if kind else None,
                 include_completed=include_completed,
             )
         except RuntimeTaskKindError as exc:
             return ToolResult(content=str(exc), is_error=True)
-        tasks = [record.to_payload(include_log=False) for record in records]
+        tasks = [record.to_model_payload() for record in records]
         payload = {"tasks": tasks}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, model_output=json.dumps(payload, ensure_ascii=False))
 
@@ -1930,7 +1961,12 @@ class ToolRuntime:
             model_output=content,
         )
 
-    def _session_search(self, call: ToolCall) -> ToolResult:
+    def _session_search(
+        self,
+        call: ToolCall,
+        *,
+        principal_scope: PrincipalScope,
+    ) -> ToolResult:
         store = self.session_runtime
         if store is None:
             return ToolResult(content="session runtime is not configured", is_error=True)
@@ -1939,8 +1975,8 @@ class ToolRuntime:
         limit = self._positive_int(call.arguments.get("limit"), default=10, maximum=50)
         if session_id:
             try:
-                messages = store.read_messages(session_id)
-            except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+                messages = store.read_owned_messages(principal_scope, session_id)
+            except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError) as exc:
                 return ToolResult(content=f"session_search failed: {exc}", is_error=True)
             selected = messages[-limit:] if not query else [
                 message
@@ -1968,15 +2004,24 @@ class ToolRuntime:
                     "preview": record.preview,
                     "message_count": record.message_count,
                 }
-                for record in store.list_sessions(limit=limit)
+                for record in store.list_owned_sessions(
+                    principal_scope,
+                    limit=limit,
+                )
             ]
             content = json.dumps({"sessions": sessions}, ensure_ascii=False)
             return ToolResult(content=content, data={"sessions": sessions}, model_output=content)
         results: list[dict[str, Any]] = []
-        for record in store.list_sessions(limit=10_000):
+        for record in store.list_owned_sessions(
+            principal_scope,
+            limit=10_000,
+        ):
             try:
-                messages = store.read_messages(record.session_id)
-            except (OSError, json.JSONDecodeError):
+                messages = store.read_owned_messages(
+                    principal_scope,
+                    record.session_id,
+                )
+            except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError):
                 continue
             for message in messages:
                 if query.lower() not in message.content.lower():

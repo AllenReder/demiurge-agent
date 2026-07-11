@@ -97,10 +97,21 @@ Per-core environments and subprocess workers are future isolation options, not
 the default runtime mode. Capability grants do not confer session/operator
 authority. Approval caching now enforces the admitted `PrincipalScope`, session,
 core/capability policy fingerprint, bounded lifetime, and explicit revocation;
-tool arguments cannot declare another owner. Session browsing/search, task
-control, and the later unified EffectRuntime still need the same owner seam
-before the alpha runtime provides uniform enforcement. Runtime task records,
+tool arguments cannot declare another owner. Session browsing/resume/search and
+task detail/wait/cancel now enforce the same scope in store-owned queries;
+`session_search` additionally requires `session.read` plus approval. The later
+unified EffectRuntime still needs this seam across every effect adapter before
+the alpha runtime provides uniform enforcement. Runtime task records,
 logs, scheduler instances, and delivery outbox status are stored in the SQLite
 runtime database; in-process workers are still responsible for live execution
 and do not replay already started dangerous side effects after host process
 restart.
+
+Ambiguous migrated sessions use the `legacy_local` owner kind. Normal channel
+and operator session/history queries fail closed for those rows; inspection is
+reserved for the explicit operator repair/status path. Model-facing task tools
+also cannot select operator/debug views or receive task logs.
+The repair/status path is Host-only, requires an exact lookup plus a bounded
+operator reason, and writes a durable audit event. Failed exact owned lookups
+also retain their true reason in Host audit while preserving one indistinguishable
+external error.

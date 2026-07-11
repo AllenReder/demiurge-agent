@@ -90,8 +90,23 @@ effects。
 
 `task_list`、`task_status`、`task_control` 与 `yield_until` 是 model-facing runtime-task
 controls。`task_control` 只支持 `command="cancel"`；其他命令会作为 unsupported 被拒绝。
-Active execution 仍在 Host 运行时内进行，task status 与 logs 则通过
-`RuntimeControlPlane` 从 SQLite projections 读取。
+Active execution 仍在 Host 运行时内进行，task status 与 logs 存储在
+`RuntimeControlPlane` 的 SQLite projections 中。Detail、wait、completion consumption
+与 cancel 会在 store query 中使用 admitted `PrincipalScope`。Model-facing task control
+只返回有界 status/result 字段，不能请求 `operator`/`debug` view；完整 task log 只通过
+独立 Host/operator surface 读取。Model payload 会省略 owner id、write scope、任意
+metadata、result reference 与 log，并限制 summary 长度。`task_list` 使用相同 model
+projection 和限制到当前 turn session 的 store-side owned query。`/subagents` 只有经过
+相同 owner check 后才使用完整 operator projection；猜中其他 principal 的 task id 与 id
+不存在得到相同结果。
+Runner-owned delegation control 与普通 ToolRuntime dispatch 调用同一个
+`resolve_approval_scope(...)` seam，因此不能使用更弱的 execution identity 检查。
+
+`session_search` 在读取任何 history 前要求 `session.read` 与 resolved `prompt/medium`
+approval policy。Browse、explicit-session 与 full-text path 都使用 `SessionRuntime` owned
+list/message query。普通 conversation scope 仅限当前绑定 session；audited operator scope
+可在 approval 后搜索所有正常 owner session。含糊的 `legacy_local` session 被排除，必须
+使用专用 operator repair/status path。
 
 每个 background task 都记录 `kind`、owner session/turn、`source_tool`、status、summary、
 bounded log tail、result reference 与可选 `write_scope`。具有相同非空 `write_scope` 的

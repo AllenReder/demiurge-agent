@@ -84,8 +84,16 @@ host-shared Python environment 中。Per-core environment 与 subprocess worker 
 isolation option，不是默认运行模式。Capability grant 不授予 session/operator authority；
 approval cache 现在强制执行 admitted `PrincipalScope`、session、core/capability policy
 fingerprint、bounded lifetime 与显式 revocation，tool argument 不能声明另一个 owner。
-Session browse/search、task control 与后续统一 EffectRuntime 仍需接入同一 owner seam，
-因此当前 alpha 尚未实现全路径统一 enforcement。Runtime
+Session browse/resume/search 与 task detail/wait/cancel 现在已在 store-owned query 中执行
+同一 scope；`session_search` 还要求 `session.read` 与 approval。后续统一 EffectRuntime
+仍需把该 seam 扩展到每个 effect adapter，因此当前 alpha 尚未实现全路径统一 enforcement。Runtime
 task records、logs、scheduler instances 与 delivery outbox status 存储在 SQLite runtime
 database 中；in-process worker 仍负责 live execution，并且不会在 Host process restart
 后重放已经开始的危险 side effect。
+
+含糊迁移 session 使用 `legacy_local` owner kind。普通 channel/operator session/history
+query 对这些 row fail closed；检查只保留给显式 operator repair/status path。Model-facing
+task tool 也不能选择 operator/debug view 或接收 task log。
+Repair/status path 仅属于 Host，要求精确 lookup 与有界 operator reason，并写入 durable
+audit event。失败的精确 owned lookup 也会在 Host audit 中保留真实原因，同时对外继续使用
+不可区分的统一错误。

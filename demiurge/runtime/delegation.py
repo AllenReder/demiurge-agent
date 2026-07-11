@@ -2,30 +2,51 @@ from __future__ import annotations
 
 from typing import Any
 
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.text_format import format_table, shorten_text
 from demiurge.runtime.tasks import RuntimeTaskWorker
 
 
-async def subagents_command_text(task_worker: RuntimeTaskWorker, *, session_id: str, args: str) -> str:
+async def subagents_command_text(
+    task_worker: RuntimeTaskWorker,
+    *,
+    principal_scope: PrincipalScope,
+    args: str,
+) -> str:
+    principal_scope = PrincipalScopeResolver(
+        task_worker.control_plane.store
+    ).admit(principal_scope)
     parts = args.split()
     if parts and parts[0] == "cancel":
         if len(parts) != 2:
             return "Usage: /subagents cancel <task_id>"
         try:
-            record = await task_worker.cancel(parts[1])
+            record = await task_worker.cancel_owned(principal_scope, parts[1])
         except KeyError:
             return f"Subagent task not found: {parts[1]}"
-        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.task_id)), title="Cancelled Subagent")
+        return _format_task(
+            record.to_payload(
+                include_log=True,
+                log=task_worker.log_owned(principal_scope, record.task_id),
+            ),
+            title="Cancelled Subagent",
+        )
     if parts:
         task_id = parts[0]
         try:
-            record = task_worker.get(task_id)
+            record = task_worker.get_owned(principal_scope, task_id)
         except KeyError:
             return f"Subagent task not found: {task_id}"
         if record.kind != "agent.spawn":
             return f"Task is not a subagent: {task_id}"
-        return _format_task(record.to_payload(include_log=True, log=task_worker.log(record.task_id)), title="Subagent")
-    records = task_worker.list_tasks(owner_session_id=session_id, kind="agent.spawn")
+        return _format_task(
+            record.to_payload(
+                include_log=True,
+                log=task_worker.log_owned(principal_scope, record.task_id),
+            ),
+            title="Subagent",
+        )
+    records = task_worker.list_owned(principal_scope, kind="agent.spawn")
     if not records:
         return "No subagents for this session."
     rows = [

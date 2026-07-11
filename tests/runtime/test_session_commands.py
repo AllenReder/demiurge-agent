@@ -30,8 +30,14 @@ class FakeSessionRuntime:
     def __init__(self):
         self.calls = []
 
-    def list_sessions(self, *, core_id: str | None = None, limit: int = 20):
-        self.calls.append({"core_id": core_id, "limit": limit})
+    def list_owned_sessions(
+        self,
+        scope,
+        *,
+        core_id: str | None = None,
+        limit: int = 20,
+    ):
+        self.calls.append({"scope": scope, "core_id": core_id, "limit": limit})
         return [_record("session_1"), _record("session_2")]
 
 
@@ -72,15 +78,17 @@ class NoStartRunner:
 
 def test_build_session_list_view_reads_runtime_with_core_and_limit():
     runtime = FakeSessionRuntime()
+    scope = object()
 
     view = build_session_list_view(
         runtime,
+        principal_scope=scope,
         core_id="assistant",
         active_session_id="session_1",
         limit=5,
     )
 
-    assert runtime.calls == [{"core_id": "assistant", "limit": 5}]
+    assert runtime.calls == [{"scope": scope, "core_id": "assistant", "limit": 5}]
     assert view.choices[0].active is True
     assert view.session_ids == ["session_1", "session_2"]
 

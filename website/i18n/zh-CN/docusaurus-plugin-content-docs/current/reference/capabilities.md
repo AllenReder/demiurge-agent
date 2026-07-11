@@ -84,6 +84,7 @@ capabilities:
 | `network.fetch` | 获取 network content。 |
 | `schedule.manage` | 管理 core schedule YAML files。 |
 | `task.control` | 列出、检查、等待或取消 background runtime tasks。 |
+| `session.read` | 通过 owner-scoped Host query 浏览或搜索 session history；`session_search` 还要求 approval。 |
 | `tool.call:<tool>` | 允许 authored code 通过 `ctx.tools.call(...)` 调用可见 tool。 |
 | `mcp.call:<server>` | 允许 model 调用 MCP server 的 tools。 |
 | `skill.activate` | 允许 input slot 激活 skills。 |

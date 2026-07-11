@@ -109,11 +109,11 @@ active-turn cancel registry are process-local, restart recovery is not
 implemented here, and `TurnRequest`/`TurnResult` still retain alpha compatibility
 surfaces that are not the final deeply immutable 1.0 products. Live core,
 lifecycle, state, lock, and task controls are private admitted-turn state rather
-than fields on `TurnExecutionContext`. PrincipalScope consumers are also being moved
-incrementally: store-owned session/message/task predicates, same-origin manual
-resume, and principal/session/policy-scoped approval caching exist now, while
-session listing/search and task control remain assigned to the next DG-P2
-task.
+than fields on `TurnExecutionContext`. PrincipalScope now reaches store-owned
+session/message/task predicates, channel and operator session list/resume,
+`session_search`, task detail/wait/cancel, `/subagents`, and
+principal/session/policy-scoped approval caching. Later EffectRuntime work
+extends the same owner seam across every effect adapter.
 
 ## Principal and Execution Context
 
@@ -195,6 +195,16 @@ restart-durable.
 
 `/stop` and foreground cancellation affect only the active turn. Background
 tasks continue until they finish or a user calls `task_control(command="cancel")`.
+Model-facing `task_status`, `task_control`, and `yield_until`, plus the
+`/subagents` list/detail/cancel command, use the admitted `PrincipalScope` in
+store-side task predicates. A guessed task id owned by another principal is
+reported exactly like a missing id and cannot expose logs, wait for completion,
+consume completion state, or cancel the task.
+The model-facing controls return bounded status/result fields, not task logs;
+full log inspection remains an independent Host/operator surface.
+Delegation controls and ordinary ToolRuntime dispatch share the same
+`resolve_approval_scope(...)` identity validation, including session, turn,
+core revision, and capability snapshot checks.
 
 Background work that needs user input is marked `blocked_needs_user` and is
 not auto-approved.
@@ -214,6 +224,13 @@ host-owned route key built from explicit platform facts, for example
 `telegram:dm:123` or `slack:channel:T1:C1:thread:123.4`. Channel `/resume`
 rebinds the current conversation key to the resumed session so the next inbound
 message from that external conversation continues in the same transcript.
+Channel `/sessions` and `/resume` use owned session list/get queries; ordinary
+conversation authority sees only its bound session, while the local TUI can
+cross sessions only through its explicit audited operator scope. A raw session
+id that is missing or outside the scope returns the same external error before
+the runner or route binding is changed.
+Rows migrated as `legacy_local` remain excluded from normal operator browsing
+and history reads; only the dedicated repair/status path may inspect them.
 
 The containment path now builds delivery from the captured turn session rather
 than rereading `runner.session_id`. The final contract still moves the route

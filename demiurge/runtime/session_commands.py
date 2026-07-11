@@ -3,12 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from demiurge.runtime.scope import PrincipalScope
 from demiurge.runtime.text_format import format_table
 from demiurge.storage import SessionRecord
 
 
 class SessionListRuntime(Protocol):
-    def list_sessions(self, *, core_id: str | None = None, limit: int = 20) -> list[SessionRecord]:
+    def list_owned_sessions(
+        self,
+        scope: PrincipalScope,
+        *,
+        core_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionRecord]:
         ...
 
 
@@ -78,11 +85,16 @@ class SessionChoiceResolution:
 def build_session_list_view(
     session_runtime: SessionListRuntime,
     *,
+    principal_scope: PrincipalScope,
     core_id: str | None,
     active_session_id: str | None,
     limit: int,
 ) -> SessionListView:
-    records = session_runtime.list_sessions(core_id=core_id, limit=limit)
+    records = session_runtime.list_owned_sessions(
+        principal_scope,
+        core_id=core_id,
+        limit=limit,
+    )
     return session_list_view(records, active_session_id=active_session_id)
 
 

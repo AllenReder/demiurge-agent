@@ -45,6 +45,10 @@ def _turn() -> TurnContext:
     )
 
 
+def _scope():
+    return SimpleNamespace(session_id="session_1")
+
+
 class _ToolRuntime:
     def __init__(self, names):
         self.names = list(names)
@@ -63,6 +67,12 @@ class _ChildAgents:
 
 
 class _TaskWorker:
+    def get_owned(self, scope, task_id):
+        raise KeyError(task_id)
+
+    def log_owned(self, scope, task_id):
+        return []
+
     def get(self, task_id):
         raise KeyError(task_id)
 
@@ -72,7 +82,20 @@ class _TaskWorker:
     async def cancel(self, task_id):
         raise KeyError(task_id)
 
+    async def cancel_owned(self, scope, task_id):
+        raise KeyError(task_id)
+
     async def wait(self, task_id, *, timeout_seconds, consume_completion):
+        raise KeyError(task_id)
+
+    async def wait_owned(
+        self,
+        scope,
+        task_id,
+        *,
+        timeout_seconds,
+        consume_completion,
+    ):
         raise KeyError(task_id)
 
 
@@ -103,6 +126,7 @@ async def test_delegation_runtime_rejects_hidden_builtin_tool():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -120,6 +144,7 @@ async def test_delegation_runtime_rejects_unsupported_visible_tool():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -133,7 +158,13 @@ async def test_delegation_runtime_dispatches_delegate_task_to_child_agent_runtim
     core = _core()
     call = ToolCall(name="delegate_task", arguments={"goal": "work"})
 
-    result = await runtime.execute(call, core=core, turn=_turn(), capability=CapabilityFacade(core))
+    result = await runtime.execute(
+        call,
+        core=core,
+        turn=_turn(),
+        capability=CapabilityFacade(core),
+        principal_scope=_scope(),
+    )
 
     assert result.data == {"task_id": "task_1"}
     assert host.child_agents.calls[0][0] is call
@@ -150,6 +181,7 @@ async def test_task_status_requires_task_id():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -167,6 +199,7 @@ async def test_task_control_rejects_unsupported_command_before_lookup():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -184,6 +217,7 @@ async def test_yield_until_missing_task_returns_model_facing_error():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -201,6 +235,7 @@ async def test_task_control_capability_denial_becomes_tool_error():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True

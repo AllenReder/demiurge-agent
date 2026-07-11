@@ -117,10 +117,18 @@ backup is reused only when its logical fingerprint matches the current version
 sessions, messages, and tasks, and `SessionRuntime` exposes owned get/list
 interfaces. Approval requests now derive their owner and correlation from the
 admitted `TurnExecutionContext`, or from an explicit Host-issued
-`PrincipalScope` for non-turn operations. The remaining slash-command,
-session-search, and task-control callers are intentionally migrated in the
-next PrincipalScope task; their presence must not be read as complete owner
-enforcement yet.
+`PrincipalScope` for non-turn operations. Channel/operator session list and
+resume, `session_search`, task detail/wait/cancel, and `/subagents` now call
+those owned interfaces. Not-found and not-authorized share one external result;
+raw ids never authorize a global read or mutation.
+Normal owned queries, including audited operator queries, exclude ambiguous
+`legacy_local` rows. Those rows are visible only through the dedicated
+operator repair/status path, `RuntimeStore.query_legacy_for_repair(...)`, which
+requires a live audited operator scope, an exact session/task lookup, and a
+bounded reason. Every access emits `principal_scope.legacy_repair_accessed`.
+Exact owned lookups that return the shared external not-found result emit a
+Host-only `principal_scope.owner_lookup_denied` audit with the real reason:
+missing, unauthorized, missing durable owner, or legacy repair required.
 
 Every detail, list, wait, cancel, history, resume, search, and approval cache
 operation applies its owner predicate in the owning module/store. Callers must

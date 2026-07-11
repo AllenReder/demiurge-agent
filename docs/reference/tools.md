@@ -328,19 +328,41 @@ These calls submit host-owned background tasks:
 
 Background task tools return a `task_id`. Use `task_status`,
 `task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or
-control them. If `yield_until` returns a terminal or blocked status, that tool
-result consumes the task's pending completion notification, so the same result
+control them. Detail, wait, completion consumption, and cancel are restricted
+by the admitted `PrincipalScope`; an unowned id is indistinguishable from a
+missing id. These model-facing tools return bounded status/result fields only;
+they do not accept operator/debug views or return task logs. Full log inspection
+uses a separate Host/operator surface. Model task payloads omit owner ids,
+write scope, arbitrary metadata, and result references, and bound the summary.
+`task_list` uses the same projection and remains restricted to the current turn
+session. `/subagents` uses the same owner checks.
+If `yield_until`
+returns a terminal or blocked status, that tool result consumes the task's
+pending completion notification, so the same result
 does not also trigger a separate background-completion turn. If `yield_until`
 reaches its timeout while the task is still running, it returns the current task
 status with `timed_out=true`; the timeout does not mean the task failed.
 `task_list` is scoped to the current session.
 
+## Session History Search
+
+`session_search` requires the `session.read` capability and resolved
+`prompt/medium` approval before reading history. Its explicit-session, browse,
+and full-text paths all use owner-scoped `SessionRuntime` queries. Ordinary
+channel authority can read only the currently bound session. The local operator
+may cross sessions only through its explicit audited operator scope, and a
+missing or unauthorized session id produces the same external error.
+Ambiguous `legacy_local` sessions remain hidden from normal owned queries and
+are available only to the dedicated, reasoned, durably audited Host/operator
+repair/status path.
+
 Foreground `/stop` cancels only the foreground turn. It does not cancel
 background tasks.
 
 `agent.spawn` task metadata includes both the requested child slot controls and
-the resolved child pipeline slots after the child turn runs. Use `task_status`
-or `yield_until` to inspect those fields.
+the resolved child pipeline slots after the child turn runs. This operator-only
+metadata is intentionally absent from model task payloads; inspect it through
+the owner-checked `/subagents <task_id>` Host/operator detail surface.
 
 ## Package-Provided Web Search
 

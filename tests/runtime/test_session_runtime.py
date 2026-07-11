@@ -260,6 +260,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         core=core,
         turn=status_turn,
         capability=CapabilityFacade(core),
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
     control = await app.runner.execute_tool(
@@ -267,6 +268,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         core=core,
         turn=status_turn,
         capability=CapabilityFacade(core),
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
     assert status.is_error is True

@@ -97,9 +97,16 @@ resolution 绝不会自动提升这些 row；migration 失败时 version 4 datab
 migration。`RuntimeStore.query_owned()` 当前已在 SQL 内为
 session、message 与 task 应用 owner predicate，`SessionRuntime` 也提供 owned get/list
 interface。Approval request 现在从 admitted `TurnExecutionContext` 派生 owner 与
-correlation；非 turn 操作必须提供显式的 Host-issued `PrincipalScope`。其余 slash
-command、session search 与 task control caller 会在下一个 PrincipalScope task 中迁移；
-当前实现不能被理解为 owner enforcement 已全部完成。
+correlation；非 turn 操作必须提供显式的 Host-issued `PrincipalScope`。Channel/operator
+session list/resume、`session_search`、task detail/wait/cancel 与 `/subagents` 现在都调用
+这些 owned interface。Not-found 与 not-authorized 使用同一外部结果；raw id 不能授权全局
+read 或 mutation。
+普通 owned query（包括 audited operator query）会排除含糊的 `legacy_local` row；只有
+专用 operator repair/status path `RuntimeStore.query_legacy_for_repair(...)` 可以看到它们。
+该 path 要求 live audited operator scope、精确 session/task lookup 与有界 reason；每次访问
+写入 `principal_scope.legacy_repair_accessed`。精确 owned lookup 对外统一返回 not-found 时，
+Host-only `principal_scope.owner_lookup_denied` audit 会保留真实原因：missing、unauthorized、
+missing durable owner 或 legacy repair required。
 
 每个 detail、list、wait、cancel、history、resume、search 与 approval cache 操作，都由
 所属 module/store 应用 owner predicate。调用方不得先按 id 读取全局对象，再临时执行

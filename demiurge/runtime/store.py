@@ -172,15 +172,151 @@ class RuntimeStore:
         if owner_field is None:
             raise ValueError(f"runtime owner predicate is not defined for table: {query.table}")
         if scope.authority is AuthorityKind.OPERATOR:
-            return self._query(
+            page = self._query(
                 query,
                 owner_field=owner_field,
                 require_durable_owner=True,
             )
-        return self._query(
+        else:
+            page = self._query(
+                query,
+                owner_field=owner_field,
+                allowed_owner_ids=scope.allowed_session_ids,
+            )
+        self._audit_empty_owned_lookup(scope, query, owner_field=owner_field, page=page)
+        return page
+
+    def query_legacy_for_repair(
+        self,
+        scope: PrincipalScope,
+        query: RuntimeQuery,
+        *,
+        reason: str,
+    ) -> ProjectionPage:
+        scope = PrincipalScopeResolver(self).admit(scope)
+        if scope.authority is not AuthorityKind.OPERATOR:
+            raise PermissionError("legacy repair status requires operator authority")
+        owner_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "owner_session_id",
+        }.get(query.table)
+        lookup_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "task_id",
+        }.get(query.table)
+        if owner_field is None or lookup_field is None:
+            raise ValueError(f"legacy repair query is not defined for table: {query.table}")
+        where = query.where or {}
+        lookup_id = str(where.get(lookup_field) or "").strip()
+        if not lookup_id:
+            raise ValueError(f"legacy repair query requires exact {lookup_field}")
+        normalized_reason = " ".join(str(reason or "").split())
+        if not normalized_reason:
+            raise ValueError("legacy repair query reason is required")
+        if len(normalized_reason) > 300:
+            raise ValueError("legacy repair query reason must be at most 300 characters")
+        page = self._query(
             query,
             owner_field=owner_field,
-            allowed_owner_ids=scope.allowed_session_ids,
+            required_owner_kind="legacy_local",
+        )
+        self.append(
+            [
+                RuntimeEvent(
+                    type="principal_scope.legacy_repair_accessed",
+                    aggregate_type="principal_scope",
+                    aggregate_id=scope.principal_id,
+                    payload={
+                        "table": query.table,
+                        "lookup_field": lookup_field,
+                        "lookup_id": lookup_id[:256],
+                        "lookup_id_truncated": len(lookup_id) > 256,
+                        "reason": normalized_reason,
+                        "result_count": len(page.rows),
+                    },
+                    actor={
+                        "kind": scope.authority.value,
+                        "principal_id": scope.principal_id,
+                    },
+                )
+            ]
+        )
+        return page
+
+    def _audit_empty_owned_lookup(
+        self,
+        scope: PrincipalScope,
+        query: RuntimeQuery,
+        *,
+        owner_field: str,
+        page: ProjectionPage,
+    ) -> None:
+        if page.rows:
+            return
+        lookup_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "task_id",
+        }.get(query.table)
+        where = query.where or {}
+        lookup_id = str(where.get(lookup_field or "") or "").strip()
+        if lookup_field is None or not lookup_id:
+            return
+        target_table = "sessions" if query.table == "messages" else query.table
+        target_field = "session_id" if query.table == "messages" else lookup_field
+        target = self._query(
+            RuntimeQuery(
+                table=target_table,
+                where={target_field: lookup_id},
+                limit=1,
+            )
+        ).rows
+        reason = "not_found"
+        if target:
+            owner_session_id = (
+                lookup_id
+                if query.table == "messages"
+                else str(target[0].get(owner_field) or "")
+            )
+            owners = self._query(
+                RuntimeQuery(
+                    table="session_owners",
+                    where={"session_id": owner_session_id},
+                    limit=1,
+                )
+            ).rows
+            if not owners:
+                reason = "missing_durable_owner"
+            elif str(owners[0].get("owner_kind") or "") == "legacy_local":
+                reason = "legacy_owner_requires_repair"
+            elif (
+                scope.authority is AuthorityKind.OPERATOR
+                or owner_session_id in scope.allowed_session_ids
+            ):
+                return
+            else:
+                reason = "not_authorized"
+        self.append(
+            [
+                RuntimeEvent(
+                    type="principal_scope.owner_lookup_denied",
+                    aggregate_type="principal_scope",
+                    aggregate_id=scope.principal_id,
+                    payload={
+                        "table": query.table,
+                        "lookup_field": lookup_field,
+                        "lookup_id": lookup_id[:256],
+                        "lookup_id_truncated": len(lookup_id) > 256,
+                        "reason": reason,
+                    },
+                    actor={
+                        "kind": scope.authority.value,
+                        "principal_id": scope.principal_id,
+                    },
+                )
+            ]
         )
 
     def session_owner_exists(self, session_id: str) -> bool:
@@ -225,6 +361,7 @@ class RuntimeStore:
         owner_field: str | None = None,
         allowed_owner_ids: frozenset[str] | None = None,
         require_durable_owner: bool = False,
+        required_owner_kind: str | None = None,
     ) -> ProjectionPage:
         if query.table not in _QUERY_TABLES:
             raise ValueError(f"unsupported runtime query table: {query.table}")
@@ -237,10 +374,18 @@ class RuntimeStore:
             clauses.append(f"{key} = ?")
             values.append(value)
         if owner_field is not None:
-            if require_durable_owner:
+            if required_owner_kind is not None:
                 clauses.append(
                     "EXISTS (SELECT 1 FROM session_owners AS scope_owner "
-                    f"WHERE scope_owner.session_id = {query.table}.{owner_field})"
+                    f"WHERE scope_owner.session_id = {query.table}.{owner_field} "
+                    "AND scope_owner.owner_kind = ?)"
+                )
+                values.append(required_owner_kind)
+            elif require_durable_owner:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM session_owners AS scope_owner "
+                    f"WHERE scope_owner.session_id = {query.table}.{owner_field} "
+                    "AND scope_owner.owner_kind != 'legacy_local')"
                 )
             else:
                 owner_ids = sorted(allowed_owner_ids or ())

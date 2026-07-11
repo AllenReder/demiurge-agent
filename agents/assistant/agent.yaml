@@ -126,6 +126,8 @@ capabilities:
       scope: workspace
     task.control:
       scope: session
+    session.read:
+      scope: session
     agents.spawn:evolver:
       max_children_per_turn: 4
     tool.call:evolve_core:

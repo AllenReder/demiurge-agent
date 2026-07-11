@@ -2,10 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from demiurge.app import create_app
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
 from demiurge.runtime.ingress import ConversationIngressState
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.storage import SessionRecord
 
 
@@ -231,6 +233,10 @@ async def test_channel_command_executor_resume_rebinds_current_conversation():
 
         def __init__(self):
             self.resume_calls = []
+            self.principal_scope = object()
+
+        async def resolve_command_principal_scope(self, inbound):
+            return self.principal_scope
 
         def resume_session(self, session_id: str, **kwargs):
             self.resume_calls.append({"session_id": session_id, **kwargs})
@@ -244,10 +250,22 @@ async def test_channel_command_executor_resume_rebinds_current_conversation():
 
     runner = Runner()
     route_binding = RouteBinding()
+
+    def list_owned_sessions(scope, *, core_id, limit):
+        assert scope is runner.principal_scope
+        return [_record("session_1"), _record("session_2")]
+
+    def get_owned_session(scope, session_id):
+        assert scope is runner.principal_scope
+        return _record(session_id)
+
     state = ConversationIngressState(
         runtime=SimpleNamespace(
             runner=runner,
-            session_runtime=SimpleNamespace(list_sessions=lambda *, core_id, limit: [_record("session_1"), _record("session_2")]),
+            session_runtime=SimpleNamespace(
+                list_owned_sessions=list_owned_sessions,
+                get_owned_session=get_owned_session,
+            ),
         ),
         busy_mode="interrupt",
         route_binding=route_binding,
@@ -268,6 +286,161 @@ async def test_channel_command_executor_resume_rebinds_current_conversation():
     ]
     assert route_binding.binds == [(runner.interaction_router, "session_2")]
     assert sent == [("source_1", "reply_1", "Resumed session: `session_2`")]
+
+
+@pytest.mark.asyncio
+async def test_channel_sessions_list_uses_principal_owned_sessions():
+    sent = []
+    ran = []
+    resolved_scope = object()
+
+    class SessionRuntime:
+        def list_sessions(self, *, core_id, limit):
+            return [_record("session_1"), _record("session_2")]
+
+        def list_owned_sessions(self, scope, *, core_id, limit):
+            assert scope is resolved_scope
+            return [_record("session_1")]
+
+    class Runner:
+        core_id = "assistant"
+        session_id = "session_1"
+        provider_name = "fake"
+        principal_scope = None
+
+        async def resolve_command_principal_scope(self, inbound):
+            assert inbound.conversation_key == "conversation_1"
+            return resolved_scope
+
+    runner = Runner()
+    state = ConversationIngressState(
+        runtime=SimpleNamespace(
+            runner=runner,
+            session_runtime=SessionRuntime(),
+        ),
+        busy_mode="interrupt",
+        route_binding=SimpleNamespace(bind=lambda *_args: None),
+    )
+    executor = _executor(sent, ran, channel_name="telegram")
+
+    await executor.handlers()["sessions"]("", _inbound("/sessions"), state)
+
+    assert "session_1" in sent[0][2]
+    assert "session_2" not in sent[0][2]
+
+
+@pytest.mark.asyncio
+async def test_channel_sessions_derives_scope_from_authenticated_inbound(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    session_ids = {}
+    for suffix in ("a", "b"):
+        session_id = f"session_real_command_{suffix}"
+        conversation_key = f"test:conversation:{suffix}"
+        principal_key = f"user_{suffix}"
+        issued = resolver.issue_conversation(
+            channel="test",
+            principal_key=principal_key,
+            conversation_key=conversation_key,
+            session_id=session_id,
+        )
+        app.session_runtime.create_session(
+            session_id=session_id,
+            core_id="assistant",
+            core_revision="rev",
+            channel="test",
+            conversation_key=conversation_key,
+            principal_scope=issued,
+        )
+        session_ids[suffix] = session_id
+
+    sent = []
+    ran = []
+    state = ConversationIngressState(
+        runtime=SimpleNamespace(
+            runner=app.runner,
+            session_runtime=app.session_runtime,
+        ),
+        busy_mode="interrupt",
+        route_binding=SimpleNamespace(bind=lambda *_args: None),
+    )
+    executor = _executor(sent, ran, channel_name="test")
+    inbound = InteractionInbound(
+        channel="test",
+        text="/sessions",
+        source="user_a",
+        principal_key="user_a",
+        reply_to="reply_a",
+        conversation_key="test:conversation:a",
+        metadata={"kind": "test"},
+    )
+
+    try:
+        await executor.handlers()["sessions"]("", inbound, state)
+
+        assert session_ids["a"] in sent[0][2]
+        assert session_ids["b"] not in sent[0][2]
+        assert app.runner.session_id == session_ids["a"]
+    finally:
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_resume_rejects_unowned_raw_session_id_before_runner_call():
+    sent = []
+    ran = []
+    principal_scope = object()
+
+    class Runner:
+        core_id = "assistant"
+        session_id = "session_1"
+        provider_name = "fake"
+        interaction_router = object()
+
+        def __init__(self):
+            self.resume_calls = []
+            self.principal_scope = principal_scope
+
+        async def resolve_command_principal_scope(self, inbound):
+            return self.principal_scope
+
+        def resume_session(self, session_id, **kwargs):
+            self.resume_calls.append({"session_id": session_id, **kwargs})
+
+    class SessionRuntime:
+        def list_owned_sessions(self, scope, *, core_id, limit):
+            assert scope is principal_scope
+            return [_record("session_1")]
+
+        def get_owned_session(self, scope, session_id):
+            assert scope is principal_scope
+            raise FileNotFoundError(f"session not found: {session_id}")
+
+    runner = Runner()
+    state = ConversationIngressState(
+        runtime=SimpleNamespace(
+            runner=runner,
+            session_runtime=SessionRuntime(),
+        ),
+        busy_mode="interrupt",
+        route_binding=SimpleNamespace(bind=lambda *_args: None),
+    )
+    executor = _executor(sent, ran, channel_name="telegram")
+
+    await executor.handlers()["resume"](
+        "session_2",
+        _inbound("/resume session_2"),
+        state,
+    )
+
+    assert runner.resume_calls == []
+    assert sent == [
+        (
+            "source_1",
+            "reply_1",
+            "Session not found or not authorized.",
+        )
+    ]
 
 
 @pytest.mark.asyncio

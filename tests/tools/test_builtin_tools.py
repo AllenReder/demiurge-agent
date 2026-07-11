@@ -167,6 +167,33 @@ def _principal_scope(app, core, turn):
     return resolver.origin_scope(session_id=turn.session_id)
 
 
+def _conversation_scope(app, core, suffix):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    session_id = f"session_{suffix}"
+    conversation_key = f"probe:conversation:{suffix}"
+    principal_key = f"user_{suffix}"
+    issued = resolver.issue_conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+    app.session_runtime.create_session(
+        session_id=session_id,
+        core_id=core.core_id,
+        core_revision=core.revision,
+        channel="probe",
+        conversation_key=conversation_key,
+        principal_scope=issued,
+    )
+    return resolver.conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+
+
 async def _execute(app, core, name, arguments):
     turn = _turn(core)
     return await app.tool_runtime.execute(
@@ -1463,6 +1490,7 @@ async def test_task_list_is_scoped_to_current_session(tmp_path):
         owner_turn_id="turn_test",
         source_tool="terminal",
         task_factory=quick_task,
+        metadata={"private_token": "task-list-private-metadata"},
     )
     other = app.task_worker.start_task(
         kind="terminal.exec",
@@ -1473,11 +1501,23 @@ async def test_task_list_is_scoped_to_current_session(tmp_path):
     )
     await app.task_worker.wait(current.task_id, timeout_seconds=5)
     await app.task_worker.wait(other.task_id, timeout_seconds=5)
+    app.task_worker.set_result_ref(current.task_id, "file:///operator/private/task-list.json")
 
     listed = await _execute(app, core, "task_list", {"kind": "terminal.exec"})
 
     assert current.task_id in listed.content
     assert other.task_id not in listed.content
+    assert "task-list-private-metadata" not in listed.content
+    assert "operator/private/task-list.json" not in listed.content
+    assert set(listed.data["tasks"][0]) == {
+        "task_id",
+        "kind",
+        "status",
+        "running",
+        "started_at",
+        "completed_at",
+        "summary",
+    }
 
 
 def test_task_list_schema_does_not_expose_owner_session_id(tmp_path):
@@ -2211,6 +2251,7 @@ async def test_skill_manage_uses_configured_skills_root(tmp_path):
 @pytest.mark.asyncio
 async def test_session_search_reads_existing_messages_without_history_write(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     await app.runner.run_turn("alpha search target")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     before = app.session_runtime.message_count(app.runner.session_id)
@@ -2221,6 +2262,204 @@ async def test_session_search_reads_existing_messages_without_history_write(tmp_
     assert result.is_error is False
     assert "alpha search target" in result.content
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_session_search_requires_session_read_capability(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {}).pop(
+        "session.read",
+        None,
+    )
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "secret history", "limit": 5},
+    )
+
+    assert result.is_error is True
+    assert result.data == {"executionStarted": False}
+    assert result.content == "capability denied: session.read for host"
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_core_metadata_cannot_replace_host_capability(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    defaults = raw.setdefault("capabilities", {}).setdefault("defaults", {})
+    defaults.pop("session.read", None)
+    defaults["task.control"] = {"scope": "session"}
+    raw.setdefault("tools", {}).setdefault("metadata", {})["session_search"] = {
+        "capability": "task.control",
+        "risk": "medium",
+        "approval_policy": "prompt",
+    }
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "secret history", "limit": 5},
+    )
+
+    assert result.is_error is True
+    assert result.data == {"executionStarted": False}
+    assert result.content == "capability denied: session.read for host"
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_approval_denial_prevents_history_read(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {})[
+        "session.read"
+    ] = {"scope": "session"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(core)
+    principal_scope = _principal_scope(app, core, turn)
+    app.session_runtime.append_message(
+        turn.session_id,
+        role="user",
+        content="private history marker",
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+
+    result = await app.tool_runtime.execute(
+        ToolCall(
+            name="session_search",
+            arguments={"query": "private", "limit": 5},
+            id="call_session_search",
+        ),
+        core=core,
+        turn=turn,
+        capability=CapabilityFacade(core),
+        principal_scope=principal_scope,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert "private history marker" not in result.content
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_does_not_read_another_principal_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    scope_a = _conversation_scope(app, core, "a")
+    scope_b = _conversation_scope(app, core, "b")
+    app.session_runtime.append_message(
+        scope_a.session_id,
+        role="user",
+        content="alpha visible marker",
+    )
+    app.session_runtime.append_message(
+        scope_b.session_id,
+        role="user",
+        content="alpha private marker",
+    )
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_a",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="search alpha"),
+    )
+
+    result = await app.tool_runtime.execute(
+        ToolCall(
+            name="session_search",
+            arguments={"query": "alpha", "limit": 10},
+            id="call_session_search",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+    browse = await app.tool_runtime.execute(
+        ToolCall(
+            name="session_search",
+            arguments={"limit": 10},
+            id="call_session_browse",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+    direct = await app.tool_runtime.execute(
+        ToolCall(
+            name="session_search",
+            arguments={"session_id": scope_b.session_id, "limit": 10},
+            id="call_session_direct",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is False
+    assert "alpha visible marker" in result.content
+    assert "alpha private marker" not in result.content
+    assert scope_b.session_id not in result.content
+    assert browse.is_error is False
+    assert scope_a.session_id in browse.content
+    assert scope_b.session_id not in browse.content
+    assert direct.is_error is True
+    assert "alpha private marker" not in direct.content
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_operator_scope_does_not_browse_legacy_history(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.session_runtime.create_session(
+        session_id="session_legacy_search",
+        core_id="assistant",
+        core_revision="legacy-rev",
+    )
+    app.session_runtime.append_message(
+        "session_legacy_search",
+        role="user",
+        content="legacy-search-private-marker",
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "legacy-search-private-marker", "limit": 10},
+    )
+    browse = await _execute(app, core, "session_search", {"limit": 50})
+
+    assert result.is_error is False
+    assert "legacy-search-private-marker" not in result.content
+    assert "session_legacy_search" not in browse.content
+    await app.close()
 
 
 @pytest.mark.asyncio

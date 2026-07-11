@@ -12,6 +12,7 @@ from demiurge.runtime.durable_work import DurableClaim
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeQuery
+from demiurge.runtime.text_format import shorten_text
 from demiurge.util import utc_id
 
 
@@ -84,6 +85,22 @@ class RuntimeTaskRecord:
         if include_log:
             payload["log"] = list(log or [])
         return payload
+
+    def to_model_payload(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "kind": self.kind,
+            "status": self.status,
+            "running": self.running,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "summary": shorten_text(
+                self.summary,
+                limit=1200,
+                marker="...",
+                normalize_whitespace=False,
+            ),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +406,26 @@ class RuntimeTaskWorker:
         except KeyError as exc:
             raise KeyError(f"background task not found: {task_id}") from exc
 
+    def get_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+    ) -> RuntimeTaskRecord:
+        rows = self.control_plane.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="tasks",
+                where={"task_id": task_id},
+                limit=1,
+            ),
+        ).rows
+        if not rows:
+            raise KeyError(f"background task not found: {task_id}")
+        try:
+            return self._record_from_projection(task_id, task_row=rows[0])
+        except KeyError as exc:
+            raise KeyError(f"background task not found: {task_id}") from exc
+
     def list_tasks(
         self,
         *,
@@ -416,8 +453,54 @@ class RuntimeTaskWorker:
             records = [record for record in records if record.running]
         return sorted(records, key=lambda record: record.started_at or "")
 
+    def list_owned(
+        self,
+        scope: PrincipalScope,
+        *,
+        owner_session_id: str | None = None,
+        kind: str | None = None,
+        include_completed: bool = True,
+    ) -> list[RuntimeTaskRecord]:
+        if kind is not None:
+            self._validate_background_kind(kind)
+        where: dict[str, Any] = {}
+        if owner_session_id is not None:
+            where["owner_session_id"] = owner_session_id
+        if kind is not None:
+            where["kind"] = kind
+        rows = self.control_plane.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="tasks",
+                where=where or None,
+                order_by="created_at",
+                limit=1000,
+            ),
+        ).rows
+        records = [
+            self._record_from_projection(str(row["task_id"]), task_row=row)
+            for row in rows
+            if str(row.get("kind") or "") in BACKGROUND_TASK_KINDS
+        ]
+        if not include_completed:
+            records = [record for record in records if record.running]
+        return sorted(records, key=lambda record: record.started_at or "")
+
     def log(self, task_id: str, *, tail: int | None = None) -> list[str]:
         self.get(task_id)
+        return self._task_log(task_id, tail=tail)
+
+    def log_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+        *,
+        tail: int | None = None,
+    ) -> list[str]:
+        self.get_owned(scope, task_id)
+        return self._task_log(task_id, tail=tail)
+
+    def _task_log(self, task_id: str, *, tail: int | None) -> list[str]:
         rows = self.control_plane.store.query(
             RuntimeQuery(table="task_logs", where={"task_id": task_id}, order_by="seq", limit=10000)
         ).rows
@@ -464,6 +547,21 @@ class RuntimeTaskWorker:
                     if record is not None and _is_completion_status(record.status):
                         self._emit_completion_once(record)
 
+    async def wait_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+        *,
+        timeout_seconds: int | float | None = None,
+        consume_completion: bool = False,
+    ) -> RuntimeTaskRecord:
+        self.get_owned(scope, task_id)
+        return await self.wait(
+            task_id,
+            timeout_seconds=timeout_seconds,
+            consume_completion=consume_completion,
+        )
+
     async def cancel(self, task_id: str) -> RuntimeTaskRecord:
         record = self.get(task_id)
         if record.status in TERMINAL_TASK_STATUSES:
@@ -492,6 +590,14 @@ class RuntimeTaskWorker:
                 pass
         self._emit_completion_once(record)
         return self.get(task_id)
+
+    async def cancel_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+    ) -> RuntimeTaskRecord:
+        self.get_owned(scope, task_id)
+        return await self.cancel(task_id)
 
     async def drain(self) -> None:
         while True:

@@ -9,6 +9,7 @@ import pytest
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, ToolInteractionRecord, UserPromptRequest
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.security.approval import ApprovalRequest, ApprovalScope
 from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge.sdk import ToolResult
@@ -508,6 +509,11 @@ async def _complete_background_task(app, *, summary: str = "background complete"
         ctx.append_log("background tail")
         return summary
 
+    app.task_worker.bind_turn_scope(
+        session_id=app.runner.session_id,
+        turn_id="turn_origin",
+        scope=PrincipalScopeResolver(app.runtime_store).admit(app.runner.principal_scope),
+    )
     record = app.task_worker.start_task(
         kind="terminal.exec",
         owner_session_id=app.runner.session_id,
@@ -1134,6 +1140,11 @@ async def test_tui_bridge_yield_until_consumes_background_completion_turn(tmp_pa
         ctx.append_log("done")
         return "background complete"
 
+    app.task_worker.bind_turn_scope(
+        session_id=app.runner.session_id,
+        turn_id="turn_origin",
+        scope=PrincipalScopeResolver(app.runtime_store).admit(app.runner.principal_scope),
+    )
     record = app.task_worker.start_task(
         kind="terminal.exec",
         owner_session_id=app.runner.session_id,

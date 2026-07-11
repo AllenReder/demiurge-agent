@@ -187,10 +187,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="task_status",
         description="Inspect a delegated task or runtime control-plane task.",
         input_schema=_schema(
-            {
-                "task_id": {"type": "string"},
-                "view": {"type": "string", "enum": ["model", "operator", "debug"], "default": "model"},
-            },
+            {"task_id": {"type": "string"}},
             required=["task_id"],
         ),
     ),
@@ -361,7 +358,12 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "todo": {"risk": "low", "approval_policy": "auto"},
     "clarify": {"risk": "low", "approval_policy": "auto"},
     "web_extract": {"risk": "medium", "capability": "network.fetch", "approval_policy": "prompt"},
-    "session_search": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
+    "session_search": {
+        "risk": "medium",
+        "capability": "session.read",
+        "approval_policy": "prompt",
+        "model_output_policy": "current_turn",
+    },
     "schedule_manage": {"risk": "high", "capability": "schedule.manage", "approval_policy": "prompt"},
     "tools_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
 }

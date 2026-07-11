@@ -1,5 +1,6 @@
 import asyncio
 import shutil
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -10,8 +11,9 @@ from demiurge.app import create_app, source_agents_root
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.sdk import AgentInput, TurnContext
-from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.capabilities import CapabilityFacade, CapabilitySnapshot
 from demiurge.slash import specs_for_surface
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
 
@@ -50,6 +52,33 @@ class BlockingProvider:
             self.release = asyncio.Event()
         await self.release.wait()
         return LLMResponse(content="child done")
+
+
+def _conversation_scope(app, suffix: str):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    session_id = f"session_{suffix}"
+    conversation_key = f"probe:conversation:{suffix}"
+    principal_key = f"user_{suffix}"
+    issued = resolver.issue_conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+    app.session_runtime.create_session(
+        session_id=session_id,
+        core_id="assistant",
+        core_revision="rev",
+        channel="probe",
+        conversation_key=conversation_key,
+        principal_scope=issued,
+    )
+    return resolver.conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
 
 
 def _turn(app, core):
@@ -129,6 +158,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         core=core,
         turn=turn,
         capability=capability,
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
 
@@ -140,6 +170,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         core=core,
         turn=turn,
         capability=capability,
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
     waited = await app.runner.execute_tool(
@@ -150,16 +181,658 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         core=core,
         turn=turn,
         capability=capability,
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
 
     assert status.data["task_id"] == task_id
     assert waited.data["status"] == "succeeded"
     assert app.control_plane.read(task_id)["kind"] == "agent.spawn"
-    listing = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args="")
-    detail = await subagents_command_text(app.task_worker, session_id=app.runner.session_id, args=task_id)
+    listing = await subagents_command_text(
+        app.task_worker,
+        principal_scope=app.runner.principal_scope,
+        args="",
+    )
+    detail = await subagents_command_text(
+        app.task_worker,
+        principal_scope=app.runner.principal_scope,
+        args=task_id,
+    )
     assert task_id in listing
     assert "Subagent" in detail
+
+
+@pytest.mark.asyncio
+async def test_task_status_hides_task_owned_by_another_principal_scope(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope(app, "a")
+    scope_b = _conversation_scope(app, "b")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope_b.session_id,
+        turn_id="turn_b",
+        scope=scope_b,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope_b.session_id,
+        owner_turn_id="turn_b",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+        metadata={"private_marker": "session-b-only"},
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_a",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="inspect guessed task"),
+    )
+
+    try:
+        result = await app.runner.execute_tool(
+            ToolCall(name="task_status", arguments={"task_id": task.task_id}),
+            core=core,
+            turn=turn_a,
+            capability=CapabilityFacade(core),
+            principal_scope=scope_a,
+            emit_event=app.runner.event_log.emit,
+        )
+
+        assert result.is_error is True
+        assert result.content == f"background task not found: {task.task_id}"
+        assert "session-b-only" not in result.content
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_task_status_hides_cross_core_task_owned_by_another_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope(app, "cross-core-a")
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    issued_b = resolver.issue_conversation(
+        channel="probe",
+        principal_key="user_cross_core_b",
+        conversation_key="probe:conversation:cross-core-b",
+        session_id="session_cross_core_b",
+    )
+    app.session_runtime.create_session(
+        session_id="session_cross_core_b",
+        core_id="evolver",
+        core_revision="rev-evolver",
+        channel="probe",
+        conversation_key="probe:conversation:cross-core-b",
+        principal_scope=issued_b,
+    )
+    scope_b = resolver.conversation(
+        channel="probe",
+        principal_key="user_cross_core_b",
+        conversation_key="probe:conversation:cross-core-b",
+        session_id="session_cross_core_b",
+    )
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope_b.session_id,
+        turn_id="turn_cross_core_b",
+        scope=scope_b,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope_b.session_id,
+        owner_turn_id="turn_cross_core_b",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+        metadata={"core_id": "evolver", "private_marker": "cross-core-private"},
+    )
+    core_a = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_cross_core_a",
+        core_id=core_a.core_id,
+        core_revision=core_a.revision,
+        user_input=AgentInput(content="inspect cross-core task"),
+    )
+
+    try:
+        result = await app.runner.execute_tool(
+            ToolCall(name="task_status", arguments={"task_id": task.task_id}),
+            core=core_a,
+            turn=turn_a,
+            capability=CapabilityFacade(core_a),
+            principal_scope=scope_a,
+            emit_event=app.runner.event_log.emit,
+        )
+
+        assert result.is_error is True
+        assert result.content == f"background task not found: {task.task_id}"
+        assert "cross-core-private" not in result.content
+        audits = app.runtime_store.query(
+            RuntimeQuery(
+                table="runtime_events",
+                where={"type": "principal_scope.owner_lookup_denied"},
+                order_by="seq",
+                limit=10,
+            )
+        ).rows
+        assert any(
+            event["payload"] == {
+                "table": "tasks",
+                "lookup_field": "task_id",
+                "lookup_id": task.task_id,
+                "lookup_id_truncated": False,
+                "reason": "not_authorized",
+            }
+            for event in audits
+        )
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_model_task_status_cannot_request_operator_or_debug_log_view(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope = _conversation_scope(app, "model-view")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope.session_id,
+        turn_id="turn_model_view",
+        scope=scope,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope.session_id,
+        owner_turn_id="turn_model_view",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+        metadata={"private_token": "task-metadata-must-stay-operator-only"},
+    )
+    private_log = "operator-only-full-task-log"
+    app.task_worker.append_log(task.task_id, private_log)
+    app.task_worker.set_summary(task.task_id, "model-visible-summary-" + ("x" * 5000))
+    app.task_worker.set_result_ref(task.task_id, "file:///operator/private/result.json")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = TurnContext(
+        session_id=scope.session_id,
+        turn_id="turn_model_view",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="inspect task"),
+    )
+
+    try:
+        for requested_view in ("operator", "debug"):
+            result = await app.runner.execute_tool(
+                ToolCall(
+                    name="task_status",
+                    arguments={"task_id": task.task_id, "view": requested_view},
+                ),
+                core=core,
+                turn=turn,
+                capability=CapabilityFacade(core),
+                principal_scope=scope,
+                emit_event=app.runner.event_log.emit,
+            )
+
+            assert result.is_error is False
+            assert set(result.data) == {
+                "task_id",
+                "kind",
+                "status",
+                "running",
+                "started_at",
+                "completed_at",
+                "summary",
+            }
+            assert "log" not in result.data
+            assert private_log not in result.content
+            assert "task-metadata-must-stay-operator-only" not in result.content
+            assert "operator/private/result.json" not in result.content
+            assert len(result.data["summary"]) <= 1200
+
+        schema = BUILTIN_TOOL_DEFINITIONS["task_status"].input_schema
+        assert "view" not in schema["properties"]
+
+        timed_out = await app.runner.execute_tool(
+            ToolCall(
+                name="yield_until",
+                arguments={"task_id": task.task_id, "timeout_seconds": 0},
+            ),
+            core=core,
+            turn=turn,
+            capability=CapabilityFacade(core),
+            principal_scope=scope,
+            emit_event=app.runner.event_log.emit,
+        )
+        assert timed_out.data["timed_out"] is True
+        assert "log" not in timed_out.data
+        assert "log_tail" not in timed_out.data
+        assert private_log not in timed_out.content
+
+        cancelled = await app.runner.execute_tool(
+            ToolCall(
+                name="task_control",
+                arguments={"task_id": task.task_id, "command": "cancel"},
+            ),
+            core=core,
+            turn=turn,
+            capability=CapabilityFacade(core),
+            principal_scope=scope,
+            emit_event=app.runner.event_log.emit,
+        )
+        assert cancelled.data["status"] == "cancelled"
+        assert "log" not in cancelled.data
+        assert "log_tail" not in cancelled.data
+        assert private_log not in cancelled.content
+
+        waited = await app.runner.execute_tool(
+            ToolCall(
+                name="yield_until",
+                arguments={"task_id": task.task_id, "timeout_seconds": 1},
+            ),
+            core=core,
+            turn=turn,
+            capability=CapabilityFacade(core),
+            principal_scope=scope,
+            emit_event=app.runner.event_log.emit,
+        )
+        assert waited.data["status"] == "cancelled"
+        assert "log" not in waited.data
+        assert "log_tail" not in waited.data
+        assert private_log not in waited.content
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_delegation_tool_uses_shared_execution_identity_validation(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope = _conversation_scope(app, "shared-scope-validation")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope.session_id,
+        turn_id="turn_shared_scope",
+        scope=scope,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope.session_id,
+        owner_turn_id="turn_shared_scope",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = TurnContext(
+        session_id=scope.session_id,
+        turn_id="turn_shared_scope",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="inspect task"),
+    )
+    snapshot = CapabilitySnapshot.capture(core)
+    capability = CapabilityFacade(core, snapshot=snapshot)
+    forged_context = SimpleNamespace(
+        session_id=scope.session_id,
+        principal_scope=scope,
+        core_id="evolver",
+        core_revision=core.revision,
+        capability_snapshot=snapshot,
+        cancellation=SimpleNamespace(turn_id=turn.turn_id),
+        admission_lease=SimpleNamespace(
+            turn_id=turn.turn_id,
+            session_id=scope.session_id,
+        ),
+        trace_id=turn.turn_id,
+    )
+
+    try:
+        result = await app.runner.execute_tool(
+            ToolCall(name="task_status", arguments={"task_id": task.task_id}),
+            core=core,
+            turn=turn,
+            capability=capability,
+            execution_context=forged_context,
+            emit_event=app.runner.event_log.emit,
+        )
+
+        assert result.is_error is True
+        assert result.data == {"executionStarted": False}
+        assert result.content == "TurnExecutionContext does not match tool execution identity"
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_scope_cannot_control_task_from_another_origin_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    scheduler_scope = resolver.scheduled_run(
+        core_id="assistant",
+        schedule_id="daily:summary",
+        run_id="run_scheduler_owner",
+        session_id="session_scheduler_owner",
+    )
+    app.session_runtime.create_session(
+        session_id=scheduler_scope.session_id,
+        core_id="assistant",
+        core_revision="rev",
+        principal_scope=scheduler_scope,
+    )
+    scheduler_scope = resolver.origin_scope(session_id=scheduler_scope.session_id)
+    other_scope = _conversation_scope(app, "scheduler-other")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=other_scope.session_id,
+        turn_id="turn_scheduler_other",
+        scope=other_scope,
+    )
+    other_task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=other_scope.session_id,
+        owner_turn_id="turn_scheduler_other",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+
+    try:
+        with pytest.raises(KeyError):
+            app.task_worker.get_owned(scheduler_scope, other_task.task_id)
+        with pytest.raises(KeyError):
+            await app.task_worker.cancel_owned(scheduler_scope, other_task.task_id)
+        assert app.task_worker.get(other_task.task_id).status in {"queued", "running"}
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_delegated_child_scope_controls_only_child_owned_tasks(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    parent_scope = _conversation_scope(app, "child-parent")
+    child_scope = resolver.delegated_agent(
+        parent=parent_scope,
+        task_id="task_spawn_child",
+        parent_turn_id="turn_parent",
+        child_session_id="session_child_owned",
+    )
+    app.session_runtime.create_session(
+        session_id=child_scope.session_id,
+        core_id="assistant",
+        core_revision="rev",
+        principal_scope=child_scope,
+    )
+    child_scope = resolver.origin_scope(session_id=child_scope.session_id)
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=parent_scope.session_id,
+        turn_id="turn_parent_task",
+        scope=parent_scope,
+    )
+    parent_task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=parent_scope.session_id,
+        owner_turn_id="turn_parent_task",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+    app.task_worker.bind_turn_scope(
+        session_id=child_scope.session_id,
+        turn_id="turn_child_task",
+        scope=child_scope,
+    )
+    child_task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=child_scope.session_id,
+        owner_turn_id="turn_child_task",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+
+    try:
+        assert app.task_worker.get_owned(child_scope, child_task.task_id).task_id == child_task.task_id
+        with pytest.raises(KeyError):
+            app.task_worker.get_owned(child_scope, parent_task.task_id)
+        with pytest.raises(KeyError):
+            await app.task_worker.cancel_owned(child_scope, parent_task.task_id)
+        assert app.task_worker.get(parent_task.task_id).status in {"queued", "running"}
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_operator_scope_can_control_normally_owned_task(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    conversation_scope = _conversation_scope(app, "operator-target")
+    operator_scope = resolver.local_operator(
+        active_session_id=app.runner.session_id,
+        reason="operator task administration regression",
+    )
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=conversation_scope.session_id,
+        turn_id="turn_operator_target",
+        scope=conversation_scope,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=conversation_scope.session_id,
+        owner_turn_id="turn_operator_target",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+
+    try:
+        assert app.task_worker.get_owned(operator_scope, task.task_id).task_id == task.task_id
+        cancelled = await app.task_worker.cancel_owned(operator_scope, task.task_id)
+        assert cancelled.status == "cancelled"
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_task_control_cannot_cancel_task_owned_by_another_principal_scope(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope(app, "a")
+    scope_b = _conversation_scope(app, "b")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope_b.session_id,
+        turn_id="turn_b",
+        scope=scope_b,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope_b.session_id,
+        owner_turn_id="turn_b",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_a",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="cancel guessed task"),
+    )
+
+    try:
+        result = await app.runner.execute_tool(
+            ToolCall(
+                name="task_control",
+                arguments={"task_id": task.task_id, "command": "cancel"},
+            ),
+            core=core,
+            turn=turn_a,
+            capability=CapabilityFacade(core),
+            principal_scope=scope_a,
+            emit_event=app.runner.event_log.emit,
+        )
+
+        assert result.is_error is True
+        assert result.content == f"background task not found: {task.task_id}"
+        assert app.task_worker.get(task.task_id).status in {"queued", "running"}
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_yield_until_cannot_wait_for_task_owned_by_another_principal_scope(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope(app, "a")
+    scope_b = _conversation_scope(app, "b")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope_b.session_id,
+        turn_id="turn_b",
+        scope=scope_b,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope_b.session_id,
+        owner_turn_id="turn_b",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_a",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="wait for guessed task"),
+    )
+
+    try:
+        result = await app.runner.execute_tool(
+            ToolCall(
+                name="yield_until",
+                arguments={"task_id": task.task_id, "timeout_seconds": 0},
+            ),
+            core=core,
+            turn=turn_a,
+            capability=CapabilityFacade(core),
+            principal_scope=scope_a,
+            emit_event=app.runner.event_log.emit,
+        )
+
+        assert result.is_error is True
+        assert result.content == f"background task not found: {task.task_id}"
+        assert app.task_worker.get(task.task_id).status in {"queued", "running"}
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_subagents_commands_hide_and_cannot_cancel_another_principal_task(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    scope_a = _conversation_scope(app, "a")
+    scope_b = _conversation_scope(app, "b")
+    release = asyncio.Event()
+
+    async def blocked_task(_context):
+        await release.wait()
+
+    app.task_worker.bind_turn_scope(
+        session_id=scope_b.session_id,
+        turn_id="turn_b",
+        scope=scope_b,
+    )
+    task = app.task_worker.start_task(
+        kind="agent.spawn",
+        owner_session_id=scope_b.session_id,
+        owner_turn_id="turn_b",
+        source_tool="delegate_task",
+        task_factory=blocked_task,
+        metadata={"private_marker": "session-b-only"},
+    )
+
+    try:
+        listing = await subagents_command_text(
+            app.task_worker,
+            principal_scope=scope_a,
+            args="",
+        )
+        detail = await subagents_command_text(
+            app.task_worker,
+            principal_scope=scope_a,
+            args=task.task_id,
+        )
+        cancelled = await subagents_command_text(
+            app.task_worker,
+            principal_scope=scope_a,
+            args=f"cancel {task.task_id}",
+        )
+
+        assert task.task_id not in listing
+        assert detail == f"Subagent task not found: {task.task_id}"
+        assert cancelled == f"Subagent task not found: {task.task_id}"
+        assert "session-b-only" not in detail
+        assert app.task_worker.get(task.task_id).status in {"queued", "running"}
+    finally:
+        release.set()
+        await app.task_worker.drain()
+        await app.close()
 
 
 @pytest.mark.asyncio

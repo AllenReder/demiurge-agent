@@ -711,6 +711,7 @@ class OperatorGatewayRuntime:
         limit = int(args.strip()) if args.strip().isdigit() else 20
         view = build_session_list_view(
             self.app.session_runtime,
+            principal_scope=self.app.runner.principal_scope,
             core_id=self.app.runner.core_id,
             active_session_id=self.app.runner.session_id,
             limit=limit,
@@ -721,7 +722,7 @@ class OperatorGatewayRuntime:
     async def _subagents(self, args: str) -> bool:
         text = await subagents_command_text(
             self.app.task_worker,
-            session_id=self.app.runner.session_id,
+            principal_scope=self.app.runner.principal_scope,
             args=args,
         )
         await self._emit_command_output("subagents", text)
@@ -731,6 +732,7 @@ class OperatorGatewayRuntime:
         raw = args.strip()
         view = build_session_list_view(
             self.app.session_runtime,
+            principal_scope=self.app.runner.principal_scope,
             core_id=self.app.runner.core_id,
             active_session_id=self.app.runner.session_id,
             limit=20,
@@ -763,6 +765,17 @@ class OperatorGatewayRuntime:
             await self._emit_notice(resolution.message or "invalid session selection", level="error")
             return True
         assert resolution.session_id is not None
+        try:
+            self.app.session_runtime.get_owned_session(
+                self.app.runner.principal_scope,
+                resolution.session_id,
+            )
+        except (FileNotFoundError, PermissionError):
+            await self._emit_notice(
+                "session not found or not authorized",
+                level="error",
+            )
+            return True
         await self._resume_session(resolution.session_id)
         return True
 

@@ -64,7 +64,7 @@ adding another policy or lifecycle owner.
 
 | Contract | Current alpha implementation | Frozen target |
 | --- | --- | --- |
-| `PrincipalScope` | Immutable Host-derived authority, durable session-owner predicates, and approval-cache ownership/invalidation exist; remaining session/task/history consumers migrate in later DG-P2 work. | One immutable owner predicate reaches every session, task, approval, history, and effect operation. |
+| `PrincipalScope` | Immutable Host-derived authority now governs session list/resume/search, task detail/wait/cancel, `/subagents`, durable session/message/task queries, and approval-cache ownership/invalidation. | One immutable owner predicate reaches every session, task, approval, history, and effect operation; later EffectRuntime work applies the same seam to every effect adapter. |
 | `TurnExecutionContext` | Frozen turn identity pins principal, session, revision, capability declarations, route, cancellation, admission, and trace; mutable lifecycle/state handles remain internal. | Deeply immutable principal, session, revision, capability, route, admission, cancellation, and trace bindings. |
 | `TurnExecution` | `run(TurnRequest)` owns admission through completion; owner-checked `cancel(...)`, captured-route delivery, concurrency, and cleanup are implemented. | Typed outcomes, durable admission/restart recovery, and final immutable result projections complete the lifecycle. |
 | `EffectRuntime` | `ToolRuntime`, `McpRuntime`, security helpers, and inline file/process/network code own different parts of dispatch. | One resolved effect entry and one policy/dispatch order for builtin, authored, and MCP effects. |
