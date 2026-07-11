@@ -24,10 +24,12 @@ Tools can come from:
 
 The current runtime resolves a model tool name and then takes separate builtin,
 authored, or MCP branches. Many builtin handlers apply their own capability,
-approval, workspace, command, and network checks, but there is no generic
-builtin gate: `evolve_core` and `rollback_core` currently require their
-capabilities without resolving the registry `prompt` policy before mutation.
-MCP call dispatch applies its call capability and approval policy. Authored tool
+approval, workspace, command, and network checks, and there is still no generic
+builtin gate. The core-mutation branches now receive the same resolved registry
+entry used for visibility, require its singular capability, and apply its
+monotonic approval policy before any evolution/version-store adapter call or
+background task creation. MCP call dispatch applies its call capability and
+approval policy. Authored tool
 dispatch uses the same resolved registry entry exposed to the model/operator,
 requires its singular `capability`, and resolves `risk`/`approval_policy` before
 the authored entrypoint is imported and called. Core/global approval can make
@@ -86,10 +88,12 @@ live worker for active work:
   the live core.
 - `evolve_core(action="review")`, `evolve_core(action="promote")`, and
   `evolve_core(action="discard")` operate on that run id through the host-owned
-  evolution runtime. Promotion advances Git refs only after gates pass. The
-  current alpha branch checks `tool.call:evolve_core` but does not yet enforce
-  the registry `prompt` policy before promotion; `EffectRuntime` must close that
-  gap.
+  evolution runtime. Promotion advances Git refs only after gates pass. Every
+  action resolves capability and approval before dispatch; the action and
+  target are part of the approval-cache rule so one mutation action does not
+  authorize another. Principal/session ownership of that cache remains later
+  `PrincipalScope` work. `EffectRuntime` must remove the remaining dispatcher
+  duplication without weakening this ordering.
 - `ctx.agents.spawn(...)` is routed by the runner into an `agent.spawn` task.
 - `delegate_task(...)` is executed by the active runner context and creates an
   `agent.spawn` task with child output returned as parent evidence.

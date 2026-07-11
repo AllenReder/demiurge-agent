@@ -410,10 +410,12 @@ class ToolRuntime:
                 for entry in self.registry_for(core, turn=turn)
             }
             if call.name in BUILTIN_TOOL_DEFINITIONS:
-                if call.name not in visible_tools:
+                entry = visible_tools.get(call.name)
+                if entry is None or entry.source != "builtin":
                     return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
                 return await self._execute_builtin(
                     call,
+                    entry=entry,
                     core=core,
                     turn=turn,
                     capability=capability,
@@ -523,17 +525,32 @@ class ToolRuntime:
         self,
         call: ToolCall,
         *,
+        entry: ToolRegistryEntry,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         emit_event: EventEmitter | None = None,
     ) -> ToolResult:
         if call.name == "rollback_core":
-            capability.require("tool.call:rollback_core")
+            capability.require(entry.capability or "tool.call:rollback_core")
+            target = str(call.arguments.get("target") or "previous")
+            approval_denial = await self._approval_for_resolved_entry(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                action="core.rollback",
+                summary=f"Rollback core {core.core_id} to {target}",
+                target=f"{core.core_id}:{target}",
+                arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
             try:
                 pointer = self.version_store.rollback(
                     core.core_id,
-                    target=str(call.arguments.get("target") or "previous"),
+                    target=target,
                     reason=str(call.arguments.get("reason") or "rollback_core"),
                 )
             except CoreRepositoryError as exc:
@@ -550,7 +567,7 @@ class ToolRuntime:
                 model_output=json.dumps(payload, ensure_ascii=False),
             )
         if call.name == "evolve_core":
-            capability.require("tool.call:evolve_core")
+            capability.require(entry.capability or "tool.call:evolve_core")
             if self.evolution_runtime is None:
                 return ToolResult(content="evolution runtime is not configured", is_error=True)
             action = str(call.arguments.get("action") or "start").strip().lower()
@@ -562,6 +579,20 @@ class ToolRuntime:
             if action == "start":
                 if not goal.strip():
                     return ToolResult(content="goal is required for evolve_core start", is_error=True)
+                execution_mode = "background" if background else "foreground"
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action=f"evolve.start.{execution_mode}",
+                    summary=f"Start {execution_mode} evolve run for core {core.core_id}",
+                    target=core.core_id,
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 if background:
                     return self._start_evolve_task(
                         core=core,
@@ -579,6 +610,19 @@ class ToolRuntime:
             if action == "review":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core review", is_error=True)
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.review",
+                    summary=f"Review evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 result = await self.evolution_runtime.review(run_id, target_core_id=core.core_id, goal=reason)
                 payload = asdict(result)
                 content = f"evolve review {run_id}: {'passed' if result.passed else 'failed'}"
@@ -586,6 +630,19 @@ class ToolRuntime:
             if action == "promote":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core promote", is_error=True)
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.promote",
+                    summary=f"Promote evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 try:
                     result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
                 except CoreRepositoryError as exc:
@@ -595,6 +652,19 @@ class ToolRuntime:
             if action == "discard":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core discard", is_error=True)
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.discard",
+                    summary=f"Discard evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 payload = self.evolution_runtime.discard(run_id)
                 return ToolResult(content=f"discarded evolve run {run_id}", data=payload, model_output=json.dumps(payload, ensure_ascii=False))
             return ToolResult(content=f"unsupported evolve_core action: {action}", is_error=True)
@@ -2224,6 +2294,31 @@ class ToolRuntime:
         turn: TurnContext,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
+        return await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="authored.call",
+            summary=f"Call authored tool {entry.name}",
+            target=slot.relative_path,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            emit_event=emit_event,
+        )
+
+    async def _approval_for_resolved_entry(
+        self,
+        entry: ToolRegistryEntry,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        action: str,
+        summary: str,
+        target: str | None,
+        arguments_preview: dict[str, Any],
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
         capability_name = entry.capability or f"tool.call:{entry.name}"
         policy = entry.approval_policy
         for configured in (
@@ -2242,19 +2337,18 @@ class ToolRuntime:
         ):
             if configured:
                 policy = self._stricter_policy(policy, configured)
-        summary = f"Call authored tool {entry.name}"
         request = ApprovalRequest(
             tool_name=entry.name,
             tool_call_id=call.id,
             turn_id=turn.turn_id,
             capability=capability_name,
-            action="authored.call",
+            action=action,
             risk=entry.risk,
             summary=summary,
-            target=slot.relative_path,
-            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            target=target,
+            arguments_preview=arguments_preview,
             cache_key=(
-                f"{entry.name}:{capability_name}:authored.call:{slot.relative_path}"
+                f"{entry.name}:{capability_name}:{action}:{target or ''}"
             ),
             auto_approve=policy == "auto",
             policy=policy,

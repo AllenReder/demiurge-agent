@@ -22,9 +22,10 @@ Tools 可以来自：
 ## 当前 Dispatch
 
 当前运行时解析 model tool name 后，分别进入 builtin、authored 或 MCP 分支。许多 builtin
-handler 会自行执行 capability、approval、workspace、command 与 network checks，但目前
-没有通用 builtin gate：`evolve_core` 与 `rollback_core` 当前会要求对应 capability，
-却不会在修改 core refs 前解析 registry 的 `prompt` policy。MCP call dispatch 会应用
+handler 会自行执行 capability、approval、workspace、command 与 network checks，并且
+目前仍没有通用 builtin gate。Core-mutation 分支现在接收与 visibility 相同的 resolved
+registry entry，要求其 singular capability，并在任何 evolution/version-store adapter call
+或 background task 创建前应用单调收紧的 approval policy。MCP call dispatch 会应用
 call capability 与 approval policy。Authored dispatch 使用同一个对 model/operator 可见的
 resolved registry entry，在 import/call entrypoint 前要求 singular `capability` 并解析
 `risk`/`approval_policy`。Core/global approval 可以收紧该 policy，但不能削弱它。
@@ -76,9 +77,11 @@ effects。
   run。它不会切换 live core。
 - `evolve_core(action="review")`、`evolve_core(action="promote")` 与
   `evolve_core(action="discard")` 通过 Host-owned evolution runtime 操作该 run id。
-  Promotion 只会在 gates 通过后推进 Git refs。当前 alpha 分支会检查
-  `tool.call:evolve_core`，但尚未在 promotion 前强制执行 registry `prompt` policy；
-  `EffectRuntime` 必须补上这一缺口。
+  Promotion 只会在 gates 通过后推进 Git refs。每个 action 都会在 dispatch 前解析
+  capability 与 approval；action 与 target 进入 approval-cache rule，因此一个 mutation
+  action 不会授权另一个。该 cache 的 principal/session ownership 仍属于后续
+  `PrincipalScope` 工作。`EffectRuntime` 必须在不削弱该顺序的前提下删除剩余 dispatcher
+  duplication。
 - `ctx.agents.spawn(...)` 由 runner 路由成 `agent.spawn` task。
 - `delegate_task(...)` 由 active runner context 执行，并创建 `agent.spawn` task，child
   output 会作为 parent evidence 返回。两条路径都会在 task metadata 中记录 requested 与

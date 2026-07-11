@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,65 @@ class RecordingApprovalProvider:
         if self.decisions:
             return ApprovalDecision(self.decisions.pop(0), "recorded test decision")
         return ApprovalDecision("deny", "no recorded decision left")
+
+
+@dataclass
+class FakeCoreMutationResult:
+    summary: str = "fake mutation called"
+    promoted: bool = True
+    passed: bool = True
+
+
+class FakeEvolutionAdapter:
+    def __init__(self):
+        self.start_calls = 0
+        self.review_calls = 0
+        self.promote_calls = 0
+        self.discard_calls = 0
+
+    async def start(self, **kwargs):
+        self.start_calls += 1
+        return FakeCoreMutationResult()
+
+    async def review(self, run_id, *, target_core_id, goal):
+        self.review_calls += 1
+        return FakeCoreMutationResult()
+
+    async def promote(self, run_id, *, target_core_id, reason):
+        self.promote_calls += 1
+        return FakeCoreMutationResult()
+
+    def discard(self, run_id):
+        self.discard_calls += 1
+        return {"run_id": run_id}
+
+
+@dataclass
+class FakeRollbackPointer:
+    active_revision: str = "fake-revision"
+
+
+class FakeVersionStore:
+    def __init__(self):
+        self.rollback_calls = 0
+
+    def rollback(self, core_id, *, target, reason):
+        self.rollback_calls += 1
+        return FakeRollbackPointer()
+
+
+@dataclass
+class FakeTaskRecord:
+    task_id: str = "task_probe"
+
+
+class FakeTaskWorker:
+    def __init__(self):
+        self.start_calls = 0
+
+    def start_task(self, **kwargs):
+        self.start_calls += 1
+        return FakeTaskRecord()
 
 
 def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
@@ -1418,8 +1478,337 @@ def test_skill_manage_schema_exposes_file_level_actions():
 
 
 @pytest.mark.asyncio
+async def test_tool_03_evolve_promote_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: registry prompt denial must precede core promotion."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "evolve_core")
+
+    result = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
+    approval_events = [
+        event["type"]
+        for event in app.runner.event_log.tail(20)
+        if event["type"].startswith("approval.")
+    ]
+
+    assert entry.source == "builtin"
+    assert entry.capability == "tool.call:evolve_core"
+    assert entry.risk == "high"
+    assert entry.approval_policy == "prompt"
+    assert fake.promote_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert approval_events == ["approval.requested", "approval.decided", "approval.denied"]
+
+
+@pytest.mark.asyncio
+async def test_tool_03_rollback_denial_prevents_version_store_call(tmp_path):
+    """TOOL-03: registry prompt denial must precede core rollback."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeVersionStore()
+    app.tool_runtime.version_store = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "rollback_core", {"target": "previous"})
+
+    assert fake.rollback_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_background_denial_prevents_task_creation(tmp_path):
+    """TOOL-03: background evolution must be approved before task creation."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeTaskWorker()
+    app.tool_runtime.task_worker = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "start", "goal": "safe fake goal", "background": True},
+    )
+
+    assert fake.start_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_foreground_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: foreground evolution must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "start", "goal": "safe fake goal", "background": False},
+    )
+
+    assert fake.start_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_review_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: evolve review must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
+
+    assert fake.review_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_discard_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: evolve discard must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_allow_uses_resolved_entry_and_safe_preview(tmp_path):
+    """TOOL-03: approval requests must preserve resolved registry policy safely."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {
+            "action": "promote",
+            "run_id": "run_probe",
+            "reason": "r" * 5000,
+            "secret_token": "synthetic-secret",
+        },
+    )
+
+    assert fake.promote_calls == 1
+    assert result.is_error is False
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    assert request.tool_name == "evolve_core"
+    assert request.capability == "tool.call:evolve_core"
+    assert request.risk == "high"
+    assert request.policy == "prompt"
+    assert request.action == "evolve.promote"
+    assert request.target == "assistant:run_probe"
+    assert request.arguments_preview["secret_token"] == "<redacted>"
+    assert len(request.arguments_preview["reason"]) <= 300
+    assert "[truncated 4744 chars]" in request.arguments_preview["reason"]
+    assert len(json.dumps(request.arguments_preview, ensure_ascii=False)) <= 2048
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_session_allow_is_cached_per_mutation_action(tmp_path):
+    """TOOL-03: a session allow may repeat one rule but not authorize another action."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    first = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
+    cached = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
+    different_action = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert first.is_error is False
+    assert cached.is_error is False
+    assert different_action.is_error is True
+    assert fake.promote_calls == 2
+    assert fake.discard_calls == 0
+    assert [request.action for request in provider.requests] == ["evolve.promote", "evolve.discard"]
+    assert different_action.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_global_auto_cannot_weaken_builtin_prompt_policy(tmp_path):
+    """TOOL-03: global policy may tighten but cannot lower the registry baseline."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["deny"])
+    app.tool_runtime.evolution_runtime = fake
+    app.tool_runtime.global_approval.tools["evolve_core"] = "auto"
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_core_deny_prevents_adapter_without_calling_provider(tmp_path):
+    """TOOL-03: a stricter core policy must deny before interactive routing."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["approval"] = {"tools": {"evolve_core": "deny"}}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.data["approval"]["value"] == "deny"
+    assert result.data["approval"]["reason"] == "denied by approval policy"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_no_interactive_route_denies_before_adapter_call(tmp_path):
+    """TOOL-03: prompt policy without a route must fail closed."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert result.data["approval"]["value"] == "deny"
+    assert result.data["approval"]["reason"] == "no_interactive_route"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_capability_failure_precedes_approval_and_adapter(tmp_path):
+    """TOOL-03: the resolved singular capability remains the first mutation gate."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["capabilities"]["defaults"].pop("tool.call:evolve_core", None)
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "capability denied: tool.call:evolve_core" in result.content
+
+
+@pytest.mark.asyncio
+async def test_tool_03_builtin_dispatch_uses_the_resolved_metadata_override(tmp_path):
+    """TOOL-03: visibility, capability, risk, policy, and dispatch share one entry."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["tools"]["metadata"]["evolve_core"] = {
+        "risk": "critical",
+        "capability": "tool.call:core_mutation_probe",
+        "approval_policy": "deny",
+    }
+    defaults = raw["capabilities"]["defaults"]
+    defaults.pop("tool.call:evolve_core", None)
+    defaults["tool.call:core_mutation_probe"] = {"scope": "core"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "evolve_core")
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+    approval = next(
+        event
+        for event in app.runner.event_log.tail(20)
+        if event["type"] == "approval.decided"
+    )
+
+    assert (entry.capability, entry.risk, entry.approval_policy) == (
+        "tool.call:core_mutation_probe",
+        "critical",
+        "deny",
+    )
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.data["approval"]["value"] == "deny"
+    assert {
+        "tool_name": approval["tool_name"],
+        "capability": approval["capability"],
+        "risk": approval["risk"],
+        "policy": approval["policy"],
+        "action": approval["action"],
+    } == {
+        "tool_name": "evolve_core",
+        "capability": "tool.call:core_mutation_probe",
+        "risk": "critical",
+        "policy": "deny",
+        "action": "evolve.discard",
+    }
+
+
+@pytest.mark.asyncio
 async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     before = app.version_store.active_pointer("assistant").active_revision
 
@@ -1453,6 +1842,7 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
 @pytest.mark.asyncio
 async def test_rollback_core_returns_error_when_live_tree_has_local_edits(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
     soul.write_text(soul.read_text(encoding="utf-8") + "\n\nCommitted setup edit.\n", encoding="utf-8")
     app.version_store.core_repository.commit_live(reason="test setup", summary="test setup")

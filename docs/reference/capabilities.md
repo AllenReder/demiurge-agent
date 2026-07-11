@@ -14,10 +14,10 @@ capabilities at execution time. Authored tool dispatch requires the singular
 registry capability before module import, while authored SDK clients continue
 to enforce explicit `ctx.capability.require(...)` calls inside the module.
 
-Current alpha limitations: MCP spawn/connect/discovery occurs before the later
-call capability and approval check. The `evolve_core` and `rollback_core` builtin
-branches require capabilities but do not yet resolve their registry `prompt`
-policy before mutation. See
+Current alpha limitation: MCP spawn/connect/discovery occurs before the later
+call capability and approval check. Core mutation builtins now require the
+resolved registry capability and effective approval policy before every
+evolution/version-store adapter call or background task creation. See
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime)
 for the single target ordering. Capabilities are not principal authorization or
 a Python sandbox.
@@ -114,14 +114,13 @@ Risk values are:
 low < medium < high < critical
 ```
 
-For authored tools, builtin handlers that use the approval runtime, and MCP
-calls, the Host starts from tool metadata and applies applicable core/global
-approval policy. Authored policy is monotonic: core/global `auto` cannot weaken
-registry `prompt` or `deny`. More restrictive core policy wins over tool
-metadata. Global fallback approval cannot lower a terminal command guard result
-from `prompt/high` to automatic execution. Only `allow/low` terminal commands
-can be auto-approved; hardline blocks terminate before approval. The
-core-mutation builtin exceptions above are not yet passed through this path.
+For authored tools and core mutation builtins, the Host starts from tool
+metadata and applies applicable core/global approval policy monotonically:
+core/global `auto` cannot weaken registry `prompt` or `deny`. Other builtin
+handlers and MCP calls retain their documented handler-specific resolution.
+Global fallback approval cannot lower a terminal command guard result from
+`prompt/high` to automatic execution. Only `allow/low` terminal commands can be
+auto-approved; hardline blocks terminate before approval.
 
 ## Core Approval Config
 

@@ -56,17 +56,19 @@ Builtin file, terminal, network, schedule, and skill handlers resolve their
 applicable capability/approval checks before guarded operations, and MCP tool
 calls do so before the call. Authored tool dispatch now requires the resolved
 singular capability and approval policy before module import/invocation. Alpha
-gaps remain: MCP spawn/connect/discovery can occur before call approval, and
-`evolve_core` / `rollback_core` require capabilities but do not yet resolve
-their registry `prompt` policy before mutating core refs. The target
-`EffectRuntime` closes these paths with one ordering; see
+gaps remain: MCP spawn/connect/discovery can occur before call approval, while
+builtin/authored/MCP dispatch still uses separate implementation branches.
+`evolve_core` / `rollback_core` now use the same resolved registry entry for
+capability and monotonic approval policy before adapter calls or background
+task creation. The target `EffectRuntime` removes the remaining branch
+duplication with one ordering; see
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 Background completion turns use the originating session's normal capabilities
-and do not gain approval merely by running in the background. The current
-`evolve_core` registry-policy gap also affects background start, so the alpha
-runtime does not yet guarantee that every dangerous background action reaches
-approval before execution.
+and do not gain approval merely by running in the background. An
+`evolve_core(action="start", background=true)` request must pass its resolved
+capability and action-specific approval before the Host creates the runtime
+task.
 
 ## Secrets
 

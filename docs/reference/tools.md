@@ -14,12 +14,12 @@ The host builds the visible tool registry for each turn from:
 The Agent Core declares tool surfaces. The Host is the product owner for
 selection, dispatch, capability checks, approvals, workspace scope, task
 control, and result conversion. The current alpha implementation still has
-separate builtin, authored, and MCP paths. Authored dispatch now requires its
-resolved singular capability and approval policy before importing the module,
-but MCP connect/discovery still occurs before call approval. The `evolve_core`
-and `rollback_core` builtin branches also
-require their capabilities but do not yet resolve their registry `prompt`
-policy before mutation. These gaps are frozen for removal in
+separate builtin, authored, and MCP paths. Authored dispatch and the
+`evolve_core` / `rollback_core` mutation branches now require their resolved
+singular capability and approval policy before importing a module, creating a
+background task, or calling a mutation adapter. MCP connect/discovery still
+occurs before call approval. The remaining dispatch duplication and MCP gap
+are frozen for removal in
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 ## Built-In Toolsets
@@ -70,7 +70,7 @@ expansion syntax inside comments, can conservatively require approval.
 
 For builtin handlers that use approval resolution, core metadata can make the
 effective policy stricter but cannot lower risk or weaken the registry policy.
-The core-mutation alpha exception is described below.
+This includes every `evolve_core` action and `rollback_core`.
 
 ## Authored Tools
 
@@ -229,12 +229,14 @@ does not hot-reload the active core.
 | `promote` | `run_id` | Reruns gates and advances `refs/demiurge/previous` and `refs/demiurge/live`. |
 | `discard` | `run_id` | Removes the run worktree and metadata. |
 
-`promote` is classified as a high-risk, prompt-policy operation, and
-`rollback_core` has the same prompt-policy intent. Current alpha limitation:
-both builtin branches require their capabilities but do not yet invoke the
-approval runtime before mutating core refs. `rollback_core` creates a new
-rollback commit for the live Agent Core tree; the new revision takes effect on
-the next turn.
+Every action is classified as high risk with registry `prompt` policy.
+`evolve_core` requires its resolved capability and approval before foreground
+adapter calls or background task creation; `rollback_core` does the same before
+calling the version store. Approval rules are action-scoped, so a cached
+allow for `promote` does not authorize `discard`, `review`, `start`, or
+rollback. Principal/session ownership of that cache remains a separate alpha
+limitation. `rollback_core` creates a new rollback commit for the live Agent
+Core tree; the new revision takes effect on the next turn.
 
 ## Child Agent Controls
 

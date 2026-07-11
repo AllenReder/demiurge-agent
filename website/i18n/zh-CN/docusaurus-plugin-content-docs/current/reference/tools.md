@@ -13,11 +13,11 @@ Host 会为每个 turn 从以下来源构建可见 tool registry：
 
 Agent Core 声明 tool surface。Host 是 selection、dispatch、capability checks、approvals、
 workspace scope、task control 与 result conversion 的产品 owner。当前 alpha 实现仍有
-相互分离的 builtin、authored 与 MCP 路径。Authored dispatch 现在会在 module import 前
-要求 resolved singular capability 并解析 approval policy，但 MCP connect/discovery 仍发生
-在 call approval 之前；`evolve_core` 与
-`rollback_core` builtin 分支也会要求 capability，却尚未在 mutation 前解析 registry
-`prompt` policy。这些缺口已冻结为必须在
+相互分离的 builtin、authored 与 MCP 路径。Authored dispatch 以及 `evolve_core` /
+`rollback_core` mutation 分支现在会在 module import、background task 创建或 mutation
+adapter 调用前，要求 resolved singular capability 并执行 approval policy；MCP
+connect/discovery 仍发生在 call approval 之前。剩余的 dispatch duplication 与 MCP 缺口
+已冻结为必须在
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)中消除的目标。
 
 ## Built-In Toolsets
@@ -62,7 +62,8 @@ execution shape；该 fingerprint 不能替代独立的 session/principal owners
 Ambiguous shell text（包括 comment 中的 expansion syntax）可能会保守地要求 approval。
 
 对于使用 approval resolution 的 builtin handler，core metadata 可以让 effective policy
-更严格，但不能降低 risk 或削弱 registry policy。Core-mutation alpha 例外见下文。
+更严格，但不能降低 risk 或削弱 registry policy。该规则包括所有 `evolve_core` action 与
+`rollback_core`。
 
 ## Authored Tools
 
@@ -214,10 +215,12 @@ turn 生效；当前 turn 不会 hot-reload active core。
 | `promote` | `run_id` | 重新运行 gates，并推进 `refs/demiurge/previous` 与 `refs/demiurge/live`。 |
 | `discard` | `run_id` | 删除 run worktree 与 metadata。 |
 
-`promote` 被归类为 high-risk、prompt-policy operation，`rollback_core` 具有相同的
-prompt-policy intent。当前 alpha 限制：两个 builtin 分支都会要求 capability，却尚未在
-修改 core refs 前调用 approval runtime。`rollback_core` 会为 live Agent Core tree 创建
-新的 rollback commit；新 revision 从下一个 turn 生效。
+每个 action 都被归类为 high risk，并使用 registry `prompt` policy。`evolve_core` 会在
+foreground adapter call 或 background task 创建前要求 resolved capability 与 approval；
+`rollback_core` 也会在调用 version store 前执行同样顺序。Approval rule 按 action
+隔离，因此 `promote` 的 cached allow 不会授权 `discard`、`review`、`start` 或 rollback。
+该 cache 的 principal/session ownership 仍是独立的 alpha limitation。`rollback_core` 会为
+live Agent Core tree 创建新的 rollback commit；新 revision 从下一个 turn 生效。
 
 ## Child Agent Controls
 
