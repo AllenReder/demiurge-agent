@@ -51,6 +51,20 @@ uv run demiurge doctor --json
 
 检查 runtime/source template drift。
 
+`doctor` 与 `init --check` 使用同一套进程退出约定：
+
+| Exit code | 含义 |
+| --- | --- |
+| `0` | 报告健康（JSON 模式中为 `ok: true`）。 |
+| `1` | 检查已完成，但发现一个或多个错误（`ok: false`）。 |
+| `2` | 参数、配置或检查本身无法处理。 |
+
+无论健康与否，JSON 报告都保留在 stdout，并保持 machine-readable。JSON 模式下的执行
+失败也会输出带 `error.code: doctor.execution_error` 的 `ok: false` payload，不包含
+traceback 或原始配置值。调用方必须同时检查进程状态与 JSON payload。尤其是 managed
+`update` 的 health gate 现在会在
+`init --check` 报告不健康 runtime 时停止。
+
 ## `core`
 
 ```bash

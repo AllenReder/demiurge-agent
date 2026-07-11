@@ -205,6 +205,118 @@ async def test_tui_01_gateway_waits_for_identity_before_initialize(monkeypatch):
     assert app.closed is True
 
 
+@pytest.mark.asyncio
+async def test_ui_01_gateway_initialize_failure_is_fatal_startup_error(monkeypatch):
+    from demiurge.ui_gateway import entry
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeGateway:
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.should_exit = False
+
+        async def initialize(self):
+            raise RuntimeError("initialize failed")
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.events = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            self.events.append((event, payload))
+
+        async def write_error(self, message_id, message, *, code="error"):
+            raise AssertionError("fatal initialize failure must be an operator event")
+
+        async def write_result(self, message_id, result=None):
+            raise AssertionError("fatal initialize failure must not return a result")
+
+        async def iter_requests(self):
+            yield {
+                "id": 1,
+                "method": "operator.initialize",
+                "params": {
+                    "protocol_version": TUI_PROTOCOL_VERSION,
+                    "build_stamp": TUI_BUILD_STAMP,
+                },
+            }
+
+    app = FakeApp()
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", FakeGateway)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert exit_code == 1
+    assert FakeEndpoint.instance.events == [
+        (
+            "operator.error",
+            {
+                "message": "initialize failed",
+                "method": "operator.initialize",
+                "source": "gateway_startup",
+            },
+        )
+    ]
+    assert app.closed is True
+
+
+@pytest.mark.asyncio
+async def test_ui_01_gateway_constructor_failure_closes_created_app(monkeypatch):
+    from demiurge.ui_gateway import entry
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.events = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            self.events.append((event, payload))
+
+    app = FakeApp()
+
+    def fail_gateway_construction(*args, **kwargs):
+        raise RuntimeError("gateway construction failed")
+
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", fail_gateway_construction)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert exit_code == 1
+    assert FakeEndpoint.instance.events == [
+        (
+            "operator.error",
+            {
+                "message": "gateway construction failed",
+                "source": "gateway_startup",
+            },
+        )
+    ]
+    assert app.closed is True
+
+
 def test_tui_01_protocol_mismatch_exits_nonzero_with_structured_error(tmp_path):
     request = {
         "id": 1,
@@ -433,7 +545,124 @@ def test_ui_01_gateway_startup_error_emits_operator_error_and_exits_nonzero(tmp_
     startup_error = next(frame for frame in frames if frame.get("event") == "operator.error")
     assert startup_error["payload"]["source"] == "gateway_startup"
     assert startup_error["payload"]["message"]
-    assert completed.returncode != 0
+    assert completed.returncode == 1
+
+
+def test_ui_01_gateway_configuration_error_is_structured_and_exits_two():
+    """UI-01: malformed launcher configuration is a structured usage failure."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            "[",
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "event": "operator.error",
+            "payload": {
+                "code": "config_error",
+                "message": "gateway configuration could not be loaded",
+                "source": "gateway_config",
+            },
+        }
+    ]
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        pytest.param("operator.shutdown", {}, id="rpc"),
+        pytest.param("operator.command", {"text": "/exit"}, id="slash-exit"),
+        pytest.param("operator.command", {"text": "/quit"}, id="slash-quit"),
+    ],
+)
+def test_ui_01_gateway_explicit_shutdown_exits_zero(tmp_path, method, params):
+    """UI-01: verified explicit shutdown paths are normal zero-exit lifecycles."""
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+    requests = [
+        {
+            "id": 1,
+            "method": "operator.initialize",
+            "params": {
+                "protocol_version": TUI_PROTOCOL_VERSION,
+                "build_stamp": TUI_BUILD_STAMP,
+            },
+        },
+        {"id": 2, "method": method, "params": params},
+    ]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    assert completed.returncode == 0
+    assert any(frame.get("event") == "operator.shutdown" for frame in frames)
+
+
+def test_ui_01_gateway_eof_without_shutdown_exits_one(tmp_path):
+    """UI-01: losing the client without shutdown is not a normal lifecycle."""
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+    initialize = {
+        "id": 1,
+        "method": "operator.initialize",
+        "params": {
+            "protocol_version": TUI_PROTOCOL_VERSION,
+            "build_stamp": TUI_BUILD_STAMP,
+        },
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(initialize) + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
 
 
 def test_parse_approval_response():

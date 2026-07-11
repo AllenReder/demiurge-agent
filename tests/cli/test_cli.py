@@ -59,7 +59,7 @@ def test_cli_01_doctor_json_error_exits_nonzero(tmp_path):
     )
 
     assert json.loads(completed.stdout)["ok"] is False
-    assert completed.returncode != 0
+    assert completed.returncode == 1
 
 
 def test_cli_01_init_check_json_error_exits_nonzero(tmp_path):
@@ -75,7 +75,55 @@ def test_cli_01_init_check_json_error_exits_nonzero(tmp_path):
     )
 
     assert json.loads(completed.stdout)["ok"] is False
-    assert completed.returncode != 0
+    assert completed.returncode == 1
+
+
+def test_cli_01_healthy_doctor_json_exits_zero(tmp_path):
+    """CLI-01: a healthy doctor report remains a successful process result."""
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+
+    completed = _run_cli(
+        "--home",
+        str(home),
+        "--agents-root",
+        str(source_agents_root()),
+        "doctor",
+        "--json",
+    )
+
+    assert json.loads(completed.stdout)["ok"] is True
+    assert completed.returncode == 0
+
+
+def test_cli_01_bad_arguments_exit_two():
+    """CLI-01: argparse failures remain usage errors rather than health failures."""
+    completed = _run_cli("doctor", "--not-a-real-option")
+
+    assert completed.returncode == 2
+    assert "unrecognized arguments" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(lambda home: ["--home", str(home), "doctor", "--json"], id="doctor"),
+        pytest.param(lambda home: ["init", "--home", str(home), "--check", "--json"], id="init-check"),
+    ],
+)
+def test_cli_01_check_configuration_error_exits_two_with_json(tmp_path, args):
+    """CLI-01: checks that cannot load configuration fail as structured usage errors."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("providers: [\n", encoding="utf-8")
+
+    completed = _run_cli(*args(home))
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "doctor.execution_error"
+    assert completed.stderr == ""
 
 
 def test_cli_02_init_check_preserves_runtime_filesystem_snapshot(tmp_path):

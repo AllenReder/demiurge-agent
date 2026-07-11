@@ -185,17 +185,17 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--session and --resume cannot be used together")
     if args.command == "init":
         home = args.init_home or args.home or default_home()
-        host_config = _host_config_or_default(home)
-        core_id = args.init_core or args.core or host_config.runtime.default_core or "assistant"
         agents_root = args.init_agents_root or args.agents_root
         if args.check:
-            report = DoctorRuntime(
+            _run_doctor_check(
                 home=home,
-                source_agents_root=source_agents_root(agents_root),
-                core_id=core_id,
-            ).run()
-            _print_doctor_report(report, as_json=args.json)
+                agents_root=agents_root,
+                requested_core_id=args.init_core or args.core,
+                as_json=args.json,
+            )
             return
+        host_config = _host_config_or_default(home)
+        core_id = args.init_core or args.core or host_config.runtime.default_core or "assistant"
         if args.refresh:
             try:
                 result = refresh_runtime(
@@ -230,13 +230,12 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "doctor":
-        host_config = _host_config_or_default(args.home or default_home())
-        report = DoctorRuntime(
+        _run_doctor_check(
             home=args.home or default_home(),
-            source_agents_root=source_agents_root(args.agents_root),
-            core_id=args.doctor_core or args.core or host_config.runtime.default_core or "assistant",
-        ).run()
-        _print_doctor_report(report, as_json=args.json)
+            agents_root=args.agents_root,
+            requested_core_id=args.doctor_core or args.core,
+            as_json=args.json,
+        )
         return
 
     if args.command == "core":
@@ -433,6 +432,40 @@ def _print_doctor_report(report: DoctorReport, *, as_json: bool = False) -> None
             print(f"  details: {json.dumps(finding.details, ensure_ascii=False, sort_keys=True)}")
         if finding.remediation:
             print(f"  remediation: {finding.remediation}")
+
+
+def _finish_doctor_report(report: DoctorReport, *, as_json: bool = False) -> None:
+    _print_doctor_report(report, as_json=as_json)
+    if report.has_errors:
+        raise SystemExit(1)
+
+
+def _run_doctor_check(
+    *,
+    home: Path,
+    agents_root: Path | None,
+    requested_core_id: str | None,
+    as_json: bool,
+) -> None:
+    try:
+        host_config = _host_config_or_default(home)
+        report = DoctorRuntime(
+            home=home,
+            source_agents_root=source_agents_root(agents_root),
+            core_id=requested_core_id or host_config.runtime.default_core or "assistant",
+        ).run()
+    except Exception as exc:
+        error = {
+            "code": "doctor.execution_error",
+            "message": "runtime check could not be completed",
+            "type": type(exc).__name__,
+        }
+        if as_json:
+            print(json.dumps({"ok": False, "error": error}, indent=2, ensure_ascii=False))
+        else:
+            print(f"doctor: {error['message']} ({error['type']})", file=sys.stderr)
+        raise SystemExit(2) from None
+    _finish_doctor_report(report, as_json=as_json)
 
 
 def _print_refresh_result(result: dict[str, object]) -> None:

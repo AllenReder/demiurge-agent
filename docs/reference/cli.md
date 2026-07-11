@@ -55,6 +55,21 @@ Checks runtime/source template drift. It also reports runtime core repository
 consistency problems, such as a missing live ref, a live checkout that no
 longer matches `refs/demiurge/live`, or a rollback ref that needs repair.
 
+`doctor` and `init --check` use the same process exit contract:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The report is healthy (`ok: true` in JSON mode). |
+| `1` | The check completed and found one or more errors (`ok: false`). |
+| `2` | Arguments, configuration, or the check itself could not be processed. |
+
+JSON reports remain on stdout and machine-readable for both healthy and
+unhealthy results. In JSON mode, an execution failure also emits an `ok: false`
+payload with `error.code: doctor.execution_error`, without a traceback or raw
+configuration values. Callers must inspect the process status as well as the
+JSON payload. In particular, the managed `update` health gate now stops when
+`init --check` reports an unhealthy runtime.
+
 ## `core`
 
 ```bash

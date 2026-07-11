@@ -58,6 +58,28 @@ result. The TUI validates that response before treating initialization as
 successful. A mismatch returns RPC code `protocol_mismatch` and exits with code
 2, so a stale bundle cannot appear as a normal shutdown.
 
+## Process Exit Contract
+
+The NDJSON entrypoint uses process status as part of the operator protocol:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The verified client explicitly requested shutdown by RPC, `/exit`, or `/quit`. |
+| `1` | Host startup failed, or the client stream ended without an explicit shutdown. |
+| `2` | CLI parsing, gateway configuration, or the initialize identity handshake failed. |
+
+When Host creation or `OperatorGatewayRuntime.initialize()` fails, stdout first
+receives an `operator.error` event with `source: gateway_startup`, then the
+process exits with code 1. Clients must not translate that lifecycle into
+`operator.shutdown`. Protocol/build mismatch
+continues to use the structured RPC code `protocol_mismatch` and process exit
+2. Losing stdin after initialization is also abnormal; only an explicit,
+verified shutdown request is a zero-exit lifecycle. The `/exit` and `/quit`
+operator commands call the same shutdown path as the `operator.shutdown` RPC.
+Malformed launcher configuration emits `operator.error` with
+`source: gateway_config` and `code: config_error` before exiting with code 2;
+the payload does not echo raw configuration values.
+
 Keep `demiurge/ui_gateway/protocol.py` and
 `ui-tui/src/gateway/protocol.ts` synchronized when the wire contract changes,
 then rebuild and byte-compare `ui-tui/dist/entry.js` with

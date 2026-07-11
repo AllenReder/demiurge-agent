@@ -54,6 +54,25 @@ Host identity。TUI 必须再次校验该 response，才能把 initialize 视为
 RPC code `protocol_mismatch` 并以 exit code 2 结束，因此 stale bundle 不会表现成正常
 shutdown。
 
+## Process Exit Contract
+
+NDJSON entrypoint 把进程状态作为 operator protocol 的一部分：
+
+| Exit code | 含义 |
+| --- | --- |
+| `0` | 已完成身份校验的 client 通过 RPC、`/exit` 或 `/quit` 显式请求 shutdown。 |
+| `1` | Host startup 失败，或 client stream 在没有显式 shutdown 时结束。 |
+| `2` | CLI 参数解析、gateway 配置或 initialize identity handshake 失败。 |
+
+Host 创建或 `OperatorGatewayRuntime.initialize()` 失败时，stdout 会先收到一个
+`source: gateway_startup` 的 `operator.error` event，然后进程以 code 1 退出。Client
+不得把这个 lifecycle 转换为 `operator.shutdown`。Protocol/build mismatch 继续使用结构化 RPC code
+`protocol_mismatch` 与 process exit 2。Initialize 后失去 stdin 同样属于异常；只有显式且
+已校验的 shutdown request 才是 zero-exit lifecycle。`/exit` 与 `/quit` operator
+command 会调用和 `operator.shutdown` RPC 相同的 shutdown path。
+Malformed launcher configuration 会先发送带 `source: gateway_config` 与
+`code: config_error` 的 `operator.error`，再以 code 2 退出；payload 不会回显原始配置值。
+
 Wire contract 变化时，应同步更新 `demiurge/ui_gateway/protocol.py` 与
 `ui-tui/src/gateway/protocol.ts`，然后 rebuild，并逐字节比较
 `ui-tui/dist/entry.js` 与 `demiurge/ui/tui_dist/entry.js`。

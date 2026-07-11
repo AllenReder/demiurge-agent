@@ -21,6 +21,10 @@ class TuiIdentityMismatch(ValueError):
     pass
 
 
+class TuiStartupError(RuntimeError):
+    pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m demiurge.ui_gateway.entry")
     parser.add_argument("--config-json", default=None, help="JSON config produced by the demiurge TUI launcher")
@@ -35,12 +39,25 @@ def main(argv: list[str] | None = None) -> None:
 
 async def async_main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = _load_config(args.config_json)
     endpoint = NdjsonRpcEndpoint()
+
+    try:
+        config = _load_config(args.config_json)
+    except Exception:
+        await endpoint.write_event(
+            "operator.error",
+            {
+                "code": "config_error",
+                "message": "gateway configuration could not be loaded",
+                "source": "gateway_config",
+            },
+        )
+        return 2
 
     async def emit(event: str, payload: dict[str, Any]) -> None:
         await endpoint.write_event(event, payload)
 
+    app = None
     try:
         app = create_app(
             home=Path(config.get("home") or default_home()),
@@ -59,7 +76,9 @@ async def async_main(argv: list[str] | None = None) -> int:
         gateway = OperatorGatewayRuntime(app, emit=emit, tool_display=config.get("tool_display"), busy_mode=config.get("busy_mode"))
     except Exception as exc:
         await endpoint.write_event("operator.error", {"message": str(exc), "source": "gateway_startup"})
-        return 0
+        if app is not None:
+            await app.close()
+        return 1
 
     pending_handlers: set[asyncio.Task[None]] = set()
     try:
@@ -76,9 +95,11 @@ async def async_main(argv: list[str] | None = None) -> int:
                 await _handle_request(endpoint, gateway, message_id, method, params)
             except TuiIdentityMismatch:
                 return 2
+            except TuiStartupError:
+                return 1
             if gateway.should_exit:
                 return 0
-        return 0
+        return 1
     finally:
         for task in pending_handlers:
             task.cancel()
@@ -113,6 +134,16 @@ async def _handle_request(
         raise
     except Exception as exc:
         print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        if method == "operator.initialize" and not getattr(gateway, "_tui_identity_verified", False):
+            await endpoint.write_event(
+                "operator.error",
+                {
+                    "message": str(exc),
+                    "method": method,
+                    "source": "gateway_startup",
+                },
+            )
+            raise TuiStartupError(str(exc)) from exc
         if message_id is not None:
             await endpoint.write_error(message_id, str(exc))
         else:
