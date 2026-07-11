@@ -40,6 +40,267 @@ class EventSink:
         return "\n".join(values)
 
 
+@pytest.mark.asyncio
+async def test_tui_01_initialize_rejects_protocol_mismatch_before_gateway_start():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    with pytest.raises(ValueError, match="TUI protocol mismatch"):
+        await _dispatch(
+            gateway,
+            "operator.initialize",
+            {
+                "protocol_version": TUI_PROTOCOL_VERSION + 1,
+                "build_stamp": TUI_BUILD_STAMP,
+            },
+        )
+
+    assert gateway.initialize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_01_initialize_rejects_build_mismatch_before_gateway_start():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    with pytest.raises(ValueError, match="TUI build mismatch"):
+        await _dispatch(
+            gateway,
+            "operator.initialize",
+            {
+                "protocol_version": TUI_PROTOCOL_VERSION,
+                "build_stamp": "stale-interaction-bundle",
+            },
+        )
+
+    assert gateway.initialize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_01_initialize_returns_host_protocol_identity():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    result = await _dispatch(
+        gateway,
+        "operator.initialize",
+        {
+            "protocol_version": TUI_PROTOCOL_VERSION,
+            "build_stamp": TUI_BUILD_STAMP,
+        },
+    )
+
+    assert gateway.initialize_calls == 1
+    assert result == {
+        "status": "idle",
+        "protocol_version": TUI_PROTOCOL_VERSION,
+        "build_stamp": TUI_BUILD_STAMP,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tui_01_non_initialize_first_frame_requires_identity_handshake():
+    from demiurge.ui_gateway.entry import TuiIdentityMismatch, _dispatch
+
+    class FakeGateway:
+        pass
+
+    with pytest.raises(TuiIdentityMismatch, match="identity handshake required"):
+        await _dispatch(FakeGateway(), "interaction.initialize", {})
+
+
+@pytest.mark.asyncio
+async def test_tui_01_gateway_waits_for_identity_before_initialize(monkeypatch):
+    from demiurge.ui_gateway import entry
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeGateway:
+        instance = None
+
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.initialize_calls = 0
+            self.should_exit = False
+            FakeGateway.instance = self
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.errors = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            return None
+
+        async def write_error(self, message_id, message, *, code="error"):
+            self.errors.append((message_id, code, message))
+
+        async def write_result(self, message_id, result=None):
+            raise AssertionError("mismatched initialize must not return a result")
+
+        async def iter_requests(self):
+            yield {
+                "id": 1,
+                "method": "operator.initialize",
+                "params": {
+                    "protocol_version": TUI_PROTOCOL_VERSION + 1,
+                    "build_stamp": TUI_BUILD_STAMP,
+                },
+            }
+
+    app = FakeApp()
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", FakeGateway)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert FakeGateway.instance.initialize_calls == 0
+    assert FakeEndpoint.instance.errors == [
+        (1, "protocol_mismatch", "TUI protocol mismatch: expected 1, got 2")
+    ]
+    assert exit_code == 2
+    assert app.closed is True
+
+
+def test_tui_01_protocol_mismatch_exits_nonzero_with_structured_error(tmp_path):
+    request = {
+        "id": 1,
+        "method": "operator.initialize",
+        "params": {
+            "protocol_version": 999,
+            "build_stamp": "stale-interaction-bundle",
+        },
+    }
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "id": 1,
+            "error": {
+                "code": "protocol_mismatch",
+                "message": "TUI protocol mismatch: expected 1, got 999",
+            },
+        }
+    ]
+
+
+def test_tui_01_long_command_first_frame_cannot_bypass_identity_gate(tmp_path):
+    request = {
+        "id": 1,
+        "method": "operator.command",
+        "params": {"text": "/doctor"},
+    }
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "id": 1,
+            "error": {
+                "code": "protocol_mismatch",
+                "message": "TUI identity handshake required before method: operator.command",
+            },
+        }
+    ]
+
+
+def test_tui_01_python_and_typescript_protocol_identity_match():
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "ui-tui"
+        / "src"
+        / "gateway"
+        / "protocol.ts"
+    ).read_text(encoding="utf-8")
+
+    assert f"TUI_PROTOCOL_VERSION = {TUI_PROTOCOL_VERSION}" in source
+    assert f'TUI_BUILD_STAMP = "{TUI_BUILD_STAMP}"' in source
+
+
 class BlockingProvider:
     def __init__(self):
         self.started = asyncio.Event()

@@ -111,6 +111,15 @@ node --check ui-tui/dist/entry.js
 node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) process.exit(1);"
 ```
 
+Normal `demiurge` launches always use the tracked packaged asset. To exercise
+the local `ui-tui/dist/entry.js` (or `src/entry.tsx` with local `tsx`) while
+developing, set `DEMIURGE_TUI_DEV=1`; missing dev artifacts produce a command
+that rebuilds them instead of silently falling back. Protocol changes must keep
+`demiurge/ui_gateway/protocol.py` and `ui-tui/src/gateway/protocol.ts` in sync,
+then rebuild and copy the packaged asset. The initialize handshake rejects a
+version/build mismatch before starting gateway-owned session or scheduler
+state.
+
 ## Verification
 
 Use the narrowest useful checks for the change.

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createInterface } from "node:readline"
 import { encodeRequest, parseRpcLine } from "./rpc"
+import { TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION, validateGatewayIdentity } from "./protocol"
 import type { GatewayEvent, RpcResponse } from "../types"
 
 type Pending = {
@@ -54,6 +55,14 @@ export class GatewayClient {
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
     })
+  }
+
+  async initialize(): Promise<void> {
+    const result = await this.request("operator.initialize", {
+      protocol_version: TUI_PROTOCOL_VERSION,
+      build_stamp: TUI_BUILD_STAMP,
+    })
+    validateGatewayIdentity(result)
   }
 
   shutdown(): void {

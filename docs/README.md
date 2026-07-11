@@ -74,6 +74,12 @@ The TUI requires Node.js 20 or newer. Running `demiurge` without a subcommand
 starts the TUI. The main subcommands are `init`, `doctor`, `core`, `package`,
 `update`, `setup`, and `gateway`.
 
+The launcher uses the tracked packaged TUI bundle by default and ignores a
+leftover source-checkout `ui-tui/dist/entry.js`. Use `DEMIURGE_TUI_DEV=1` only
+when intentionally running local TUI build/source artifacts. The TUI and Host
+exchange protocol/build identity before gateway initialization and fail closed
+on a mismatch.
+
 ## Configuration Order
 
 Provider resolution uses this order:

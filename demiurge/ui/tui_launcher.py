@@ -29,16 +29,22 @@ def _resolve_tui_entry(node: str) -> tuple[Path, list[str]]:
     root = Path(__file__).resolve().parents[2]
     dist_entry = root / "ui-tui" / "dist" / "entry.js"
     source_entry = root / "ui-tui" / "src" / "entry.tsx"
-    if dist_entry.exists():
-        return dist_entry, [node, str(dist_entry)]
+    tsx_loader = root / "ui-tui" / "node_modules" / "tsx" / "dist" / "loader.mjs"
+    if os.environ.get("DEMIURGE_TUI_DEV") == "1":
+        if dist_entry.exists():
+            return dist_entry, [node, str(dist_entry)]
+        if source_entry.exists() and tsx_loader.exists():
+            return source_entry, [node, "--import", str(tsx_loader), str(source_entry)]
+        raise SystemExit(
+            "demiurge TUI development mode requires `ui-tui/dist/entry.js` or "
+            "`ui-tui/src/entry.tsx` with local tsx. Run `cd ui-tui && npm ci && npm run build`."
+        )
     packaged_entry = _packaged_tui_entry()
     if packaged_entry.exists():
         return packaged_entry, [node, str(packaged_entry)]
-    if source_entry.exists() and (root / "ui-tui" / "node_modules" / "tsx").exists():
-        return source_entry, [node, "--import", "tsx", str(source_entry)]
     raise SystemExit(
-        "demiurge TUI frontend asset is missing. In a source checkout run "
-        "`cd ui-tui && npm ci && npm run build`, or reinstall a wheel that includes the bundled Ink TUI asset."
+        "demiurge TUI frontend asset is missing. Reinstall a wheel that includes the bundled Ink TUI asset, "
+        "or set DEMIURGE_TUI_DEV=1 and run `cd ui-tui && npm ci && npm run build` for development."
     )
 
 

@@ -10,11 +10,15 @@ from typing import Any
 
 from demiurge.app import create_app
 from demiurge.ui_gateway.bridge import OperatorGatewayRuntime
-from demiurge.ui_gateway.protocol import NdjsonRpcEndpoint
+from demiurge.ui_gateway.protocol import NdjsonRpcEndpoint, TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
 from demiurge.util import default_home
 
 
 LONG_OPERATOR_COMMANDS = frozenset({"/doctor", "/packages", "/evolve", "/rollback", "/compact"})
+
+
+class TuiIdentityMismatch(ValueError):
+    pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,10 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    asyncio.run(async_main(argv))
+    exit_code = asyncio.run(async_main(argv))
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
-async def async_main(argv: list[str] | None = None) -> None:
+async def async_main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = _load_config(args.config_json)
     endpoint = NdjsonRpcEndpoint()
@@ -51,10 +57,9 @@ async def async_main(argv: list[str] | None = None) -> None:
             resume_required=bool(config.get("resume")),
         )
         gateway = OperatorGatewayRuntime(app, emit=emit, tool_display=config.get("tool_display"), busy_mode=config.get("busy_mode"))
-        await gateway.initialize()
     except Exception as exc:
         await endpoint.write_event("operator.error", {"message": str(exc), "source": "gateway_startup"})
-        return
+        return 0
 
     pending_handlers: set[asyncio.Task[None]] = set()
     try:
@@ -62,14 +67,18 @@ async def async_main(argv: list[str] | None = None) -> None:
             message_id = request.get("id")
             method = str(request.get("method") or "")
             params = request.get("params") if isinstance(request.get("params"), dict) else {}
-            if _is_long_operator_request(method, params):
+            if getattr(gateway, "_tui_identity_verified", False) and _is_long_operator_request(method, params):
                 task = asyncio.create_task(_handle_request(endpoint, gateway, message_id, method, params))
                 pending_handlers.add(task)
                 task.add_done_callback(pending_handlers.discard)
                 continue
-            await _handle_request(endpoint, gateway, message_id, method, params)
+            try:
+                await _handle_request(endpoint, gateway, message_id, method, params)
+            except TuiIdentityMismatch:
+                return 2
             if gateway.should_exit:
-                return
+                return 0
+        return 0
     finally:
         for task in pending_handlers:
             task.cancel()
@@ -87,6 +96,21 @@ async def _handle_request(
 ) -> None:
     try:
         result = await _dispatch(gateway, method, params)
+    except TuiIdentityMismatch as exc:
+        print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        if message_id is not None:
+            await endpoint.write_error(message_id, str(exc), code="protocol_mismatch")
+        else:
+            await endpoint.write_event(
+                "operator.error",
+                {
+                    "message": str(exc),
+                    "source": "gateway_protocol",
+                    "method": method,
+                    "code": "protocol_mismatch",
+                },
+            )
+        raise
     except Exception as exc:
         print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
         if message_id is not None:
@@ -108,7 +132,27 @@ def _is_long_operator_request(method: str, params: dict[str, Any]) -> bool:
 
 async def _dispatch(gateway: OperatorGatewayRuntime, method: str, params: dict[str, Any]) -> Any:
     if method == "operator.initialize":
-        return await gateway.initialize()
+        protocol_version = params.get("protocol_version")
+        if protocol_version != TUI_PROTOCOL_VERSION:
+            raise TuiIdentityMismatch(
+                f"TUI protocol mismatch: expected {TUI_PROTOCOL_VERSION}, got {protocol_version!r}"
+            )
+        build_stamp = params.get("build_stamp")
+        if build_stamp != TUI_BUILD_STAMP:
+            raise TuiIdentityMismatch(
+                f"TUI build mismatch: expected {TUI_BUILD_STAMP!r}, got {build_stamp!r}"
+            )
+        result = await gateway.initialize()
+        setattr(gateway, "_tui_identity_verified", True)
+        return {
+            **result,
+            "protocol_version": TUI_PROTOCOL_VERSION,
+            "build_stamp": TUI_BUILD_STAMP,
+        }
+    if not getattr(gateway, "_tui_identity_verified", False):
+        raise TuiIdentityMismatch(
+            f"TUI identity handshake required before method: {method or '<empty>'}"
+        )
     if method == "operator.submit":
         return await gateway.submit(str(params.get("text") or ""))
     if method == "operator.reply_prompt":

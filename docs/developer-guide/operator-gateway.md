@@ -44,6 +44,25 @@ The TUI reducer consumes only `operator.*` frames. Internal
 messaging channels below the gateway, but those names are not the operator wire
 protocol.
 
+## Initialize Identity Handshake
+
+The tracked packaged bundle is the default launcher asset. An ignored
+source-checkout `ui-tui/dist/entry.js` is used only when
+`DEMIURGE_TUI_DEV=1`; development mode can also run `src/entry.tsx` when local
+`tsx` is installed.
+
+The first RPC is `operator.initialize` with `protocol_version` and
+`build_stamp`. The Python entrypoint validates both values before calling
+`OperatorGatewayRuntime.initialize()`, then returns the Host identity in the
+result. The TUI validates that response before treating initialization as
+successful. A mismatch returns RPC code `protocol_mismatch` and exits with code
+2, so a stale bundle cannot appear as a normal shutdown.
+
+Keep `demiurge/ui_gateway/protocol.py` and
+`ui-tui/src/gateway/protocol.ts` synchronized when the wire contract changes,
+then rebuild and byte-compare `ui-tui/dist/entry.js` with
+`demiurge/ui/tui_dist/entry.js`.
+
 ## Boundary With Channels
 
 Messaging channels own external platform concerns: allowlists, remote user and

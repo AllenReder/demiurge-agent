@@ -868,14 +868,18 @@ def test_update_requires_managed_checkout(tmp_path):
     assert "managed checkout not found" in str(exc.value)
 
 
-def test_tui_launcher_prefers_repo_dist(monkeypatch, tmp_path):
+def test_tui_launcher_dev_override_prefers_repo_dist(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     entry = repo / "ui-tui" / "dist" / "entry.js"
     entry.parent.mkdir(parents=True)
     entry.write_text("console.log('repo')\n")
+    packaged = tmp_path / "package" / "entry.js"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text("console.log('package')\n")
 
     monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
-    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: tmp_path / "package" / "entry.js")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: packaged)
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
 
     resolved, command = tui_launcher._resolve_tui_entry("/usr/bin/node")
 
@@ -927,6 +931,56 @@ def test_tui_01_default_launcher_ignores_stale_repo_dist(monkeypatch, tmp_path):
 
     assert {path: path.read_bytes() for path in bundle_snapshot} == bundle_snapshot
     assert launched["command"] == ["/usr/bin/node", str(packaged_entry)]
+
+
+def test_tui_launcher_default_does_not_fallback_to_repo_dist(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    stale_entry = repo / "ui-tui" / "dist" / "entry.js"
+    stale_entry.parent.mkdir(parents=True)
+    stale_entry.write_text("console.log('stale')\n", encoding="utf-8")
+    missing_packaged = tmp_path / "package" / "entry.js"
+
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: missing_packaged)
+    monkeypatch.delenv("DEMIURGE_TUI_DEV", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert "reinstall a wheel" in str(exc.value).lower()
+
+
+def test_tui_launcher_dev_override_uses_source_when_dist_is_missing(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    source = repo / "ui-tui" / "src" / "entry.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export {}\n", encoding="utf-8")
+    tsx_loader = repo / "ui-tui" / "node_modules" / "tsx" / "dist" / "loader.mjs"
+    tsx_loader.parent.mkdir(parents=True)
+    tsx_loader.write_text("", encoding="utf-8")
+    packaged = tmp_path / "package" / "entry.js"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text("console.log('package')\n", encoding="utf-8")
+
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: packaged)
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
+
+    resolved, command = tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert resolved == source
+    assert command == ["/usr/bin/node", "--import", str(tsx_loader), str(source)]
+
+
+def test_tui_launcher_dev_override_reports_missing_artifact(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
+
+    with pytest.raises(SystemExit) as exc:
+        tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert "npm ci && npm run build" in str(exc.value)
 
 
 def test_tui_launcher_uses_packaged_dist_when_repo_dist_missing(monkeypatch, tmp_path):
