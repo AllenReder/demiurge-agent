@@ -55,10 +55,15 @@ capability facade。
 - restart 会显式标记或恢复 orphaned admission，绝不静默重放危险的 provider/effect step；
 - detached work 是独立拥有的 runtime task，而不是迟到修改已经完成的 turn。
 
-当前 alpha 实现**尚未**保证每个 session 只有一个 active turn。
-`SessionTurnStepRunner.session_id` 可变，而 prompt、IO、slot、event 与 delivery helpers
-在 admission 后仍会读取它。在实现 `TurnExecution` 之前，调用方不得把现有 runner 当作
-concurrency-isolation guarantee。
+当前 containment 实现通过 keyed admission lock 保证每个 session 在单进程内只有一个
+active turn，不同 session 仍可并发。Admission 会在 bootstrap 前捕获解析出的 session；
+prompt、IO、slot history/result、event、artifact 与 delivery hot path 在 await 后使用该
+captured session 或不可变的 `TurnContext.session_id`。Cancellation 与 failure 会在
+`finally` 中释放 admission lock。
+
+这仍不是最终的 durable `TurnExecution` contract。Admission lock 只存在于当前进程，scope
+仍携带 mutable objects，本 task 不实现 restart recovery；principal、core revision、route 与
+cancellation ownership 由后续 TurnExecution/PrincipalScope 工作完成。
 
 ## Principal 与 Execution Context
 
@@ -123,7 +128,7 @@ parent turn 完成后继续修改它。这里的 **parallel** 表示在 parent t
 
 Runner 拥有共享的 `SessionInteractionRouter`。`InteractionRuntime` 把当前 adapter 作为
 `SessionRouteBinding` 传入；runner 解析 inbound 的最终 session 后，会把该 route 绑定到
-`runner.session_id`。TUI 和 channel 的 `/new`、`/resume` 与 session switch 路径必须把
+admission 捕获的 session id。TUI 和 channel 的 `/new`、`/resume` 与 session switch 路径必须把
 同一个 adapter route 重新绑定到新 session。
 
 External channel conversation 还有一层 durable binding，key 为
@@ -133,9 +138,9 @@ External channel conversation 还有一层 durable binding，key 为
 绑定到 resumed session，因此同一 external conversation 的下一条 inbound message 会继续
 进入同一 transcript。
 
-这描述的是当前 route 实现，而不是目标 concurrency contract。最终 route token 必须捕获
-在 `TurnExecutionContext` 中，delivery 必须使用该 captured identity，不能重新读取
-`runner.session_id`。
+Containment path 现在会用 captured turn session 构造 delivery，不再重新读取
+`runner.session_id`。最终 contract 仍需把 route token 本身放进 `TurnExecutionContext`，让
+restart、owner check 与 route lifetime 由同一个 durable execution interface 表达。
 
 Ordinary output、tool lifecycle events 与 background output flushes 会创建带必填
 `session_id` 的 `InteractionOutbound`。Router 只向绑定该 session 的 route 投递。如果

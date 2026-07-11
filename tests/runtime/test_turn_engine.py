@@ -54,6 +54,7 @@ class _FakeTurnHost:
         context: list[ContextContribution],
         turn_messages: list[LLMMessage],
         *,
+        session_id: str,
         turn_id: str,
         step_id: str,
         use_bootstrap_context: bool,

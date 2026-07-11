@@ -17,6 +17,7 @@ from demiurge.runtime.interactions import (
     SessionRouteBinding,
 )
 from demiurge.sdk import ToolResult
+from demiurge.storage import EventLog
 from demiurge.tools.records import ToolExecutionRecord
 
 
@@ -70,6 +71,49 @@ class CoordinatedSessionProvider:
             return LLMResponse(content="assistant-A")
         self.release_first.set()
         return LLMResponse(content="assistant-B")
+
+
+class SerialSessionProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            return LLMResponse(content="assistant-A")
+        self.second_started.set()
+        return LLMResponse(content="assistant-B")
+
+
+class CoordinatedToolSessionProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="read_a",
+                        name="read_file",
+                        arguments={"path": "note.txt"},
+                    )
+                ]
+            )
+        if self.calls == 2:
+            self.release_first.set()
+            return LLMResponse(content="assistant-B")
+        return LLMResponse(content="assistant-A")
 
 
 class RecordingSessionRoute:
@@ -229,6 +273,31 @@ async def test_interaction_runtime_facade_runs_execution_then_response_projectio
 
 
 @pytest.mark.asyncio
+async def test_inbound_metadata_cannot_override_host_session_owner(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    runtime = InteractionRuntime(app.runner)
+    inbound = InteractionInbound(
+        channel="probe",
+        text="hello",
+        source="source",
+        conversation_key="probe:metadata-owner",
+        metadata={"session_id": "session_attacker"},
+    )
+
+    try:
+        outbound = await runtime.handle(inbound, route=RecordingSessionRoute())
+
+        assert outbound.session_id != "session_attacker"
+        assert not EventLog(app.home, "session_attacker").path.exists()
+        assert {
+            event["session_id"]
+            for event in EventLog(app.home, outbound.session_id).read_all()
+        } == {outbound.session_id}
+    finally:
+        await app.close()
+
+
+@pytest.mark.asyncio
 async def test_ses_01_concurrent_turns_keep_assistant_history_isolated_by_session(tmp_path):
     """SES-01: concurrent interaction turns keep assistant history session-local."""
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -263,6 +332,26 @@ async def test_ses_01_concurrent_turns_keep_assistant_history_isolated_by_sessio
             ]
 
         assert outbound_a.session_id != outbound_b.session_id
+        events_a = EventLog(app.home, outbound_a.session_id)
+        events_b = EventLog(app.home, outbound_b.session_id)
+        assert {event["type"] for event in events_a.for_turn(outbound_a.turn_id)} >= {
+            "message.completed",
+            "turn.completed",
+        }
+        assert sum(
+            event["type"] == "module.completed"
+            for event in events_a.for_turn(outbound_a.turn_id)
+        ) >= 2
+        assert {event["type"] for event in events_b.for_turn(outbound_b.turn_id)} >= {
+            "message.completed",
+            "turn.completed",
+        }
+        assert sum(
+            event["type"] == "module.completed"
+            for event in events_b.for_turn(outbound_b.turn_id)
+        ) >= 2
+        assert events_a.for_turn(outbound_b.turn_id) == []
+        assert events_b.for_turn(outbound_a.turn_id) == []
         assert {
             "A": {
                 "history": history(outbound_a.session_id),
@@ -296,4 +385,156 @@ async def test_ses_01_concurrent_turns_keep_assistant_history_isolated_by_sessio
         if not task_a.done():
             task_a.cancel()
             await asyncio.gather(task_a, return_exceptions=True)
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turn_tool_result_and_approval_events_keep_turn_session(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("tool-result-A", encoding="utf-8")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = CoordinatedToolSessionProvider()
+    app.runner.provider = provider
+    runtime = InteractionRuntime(app.runner)
+    inbound_a = InteractionInbound(
+        channel="probe",
+        text="user-A",
+        source="A",
+        conversation_key="probe:tool:A",
+    )
+    inbound_b = InteractionInbound(
+        channel="probe",
+        text="user-B",
+        source="B",
+        conversation_key="probe:tool:B",
+    )
+    task_a = asyncio.create_task(runtime.handle(inbound_a, route=RecordingSessionRoute()))
+
+    try:
+        await asyncio.wait_for(provider.first_started.wait(), timeout=5)
+        outbound_b = await asyncio.wait_for(
+            runtime.handle(inbound_b, route=RecordingSessionRoute()),
+            timeout=5,
+        )
+        outbound_a = await asyncio.wait_for(task_a, timeout=5)
+
+        tool_messages_a = [
+            message.content
+            for message in app.session_runtime.read_messages(outbound_a.session_id)
+            if message.role == "tool"
+        ]
+        tool_messages_b = [
+            message.content
+            for message in app.session_runtime.read_messages(outbound_b.session_id)
+            if message.role == "tool"
+        ]
+        events_a = EventLog(app.home, outbound_a.session_id)
+        events_b = EventLog(app.home, outbound_b.session_id)
+
+        assert any("tool-result-A" in content for content in tool_messages_a)
+        assert tool_messages_b == []
+        assert "approval.decided" in {
+            event["type"] for event in events_a.for_turn(outbound_a.turn_id)
+        }
+        assert events_b.for_turn(outbound_a.turn_id) == []
+    finally:
+        provider.release_first.set()
+        if not task_a.done():
+            task_a.cancel()
+            await asyncio.gather(task_a, return_exceptions=True)
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_same_session_turns_are_admitted_serially_without_duplicate_bootstrap(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = SerialSessionProvider()
+    app.runner.provider = provider
+    runtime = InteractionRuntime(app.runner)
+    inbound_a = InteractionInbound(
+        channel="probe",
+        text="user-A",
+        source="same",
+        conversation_key="probe:dm:same",
+    )
+    inbound_b = InteractionInbound(
+        channel="probe",
+        text="user-B",
+        source="same",
+        conversation_key="probe:dm:same",
+    )
+    task_a = asyncio.create_task(runtime.handle(inbound_a, route=RecordingSessionRoute()))
+    task_b = None
+
+    try:
+        await asyncio.wait_for(provider.first_started.wait(), timeout=5)
+        task_b = asyncio.create_task(runtime.handle(inbound_b, route=RecordingSessionRoute()))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(provider.second_started.wait(), timeout=0.2)
+
+        provider.release_first.set()
+        outbound_a, outbound_b = await asyncio.gather(task_a, task_b)
+
+        assert outbound_a.session_id == outbound_b.session_id
+        assert [
+            (message.role, message.content)
+            for message in app.session_runtime.read_messages(outbound_a.session_id)
+        ] == [
+            ("user", "user-A"),
+            ("assistant", "assistant-A"),
+            ("user", "user-B"),
+            ("assistant", "assistant-B"),
+        ]
+        assert [
+            event["type"]
+            for event in EventLog(app.home, outbound_a.session_id).read_all()
+        ].count("bootstrap.started") == 1
+    finally:
+        provider.release_first.set()
+        pending = [task for task in (task_a, task_b) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await app.close()
+
+
+@pytest.mark.asyncio
+async def test_same_session_admission_releases_after_turn_cancellation(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    provider = SerialSessionProvider()
+    app.runner.provider = provider
+    runtime = InteractionRuntime(app.runner)
+    inbound = InteractionInbound(
+        channel="probe",
+        text="user",
+        source="same",
+        conversation_key="probe:dm:cancel",
+    )
+    task_a = asyncio.create_task(runtime.handle(inbound, route=RecordingSessionRoute()))
+    task_b = None
+
+    try:
+        await asyncio.wait_for(provider.first_started.wait(), timeout=5)
+        task_b = asyncio.create_task(runtime.handle(inbound, route=RecordingSessionRoute()))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(provider.second_started.wait(), timeout=0.2)
+
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task_a
+        outbound_b = await asyncio.wait_for(task_b, timeout=5)
+
+        events = EventLog(app.home, outbound_b.session_id).read_all()
+        assert [event["type"] for event in events].count("turn.cancelled") == 1
+        assert [event["type"] for event in events].count("turn.completed") == 1
+        assert [event["type"] for event in events].count("bootstrap.started") == 1
+    finally:
+        provider.release_first.set()
+        pending = [task for task in (task_a, task_b) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await app.close()

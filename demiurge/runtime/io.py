@@ -13,10 +13,6 @@ from demiurge.tools.records import ToolExecutionRecord
 
 class TurnIOHost(Protocol):
     @property
-    def session_id(self) -> str:
-        ...
-
-    @property
     def session_runtime(self) -> SessionRuntime:
         ...
 
@@ -55,15 +51,11 @@ class RunnerTurnIOHost:
         self.runner = runner
 
     @property
-    def session_id(self) -> str:
-        return self.runner.session_id
-
-    @property
     def session_runtime(self) -> SessionRuntime:
         return self.runner.session_runtime
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
     def truncate_model_content(self, content: str) -> str:
         return self.runner._truncate_model_content(content)
@@ -107,6 +99,7 @@ class TurnIO:
     def send_user(
         self,
         *,
+        session_id: str,
         turn_id: str,
         content: str,
         interaction_metadata: dict[str, Any],
@@ -114,7 +107,7 @@ class TurnIO:
         if not content:
             return None
         message = self.host.session_runtime.append_message(
-            self.host.session_id,
+            session_id,
             role="user",
             content=content,
             turn_id=turn_id,
@@ -140,7 +133,7 @@ class TurnIO:
         interaction_metadata: dict[str, Any],
     ) -> tuple[SessionMessage, list[InteractionItem]]:
         message = self.host.session_runtime.append_message(
-            self.host.session_id,
+            turn.session_id,
             role="assistant",
             content=content,
             turn_id=turn.turn_id,
@@ -282,7 +275,7 @@ class TurnIO:
     ) -> SessionMessage:
         content = self.host.truncate_model_content(self.host.tool_result_model_content(record.result))
         message = self.host.session_runtime.append_message(
-            self.host.session_id,
+            turn.session_id,
             role="tool",
             content=content,
             turn_id=turn.turn_id,

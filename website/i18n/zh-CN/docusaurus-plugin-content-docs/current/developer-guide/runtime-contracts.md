@@ -214,8 +214,11 @@ consumer，绝不是相互竞争的 completion authority。
 - Admission lookup 按 key 执行并实际达到 O(1)；清除 idle lock entries；session/task owner
   queries 有索引、有界且支持分页。
 
-当前 `TurnExecutionScope` 只是前身，并非最终 context。它捕获了 `session_id`，但仍携带
-mutable objects，而 prompt、IO、slot、event 与 delivery 路径仍会读取 mutable runner state。
+当前 `TurnExecutionScope` 只是前身，并非最终 context。Containment runtime 现在用单进程
+keyed lock 串行 same-session turn，并把 captured session 贯穿 prompt、IO、slot
+history/result、event、artifact 与 delivery 路径。它仍携带 mutable objects，lock 也不具备
+restart durability；完整的 principal/revision/route/cancellation contract 仍由后续
+`TurnExecution` 实现负责。
 
 ## EffectRuntime
 

@@ -241,9 +241,12 @@ completion authorities.
 - Admission lookup is keyed and effectively O(1); idle lock entries are
   removed; session/task owner queries are indexed, bounded, and paginated.
 
-The current `TurnExecutionScope` is a precursor, not the final context. It
-captures `session_id` but still carries mutable objects, while prompt, IO, slot,
-event, and delivery paths continue to read mutable runner state.
+The current `TurnExecutionScope` is a precursor, not the final context. The
+containment runtime now serializes same-session turns with an in-process keyed
+lock and carries the captured session through prompt, IO, slot history/result,
+event, artifact, and delivery paths. It still carries mutable objects, the lock
+is not restart-durable, and the full principal/revision/route/cancellation
+contract remains owned by the later `TurnExecution` implementation.
 
 ## EffectRuntime
 

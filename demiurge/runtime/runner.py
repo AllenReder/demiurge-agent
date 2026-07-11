@@ -97,6 +97,7 @@ class SessionTurnStepRunner:
         self.tool_runtime = tool_runtime
         self.core_id = core_id
         self.session_id = session_id or utc_id("session_")
+        self._turn_session_ids: dict[str, str] = {}
         self.model_override = model_override
         self.model_resolver = model_resolver
         self.provider_name = provider_name
@@ -124,9 +125,8 @@ class SessionTurnStepRunner:
             assembler=self.context_assembler,
             sessions=self.sessions,
             interaction_router=self.interaction_router,
-            session_id=lambda: self.session_id,
             show_system_prompt=lambda: self.show_system_prompt,
-            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            emit_event=self.emit_turn_event,
         )
         self.session_compaction = SessionCompactionRuntime(
             sessions=self.sessions,
@@ -162,13 +162,11 @@ class SessionTurnStepRunner:
         )
         self.module_delivery = ModuleDeliveryRuntime(RunnerModuleDeliveryHost(self))
         self.interaction_dispatch = InteractionDispatchRuntime(
-            session_id=lambda: self.session_id,
             delivery_runtime=self.delivery_runtime,
             track_background_task=self.background_tasks.track,
         )
         self.slot_effects = SlotEffectRuntime(
             home=self.home,
-            session_id=lambda: self.session_id,
             workspace=self.workspace,
             module_delivery=self.module_delivery,
             dispatch=self.interaction_dispatch,
@@ -179,7 +177,7 @@ class SessionTurnStepRunner:
             slot_runtime=self.slot_runtime,
             slot_context=self.slot_context,
             slot_effects=self.slot_effects,
-            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            emit_event=self.emit_slot_event,
             track_background_task=self.background_tasks.track,
             refresh_history=self._refresh_history,
         )
@@ -192,10 +190,24 @@ class SessionTurnStepRunner:
         self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.event_log.emit(event_type, **payload)
+        session_id = self._event_session_id(payload)
+        payload.pop("session_id", None)
+        return EventLog(self.home, session_id).emit(event_type, **payload)
 
     def emit_slot_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.event_log.emit(event_type, **payload)
+        return self.emit_turn_event(event_type, **payload)
+
+    def _event_session_id(self, payload: Mapping[str, Any]) -> str:
+        turn_id = payload.get("turn_id")
+        if turn_id and str(turn_id) in self._turn_session_ids:
+            return self._turn_session_ids[str(turn_id)]
+        explicit = payload.get("session_id")
+        if explicit:
+            return str(explicit)
+        return self.session_id
+
+    def release_turn_event_scope(self, turn_id: str) -> None:
+        self._turn_session_ids.pop(turn_id, None)
 
     def _bind_event_log(self) -> None:
         self.event_log = EventLog(self.home, self.session_id)
@@ -243,12 +255,14 @@ class SessionTurnStepRunner:
         context: list[ContextContribution],
         turn_messages: list[LLMMessage],
         *,
+        session_id: str,
         turn_id: str,
         step_id: str,
         use_bootstrap_context: bool = True,
     ) -> list[LLMMessage]:
         return self.prompt_context.build_messages(
             PromptBuildRequest(
+                session_id=session_id,
                 core=core,
                 context=context,
                 turn_messages=turn_messages,
@@ -389,8 +403,8 @@ class SessionTurnStepRunner:
     def _refresh_history(self) -> None:
         self.history = self._session_history_messages()
 
-    def _module_result_client(self, *, writable: bool) -> ModuleResultClient:
-        return self.slot_context.result_client(writable=writable)
+    def _module_result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
+        return self.slot_context.result_client(session_id=session_id, writable=writable)
 
     async def execute_tool(
         self,
@@ -427,7 +441,10 @@ class SessionTurnStepRunner:
             core=core,
             turn=turn,
             capability=capability,
-            emit_event=self.event_log.emit,
+            emit_event=lambda event_type, **payload: self.emit_turn_event(
+                event_type,
+                **{**payload, "session_id": turn.session_id},
+            ),
             output_factory=output_factory,
         )
 

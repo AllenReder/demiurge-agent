@@ -60,11 +60,17 @@ The module owns these observable contracts:
 - detached work is a separately owned runtime task, not a late mutation of a
   completed turn.
 
-The current alpha implementation does **not** yet enforce one active turn per
-session. `SessionTurnStepRunner.session_id` is mutable, and prompt, IO, slot,
-event, and delivery helpers still read it after admission. Until
-`TurnExecution` is implemented, callers must not treat the existing runner as
-a concurrency-isolation guarantee.
+The current containment implementation enforces one in-process active turn per
+session with a keyed admission lock; different sessions still run concurrently.
+Admission captures the resolved session before bootstrap, and the prompt, IO,
+slot history/result, event, artifact, and delivery hot paths use that captured
+session or the immutable `TurnContext.session_id` after an await. Cancellation
+and failure release the admission lock in `finally`.
+
+This is not yet the final durable `TurnExecution` contract. Admission locks are
+process-local, the scope still carries mutable objects, restart recovery is not
+implemented here, and principal/core-revision/cancellation ownership is
+completed by the later TurnExecution and PrincipalScope work.
 
 ## Principal and Execution Context
 
@@ -139,7 +145,8 @@ not auto-approved.
 
 The runner owns a shared `SessionInteractionRouter`. `InteractionRuntime`
 passes the current adapter as a `SessionRouteBinding`; after the runner resolves
-the final session for the inbound, it binds that route to `runner.session_id`.
+the final session for the inbound, admission captures that session id and binds
+the route to the captured value.
 TUI and channel `/new`, `/resume`, and session switch paths must rebind the
 same adapter route to the new session.
 
@@ -150,10 +157,10 @@ host-owned route key built from explicit platform facts, for example
 rebinds the current conversation key to the resumed session so the next inbound
 message from that external conversation continues in the same transcript.
 
-This describes the current route implementation, not the target concurrency
-contract. The final route token must be captured in `TurnExecutionContext` and
-delivery must use that captured identity rather than rereading
-`runner.session_id`.
+The containment path now builds delivery from the captured turn session rather
+than rereading `runner.session_id`. The final contract still moves the route
+token itself into `TurnExecutionContext` so restart, owner checks, and route
+lifetime are represented by one durable execution interface.
 
 Ordinary output, tool lifecycle events, and background output flushes create
 `InteractionOutbound` objects with a required `session_id`. The router delivers

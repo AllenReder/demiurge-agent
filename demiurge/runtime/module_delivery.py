@@ -27,10 +27,6 @@ class ModuleDeliveryHost(Protocol):
         ...
 
     @property
-    def session_id(self) -> str:
-        ...
-
-    @property
     def session_runtime(self) -> SessionRuntime:
         ...
 
@@ -55,15 +51,11 @@ class RunnerModuleDeliveryHost:
         return self.runner.home
 
     @property
-    def session_id(self) -> str:
-        return self.runner.session_id
-
-    @property
     def session_runtime(self) -> SessionRuntime:
         return self.runner.session_runtime
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
     def append_runtime_event(self, event: RuntimeEvent) -> None:
         self.runner._append_runtime_event(event)
@@ -96,7 +88,7 @@ class ModuleDeliveryRuntime:
         if request.target != "current":
             raise ValueError(f"unsupported delivery target: {request.target}")
 
-        artifact_store = ArtifactStore(self.host.home, self.host.session_id)
+        artifact_store = ArtifactStore(self.host.home, turn.session_id)
         history_blocks: list[dict[str, Any]] = []
         delivery_blocks: list[dict[str, Any]] = []
         artifacts: list[ArtifactRef] = []
@@ -128,7 +120,7 @@ class ModuleDeliveryRuntime:
             artifact = artifact_store.store(artifact_input_to_dict(block.artifact))
             artifacts.append(artifact)
             history_artifact = asdict(artifact)
-            delivery_artifact = self._delivery_artifact_dict(artifact)
+            delivery_artifact = self._delivery_artifact_dict(artifact, session_id=turn.session_id)
             delivery_artifacts.append(delivery_artifact)
             if block.text:
                 fallback_lines.append(str(block.text))
@@ -158,7 +150,7 @@ class ModuleDeliveryRuntime:
                         "kind": artifact.kind,
                         "uri": artifact.path or artifact.url or "",
                         "metadata": {
-                            "session_id": self.host.session_id,
+                            "session_id": turn.session_id,
                             "turn_id": turn.turn_id,
                             "media_type": artifact.media_type,
                             "summary": artifact.summary,
@@ -211,7 +203,7 @@ class ModuleDeliveryRuntime:
         }
         if writes_history:
             message = self.host.session_runtime.append_delivery_message(
-                self.host.session_id,
+                turn.session_id,
                 role="assistant",
                 content=content,
                 delivery_id=request.delivery_id,
@@ -254,7 +246,7 @@ class ModuleDeliveryRuntime:
                     ),
                     delivery_work_enqueued_event(
                         request.delivery_id,
-                        owner_session_id=self.host.session_id,
+                        owner_session_id=turn.session_id,
                         owner_turn_id=turn.turn_id,
                         payload={
                             "owner_turn_id": turn.turn_id,
@@ -313,7 +305,7 @@ class ModuleDeliveryRuntime:
             )
         return None
 
-    def _delivery_artifact_dict(self, artifact: ArtifactRef) -> dict[str, Any]:
+    def _delivery_artifact_dict(self, artifact: ArtifactRef, *, session_id: str) -> dict[str, Any]:
         data = asdict(artifact)
         path = artifact.path
         if path:
@@ -322,6 +314,6 @@ class ModuleDeliveryRuntime:
                 data["resolved_path"] = str(raw_path)
             else:
                 data["resolved_path"] = str(
-                    (self.host.home / "runtime" / "artifacts" / self.host.session_id / path).resolve()
+                    (self.host.home / "runtime" / "artifacts" / session_id / path).resolve()
                 )
         return data

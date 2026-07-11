@@ -46,7 +46,6 @@ class _Harness:
         self.delivery_runtime = _DeliveryRuntime()
         self.tasks: list[asyncio.Task] = []
         self.runtime = InteractionDispatchRuntime(
-            session_id=lambda: "session_1",
             delivery_runtime=self.delivery_runtime,
             track_background_task=self.tasks.append,
         )

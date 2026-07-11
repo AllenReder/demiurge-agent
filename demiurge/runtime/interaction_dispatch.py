@@ -13,11 +13,9 @@ class InteractionDispatchRuntime:
     def __init__(
         self,
         *,
-        session_id: Callable[[], str],
         delivery_runtime: Any,
         track_background_task: Callable[[asyncio.Task[Any]], None],
     ) -> None:
-        self._session_id = session_id
         self.delivery_runtime = delivery_runtime
         self.track_background_task = track_background_task
 
@@ -35,7 +33,7 @@ class InteractionDispatchRuntime:
         task = asyncio.create_task(
             self.delivery_runtime.dispatch_item(
                 item,
-                session_id=self._session_id(),
+                session_id=turn.session_id,
                 turn_id=turn.turn_id,
                 channel=channel,
                 metadata=metadata,
@@ -57,7 +55,7 @@ class InteractionDispatchRuntime:
         channel, metadata = prepared
         await self.delivery_runtime.dispatch_item(
             item,
-            session_id=self._session_id(),
+            session_id=turn.session_id,
             turn_id=turn.turn_id,
             channel=channel,
             metadata=metadata,

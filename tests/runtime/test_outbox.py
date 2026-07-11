@@ -58,7 +58,7 @@ async def test_delivery_runtime_claims_sends_and_marks_sent_once(tmp_path):
     bridge = RecordingBridge()
     router = SessionInteractionRouter()
     router.bind("session_1", bridge)
-    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_1"), router=router)
+    runtime = DeliveryRuntime(store=store, event_log=EventLog(tmp_path, "session_2"), router=router)
 
     await runtime.dispatch_item(
         item,
@@ -104,6 +104,8 @@ async def test_delivery_runtime_marks_failed_with_current_claim_attempt(tmp_path
     assert outbox["last_error"] == "bridge boom"
     assert work["status"] == "failed"
     assert work["attempts"] == 1
+    assert [event["type"] for event in EventLog(tmp_path, "session_1").read_all()] == ["delivery.failed"]
+    assert EventLog(tmp_path, "session_2").read_all() == []
 
 
 @pytest.mark.asyncio
@@ -112,7 +114,7 @@ async def test_delivery_runtime_marks_unrouted_without_active_route(tmp_path):
     item = _queue_delivery(store)
     runtime = DeliveryRuntime(
         store=store,
-        event_log=EventLog(tmp_path, "session_1"),
+        event_log=EventLog(tmp_path, "session_2"),
         router=SessionInteractionRouter(),
     )
 
@@ -131,6 +133,8 @@ async def test_delivery_runtime_marks_unrouted_without_active_route(tmp_path):
     assert outbox["status"] == "unrouted"
     assert outbox["last_error"] == "no_interactive_route"
     assert work["status"] == "succeeded"
+    assert [event["type"] for event in EventLog(tmp_path, "session_1").read_all()] == ["delivery.unrouted"]
+    assert EventLog(tmp_path, "session_2").read_all() == []
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,7 @@ class TurnExecutionScope:
     interaction_metadata: dict[str, Any]
     state_stores: ModuleStateStores
     input_envelope: InputEnvelope
+    admission_lock: asyncio.Lock
 
 
 class TurnAdmissionHost(Protocol):
@@ -78,8 +79,7 @@ class TurnAdmissionHost(Protocol):
     def session_id(self) -> str:
         ...
 
-    @property
-    def session_started(self) -> bool:
+    def is_session_started(self, session_id: str) -> bool:
         ...
 
     @property
@@ -95,10 +95,10 @@ class TurnAdmissionHost(Protocol):
     def resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
         ...
 
-    def bind_route(self, route_binding: SessionRouteBinding) -> None:
+    def bind_route(self, route_binding: SessionRouteBinding, *, session_id: str) -> None:
         ...
 
-    def update_active_session_core(self, core: LoadedCore) -> None:
+    def update_active_session_core(self, core: LoadedCore, *, session_id: str) -> None:
         ...
 
     def core_revision(self, core: LoadedCore) -> str:
@@ -107,7 +107,7 @@ class TurnAdmissionHost(Protocol):
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         ...
 
-    def mark_session_started(self) -> None:
+    def mark_session_started(self, session_id: str) -> None:
         ...
 
     async def ensure_bootstrap(self, request: BootstrapSlotRequest) -> None:
@@ -124,7 +124,14 @@ class TurnPersistenceHost(Protocol):
     def interrupt_turn(self, lifecycle: TurnLifecycle, *, status: str, error: str) -> None:
         ...
 
-    def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]) -> None:
+    def send_user_message(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        content: str,
+        interaction_metadata: dict[str, Any],
+    ) -> None:
         ...
 
     def refresh_history(self) -> None:
@@ -160,7 +167,7 @@ class TurnPipelineHost(Protocol):
     async def run_turn_engine(self, request: TurnEngineRequest) -> TurnEngineResult:
         ...
 
-    def result_client(self, *, writable: bool) -> ModuleResultClient:
+    def result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
         ...
 
     async def run_output_slots(self, request: OutputPipelineRequest) -> list[InteractionItem]:
@@ -177,9 +184,8 @@ class RunnerTurnAdmissionHost:
     def session_id(self) -> str:
         return self.runner.session_id
 
-    @property
-    def session_started(self) -> bool:
-        return self.runner._session_started
+    def is_session_started(self, session_id: str) -> bool:
+        return session_id in self.runner._session_started_ids
 
     @property
     def workspace(self) -> str | None:
@@ -199,12 +205,12 @@ class RunnerTurnAdmissionHost:
             interaction_metadata,
         )
 
-    def bind_route(self, route_binding: SessionRouteBinding) -> None:
-        route_binding.bind(self.runner.interaction_router, self.runner.session_id)
+    def bind_route(self, route_binding: SessionRouteBinding, *, session_id: str) -> None:
+        route_binding.bind(self.runner.interaction_router, session_id)
 
-    def update_active_session_core(self, core: LoadedCore) -> None:
+    def update_active_session_core(self, core: LoadedCore, *, session_id: str) -> None:
         self.runner.session_runtime.update_session(
-            self.runner.session_id,
+            session_id,
             core_id=core.core_id,
             core_revision=self.runner._core_revision(core),
             provider=self.runner.provider_name,
@@ -216,16 +222,18 @@ class RunnerTurnAdmissionHost:
         return self.runner._core_revision(core)
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
-    def mark_session_started(self) -> None:
-        self.runner._session_started_ids.add(self.runner.session_id)
+    def mark_session_started(self, session_id: str) -> None:
+        self.runner._session_started_ids.add(session_id)
 
     async def ensure_bootstrap(self, request: BootstrapSlotRequest) -> None:
         await self.runner.bootstrap_slots.ensure(request)
 
     def begin_turn(self, request: TurnLifecycleRequest) -> TurnLifecycle:
-        return self.runner.turn_lifecycle.begin(request)
+        lifecycle = self.runner.turn_lifecycle.begin(request)
+        self.runner._turn_session_ids[lifecycle.turn_id] = lifecycle.session_id
+        return lifecycle
 
 
 class RunnerTurnPersistenceHost:
@@ -235,13 +243,24 @@ class RunnerTurnPersistenceHost:
         self.runner = runner
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
     def interrupt_turn(self, lifecycle: TurnLifecycle, *, status: str, error: str) -> None:
-        self.runner.turn_lifecycle.interrupt(lifecycle, status=status, error=error)
+        try:
+            self.runner.turn_lifecycle.interrupt(lifecycle, status=status, error=error)
+        finally:
+            self.runner.release_turn_event_scope(lifecycle.turn_id)
 
-    def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]) -> None:
+    def send_user_message(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        content: str,
+        interaction_metadata: dict[str, Any],
+    ) -> None:
         self.runner.runtime_io.send_user(
+            session_id=session_id,
             turn_id=turn_id,
             content=content,
             interaction_metadata=interaction_metadata,
@@ -276,7 +295,10 @@ class RunnerTurnPersistenceHost:
         )
 
     def complete_turn(self, lifecycle: TurnLifecycle, completion: TurnLifecycleCompletion) -> None:
-        self.runner.turn_lifecycle.complete(lifecycle, completion)
+        try:
+            self.runner.turn_lifecycle.complete(lifecycle, completion)
+        finally:
+            self.runner.release_turn_event_scope(lifecycle.turn_id)
 
     def sanitize_runtime_error(self, exc: Exception) -> str:
         return self.runner._sanitize_runtime_error(exc)
@@ -292,7 +314,14 @@ class RunnerTurnPipelineHost:
         return await self.runner.slot_pipeline.run_input(request)
 
     async def prepare_tools(self, core: LoadedCore, turn: TurnContext) -> None:
-        await self.runner.tool_runtime.prepare_for_turn(core, turn, emit_event=self.runner.event_log.emit)
+        await self.runner.tool_runtime.prepare_for_turn(
+            core,
+            turn,
+            emit_event=lambda event_type, **payload: self.runner.emit_turn_event(
+                event_type,
+                **{**payload, "session_id": turn.session_id},
+            ),
+        )
 
     def tool_definitions_for(self, core: LoadedCore, turn: TurnContext) -> list[Any]:
         return self.runner.tool_runtime.definitions_for(core, turn=turn)
@@ -300,8 +329,8 @@ class RunnerTurnPipelineHost:
     async def run_turn_engine(self, request: TurnEngineRequest) -> TurnEngineResult:
         return await self.runner.turn_engine.run(request)
 
-    def result_client(self, *, writable: bool) -> ModuleResultClient:
-        return self.runner._module_result_client(writable=writable)
+    def result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
+        return self.runner._module_result_client(session_id=session_id, writable=writable)
 
     async def run_output_slots(self, request: OutputPipelineRequest) -> list[InteractionItem]:
         return await self.runner.slot_pipeline.run_output(request)
@@ -312,59 +341,75 @@ class TurnAdmissionRuntime:
 
     def __init__(self, host: TurnAdmissionHost):
         self.host = host
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def admit(self, request: TurnPipelineRequest) -> TurnExecutionScope:
         core = await self.host.load_core(request.core_path)
         interaction_metadata = self.host.interaction_metadata(request.interaction)
         self.host.resolve_session_for_interaction(core, interaction_metadata)
-        if request.route_binding is not None:
-            self.host.bind_route(request.route_binding)
-        if request.core_path is None:
-            self.host.update_active_session_core(core)
+        session_id = self.host.session_id
+        admission_lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        await admission_lock.acquire()
+        try:
+            if request.route_binding is not None:
+                self.host.bind_route(request.route_binding, session_id=session_id)
+            if request.core_path is None:
+                self.host.update_active_session_core(core, session_id=session_id)
 
-        core_revision = self.host.core_revision(core)
-        capability = CapabilityFacade(core)
-        if not self.host.session_started:
-            self.host.emit_event(
-                "session.started",
-                core_id=core.core_id,
-                core_revision=core_revision,
-                **interaction_metadata,
-            )
-            self.host.mark_session_started()
-        if request.use_bootstrap:
-            await self.host.ensure_bootstrap(
-                BootstrapSlotRequest(
-                    session_id=self.host.session_id,
-                    core=core,
+            core_revision = self.host.core_revision(core)
+            capability = CapabilityFacade(core)
+            if not self.host.is_session_started(session_id):
+                self.host.emit_event(
+                    "session.started",
+                    **{
+                        **interaction_metadata,
+                        "session_id": session_id,
+                        "core_id": core.core_id,
+                        "core_revision": core_revision,
+                    },
+                )
+                self.host.mark_session_started(session_id)
+            if request.use_bootstrap:
+                await self.host.ensure_bootstrap(
+                    BootstrapSlotRequest(
+                        session_id=session_id,
+                        core=core,
+                        core_revision=core_revision,
+                        capability=capability,
+                        workspace=self.host.workspace,
+                        interaction_metadata=interaction_metadata,
+                    )
+                )
+
+            lifecycle = self.host.begin_turn(
+                TurnLifecycleRequest(
+                    session_id=session_id,
+                    core_id=core.core_id,
                     core_revision=core_revision,
-                    capability=capability,
-                    workspace=self.host.workspace,
-                    interaction_metadata=interaction_metadata,
+                    raw_text=request.text,
+                    metadata=interaction_metadata,
+                    attachments=tuple(request.interaction.attachments) if request.interaction is not None else (),
                 )
             )
-
-        lifecycle = self.host.begin_turn(
-            TurnLifecycleRequest(
-                session_id=self.host.session_id,
-                core_id=core.core_id,
+            return TurnExecutionScope(
+                session_id=session_id,
+                core=core,
                 core_revision=core_revision,
-                raw_text=request.text,
-                metadata=interaction_metadata,
-                attachments=tuple(request.interaction.attachments) if request.interaction is not None else (),
+                capability=capability,
+                lifecycle=lifecycle,
+                turn=lifecycle.turn,
+                interaction_metadata=interaction_metadata,
+                state_stores=lifecycle.state_stores,
+                input_envelope=lifecycle.input_envelope,
+                admission_lock=admission_lock,
             )
-        )
-        return TurnExecutionScope(
-            session_id=self.host.session_id,
-            core=core,
-            core_revision=core_revision,
-            capability=capability,
-            lifecycle=lifecycle,
-            turn=lifecycle.turn,
-            interaction_metadata=interaction_metadata,
-            state_stores=lifecycle.state_stores,
-            input_envelope=lifecycle.input_envelope,
-        )
+        except BaseException:
+            admission_lock.release()
+            raise
+
+    def release(self, scope: TurnExecutionScope) -> None:
+        if scope.admission_lock.locked():
+            scope.admission_lock.release()
 
 
 class TurnPersistenceRuntime:
@@ -383,6 +428,7 @@ class TurnPersistenceRuntime:
         )
         if input_result.persisted_user_text:
             self.host.send_user_message(
+                session_id=scope.session_id,
                 turn_id=scope.lifecycle.turn_id,
                 content=input_result.persisted_user_text,
                 interaction_metadata=scope.interaction_metadata,
@@ -461,28 +507,33 @@ class TurnPipelineRuntime:
     async def run(self, request: TurnPipelineRequest) -> TurnResult:
         self._validate_request(request)
         scope = await self.admission.admit(request)
-        turn = scope.turn
-
         try:
-            input_result = await self.host.run_input_slots(
-                InputPipelineRequest(
-                    core=scope.core,
-                    turn=turn,
-                    capability=scope.capability,
-                    envelope=scope.input_envelope,
-                    state_stores=scope.state_stores,
-                    interaction_metadata=scope.interaction_metadata,
-                    injected_system_context=request.injected_system_context or [],
-                    slot_ids=request.input_slot_ids,
-                    phase_slots=request.input_phase_slots,
-                )
-            )
+            return await self._run_admitted(request, scope)
         except asyncio.CancelledError:
             self.persistence.interrupt_cancelled(scope)
             raise
         except Exception as exc:
             self.persistence.interrupt_failed(scope, exc)
             raise
+        finally:
+            self.admission.release(scope)
+
+    async def _run_admitted(self, request: TurnPipelineRequest, scope: TurnExecutionScope) -> TurnResult:
+        turn = scope.turn
+
+        input_result = await self.host.run_input_slots(
+            InputPipelineRequest(
+                core=scope.core,
+                turn=turn,
+                capability=scope.capability,
+                envelope=scope.input_envelope,
+                state_stores=scope.state_stores,
+                interaction_metadata=scope.interaction_metadata,
+                injected_system_context=request.injected_system_context or [],
+                slot_ids=request.input_slot_ids,
+                phase_slots=request.input_phase_slots,
+            )
+        )
 
         user_text = input_result.user_text
         context = input_result.context
@@ -491,24 +542,17 @@ class TurnPipelineRuntime:
         await self.host.prepare_tools(scope.core, turn)
         available_tools = self.host.tool_definitions_for(scope.core, turn)
 
-        try:
-            engine_result = await self.host.run_turn_engine(
-                TurnEngineRequest(
-                    core=scope.core,
-                    turn=turn,
-                    capability=scope.capability,
-                    context=context,
-                    available_tools=available_tools,
-                    interaction_metadata=scope.interaction_metadata,
-                    use_bootstrap_context=request.use_bootstrap,
-                )
+        engine_result = await self.host.run_turn_engine(
+            TurnEngineRequest(
+                core=scope.core,
+                turn=turn,
+                capability=scope.capability,
+                context=context,
+                available_tools=available_tools,
+                interaction_metadata=scope.interaction_metadata,
+                use_bootstrap_context=request.use_bootstrap,
             )
-        except asyncio.CancelledError:
-            self.persistence.interrupt_cancelled(scope)
-            raise
-        except Exception as exc:
-            self.persistence.interrupt_failed(scope, exc)
-            raise
+        )
 
         final_output = engine_result.final_output
         needs_user = engine_result.needs_user
@@ -516,28 +560,21 @@ class TurnPipelineRuntime:
         turn_messages = engine_result.turn_messages
         items.extend(engine_result.items)
 
-        result_client = self.host.result_client(writable=True)
-        try:
-            output_items = await self.host.run_output_slots(
-                OutputPipelineRequest(
-                    core=scope.core,
-                    turn=turn,
-                    capability=scope.capability,
-                    current_output=final_output,
-                    tool_records=tool_records,
-                    state_stores=scope.state_stores,
-                    interaction_metadata=scope.interaction_metadata,
-                    result_client=result_client,
-                    slot_ids=request.output_slot_ids,
-                    phase_slots=request.output_phase_slots,
-                )
+        result_client = self.host.result_client(session_id=scope.session_id, writable=True)
+        output_items = await self.host.run_output_slots(
+            OutputPipelineRequest(
+                core=scope.core,
+                turn=turn,
+                capability=scope.capability,
+                current_output=final_output,
+                tool_records=tool_records,
+                state_stores=scope.state_stores,
+                interaction_metadata=scope.interaction_metadata,
+                result_client=result_client,
+                slot_ids=request.output_slot_ids,
+                phase_slots=request.output_phase_slots,
             )
-        except asyncio.CancelledError:
-            self.persistence.interrupt_cancelled(scope)
-            raise
-        except Exception as exc:
-            self.persistence.interrupt_failed(scope, exc)
-            raise
+        )
 
         items.extend(output_items)
         return self.persistence.complete(

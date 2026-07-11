@@ -53,6 +53,7 @@ class _FakeTurnRuntimeHost:
         *,
         engine_result: TurnEngineResult | None = None,
         engine_error: Exception | None = None,
+        prepare_error: Exception | None = None,
     ) -> None:
         self.session_id = "session_1"
         self.workspace = "/workspace"
@@ -60,11 +61,13 @@ class _FakeTurnRuntimeHost:
         self.core = _Core()
         self.engine_result = engine_result or TurnEngineResult(final_output="model answer")
         self.engine_error = engine_error
+        self.prepare_error = prepare_error
         self.events: list[dict[str, Any]] = []
         self.bootstrap_requests: list[Any] = []
         self.sent_users: list[dict[str, Any]] = []
         self.input_requests: list[Any] = []
         self.output_requests: list[Any] = []
+        self.result_client_session_ids: list[str | None] = []
         self.engine_requests: list[TurnEngineRequest] = []
         self.begin_requests: list[TurnLifecycleRequest] = []
         self.completed: TurnLifecycleCompletion | None = None
@@ -81,10 +84,10 @@ class _FakeTurnRuntimeHost:
     def resolve_session_for_interaction(self, core, interaction_metadata):
         self.resolved_session = (core.core_id, dict(interaction_metadata))
 
-    def bind_route(self, route_binding):
+    def bind_route(self, route_binding, *, session_id: str):
         self.bound_route = route_binding
 
-    def update_active_session_core(self, core):
+    def update_active_session_core(self, core, *, session_id: str):
         self.updated_core = core.core_id
 
     def core_revision(self, core):
@@ -95,7 +98,10 @@ class _FakeTurnRuntimeHost:
         self.events.append(event)
         return event
 
-    def mark_session_started(self):
+    def is_session_started(self, session_id: str) -> bool:
+        return self.session_started
+
+    def mark_session_started(self, session_id: str):
         self.session_started = True
 
     async def ensure_bootstrap(self, request):
@@ -139,10 +145,26 @@ class _FakeTurnRuntimeHost:
             items=[InteractionItem(kind="input_slot")],
         )
 
-    def send_user_message(self, *, turn_id: str, content: str, interaction_metadata: dict[str, Any]):
-        self.sent_users.append({"turn_id": turn_id, "content": content, "metadata": dict(interaction_metadata)})
+    def send_user_message(
+        self,
+        *,
+        session_id: str | None = None,
+        turn_id: str,
+        content: str,
+        interaction_metadata: dict[str, Any],
+    ):
+        self.sent_users.append(
+            {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "content": content,
+                "metadata": dict(interaction_metadata),
+            }
+        )
 
     async def prepare_tools(self, core, turn):
+        if self.prepare_error is not None:
+            raise self.prepare_error
         self.prepared_tools_for = turn.turn_id
 
     def tool_definitions_for(self, core, turn):
@@ -154,7 +176,8 @@ class _FakeTurnRuntimeHost:
             raise self.engine_error
         return self.engine_result
 
-    def result_client(self, *, writable: bool):
+    def result_client(self, *, writable: bool, session_id: str | None = None):
+        self.result_client_session_ids.append(session_id)
         return SimpleNamespace(value={"ok": True})
 
     async def run_output_slots(self, request):
@@ -200,7 +223,8 @@ async def test_turn_admission_runtime_resolves_session_bootstrap_and_begin_scope
         attachments=["image"],
     )
 
-    scope = await TurnAdmissionRuntime(host).admit(
+    admission = TurnAdmissionRuntime(host)
+    scope = await admission.admit(
         TurnPipelineRequest(text="hello", interaction=inbound, route_binding=route_binding)
     )
 
@@ -218,6 +242,7 @@ async def test_turn_admission_runtime_resolves_session_bootstrap_and_begin_scope
     assert host.bootstrap_requests[0].session_id == "session_1"
     assert host.bootstrap_requests[0].workspace == "/workspace"
     assert host.begin_requests[0].attachments == ("image",)
+    admission.release(scope)
 
 
 def test_turn_persistence_runtime_records_input_and_completes_turn():
@@ -262,7 +287,14 @@ def test_turn_persistence_runtime_records_input_and_completes_turn():
 
     assert scope.turn.user_input.content == "normalized hello"
     assert host.events == [{"type": "message.received", "turn_id": "turn_1", "content": "normalized hello", "channel": "tui"}]
-    assert host.sent_users == [{"turn_id": "turn_1", "content": "persisted hello", "metadata": {"channel": "tui"}}]
+    assert host.sent_users == [
+        {
+            "session_id": "session_1",
+            "turn_id": "turn_1",
+            "content": "persisted hello",
+            "metadata": {"channel": "tui"},
+        }
+    ]
     assert turn_messages[-1] == LLMMessage(role="assistant", content="visible output")
     assert host.display_turns == [
         {"turn_id": "turn_1", "user": "normalized hello", "assistant": ["visible output"], "tools": []}
@@ -293,9 +325,17 @@ async def test_turn_pipeline_runs_full_host_lifecycle():
     assert host.bootstrap_requests[0].workspace == "/workspace"
     assert host.input_requests[0].envelope.raw_text == "hello"
     assert host.input_requests[0].state_stores is not None
-    assert host.sent_users == [{"turn_id": "turn_1", "content": "persisted hello", "metadata": {"timezone": "UTC"}}]
+    assert host.sent_users == [
+        {
+            "session_id": "session_1",
+            "turn_id": "turn_1",
+            "content": "persisted hello",
+            "metadata": {"timezone": "UTC"},
+        }
+    ]
     assert host.engine_requests[0].context[0].content == "extra context"
     assert host.output_requests[0].current_output == "model answer"
+    assert host.result_client_session_ids == ["session_1"]
     assert host.completed is not None
     assert host.completed.agent_result == {"ok": True}
     assert host.history_refreshed is True
@@ -307,11 +347,37 @@ async def test_turn_pipeline_runs_full_host_lifecycle():
 @pytest.mark.asyncio
 async def test_turn_pipeline_interrupts_failed_engine_turn():
     host = _FakeTurnRuntimeHost(engine_error=RuntimeError("boom\nnoisy"))
+    runtime = _runtime(host)
 
     with pytest.raises(RuntimeError, match="boom"):
-        await _runtime(host).run(TurnPipelineRequest(text="hello"))
+        await runtime.run(TurnPipelineRequest(text="hello"))
 
     assert host.completed is None
     assert host.interrupts == [
         {"turn_id": "turn_1", "status": "failed", "error": "sanitized: RuntimeError: boom noisy"}
     ]
+
+    host.engine_error = None
+    recovered = await runtime.run(TurnPipelineRequest(text="retry"))
+    assert recovered.session_id == "session_1"
+
+
+@pytest.mark.asyncio
+async def test_turn_pipeline_interrupts_prepare_failure_and_releases_admission():
+    host = _FakeTurnRuntimeHost(prepare_error=RuntimeError("prepare failed"))
+    runtime = _runtime(host)
+
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        await runtime.run(TurnPipelineRequest(text="hello"))
+
+    assert host.interrupts == [
+        {
+            "turn_id": "turn_1",
+            "status": "failed",
+            "error": "sanitized: RuntimeError: prepare failed",
+        }
+    ]
+
+    host.prepare_error = None
+    recovered = await runtime.run(TurnPipelineRequest(text="retry"))
+    assert recovered.session_id == "session_1"

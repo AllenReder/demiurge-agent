@@ -113,10 +113,6 @@ class ChildAgentHost(Protocol):
     def sessions(self) -> Any:
         ...
 
-    @property
-    def session_id(self) -> str:
-        ...
-
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         ...
 
@@ -160,12 +156,8 @@ class RunnerChildAgentHost:
     def sessions(self) -> Any:
         return self.runner.sessions
 
-    @property
-    def session_id(self) -> str:
-        return self.runner.session_id
-
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
     def core_revision(self, core: LoadedCore) -> str:
         return self.runner._core_revision(core)
@@ -363,7 +355,14 @@ class ChildAgentRuntime:
             user_input=AgentInput(content=""),
             metadata={},
         )
-        await self.host.tool_runtime.prepare_for_turn(core, turn, emit_event=self.host.emit_event)
+        await self.host.tool_runtime.prepare_for_turn(
+            core,
+            turn,
+            emit_event=lambda event_type, **payload: self.host.emit_event(
+                event_type,
+                **{**payload, "session_id": session_id},
+            ),
+        )
 
     def requested_tools_for_core_id(self, core_id: str, requested: ChildToolRequest) -> str | list[str]:
         normalized = self.normalize_tool_request(requested)
@@ -518,6 +517,7 @@ class ChildAgentRuntime:
         async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.host.emit_event(
                 "agent_spawn.started",
+                session_id=request.parent_turn.session_id,
                 turn_id=request.parent_turn.turn_id,
                 slot=request.parent_slot_path,
                 task_id=ctx.task_id,
@@ -559,6 +559,7 @@ class ChildAgentRuntime:
                     ctx.mark_blocked(summary, metadata={"needs_user": True})
                 self.host.emit_event(
                     event_name,
+                    session_id=request.parent_turn.session_id,
                     turn_id=request.parent_turn.turn_id,
                     slot=request.parent_slot_path,
                     task_id=ctx.task_id,
@@ -581,6 +582,7 @@ class ChildAgentRuntime:
             except Exception as exc:
                 self.host.emit_event(
                     "agent_spawn.failed",
+                    session_id=request.parent_turn.session_id,
                     turn_id=request.parent_turn.turn_id,
                     slot=request.parent_slot_path,
                     task_id=ctx.task_id,
@@ -610,6 +612,7 @@ class ChildAgentRuntime:
         except RuntimeTaskConflictError as exc:
             self.host.emit_event(
                 "agent_spawn.rejected",
+                session_id=request.parent_turn.session_id,
                 turn_id=request.parent_turn.turn_id,
                 slot=request.parent_slot_path,
                 child_core_id=request.core_id,
@@ -660,7 +663,7 @@ class ChildAgentRuntime:
             return ToolResult(content=f"unsupported notify_policy: {notify_policy}", is_error=True)
         raw_use_bootstrap = call.arguments.get("use_bootstrap", False)
         use_bootstrap = False if raw_use_bootstrap is None else raw_use_bootstrap
-        context = self.delegation_context(context_mode)
+        context = self.delegation_context(context_mode, session_id=turn.session_id)
         child_tools_request = call.arguments.get("tools", CHILD_AGENT_ALL_TOOLS)
         child_session_id = utc_id("session_child_")
         try:
@@ -690,10 +693,10 @@ class ChildAgentRuntime:
         payload = {"task_id": handle.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    def delegation_context(self, context_mode: str) -> list[str]:
+    def delegation_context(self, context_mode: str, *, session_id: str) -> list[str]:
         if context_mode == "isolated":
             return []
-        messages = self.host.sessions.history_for_context(self.host.session_id)[-12:]
+        messages = self.host.sessions.history_for_context(session_id)[-12:]
         if not messages:
             return []
         transcript = "\n".join(f"{message.role}: {message.content}" for message in messages if message.content.strip())

@@ -43,13 +43,15 @@ class SessionRoutingRuntime:
     def metadata_for(self, interaction: InteractionInbound | None) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
         if interaction is not None:
+            adapter_metadata = dict(interaction.metadata or {})
+            adapter_metadata.pop("session_id", None)
+            metadata.update(adapter_metadata)
             metadata.update(
                 {
                     "channel": interaction.channel,
                     "source": interaction.source,
                     "reply_to": interaction.reply_to,
                     "conversation_key": interaction.conversation_key,
-                    **dict(interaction.metadata or {}),
                 }
             )
         metadata.update(self.runtime_timezone.metadata())
