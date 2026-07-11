@@ -603,7 +603,8 @@ async def test_authored_tool_can_send_transient_audio_without_history(tmp_path):
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=["base_output"])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, workspace=workspace)
@@ -652,7 +653,8 @@ async def test_tool_output_defaults_to_persist_when_write_history_is_omitted(tmp
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=[])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
@@ -698,7 +700,8 @@ async def test_tool_delivery_schedules_immediately_after_tool_returns(tmp_path):
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=[])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
@@ -744,7 +747,8 @@ async def test_module_tool_call_collects_tool_deliveries_in_current_turn(tmp_pat
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_module(
         agents,

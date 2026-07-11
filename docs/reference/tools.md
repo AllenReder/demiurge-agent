@@ -14,9 +14,10 @@ The host builds the visible tool registry for each turn from:
 The Agent Core declares tool surfaces. The Host is the product owner for
 selection, dispatch, capability checks, approvals, workspace scope, task
 control, and result conversion. The current alpha implementation still has
-separate builtin, authored, and MCP paths: authored singular registry policy is
-not yet enforced before invocation, and MCP connect/discovery occurs before
-call approval. The `evolve_core` and `rollback_core` builtin branches also
+separate builtin, authored, and MCP paths. Authored dispatch now requires its
+resolved singular capability and approval policy before importing the module,
+but MCP connect/discovery still occurs before call approval. The `evolve_core`
+and `rollback_core` builtin branches also
 require their capabilities but do not yet resolve their registry `prompt`
 policy before mutation. These gaps are frozen for removal in
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
@@ -90,9 +91,9 @@ Accepted `tool.yaml` fields are:
 | `entrypoint` | `module:execute` | Callable loaded from the tool directory. |
 | `description` | `""` | Model-visible tool description. |
 | `input_schema` | `{}` | Model-visible JSON schema. |
-| `risk` | `medium` | Registry risk metadata; currently not enforced by authored dispatch. |
-| `capability` | `null` | Primary registry capability metadata; currently not required automatically before authored invocation. |
-| `approval_policy` | `prompt` | Tool-level registry metadata; currently not resolved automatically before authored invocation. |
+| `risk` | `medium` | Registry risk used by authored approval resolution. |
+| `capability` | `null` | Primary registry capability required before module import when non-null. |
+| `approval_policy` | `prompt` | Tool-level policy resolved before module import and invocation. |
 | `display_policy` | `summary` | Operator display hint. |
 | `model_output_policy` | `content` | Model-output conversion hint. |
 | `capabilities` | `[]` | Capabilities the implementation may require through `ctx.capability.require(...)`. |
@@ -102,15 +103,22 @@ Accepted `tool.yaml` fields are:
 
 The singular `capability` and the `capabilities` list are separate:
 
-- `capability` identifies the tool in registry and approval metadata.
+- `capability` identifies the tool in registry and approval metadata and must
+  be granted by core defaults or path-scoped Host capability configuration.
 - `capabilities` grants effect capabilities to the tool implementation.
 
-Current alpha limitation: the authored dispatcher does not yet enforce the
-singular `capability`, `risk`, or `approval_policy` before importing and calling
-the entrypoint. The `capabilities` list is still enforced when authored code or
-an SDK client calls `ctx.capability.require(...)`. Because `host_shared` Python
-can also call ordinary Python/OS APIs directly, these declarations are not a
-sandbox.
+The plural list cannot satisfy the singular dispatcher gate; an authored tool
+cannot authorize its own invocation by repeating the singular value there.
+
+The authored dispatcher resolves the same registry entry used for definitions,
+requires its singular `capability` when present, then applies its `risk` and
+`approval_policy` plus stricter core/global approval policy before importing and
+calling the entrypoint. Approval requests use a bounded, field-name-redacted
+argument preview rather than raw arguments. The `capabilities` list remains
+separate and is enforced when authored code or an SDK client calls
+`ctx.capability.require(...)`.
+Because `host_shared` Python can also call ordinary Python/OS APIs directly,
+these declarations are not a sandbox.
 
 Authored tools are not listed in `agent/pipelines.yaml`.
 
@@ -276,10 +284,9 @@ pipeline. Invalid ids raise `ValueError` from authored `ctx.agents` calls.
 | non-empty list | Allow only the listed tool ids from the child core's configured tools. |
 
 Tool selection only narrows the child core's configured tools; it does not grant
-missing tools or capability grants. Builtin and MCP call policy still applies;
-the authored singular-policy alpha limitation described above also applies in a
-child turn. Invalid tool ids raise `ValueError` from authored `ctx.agents`
-calls.
+missing tools or capability grants. Builtin, authored, and MCP call policy still
+applies in a child turn. Invalid tool ids raise `ValueError` from authored
+`ctx.agents` calls.
 
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots, create a bootstrap snapshot, or inject an existing bootstrap

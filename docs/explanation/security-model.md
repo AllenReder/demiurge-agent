@@ -54,12 +54,12 @@ Capabilities describe effect classes such as:
 
 Builtin file, terminal, network, schedule, and skill handlers resolve their
 applicable capability/approval checks before guarded operations, and MCP tool
-calls do so before the call. Alpha gaps remain: authored tool singular registry
-policy is not enforced automatically before its entrypoint runs; MCP
-spawn/connect/discovery can occur before call approval; and `evolve_core` /
-`rollback_core` require capabilities but do not yet resolve their registry
-`prompt` policy before mutating core refs. The target `EffectRuntime` closes
-these paths with one ordering; see
+calls do so before the call. Authored tool dispatch now requires the resolved
+singular capability and approval policy before module import/invocation. Alpha
+gaps remain: MCP spawn/connect/discovery can occur before call approval, and
+`evolve_core` / `rollback_core` require capabilities but do not yet resolve
+their registry `prompt` policy before mutating core refs. The target
+`EffectRuntime` closes these paths with one ordering; see
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 Background completion turns use the originating session's normal capabilities

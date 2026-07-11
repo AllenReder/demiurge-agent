@@ -25,9 +25,11 @@ Tools 可以来自：
 handler 会自行执行 capability、approval、workspace、command 与 network checks，但目前
 没有通用 builtin gate：`evolve_core` 与 `rollback_core` 当前会要求对应 capability，
 却不会在修改 core refs 前解析 registry 的 `prompt` policy。MCP call dispatch 会应用
-call capability 与 approval policy。Authored tool registry metadata 对 model 与 operator
-可见，但 authored entrypoint 在 import 和调用前，尚未强制执行单数 `capability`、`risk`
-与 `approval_policy` 字段。
+call capability 与 approval policy。Authored dispatch 使用同一个对 model/operator 可见的
+resolved registry entry，在 import/call entrypoint 前要求 singular `capability` 并解析
+`risk`/`approval_policy`。Core/global approval 可以收紧该 policy，但不能削弱它。
+Approval request 携带受限长、按字段名脱敏的 argument preview。该 containment 不是后续
+`EffectRuntime`/SEC-02 所属的最终 cross-effect `SecretRedactor`。
 
 MCP discovery 也会在 model execution 前准备。Catalog cache miss 时，当前运行时可能在
 之后的 `mcp.call:*` capability 与 approval check 之前 spawn/connect 并调用
@@ -94,8 +96,10 @@ bounded log tail、result reference 与可选 `write_scope`。具有相同非空
 ## Authored Tools
 
 Authored tools 的目标角色是 EffectRuntime adapters。目前它们与 builtins 共用 registry
-discovery，但 authored entrypoint 仍会绕过上面所述的单数 registry capability/approval
-metadata。其 `capabilities` list 对显式 `ctx.capability.require(...)` check 仍然有效。
+discovery，当前 dispatch 已在 import/invocation 前执行 singular registry
+capability/approval metadata。其 `capabilities` list 仍是独立 grant surface，并对显式
+`ctx.capability.require(...)` check 有效，且不能 self-grant singular dispatch gate。后续
+`EffectRuntime` 会删除剩余的 builtin/authored/MCP dispatch duplication。
 
 ## MCP Tools
 

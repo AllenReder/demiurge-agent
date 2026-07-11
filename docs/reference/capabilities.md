@@ -10,13 +10,12 @@ whether a requested effect can run automatically, must prompt, or is denied.
 
 Declaring a tool, slot, schedule, or MCP server does not grant a capability by
 itself. Builtin and MCP call handlers generally check their required
-capabilities at execution time, and authored SDK clients enforce explicit
-`ctx.capability.require(...)` calls.
+capabilities at execution time. Authored tool dispatch requires the singular
+registry capability before module import, while authored SDK clients continue
+to enforce explicit `ctx.capability.require(...)` calls inside the module.
 
-Current alpha limitations: authored tool singular `capability`, `risk`, and
-`approval_policy` registry fields are not automatically enforced before the
-entrypoint runs, and MCP spawn/connect/discovery occurs before the later call
-capability and approval check. The `evolve_core` and `rollback_core` builtin
+Current alpha limitations: MCP spawn/connect/discovery occurs before the later
+call capability and approval check. The `evolve_core` and `rollback_core` builtin
 branches require capabilities but do not yet resolve their registry `prompt`
 policy before mutation. See
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime)
@@ -61,6 +60,9 @@ ctx.capability.require("fs.read", slot_path=ctx.slot_path)
 ```
 
 If the capability is not declared, the host raises `capability denied`.
+This plural implementation grant does not satisfy an authored tool's singular
+registry `capability`; the pre-import dispatcher gate requires a core default
+or path-scoped capability grant.
 
 ## Prefix Grants
 
@@ -112,15 +114,14 @@ Risk values are:
 low < medium < high < critical
 ```
 
-For builtin handlers that use the approval runtime, and for MCP calls, the Host
-starts from tool metadata, then applies core approval overrides, then global
-fallback approval. More restrictive core policy wins over tool metadata.
-Global fallback approval is Host-level policy and can be used as the final
-default, but it cannot lower a terminal command guard result from `prompt/high`
-to automatic execution. Only `allow/low` terminal commands can be auto-approved;
-hardline blocks terminate before approval. Authored singular metadata and the
-core-mutation builtin exceptions above are not yet passed through this
-resolution path.
+For authored tools, builtin handlers that use the approval runtime, and MCP
+calls, the Host starts from tool metadata and applies applicable core/global
+approval policy. Authored policy is monotonic: core/global `auto` cannot weaken
+registry `prompt` or `deny`. More restrictive core policy wins over tool
+metadata. Global fallback approval cannot lower a terminal command guard result
+from `prompt/high` to automatic execution. Only `allow/low` terminal commands
+can be auto-approved; hardline blocks terminate before approval. The
+core-mutation builtin exceptions above are not yet passed through this path.
 
 ## Core Approval Config
 

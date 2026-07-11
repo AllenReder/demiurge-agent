@@ -99,6 +99,39 @@ async def _execute(app, core, name, arguments):
     )
 
 
+def _install_authored_policy_tool(
+    app,
+    *,
+    name: str,
+    module_source: str,
+    capability: str = "probe.effect",
+    capabilities: list[str] | None = None,
+    risk: str = "medium",
+    approval_policy: str = "prompt",
+) -> None:
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / name
+    tool_root.mkdir(parents=True)
+    capability_block = "capabilities: []\n"
+    if capabilities:
+        capability_block = "capabilities:\n" + "".join(
+            f"  - {item}\n"
+            for item in capabilities
+        )
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        f"description: Authored policy test tool {name}.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        f"{capability_block}"
+        f"capability: {capability}\n"
+        f"risk: {risk}\n"
+        f"approval_policy: {approval_policy}\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(module_source, encoding="utf-8")
+
+
 @pytest.mark.asyncio
 async def test_tool_01_authored_prompt_policy_denial_prevents_execution(tmp_path):
     """TOOL-01: authored prompt policy must be enforced before module execution."""
@@ -133,6 +166,11 @@ async def test_tool_01_authored_prompt_policy_denial_prevents_execution(tmp_path
     entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "policy_probe")
 
     result = await _execute(app, core, "policy_probe", {})
+    approval_events = [
+        event["type"]
+        for event in app.runner.event_log.tail(20)
+        if event["type"].startswith("approval.")
+    ]
 
     assert entry.source == "authored"
     assert entry.capability == "probe.effect"
@@ -142,12 +180,52 @@ async def test_tool_01_authored_prompt_policy_denial_prevents_execution(tmp_path
         "is_error": result.is_error,
         "approval_requests": len(approval_provider.requests),
         "approval_risks": [request.risk for request in approval_provider.requests],
+        "approval_events": approval_events,
+        "execution_started": result.data["executionStarted"],
+        "decision": result.data["approval"]["value"],
     } == {
         "marker_exists": False,
         "is_error": True,
         "approval_requests": 1,
         "approval_risks": ["medium"],
+        "approval_events": ["approval.requested", "approval.decided", "approval.denied"],
+        "execution_started": False,
+        "decision": "deny",
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_approval_uses_bounded_redacted_preview(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_authored_policy_tool(
+        app,
+        name="preview_probe",
+        module_source="def run(ctx, arguments):\n    return {'content': 'probe-ran'}\n",
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+    secret = "SYNTHETIC_AUTHORED_SECRET_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "preview_probe",
+        {
+            "api_key": secret,
+            "note": "x" * 5000,
+            "nested": {"token": secret, "visible": "ok"},
+        },
+    )
+
+    preview = provider.requests[0].arguments_preview
+    serialized = json.dumps(preview, ensure_ascii=False)
+    assert result.is_error is True
+    assert preview["api_key"] == "<redacted>"
+    assert preview["nested"]["token"] == "<redacted>"
+    assert preview["nested"]["visible"] == "ok"
+    assert secret not in serialized
+    assert len(serialized) <= 2048
 
 
 @pytest.mark.asyncio
@@ -178,12 +256,245 @@ async def test_tool_01_authored_missing_capability_prevents_module_import(tmp_pa
         "    return {'content': 'probe-ran'}\n",
         encoding="utf-8",
     )
+    approval_provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = approval_provider
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
 
     result = await _execute(app, core, "capability_probe", {})
 
     assert result.is_error is True
     assert marker.exists() is False
+    assert result.data["executionStarted"] is False
+    assert result.content == "capability denied: probe.missing for agent/tools/capability_probe"
+    assert approval_provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_plural_capabilities_cannot_self_grant_singular_gate(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-self-grant.txt"
+    _install_authored_policy_tool(
+        app,
+        name="self_grant_probe",
+        capabilities=["probe.effect"],
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+            "def run(ctx, arguments):\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "self_grant_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert marker.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_global_auto_cannot_weaken_prompt_policy(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-global-auto.txt"
+    _install_authored_policy_tool(
+        app,
+        name="global_auto_probe",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.global_approval.tools["global_auto_probe"] = "auto"
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "global_auto_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_core_prompt_makes_auto_policy_stricter(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-core-prompt.txt"
+    _install_authored_policy_tool(
+        app,
+        name="core_prompt_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["approval"] = {"tools": {"core_prompt_probe": "prompt"}}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "core_prompt_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_prompt_without_interactive_route_denies_before_import(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-no-route.txt"
+    _install_authored_policy_tool(
+        app,
+        name="no_route_probe",
+        module_source=(
+            "from pathlib import Path\n\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+            "def run(ctx, arguments):\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "no_route_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["reason"] == "no_interactive_route"
+    assert marker.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_deny_policy_does_not_call_provider(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-deny.txt"
+    _install_authored_policy_tool(
+        app,
+        name="deny_probe",
+        approval_policy="deny",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "deny_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert marker.exists() is False
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_auto_policy_executes_without_provider(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-auto.txt"
+    _install_authored_policy_tool(
+        app,
+        name="auto_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "auto_probe", {})
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+
+    assert result.is_error is False
+    assert result.content == "probe-ran"
+    assert marker.exists() is True
+    assert provider.requests == []
+    assert approval["automatic"] is True
+    assert approval["policy"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_session_allow_reuses_same_rule(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_authored_policy_tool(
+        app,
+        name="session_allow_probe",
+        module_source="def run(ctx, arguments):\n    return {'content': 'probe-ran'}\n",
+    )
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    first = await _execute(app, core, "session_allow_probe", {"value": 1})
+    second = await _execute(app, core, "session_allow_probe", {"value": 2})
+
+    assert first.is_error is False
+    assert second.is_error is False
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_exception_reports_execution_started(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-exception.txt"
+    _install_authored_policy_tool(
+        app,
+        name="exception_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('started', encoding='utf-8')\n"
+            "    raise RuntimeError('synthetic authored failure')\n"
+        ),
+    )
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "exception_probe", {})
+
+    assert marker.exists() is True
+    assert result.is_error is True
+    assert result.content == "synthetic authored failure"
+    assert result.data["executionStarted"] is True
 
 
 def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):

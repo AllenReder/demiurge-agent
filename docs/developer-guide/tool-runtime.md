@@ -28,9 +28,12 @@ approval, workspace, command, and network checks, but there is no generic
 builtin gate: `evolve_core` and `rollback_core` currently require their
 capabilities without resolving the registry `prompt` policy before mutation.
 MCP call dispatch applies its call capability and approval policy. Authored tool
-registry metadata is visible to the model and operator, but the singular
-`capability`, `risk`, and `approval_policy` fields are not yet enforced before
-the authored entrypoint is imported and called.
+dispatch uses the same resolved registry entry exposed to the model/operator,
+requires its singular `capability`, and resolves `risk`/`approval_policy` before
+the authored entrypoint is imported and called. Core/global approval can make
+that policy stricter but cannot weaken it. Approval requests carry a bounded,
+field-name-redacted argument preview. This containment is not the final
+cross-effect `SecretRedactor` owned by the later `EffectRuntime`/SEC-02 work.
 
 MCP discovery is also prepared before model execution. On a catalog cache miss,
 the current runtime can spawn/connect and call `list_tools()` before the later
@@ -107,9 +110,12 @@ status, summary, bounded log tail, result reference, and an optional
 ## Authored Tools
 
 Authored tools are intended EffectRuntime adapters. Today they share registry
-discovery with builtins, but authored entrypoints still bypass the singular
-registry capability/approval metadata described above. Their `capabilities`
-list remains meaningful for explicit `ctx.capability.require(...)` checks.
+discovery with builtins, and their current dispatch now enforces singular
+registry capability/approval metadata before import/invocation. Their
+`capabilities` list remains a separate grant surface for explicit
+`ctx.capability.require(...)` checks and cannot self-grant the singular dispatch
+gate. The later `EffectRuntime` removes the remaining builtin/authored/MCP
+dispatch duplication.
 
 ## MCP Tools
 

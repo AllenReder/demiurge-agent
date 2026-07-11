@@ -13,8 +13,9 @@ Host 会为每个 turn 从以下来源构建可见 tool registry：
 
 Agent Core 声明 tool surface。Host 是 selection、dispatch、capability checks、approvals、
 workspace scope、task control 与 result conversion 的产品 owner。当前 alpha 实现仍有
-相互分离的 builtin、authored 与 MCP 路径：authored 单数 registry policy 尚未在调用前
-强制执行，MCP connect/discovery 发生在 call approval 之前；`evolve_core` 与
+相互分离的 builtin、authored 与 MCP 路径。Authored dispatch 现在会在 module import 前
+要求 resolved singular capability 并解析 approval policy，但 MCP connect/discovery 仍发生
+在 call approval 之前；`evolve_core` 与
 `rollback_core` builtin 分支也会要求 capability，却尚未在 mutation 前解析 registry
 `prompt` policy。这些缺口已冻结为必须在
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)中消除的目标。
@@ -82,9 +83,9 @@ agent/tools/<tool_id>/
 | `entrypoint` | `module:execute` | 从 tool directory 加载的 callable。 |
 | `description` | `""` | Model-visible tool description。 |
 | `input_schema` | `{}` | Model-visible JSON schema。 |
-| `risk` | `medium` | Registry risk metadata；当前 authored dispatch 不强制执行。 |
-| `capability` | `null` | Primary registry capability metadata；authored invocation 前当前不会自动要求。 |
-| `approval_policy` | `prompt` | Tool-level registry metadata；authored invocation 前当前不会自动解析。 |
+| `risk` | `medium` | Authored approval resolution 使用的 registry risk。 |
+| `capability` | `null` | 非 null 时在 module import 前要求的 primary registry capability。 |
+| `approval_policy` | `prompt` | Module import 与 invocation 前解析的 tool-level policy。 |
 | `display_policy` | `summary` | Operator display hint。 |
 | `model_output_policy` | `content` | Model-output conversion hint。 |
 | `capabilities` | `[]` | Implementation 可通过 `ctx.capability.require(...)` 要求的 capabilities。 |
@@ -94,13 +95,19 @@ agent/tools/<tool_id>/
 
 单数 `capability` 与 `capabilities` list 含义不同：
 
-- `capability` 在 registry 与 approval metadata 中标识 tool；
+- `capability` 在 registry 与 approval metadata 中标识 tool，并且必须由 core default 或
+  path-scoped Host capability configuration grant；
 - `capabilities` 向 tool implementation 授予 effect capabilities。
 
-当前 alpha 限制：authored dispatcher 尚未在 import 和调用 entrypoint 前强制执行单数
-`capability`、`risk` 或 `approval_policy`。当 authored code 或 SDK client 调用
-`ctx.capability.require(...)` 时，`capabilities` list 仍会被强制执行。由于
-`host_shared` Python 也可以直接调用普通 Python/OS APIs，这些 declaration 并不是
+Plural list 不能满足 singular dispatcher gate；authored tool 不能通过在该 list 中重复
+singular value 来授权自己的 invocation。
+
+Authored dispatcher 使用与 definitions 相同的 resolved registry entry：非空 singular
+`capability` 会先被要求，随后在 import/call entrypoint 前应用 `risk`、
+`approval_policy` 与更严格的 core/global approval policy。Approval request 使用受限长、
+按字段名脱敏的 argument preview，而不是 raw arguments。`capabilities` list 仍是独立
+grant surface，并在 authored code 或 SDK client 调用 `ctx.capability.require(...)` 时执行。
+由于 `host_shared` Python 也可以直接调用普通 Python/OS APIs，这些 declaration 并不是
 sandbox。
 
 Authored tools 不会列在 `agent/pipelines.yaml` 中。
@@ -259,8 +266,8 @@ Slot id 必须存在且已经位于 child core 的 active pipeline 中。无效 
 | 非空 list | 只允许 child core configured tools 中列出的 tool ids。 |
 
 Tool selection 只能缩小 child core configured tools；它不会授予缺失 tool 或 capability
-grant。Builtin 与 MCP call policy 仍适用；上文 authored singular-policy alpha limitation
-也适用于 child turn。无效 tool id 会使 authored `ctx.agents` call 抛出 `ValueError`。
+grant。Builtin、authored 与 MCP call policy 在 child turn 中仍适用。无效 tool id 会使
+authored `ctx.agents` call 抛出 `ValueError`。
 
 `use_bootstrap` 默认为 `False`。为 false 时，child turn 不会运行 bootstrap slots、创建
 bootstrap snapshot，也不会把现有 bootstrap snapshot 注入 provider request。设置

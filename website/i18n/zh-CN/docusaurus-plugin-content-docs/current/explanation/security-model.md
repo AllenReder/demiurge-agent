@@ -48,11 +48,11 @@ Capabilities 描述以下 effect class：
 - `tool.call:rollback_core`
 
 Builtin file、terminal、network、schedule 与 skill handlers 会在受保护操作前解析适用的
-capability/approval checks，MCP tool call 也会在 call 前执行。仍有 alpha 缺口：authored
-tool 的单数 registry policy 不会在 entrypoint 运行前自动强制执行；MCP
-spawn/connect/discovery 可能发生在 call approval 之前；`evolve_core` / `rollback_core`
-会要求 capabilities，却尚未在修改 core refs 前解析其 registry `prompt` policy。目标
-`EffectRuntime` 用同一套顺序封闭这些路径；参见
+capability/approval checks，MCP tool call 也会在 call 前执行。Authored tool dispatch
+现在会在 module import/invocation 前要求 resolved singular capability 并解析 approval
+policy。剩余 alpha 缺口包括：MCP spawn/connect/discovery 可能发生在 call approval 之前；
+`evolve_core` / `rollback_core` 会要求 capabilities，却尚未在修改 core refs 前解析其
+registry `prompt` policy。目标 `EffectRuntime` 用同一套顺序封闭这些路径；参见
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)。
 
 Background completion turn 使用原 session 的正常 capabilities，不会仅仅因为在后台运行

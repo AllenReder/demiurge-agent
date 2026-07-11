@@ -55,6 +55,82 @@ from demiurge.security.workspace import (
 )
 
 
+_AUTHORED_PREVIEW_MAX_CHARS = 2048
+_AUTHORED_PREVIEW_MAX_ITEMS = 20
+_AUTHORED_PREVIEW_MAX_DEPTH = 4
+_AUTHORED_PREVIEW_MAX_STRING = 256
+_SENSITIVE_ARGUMENT_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "private_key",
+    "secret",
+    "token",
+)
+
+
+def _safe_authored_arguments_preview(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    preview = _sanitize_authored_preview_value(dict(arguments), depth=0)
+    if not isinstance(preview, dict):
+        return {"value": preview}
+    serialized = json.dumps(preview, ensure_ascii=False, sort_keys=True)
+    if len(serialized) <= _AUTHORED_PREVIEW_MAX_CHARS:
+        return preview
+    bounded: dict[str, Any] = {}
+    for key, value in preview.items():
+        candidate = {**bounded, key: value, "_truncated": True}
+        if len(json.dumps(candidate, ensure_ascii=False, sort_keys=True)) <= _AUTHORED_PREVIEW_MAX_CHARS:
+            bounded[key] = value
+        else:
+            bounded[key] = "<truncated>"
+    bounded["_truncated"] = True
+    while len(json.dumps(bounded, ensure_ascii=False, sort_keys=True)) > _AUTHORED_PREVIEW_MAX_CHARS:
+        removable = next((key for key in reversed(bounded) if key != "_truncated"), None)
+        if removable is None:
+            break
+        bounded.pop(removable)
+    return bounded
+
+
+def _sanitize_authored_preview_value(value: Any, *, depth: int) -> Any:
+    if depth >= _AUTHORED_PREVIEW_MAX_DEPTH:
+        return "<truncated>"
+    if isinstance(value, Mapping):
+        preview: dict[str, Any] = {}
+        items = list(value.items())
+        for raw_key, child in items[:_AUTHORED_PREVIEW_MAX_ITEMS]:
+            key = truncate_text(str(raw_key), limit=80)
+            if _is_sensitive_argument_key(key):
+                preview[key] = "<redacted>"
+            else:
+                preview[key] = _sanitize_authored_preview_value(child, depth=depth + 1)
+        if len(items) > _AUTHORED_PREVIEW_MAX_ITEMS:
+            preview["_truncated_items"] = len(items) - _AUTHORED_PREVIEW_MAX_ITEMS
+        return preview
+    if isinstance(value, (list, tuple)):
+        items = [
+            _sanitize_authored_preview_value(item, depth=depth + 1)
+            for item in value[:_AUTHORED_PREVIEW_MAX_ITEMS]
+        ]
+        if len(value) > _AUTHORED_PREVIEW_MAX_ITEMS:
+            items.append(f"<truncated {len(value) - _AUTHORED_PREVIEW_MAX_ITEMS} items>")
+        return items
+    if isinstance(value, str):
+        return truncate_text(value, limit=_AUTHORED_PREVIEW_MAX_STRING)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return truncate_text(repr(value), limit=_AUTHORED_PREVIEW_MAX_STRING)
+
+
+def _is_sensitive_argument_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_ARGUMENT_KEY_PARTS)
+
+
 EventEmitter = Callable[..., dict[str, Any]]
 SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "scripts", "assets"})
 _COMMAND_SPECIFIC_APPROVAL_RULES = frozenset(
@@ -329,7 +405,10 @@ class ToolRuntime:
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
         try:
-            visible_tools = {entry.name for entry in self.registry_for(core, turn=turn)}
+            visible_tools = {
+                entry.name: entry
+                for entry in self.registry_for(core, turn=turn)
+            }
             if call.name in BUILTIN_TOOL_DEFINITIONS:
                 if call.name not in visible_tools:
                     return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
@@ -342,8 +421,24 @@ class ToolRuntime:
                 )
             slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
             if slot:
-                if call.name not in visible_tools:
+                entry = visible_tools.get(call.name)
+                if entry is None or entry.source != "authored":
                     return ToolResult(content=f"authored tool is not allowed: {call.name}", is_error=True)
+                if entry.capability:
+                    capability._require_registry_capability(
+                        entry.capability,
+                        slot_path=slot.relative_path,
+                    )
+                approval_denial = await self._approval_for_authored(
+                    entry,
+                    slot,
+                    call,
+                    core=core,
+                    turn=turn,
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 return await self._execute_authored(
                     slot,
                     call,
@@ -2119,6 +2214,64 @@ class ToolRuntime:
 
         return wrapped
 
+    async def _approval_for_authored(
+        self,
+        entry: ToolRegistryEntry,
+        slot: SlotDefinition,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        capability_name = entry.capability or f"tool.call:{entry.name}"
+        policy = entry.approval_policy
+        for configured in (
+            self._select_approval_policy(
+                core.manifest.approval,
+                tool_name=entry.name,
+                capability_name=capability_name,
+                risk=entry.risk,
+            ),
+            self._select_approval_policy(
+                self.global_approval,
+                tool_name=entry.name,
+                capability_name=capability_name,
+                risk=entry.risk,
+            ),
+        ):
+            if configured:
+                policy = self._stricter_policy(policy, configured)
+        summary = f"Call authored tool {entry.name}"
+        request = ApprovalRequest(
+            tool_name=entry.name,
+            tool_call_id=call.id,
+            turn_id=turn.turn_id,
+            capability=capability_name,
+            action="authored.call",
+            risk=entry.risk,
+            summary=summary,
+            target=slot.relative_path,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            cache_key=(
+                f"{entry.name}:{capability_name}:authored.call:{slot.relative_path}"
+            ),
+            auto_approve=policy == "auto",
+            policy=policy,
+            session_id=turn.session_id,
+        )
+        decision = await self.approval_runtime.decide(
+            request,
+            emit_event=self._turn_event_emitter(emit_event, turn),
+        )
+        if decision.allowed:
+            return None
+        return ToolResult(
+            content=f"approval denied: {summary}",
+            data={"executionStarted": False, "approval": asdict(decision)},
+            is_error=True,
+        )
+
     async def _execute_authored(
         self,
         slot: SlotDefinition,
@@ -2139,12 +2292,19 @@ class ToolRuntime:
             output=output,
             workspace=self.workspace.root,
         )
-        value = func(ctx, call.arguments)
-        if inspect.isawaitable(value):
-            value = await value
-        flush_slot_end = getattr(output, "flush_slot_end", None)
-        if callable(flush_slot_end):
-            flush_slot_end()
+        try:
+            value = func(ctx, call.arguments)
+            if inspect.isawaitable(value):
+                value = await value
+            flush_slot_end = getattr(output, "flush_slot_end", None)
+            if callable(flush_slot_end):
+                flush_slot_end()
+        except Exception as exc:
+            return ToolResult(
+                content=str(exc),
+                data={"executionStarted": True},
+                is_error=True,
+            )
         if isinstance(value, ToolResult):
             return value
         if isinstance(value, dict):

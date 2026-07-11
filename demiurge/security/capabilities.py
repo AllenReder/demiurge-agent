@@ -16,10 +16,43 @@ class CapabilityFacade:
     audit: list[dict[str, Any]] = field(default_factory=list)
 
     def can(self, capability: str, *, slot_path: str | None = None) -> bool:
-        return self._is_declared(capability, slot_path=slot_path)
+        return self._is_declared(
+            capability,
+            slot_path=slot_path,
+            include_component_manifest=True,
+        )
 
     def require(self, capability: str, *, slot_path: str | None = None) -> None:
-        allowed = self.can(capability, slot_path=slot_path)
+        self._require(
+            capability,
+            slot_path=slot_path,
+            include_component_manifest=True,
+        )
+
+    def _require_registry_capability(
+        self,
+        capability: str,
+        *,
+        slot_path: str,
+    ) -> None:
+        self._require(
+            capability,
+            slot_path=slot_path,
+            include_component_manifest=False,
+        )
+
+    def _require(
+        self,
+        capability: str,
+        *,
+        slot_path: str | None,
+        include_component_manifest: bool,
+    ) -> None:
+        allowed = self._is_declared(
+            capability,
+            slot_path=slot_path,
+            include_component_manifest=include_component_manifest,
+        )
         self.audit.append(
             {
                 "capability": capability,
@@ -30,7 +63,13 @@ class CapabilityFacade:
         if not allowed:
             raise CapabilityDenied(f"capability denied: {capability} for {slot_path or 'host'}")
 
-    def _is_declared(self, capability: str, *, slot_path: str | None = None) -> bool:
+    def _is_declared(
+        self,
+        capability: str,
+        *,
+        slot_path: str | None = None,
+        include_component_manifest: bool = True,
+    ) -> bool:
         caps = self.core.raw_manifest.get("capabilities", {}) or {}
         if slot_path:
             slot_caps = (caps.get("slots", {}) or {}).get(slot_path, {}) or {}
@@ -42,10 +81,11 @@ class CapabilityFacade:
             for slot in self.core.bootstrap_slots + self.core.input_slots + self.core.output_slots + self.core.tool_slots:
                 if slot.relative_path != slot_path:
                     continue
-                if capability in slot.capabilities:
-                    return True
-                if any(prefix in slot.capabilities for prefix in self._prefixes(capability)):
-                    return True
+                if include_component_manifest:
+                    if capability in slot.capabilities:
+                        return True
+                    if any(prefix in slot.capabilities for prefix in self._prefixes(capability)):
+                        return True
         defaults = caps.get("defaults", {}) or {}
         if capability in defaults:
             return True
