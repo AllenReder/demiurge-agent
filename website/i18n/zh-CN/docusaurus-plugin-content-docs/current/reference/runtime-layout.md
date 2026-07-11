@@ -56,6 +56,8 @@ demiurge-agent/
 | `.core-ignore` | Host-owned Git ignore file，用于 `__pycache__/` 等 runtime cache artifacts。 |
 | `.evolve/runs/<run_id>/agents/` | 针对整个 agents tree 的隔离 evolve worktree。 |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store 和 projections。 |
+| `runtime/runtime.sqlite3.v4.bak` | schema 4 升级到 schema 5 前保留的、通过 integrity check 的 migration backup。 |
+| `runtime/runtime.sqlite3.migrate.lock` | 串行化 runtime schema upgrade attempt 的 Host migration lock。 |
 | `runtime/artifacts/` | Runtime records 引用的 host-owned artifacts。 |
 | `runtime/session-events/` | Per-session diagnostic event logs。 |
 | `state/<core_id>.json` | 通过 `ctx.state.core` 读写的 core-scoped JSON state。 |
@@ -64,6 +66,16 @@ demiurge-agent/
 | `state/**/.*.transaction.json` | State snapshot 与 proposal audit 正在提交时使用的私有临时恢复 journal。 |
 | `workspace/` | 未选择 CLI/env/core workspace 时使用的默认 workspace。 |
 | `logs/` | Runtime logs，例如 `mcp-stderr.log`。 |
+
+Runtime schema 5 新增 immutable `session_owners` projection，供 Host-owned
+`PrincipalScope` resolution 使用。新 session 会在创建时记录 conversation、operator、
+system 或 delegated-agent ownership。schema 4 migration 只会安全回填唯一匹配的
+conversation binding；含糊 row 会变成 `legacy_local`，只能通过显式 operator repair
+path 查看；普通 origin resolution 会 fail closed，绝不会自动提升这些 row。在 POSIX 上，
+migration backup 与 lock 使用 `0600`。Backup 先写入私有临时 SQLite
+file，version、integrity 与 logical-fingerprint check 通过后才 atomic expose。Existing
+valid-but-stale backup 会停止 migration，不会被复用。Migration 失败会 rollback database
+transaction、保留 version 4 backup，并报告绝对路径与 stop-and-replace restore 动作。
 
 这些 state file 是当前 alpha containment，不是最终 production state engine。在单个
 Host process 内，同一个 resolved state path 的 write 会串行执行。Snapshot 和 proposal

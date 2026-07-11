@@ -73,11 +73,51 @@ conversation/session bindings:
 - `CapabilityFacade` describes Agent Core effect grants and never substitutes
   for principal authorization.
 
-Only a Host authority resolver/factory constructs `PrincipalScope`. Transport
+Only the store-bound Host authority resolver constructs `PrincipalScope`. Transport
 adapters contribute authenticated facts; request payloads and Agent Core code
 cannot instantiate operator/system authority. Legacy session/task rows with
 missing or ambiguous ownership fail closed and are visible only to an explicit
 operator repair path.
+
+Operator scope issuance requires a non-empty audit reason and derives its
+active-session binding from durable ownership; callers cannot inject
+`allowed_session_ids`. It also requires an in-memory issuer held by the active
+Host, so reopening the SQLite path does not enable operator issuance. Host
+shutdown revokes that process-local capability in `finally`; retained operator
+scopes are rejected after `DemiurgeApp.close()`, including when tool shutdown
+raises.
+Cross-session operator reads use a relational `session_owners` predicate and
+do not build an unbounded SQL bind list. Owned queries or session persistence
+reject a scope issued by another store.
+
+The current alpha implementation places this seam in
+`demiurge/runtime/scope.py`. `TurnAdmissionRuntime` now carries a frozen scope
+for external conversations, the local TUI operator, scheduled runs, and child
+agents. External adapters provide a Host-set `principal_key`; routing handles,
+arbitrary metadata, and webhook body fields do not independently grant
+authority. A background task captures a single-session origin-scope record at
+task start. Completion intake restores that record through the same store-bound
+resolver, verifies it against the completion owner before claim, and carries it
+only on the internal inbound object; model-facing metadata does not contain the
+scope record. A durable completion without that record fails before claim
+instead of falling back to route facts. Delegated sessions persist parent session/turn lineage without
+inheriting parent access, and child execution captures the admitted parent
+scope before a detached spawn closure starts.
+
+`RuntimeStore` schema version 5 adds the immutable `session_owners`
+projection. Fresh sessions persist their owner with `session.created`.
+Upgrading a version 4 database takes an integrity-checked backup first, safely
+backfills an unambiguous conversation binding, and marks ambiguous rows
+`legacy_local`; ordinary origin resolution never promotes those rows.
+Migration failure leaves the version 4 database unchanged and reports the
+absolute database/backup paths plus an explicit restore action. An existing
+backup is reused only when its logical fingerprint matches the current version
+4 database; a valid but stale backup stops migration.
+`RuntimeStore.query_owned()` currently applies SQL owner predicates for
+sessions, messages, and tasks, and `SessionRuntime` exposes owned get/list
+interfaces. The remaining slash-command, model-tool, task-control, and
+approval-cache callers are intentionally migrated in the later PrincipalScope
+tasks; their presence must not be read as complete owner enforcement yet.
 
 Every detail, list, wait, cancel, history, resume, search, and approval cache
 operation applies its owner predicate in the owning module/store. Callers must

@@ -65,12 +65,26 @@ session with a keyed admission lock; different sessions still run concurrently.
 Admission captures the resolved session before bootstrap, and the prompt, IO,
 slot history/result, event, artifact, and delivery hot paths use that captured
 session or the immutable `TurnContext.session_id` after an await. Cancellation
-and failure release the admission lock in `finally`.
+and failure release the admission lock in `finally`. Admission also resolves a
+frozen `PrincipalScope` before bootstrap: external conversations are matched
+against the durable `session_owners` projection, TUI runs use explicit local
+operator authority, schedules use run-scoped system authority, and child agents
+own only their delegated child session. The scope is carried by the internal
+`TurnExecutionScope`; it is not added to the authored `TurnContext` SDK.
+Background tasks capture a bounded record of that admitted scope before their
+detached task starts. Completion intake restores and validates the record
+against the durable session owner before claiming the event; route metadata
+cannot elevate the completion, and the internal scope record is not exposed in
+model-facing metadata. Child spawn closures likewise capture the admitted
+parent scope instead of reconstructing authority from a legacy session row.
 
 This is not yet the final durable `TurnExecution` contract. Admission locks are
 process-local, the scope still carries mutable objects, restart recovery is not
-implemented here, and principal/core-revision/cancellation ownership is
-completed by the later TurnExecution and PrincipalScope work.
+implemented here, and core-revision/route/cancellation ownership is completed
+by the later TurnExecution work. PrincipalScope consumers are also being moved
+incrementally: store-owned session/message/task predicates and same-origin
+manual resume exist now, while session listing/search, task control, and
+approval-cache enforcement remain assigned to their later DG-P2 tasks.
 
 ## Principal and Execution Context
 
@@ -78,6 +92,21 @@ completed by the later TurnExecution and PrincipalScope work.
 derived from authenticated channel/operator/system facts plus durable
 conversation/session bindings, and it supplies the owner predicate for session,
 history, task, wait, cancel, resume, search, and approval-cache operations.
+
+External adapter facts enter the Host through `InteractionInbound.principal_key`.
+That field is set by the adapter after its transport authentication/allowlist
+step and is kept separate from delivery `source`, arbitrary metadata, and raw
+webhook body identifiers. A conversation scope is accepted only when that key,
+channel, conversation binding, and session owner all match durable state.
+The store-bound resolver is the only issuer. Operator issuance never accepts a
+caller-supplied session set: it binds one active session, requires the active
+Host's in-memory operator issuer plus an explicit reason, and writes a
+`principal_scope.operator_issued` audit event. Cross-session operator queries
+use a relational `session_owners` predicate rather than materializing an
+unbounded SQL `IN` list. A scope issued by another store instance is rejected
+at owned-query and session-persistence boundaries. Closing the Host revokes its
+process-local operator capability even when tool shutdown fails, so a retained
+scope cannot authorize reads after `DemiurgeApp.close()`.
 
 `TurnExecutionContext` binds that principal to one session, turn, core revision,
 capability snapshot, workspace, route token, admission lease, cancellation

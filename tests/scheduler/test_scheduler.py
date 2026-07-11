@@ -216,6 +216,15 @@ async def test_schedule_fire_runtime_executes_claimed_schedule_without_service_l
 
     assert result.status == "completed"
     assert result.session_id is not None
+    owner = app.runtime_store.query(
+        RuntimeQuery(
+            table="session_owners",
+            where={"session_id": result.session_id},
+            limit=1,
+        )
+    ).rows[0]
+    assert owner["owner_kind"] == "system"
+    assert owner["principal_id"].startswith("principal:scheduler:assistant:daily:")
     assert app.control_plane.read(result.run_id)["status"] == "succeeded"
     user_messages = [message.content for message in provider.requests[0].messages if message.role == "user"]
     assert user_messages[-1] == "Fire directly"

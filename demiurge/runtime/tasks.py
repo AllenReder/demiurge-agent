@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping
 from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
 from demiurge.runtime.durable_work import DurableClaim
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeQuery
 from demiurge.util import utc_id
 
@@ -55,6 +56,7 @@ class RuntimeTaskRecord:
     result_ref: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     notify_on_complete: bool = True
+    origin_scope_record: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     task: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -97,6 +99,7 @@ class RuntimeTaskCompletionEvent:
     log_tail: tuple[str, ...] = ()
     result_ref: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    origin_scope_record: Mapping[str, Any] | None = field(default=None, repr=False, compare=False)
 
     def to_inbound_text(self) -> str:
         lines = [
@@ -136,7 +139,7 @@ class RuntimeTaskCompletionEvent:
         }
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": self.task_id,
             "kind": self.kind,
             "owner_session_id": self.owner_session_id,
@@ -148,6 +151,9 @@ class RuntimeTaskCompletionEvent:
             "result_ref": self.result_ref,
             "metadata": dict(self.metadata),
         }
+        if self.origin_scope_record is not None:
+            payload["origin_scope"] = dict(self.origin_scope_record)
+        return payload
 
     @classmethod
     def from_runtime_event(cls, event: Mapping[str, Any]) -> "RuntimeTaskCompletionEvent":
@@ -164,6 +170,11 @@ class RuntimeTaskCompletionEvent:
             log_tail=tuple(str(line) for line in payload.get("log_tail") or ()),
             result_ref=payload.get("result_ref"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+            origin_scope_record=(
+                payload.get("origin_scope")
+                if isinstance(payload.get("origin_scope"), Mapping)
+                else None
+            ),
         )
 
 
@@ -213,7 +224,26 @@ class RuntimeTaskWorker:
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
         self._completion_consumers: dict[str, int] = {}
+        self._turn_principal_scopes: dict[tuple[str, str], PrincipalScope] = {}
         self.host_work = host_work or HostWorkLifecycleRuntime(store=control_plane.store)
+
+    def bind_turn_scope(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        scope: PrincipalScope,
+    ) -> None:
+        PrincipalScopeResolver(self.control_plane.store).validate_owned(scope)
+        if scope.session_id != session_id:
+            raise PermissionError("PrincipalScope does not match bound turn session")
+        self._turn_principal_scopes[(session_id, turn_id)] = scope
+
+    def release_turn_scope(self, *, session_id: str, turn_id: str) -> None:
+        self._turn_principal_scopes.pop((session_id, turn_id), None)
+
+    def scope_for_turn(self, *, session_id: str, turn_id: str) -> PrincipalScope | None:
+        return self._turn_principal_scopes.get((session_id, turn_id))
 
     def start_task(
         self,
@@ -231,6 +261,18 @@ class RuntimeTaskWorker:
         task_kind = self._validate_background_kind(kind)
         normalized_scope = self._normalize_scope(write_scope)
         self._ensure_scope_available(normalized_scope)
+        principal_scope = self.scope_for_turn(
+            session_id=owner_session_id,
+            turn_id=owner_turn_id,
+        )
+        origin_scope_record = None
+        if principal_scope is not None:
+            origin_scope_record = PrincipalScopeResolver(
+                self.control_plane.store
+            ).capture_origin_record(
+                scope=principal_scope,
+                owner_session_id=owner_session_id,
+            )
         record = RuntimeTaskRecord(
             task_id=task_id or utc_id("task_"),
             kind=task_kind,
@@ -241,6 +283,7 @@ class RuntimeTaskWorker:
             status="queued",
             metadata=dict(metadata or {}),
             notify_on_complete=notify_on_complete,
+            origin_scope_record=origin_scope_record,
         )
         self._submit_runtime_task(record)
         record.task = asyncio.create_task(self._run_record(record, task_factory), context=contextvars.Context())
@@ -497,6 +540,7 @@ class RuntimeTaskWorker:
             "source_tool": record.source_tool,
             "write_scope": record.write_scope,
             "metadata": dict(record.metadata),
+            "origin_scope": dict(record.origin_scope_record) if record.origin_scope_record else None,
         }
         self.control_plane.submit_task(
             TaskSpec(
@@ -596,6 +640,7 @@ class RuntimeTaskWorker:
             log_tail=tuple(record.log_tail),
             result_ref=record.result_ref,
             metadata=dict(record.metadata),
+            origin_scope_record=record.origin_scope_record,
         )
         row = self.control_plane.emit_completion_ready(
             event_id=event.event_id,
@@ -705,6 +750,11 @@ class RuntimeTaskWorker:
         submitted = next((event for event in events if event.get("type") == "task.submitted"), {})
         submitted_payload = submitted.get("payload") if isinstance(submitted.get("payload"), Mapping) else {}
         action = submitted_payload.get("action") if isinstance(submitted_payload.get("action"), Mapping) else {}
+        origin_scope_record = (
+            action.get("origin_scope")
+            if isinstance(action.get("origin_scope"), Mapping)
+            else None
+        )
         source = task_row.get("source") if isinstance(task_row.get("source"), Mapping) else {}
         source_metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
         metadata: dict[str, Any] = {}
@@ -737,6 +787,7 @@ class RuntimeTaskWorker:
             result_ref=task_row.get("result_ref"),
             metadata=metadata,
             notify_on_complete=str(task_row.get("notify_policy") or "") != "silent",
+            origin_scope_record=dict(origin_scope_record) if origin_scope_record is not None else None,
             task=task,
         )
 

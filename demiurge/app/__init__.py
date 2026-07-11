@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from weakref import WeakValueDictionary
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
@@ -22,6 +23,11 @@ from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInteractionRouter
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.scope import (
+    PrincipalScopeResolver,
+    _activate_operator_authority,
+    _deactivate_operator_authority,
+)
 from demiurge.runtime.store import RuntimeStore
 from demiurge.providers import Provider, ProviderFactoryConfig, create_provider_from_config
 from demiurge.providers.profiles import (
@@ -32,7 +38,7 @@ from demiurge.providers.profiles import (
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
-from demiurge.util import default_home, ensure_dir
+from demiurge.util import default_home, ensure_dir, utc_id
 from demiurge.security.workspace import WorkspaceScope
 
 
@@ -283,7 +289,14 @@ class ResolvedProviderConfig:
     runtime_profile: ProviderRuntimeProfile | None = None
 
 
-@dataclass(slots=True)
+_ACTIVE_APP_LIFECYCLES: WeakValueDictionary[int, Any] = WeakValueDictionary()
+
+
+def _is_active_app_lifecycle(host: Any) -> bool:
+    return _ACTIVE_APP_LIFECYCLES.get(id(host)) is host and not host._closed
+
+
+@dataclass(slots=True, weakref_slot=True)
 class DemiurgeApp:
     home: Path
     project_root: Path
@@ -326,6 +339,8 @@ class DemiurgeApp:
     runtime_recovery_summary: dict[str, int]
     host_config_path: Path
     fallback_config_path: Path
+    _operator_authority: object | None
+    _closed: bool
 
     @property
     def agents_root(self) -> Path:
@@ -341,7 +356,17 @@ class DemiurgeApp:
         return self.core_loader.load(self.version_store.active_core_path(self.runner.core_id))
 
     async def close(self) -> None:
-        await self.tool_runtime.close()
+        try:
+            await self.tool_runtime.close()
+        finally:
+            _deactivate_operator_authority(
+                self.runtime_store,
+                self,
+                self._operator_authority,
+            )
+            self._operator_authority = None
+            self._closed = True
+            _ACTIVE_APP_LIFECYCLES.pop(id(self), None)
 
     def status(self) -> dict[str, object]:
         pointer = self.version_store.active_pointer(self.runner.core_id)
@@ -683,6 +708,7 @@ def create_app(
         ),
     )
     tool_runtime.evolution_runtime = evolution_runtime
+    runner_session_id = session_id or utc_id("session_")
     runner = SessionTurnStepRunner(
         home=home,
         version_store=version_store,
@@ -690,7 +716,7 @@ def create_app(
         provider=provider,
         tool_runtime=tool_runtime,
         core_id=resolved_core_id,
-        session_id=session_id,
+        session_id=runner_session_id,
         model_override=model,
         model_resolver=lambda core_model: resolve_model_name(core_model, fallback.model, override=model)[0],
         provider_name=resolved_provider_name,
@@ -703,9 +729,11 @@ def create_app(
         prepare_live_core=lambda: version_store.core_repository.prepare_live_for_edit_async(
             validate=lambda agents_root, changed_paths: gate_runner.run(agents_root, changed_paths=changed_paths)
         ),
+        principal_scope=None,
+        initialize_session=False,
     )
     runtime_recovery_summary = runner.delivery_runtime.recover()
-    return DemiurgeApp(
+    app = DemiurgeApp(
         home=home,
         project_root=project_root,
         version_store=version_store,
@@ -747,7 +775,26 @@ def create_app(
         runtime_recovery_summary=runtime_recovery_summary,
         host_config_path=host_config_path,
         fallback_config_path=version_store.fallback_config_path,
+        _operator_authority=None,
+        _closed=False,
     )
+    _ACTIVE_APP_LIFECYCLES[id(app)] = app
+    operator_authority = _activate_operator_authority(runtime_store, app)
+    app._operator_authority = operator_authority
+    try:
+        runner.principal_scope = PrincipalScopeResolver(runtime_store).local_operator(
+            active_session_id=runner_session_id,
+            reason="bootstrap local operator runner",
+            allow_unowned_active=True,
+        )
+        runner._ensure_current_session()
+    except Exception:
+        _deactivate_operator_authority(runtime_store, app, operator_authority)
+        app._operator_authority = None
+        app._closed = True
+        _ACTIVE_APP_LIFECYCLES.pop(id(app), None)
+        raise
+    return app
 
 
 def init_runtime(

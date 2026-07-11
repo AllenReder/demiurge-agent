@@ -485,6 +485,7 @@ class TelegramInteractionBridge:
                 channel=inbound.channel,
                 text=inbound.text,
                 source=inbound.source,
+                principal_key=inbound.principal_key,
                 reply_to=inbound.reply_to,
                 conversation_key=inbound.conversation_key,
                 metadata=metadata,
@@ -521,6 +522,7 @@ class TelegramInteractionBridge:
             channel=inbound.channel,
             text=inbound.text,
             source=inbound.source,
+            principal_key=inbound.principal_key,
             reply_to=inbound.reply_to,
             conversation_key=inbound.conversation_key,
             metadata=metadata,
@@ -664,6 +666,12 @@ class TelegramInteractionBridge:
         )
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
+        if not inbound.principal_key:
+            inbound.principal_key = inbound.conversation_key or build_conversation_key(
+                "telegram",
+                "source",
+                inbound.source,
+            )
         state = self._conversation_state(inbound.conversation_key or build_conversation_key("telegram", "dm", inbound.source))
         self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_telegram_command(inbound, state)

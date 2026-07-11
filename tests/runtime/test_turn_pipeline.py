@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +10,11 @@ import pytest
 
 from demiurge.providers import LLMMessage
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionItem, SessionRouteBinding
+from demiurge.runtime.control import RuntimeControlPlane
+from demiurge.runtime.scope import AuthorityKind, PrincipalScopeResolver
+from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.store import RuntimeStore
+from demiurge.runtime.tasks import RuntimeTaskWorker
 from demiurge.runtime.slots import InputPipelineResult
 from demiurge.runtime.turn import TurnEngineRequest, TurnEngineResult
 from demiurge.runtime.turn_lifecycle import TurnLifecycle, TurnLifecycleCompletion, TurnLifecycleRequest
@@ -17,6 +24,7 @@ from demiurge.runtime.turn_pipeline import (
     TurnPipelineRequest,
     TurnPipelineRuntime,
 )
+from tests.runtime.operator_authority_support import activate_test_operator_authority
 from demiurge.sdk import AgentInput, ContextContribution, InputEnvelope, TurnContext
 
 
@@ -74,15 +82,63 @@ class _FakeTurnRuntimeHost:
         self.interrupts: list[dict[str, str]] = []
         self.display_turns: list[dict[str, Any]] = []
         self.history_refreshed = False
+        self._scope_home = tempfile.TemporaryDirectory()
+        self.scope_resolver = PrincipalScopeResolver(
+            RuntimeStore(Path(self._scope_home.name) / "runtime.sqlite3")
+        )
+        activate_test_operator_authority(self.scope_resolver.store)
+        bootstrap_scope = self.scope_resolver.local_operator(
+            active_session_id=self.session_id,
+            reason="bootstrap test turn host",
+            allow_unowned_active=True,
+        )
+        SessionRuntime(
+            control_plane=RuntimeControlPlane(self.scope_resolver.store)
+        ).create_session(
+            session_id=self.session_id,
+            core_id="assistant",
+            core_revision="rev_1",
+            principal_scope=bootstrap_scope,
+        )
+        self.task_worker = RuntimeTaskWorker(
+            control_plane=RuntimeControlPlane(self.scope_resolver.store)
+        )
+        self.start_background_task = False
+        self.background_task_id: str | None = None
 
     async def load_core(self, core_path):
         return self.core
 
+    def bind_principal_scope(self, scope):
+        self.task_worker.bind_turn_scope(
+            session_id=scope.session_id,
+            turn_id=scope.lifecycle.turn_id,
+            scope=scope.principal_scope,
+        )
+
+    def release_principal_scope(self, scope):
+        self.task_worker.release_turn_scope(
+            session_id=scope.session_id,
+            turn_id=scope.lifecycle.turn_id,
+        )
+
     def interaction_metadata(self, interaction):
         return {"channel": interaction.channel} if interaction is not None else {"timezone": "UTC"}
 
-    def resolve_session_for_interaction(self, core, interaction_metadata):
+    def resolve_session_for_interaction(self, core, interaction, interaction_metadata):
         self.resolved_session = (core.core_id, dict(interaction_metadata))
+        if interaction is None:
+            return self.scope_resolver.local_operator(
+                active_session_id=self.session_id,
+                reason="test turn admission operator",
+                allow_unowned_active=True,
+            )
+        return self.scope_resolver.issue_conversation(
+            channel=interaction.channel,
+            principal_key=interaction.principal_key or interaction.source,
+            conversation_key=interaction.conversation_key or f"{interaction.channel}:source:{interaction.source}",
+            session_id=self.session_id,
+        )
 
     def bind_route(self, route_binding, *, session_id: str):
         self.bound_route = route_binding
@@ -174,6 +230,18 @@ class _FakeTurnRuntimeHost:
         self.engine_requests.append(request)
         if self.engine_error is not None:
             raise self.engine_error
+        if self.start_background_task:
+            async def task(ctx):
+                return "done"
+
+            record = self.task_worker.start_task(
+                kind="terminal.exec",
+                owner_session_id=request.turn.session_id,
+                owner_turn_id=request.turn.turn_id,
+                source_tool="test",
+                task_factory=task,
+            )
+            self.background_task_id = record.task_id
         return self.engine_result
 
     def result_client(self, *, writable: bool, session_id: str | None = None):
@@ -229,6 +297,7 @@ async def test_turn_admission_runtime_resolves_session_bootstrap_and_begin_scope
     )
 
     assert scope.session_id == "session_1"
+    assert scope.principal_scope.authority is AuthorityKind.CONVERSATION
     assert scope.core is host.core
     assert scope.core_revision == "rev_1"
     assert scope.interaction_metadata == {"channel": "telegram"}
@@ -337,6 +406,30 @@ async def test_turn_pipeline_runs_full_host_lifecycle():
     assert host.output_requests[0].current_output == "model answer"
     assert host.result_client_session_ids == ["session_1"]
     assert host.completed is not None
+
+
+@pytest.mark.asyncio
+async def test_turn_pipeline_captures_admitted_scope_for_background_completion():
+    host = _FakeTurnRuntimeHost()
+    host.start_background_task = True
+
+    await _runtime(host).run(TurnPipelineRequest(text="hello"))
+    assert host.background_task_id is not None
+    await host.task_worker.wait(host.background_task_id, timeout_seconds=1)
+    event = next(
+        item
+        for item in host.task_worker.pending_events_for_session(host.session_id)
+        if item.task_id == host.background_task_id
+    )
+
+    assert event.origin_scope_record is not None
+    assert event.origin_scope_record["authority"] == "operator"
+    assert event.origin_scope_record["session_id"] == host.session_id
+    assert event.origin_scope_record["allowed_session_ids"] == [host.session_id]
+    assert host.task_worker.scope_for_turn(
+        session_id=host.session_id,
+        turn_id="turn_1",
+    ) is None
     assert host.completed.agent_result == {"ok": True}
     assert host.history_refreshed is True
     assert host.display_turns == [
@@ -356,6 +449,7 @@ async def test_turn_pipeline_interrupts_failed_engine_turn():
     assert host.interrupts == [
         {"turn_id": "turn_1", "status": "failed", "error": "sanitized: RuntimeError: boom noisy"}
     ]
+    assert host.task_worker.scope_for_turn(session_id="session_1", turn_id="turn_1") is None
 
     host.engine_error = None
     recovered = await runtime.run(TurnPipelineRequest(text="retry"))
@@ -377,6 +471,7 @@ async def test_turn_pipeline_interrupts_prepare_failure_and_releases_admission()
             "error": "sanitized: RuntimeError: prepare failed",
         }
     ]
+    assert host.task_worker.scope_for_turn(session_id="session_1", turn_id="turn_1") is None
 
     host.prepare_error = None
     recovered = await runtime.run(TurnPipelineRequest(text="retry"))

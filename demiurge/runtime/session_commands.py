@@ -92,6 +92,7 @@ async def start_bound_session(
     *,
     channel: str,
     conversation_key: str | None = None,
+    principal_key: str | None = None,
     source: str | None = None,
     reply_to: str | None = None,
     replace_conversation_binding: bool = False,
@@ -99,12 +100,17 @@ async def start_bound_session(
     if not hasattr(runner, "start_new_session"):
         return SessionSwitchResult(message="Session reset is not available.")
     await runner.prepare_live_core()
+    kwargs = {
+        "channel": channel,
+        "conversation_key": conversation_key,
+        "source": source,
+        "reply_to": reply_to,
+        "replace_conversation_binding": replace_conversation_binding,
+    }
+    if principal_key is not None:
+        kwargs["principal_key"] = principal_key
     session_id = runner.start_new_session(
-        channel=channel,
-        conversation_key=conversation_key,
-        source=source,
-        reply_to=reply_to,
-        replace_conversation_binding=replace_conversation_binding,
+        **kwargs,
     )
     route_binding.bind(runner.interaction_router, session_id)
     return SessionSwitchResult(session_id=session_id)
@@ -117,18 +123,24 @@ def resume_bound_session(
     *,
     channel: str | None = None,
     conversation_key: str | None = None,
+    principal_key: str | None = None,
     source: str | None = None,
     reply_to: str | None = None,
     replace_conversation_binding: bool = False,
 ) -> SessionSwitchResult:
     try:
+        kwargs = {
+            "channel": channel,
+            "conversation_key": conversation_key,
+            "source": source,
+            "reply_to": reply_to,
+            "replace_conversation_binding": replace_conversation_binding,
+        }
+        if principal_key is not None:
+            kwargs["principal_key"] = principal_key
         runner.resume_session(
             session_id,
-            channel=channel,
-            conversation_key=conversation_key,
-            source=source,
-            reply_to=reply_to,
-            replace_conversation_binding=replace_conversation_binding,
+            **kwargs,
         )
     except FileNotFoundError as exc:
         return SessionSwitchResult(message=str(exc))

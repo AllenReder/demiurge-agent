@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.tasks import RuntimeTaskCompletionEvent, RuntimeTaskWorker
 
 
@@ -14,6 +15,7 @@ BACKGROUND_COMPLETION_TRIGGER = "background_task"
 class CompletionRoute:
     channel: str
     source: str
+    principal_key: str | None = None
     reply_to: str | None = None
     conversation_key: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -31,17 +33,23 @@ class CompletionInbox:
         *,
         route: CompletionRoute,
         claim_id: str | None = None,
+        principal_scope: PrincipalScope | None = None,
     ) -> InteractionInbound:
         event_metadata = event.to_metadata()
         if claim_id is not None:
             event_metadata["completion_claim_id"] = claim_id
         return InteractionInbound(
-            channel=route.channel,
+            channel=(principal_scope.channel if principal_scope is not None else None) or route.channel,
             text=event.to_inbound_text(),
             source=route.source,
+            principal_key=None if principal_scope is not None else route.principal_key,
             reply_to=route.reply_to,
-            conversation_key=route.conversation_key,
+            conversation_key=(
+                principal_scope.conversation_key if principal_scope is not None else None
+            )
+            or route.conversation_key,
             metadata={**dict(route.metadata or {}), **event_metadata},
+            principal_scope=principal_scope,
         )
 
     def claim_event(
@@ -51,10 +59,16 @@ class CompletionInbox:
         owner_id: str,
         route: CompletionRoute,
     ) -> InteractionInbound | None:
+        principal_scope = self._scope_for_event(event)
         claim = self.task_worker.claim_pending_event(event.event_id, owner_id=owner_id)
         if claim is None:
             return None
-        return self.inbound_for_event(event, route=route, claim_id=claim.claim_id)
+        return self.inbound_for_event(
+            event,
+            route=route,
+            claim_id=claim.claim_id,
+            principal_scope=principal_scope,
+        )
 
     def claim_pending_for_session(
         self,
@@ -76,6 +90,25 @@ class CompletionInbox:
             if self.task_worker.ack_pending_event_id(event_id, claim_id=claim_id):
                 acknowledged += 1
         return acknowledged
+
+    def _scope_for_event(self, event: RuntimeTaskCompletionEvent) -> PrincipalScope | None:
+        record = event.origin_scope_record
+        control_plane = getattr(self.task_worker, "control_plane", None)
+        if record is None:
+            if control_plane is not None:
+                raise PermissionError(
+                    "background completion has no persisted origin PrincipalScope"
+                )
+            return None
+        if control_plane is None:
+            raise RuntimeError("scoped completion requires a durable RuntimeTaskWorker")
+        scope = PrincipalScopeResolver(control_plane.store).background_completion(
+            origin_record=dict(record),
+            owner_session_id=event.owner_session_id,
+        )
+        if scope.session_id != event.owner_session_id:
+            raise PermissionError("background completion scope does not match owner session")
+        return scope
 
 
 def is_background_completion(inbound: InteractionInbound) -> bool:
@@ -106,10 +139,12 @@ def merge_completion_inbounds(user_inbound: InteractionInbound, completions: lis
         channel=user_inbound.channel,
         text=text,
         source=user_inbound.source,
+        principal_key=user_inbound.principal_key,
         reply_to=user_inbound.reply_to,
         conversation_key=user_inbound.conversation_key,
         metadata=metadata,
         attachments=list(user_inbound.attachments),
+        principal_scope=user_inbound.principal_scope,
     )
 
 

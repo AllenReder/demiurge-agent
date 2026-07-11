@@ -8,6 +8,7 @@ from typing import Any, Mapping, Protocol
 from demiurge.core import LoadedCore, SlotDefinition
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.tasks import (
     RuntimeTaskConflictError,
     RuntimeTaskContext,
@@ -49,6 +50,8 @@ class ChildAgentRunRequest:
     use_bootstrap: bool = False
     tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS
     session_id: str | None = None
+    delegation_id: str | None = None
+    parent_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -65,6 +68,7 @@ class ChildAgentSpawnRequest:
     notify_on_complete: bool = True
     session_id: str | None = None
     resolved_child_tools: "ResolvedChildAgentTools | None" = None
+    parent_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -122,9 +126,17 @@ class ChildAgentHost(Protocol):
     def resolve_model_name(self, core: LoadedCore) -> str:
         ...
 
-    def create_child_runner(self, *, core_id: str, session_id: str) -> Any:
+    def create_child_runner(
+        self,
+        *,
+        core_id: str,
+        session_id: str,
+        principal_scope: PrincipalScope,
+    ) -> Any:
         ...
 
+    def principal_scope_for_turn(self, turn: TurnContext) -> PrincipalScope | None:
+        ...
 
 class RunnerChildAgentHost:
     """Adapter from SessionTurnStepRunner to ChildAgentHost."""
@@ -165,7 +177,13 @@ class RunnerChildAgentHost:
     def resolve_model_name(self, core: LoadedCore) -> str:
         return self.runner._resolve_model_name(core)
 
-    def create_child_runner(self, *, core_id: str, session_id: str) -> Any:
+    def create_child_runner(
+        self,
+        *,
+        core_id: str,
+        session_id: str,
+        principal_scope: PrincipalScope,
+    ) -> Any:
         return self.runner.__class__(
             home=self.runner.home,
             version_store=self.runner.version_store,
@@ -185,8 +203,14 @@ class RunnerChildAgentHost:
             slot_runtime=self.runner.slot_runtime,
             interaction_router=self.runner.interaction_router,
             prepare_live_core=self.runner.prepare_live_core_callback,
+            principal_scope=principal_scope,
         )
 
+    def principal_scope_for_turn(self, turn: TurnContext) -> PrincipalScope | None:
+        return self.runner.task_worker.scope_for_turn(
+            session_id=turn.session_id,
+            turn_id=turn.turn_id,
+        )
 
 class ChildAgentRuntime:
     """Runs and spawns child agents behind a dedicated child lifecycle interface."""
@@ -404,7 +428,26 @@ class ChildAgentRuntime:
 
     async def run_child(self, request: ChildAgentRunRequest) -> AgentRunResult:
         child_session_id = request.session_id or utc_id("session_child_")
-        child_runner = self.host.create_child_runner(core_id=request.core_id, session_id=child_session_id)
+        parent_scope = request.parent_scope or self.host.principal_scope_for_turn(
+            request.parent_turn
+        )
+        if parent_scope is None:
+            raise RuntimeError("child agent requires the admitted parent PrincipalScope")
+        if parent_scope.session_id != request.parent_turn.session_id:
+            raise PermissionError("parent PrincipalScope does not match parent turn session")
+        child_scope = PrincipalScopeResolver(
+            self.host.session_runtime.store
+        ).delegated_agent(
+            parent=parent_scope,
+            task_id=request.delegation_id or child_session_id,
+            parent_turn_id=request.parent_turn.turn_id,
+            child_session_id=child_session_id,
+        )
+        child_runner = self.host.create_child_runner(
+            core_id=request.core_id,
+            session_id=child_session_id,
+            principal_scope=child_scope,
+        )
         await child_runner.prepare_live_core()
         child_core_path = self.host.version_store.active_core_path(request.core_id)
         child_core = self.host.core_loader.load(child_core_path)
@@ -488,6 +531,13 @@ class ChildAgentRuntime:
         )
 
     def spawn_child(self, request: ChildAgentSpawnRequest) -> AgentSpawnHandle:
+        parent_scope = request.parent_scope or self.host.principal_scope_for_turn(
+            request.parent_turn
+        )
+        if parent_scope is None:
+            raise RuntimeError("child agent spawn requires the admitted parent PrincipalScope")
+        if parent_scope.session_id != request.parent_turn.session_id:
+            raise PermissionError("parent PrincipalScope does not match parent turn session")
         self.resolve_slots_for_core_id(
             request.core_id,
             input_slots=request.input_slots,
@@ -537,6 +587,8 @@ class ChildAgentRuntime:
                         use_bootstrap=request.use_bootstrap,
                         tools=request.tools,
                         session_id=session_id,
+                        delegation_id=ctx.task_id,
+                        parent_scope=parent_scope,
                     )
                 )
                 child_slot_metadata = result.metadata.get("child_agent_slots")

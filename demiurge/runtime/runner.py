@@ -26,6 +26,7 @@ from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRuntime, PromptDebugRequest
+from demiurge.runtime.scope import AuthorityKind, PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.session_compaction import CompactionResult, SessionCompactionRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
@@ -89,6 +90,8 @@ class SessionTurnStepRunner:
         turn_engine: TurnEngine | None = None,
         interaction_router: SessionInteractionRouter | None = None,
         prepare_live_core: Callable[[], Awaitable[Any]] | None = None,
+        principal_scope: PrincipalScope | None = None,
+        initialize_session: bool = True,
     ):
         self.home = home
         self.version_store = version_store
@@ -97,6 +100,7 @@ class SessionTurnStepRunner:
         self.tool_runtime = tool_runtime
         self.core_id = core_id
         self.session_id = session_id or utc_id("session_")
+        self.principal_scope = principal_scope
         self._turn_session_ids: dict[str, str] = {}
         self.model_override = model_override
         self.model_resolver = model_resolver
@@ -187,7 +191,8 @@ class SessionTurnStepRunner:
             admission=TurnAdmissionRuntime(RunnerTurnAdmissionHost(self)),
             persistence=TurnPersistenceRuntime(RunnerTurnPersistenceHost(self)),
         )
-        self._ensure_current_session()
+        if initialize_session:
+            self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         session_id = self._event_session_id(payload)
@@ -330,11 +335,29 @@ class SessionTurnStepRunner:
         *,
         channel: str | None = None,
         conversation_key: str | None = None,
+        principal_key: str | None = None,
         source: str | None = None,
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> str:
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
+        new_scope: PrincipalScope | None = None
+        resolver = PrincipalScopeResolver(self.session_runtime.store)
+        if channel and conversation_key and channel != "tui":
+            new_session_id = utc_id("session_")
+            new_scope = resolver.issue_conversation(
+                channel=channel,
+                principal_key=principal_key or conversation_key,
+                conversation_key=conversation_key,
+                session_id=new_session_id,
+            )
+        elif self.principal_scope is not None and self.principal_scope.authority is AuthorityKind.OPERATOR:
+            new_session_id = utc_id("session_")
+            new_scope = resolver.local_operator(
+                active_session_id=new_session_id,
+                reason="start new local operator session",
+                allow_unowned_active=True,
+            )
         record = self.session_routes.start_new(
             self._session_core_binding(core),
             channel=channel,
@@ -342,7 +365,10 @@ class SessionTurnStepRunner:
             source=source,
             reply_to=reply_to,
             replace_conversation_binding=replace_conversation_binding,
+            principal_scope=new_scope,
         )
+        if new_scope is not None and new_scope.authority is AuthorityKind.OPERATOR:
+            self.principal_scope = new_scope
         return record.session_id
 
     def resume_session(
@@ -351,10 +377,28 @@ class SessionTurnStepRunner:
         *,
         channel: str | None = None,
         conversation_key: str | None = None,
+        principal_key: str | None = None,
         source: str | None = None,
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> None:
+        resolver = PrincipalScopeResolver(self.session_runtime.store)
+        if self.principal_scope is not None and self.principal_scope.authority is AuthorityKind.OPERATOR:
+            resume_scope = resolver.local_operator(
+                active_session_id=self.session_id,
+                reason=f"resume operator session {session_id}",
+            )
+        elif channel and conversation_key:
+            resume_scope = resolver.conversation(
+                channel=channel,
+                principal_key=principal_key or conversation_key,
+                conversation_key=conversation_key,
+                session_id=session_id,
+            )
+        elif self.principal_scope is not None:
+            resume_scope = self.principal_scope
+        else:
+            resume_scope = resolver.origin_scope(session_id=self.session_id)
         self.session_routes.resume(
             session_id,
             channel=channel,
@@ -362,6 +406,7 @@ class SessionTurnStepRunner:
             source=source,
             reply_to=reply_to,
             replace_conversation_binding=replace_conversation_binding,
+            principal_scope=resume_scope,
         )
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
@@ -369,7 +414,10 @@ class SessionTurnStepRunner:
 
     def _ensure_current_session(self) -> None:
         core = self.core_loader.load(self.initial_core_path or self.version_store.active_core_path(self.core_id))
-        self.session_routes.ensure_current(self._session_core_binding(core))
+        self.session_routes.ensure_current(
+            self._session_core_binding(core),
+            principal_scope=self.principal_scope,
+        )
 
     def _activate_session(self, session_id: str) -> None:
         if not self.sessions.exists(session_id):

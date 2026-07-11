@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
 from demiurge.providers import ToolCall
@@ -10,16 +10,21 @@ from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
+if TYPE_CHECKING:
+    from demiurge.runtime.scope import PrincipalScope
+
 
 @dataclass(slots=True)
 class InteractionInbound:
     channel: str
     text: str
     source: str
+    principal_key: str | None = None
     reply_to: str | None = None
     conversation_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     attachments: list[Any] = field(default_factory=list)
+    principal_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)

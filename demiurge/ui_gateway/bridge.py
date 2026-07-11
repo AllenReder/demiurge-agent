@@ -773,7 +773,13 @@ class OperatorGatewayRuntime:
         await self._emit_status()
 
     async def _new(self, _: str) -> bool:
-        result = await start_bound_session(self.app.runner, self._route_binding, channel="tui", source="local")
+        result = await start_bound_session(
+            self.app.runner,
+            self._route_binding,
+            channel="tui",
+            principal_key="local-operator",
+            source="local",
+        )
         if not result.ok:
             await self._emit_notice(result.message, level="error")
             return True
@@ -899,6 +905,7 @@ class OperatorGatewayRuntime:
             channel="tui",
             text=text,
             source="local",
+            principal_key="local-operator",
             reply_to=None,
             conversation_key=self._conversation_key(),
         )

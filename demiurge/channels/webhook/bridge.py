@@ -54,13 +54,25 @@ class WebhookInteractionBridge(TextChannelBridgeBase):
             return {"status": 400, "body": {"error": "webhook body must be an object"}}
         if not self._authorized(headers, body):
             return {"status": 401, "body": {"error": "unauthorized"}}
-        inbound = self.normalize_request(body, headers=headers, client=request.get("client"))
+        inbound = self.normalize_request(
+            body,
+            headers=headers,
+            client=request.get("client"),
+            principal_key=self._request_principal_key(request.get("client")),
+        )
         if inbound is None:
             return {"status": 400, "body": {"error": "webhook text is required"}}
         await self.handle_inbound(inbound)
         return {"status": 202, "body": {"ok": True, "conversation_key": inbound.conversation_key}}
 
-    def normalize_request(self, body: dict[str, Any], *, headers: dict[str, str] | None = None, client: str | None = None) -> InteractionInbound | None:
+    def normalize_request(
+        self,
+        body: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+        client: str | None = None,
+        principal_key: str | None = None,
+    ) -> InteractionInbound | None:
         text = str(body.get("text") or body.get("prompt") or "").strip()
         if not text:
             return None
@@ -87,10 +99,16 @@ class WebhookInteractionBridge(TextChannelBridgeBase):
             channel="webhook",
             text=text,
             source=source,
+            principal_key=principal_key or self._request_principal_key(client),
             reply_to=str(reply_to) if reply_to is not None else None,
             conversation_key=conversation_key,
             metadata=metadata,
         )
+
+    def _request_principal_key(self, client: str | None) -> str:
+        if not self.config.allow_unauthenticated:
+            return "configured-token"
+        return f"client:{client or 'unknown'}"
 
     async def _send_text(
         self,

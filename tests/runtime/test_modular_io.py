@@ -12,6 +12,8 @@ from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.child_agents import ChildAgentRunRequest
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityDenied
 from demiurge.sdk import AgentInput, OutputContext, TurnContext
@@ -1520,6 +1522,9 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
             parent_slot_path="test",
             context=[],
             session_id=child_session_id,
+            parent_scope=PrincipalScopeResolver(app.runtime_store).admit(
+                app.runner.principal_scope
+            ),
         )
     )
 
@@ -1527,6 +1532,16 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
     assert child_texts == ["child"]
     assert result.session_id == child_session_id
     assert result.content == "child"
+    owner = app.runtime_store.query(
+        RuntimeQuery(
+            table="session_owners",
+            where={"session_id": child_session_id},
+            limit=1,
+        )
+    ).rows[0]
+    assert owner["owner_kind"] == "delegated_agent"
+    assert owner["origin_session_id"] == parent_turn.session_id
+    assert owner["origin_turn_id"] == parent_turn.turn_id
 
 
 @pytest.mark.asyncio

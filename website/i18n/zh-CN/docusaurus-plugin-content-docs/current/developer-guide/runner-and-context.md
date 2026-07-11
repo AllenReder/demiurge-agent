@@ -59,17 +59,39 @@ capability facade。
 active turn，不同 session 仍可并发。Admission 会在 bootstrap 前捕获解析出的 session；
 prompt、IO、slot history/result、event、artifact 与 delivery hot path 在 await 后使用该
 captured session 或不可变的 `TurnContext.session_id`。Cancellation 与 failure 会在
-`finally` 中释放 admission lock。
+`finally` 中释放 admission lock。Admission 现在还会在 bootstrap 前解析 frozen
+`PrincipalScope`：external conversation 必须匹配 durable `session_owners` projection，
+TUI 使用显式 local-operator authority，schedule 使用 run-scoped system authority，child
+agent 只拥有 delegated child session。该 scope 由内部 `TurnExecutionScope` 携带，不会加入
+authored `TurnContext` SDK。Background task 会在 detached task 启动前捕获该 admitted
+scope 的单 session 有界记录；completion intake 在 claim event 前通过 durable owner
+恢复并校验该记录，route metadata 不能提升 authority，内部 scope record 也不会进入
+model-facing metadata。Child spawn closure 同样捕获 admitted parent scope，不会从
+legacy session row 重新构造 authority。
 
 这仍不是最终的 durable `TurnExecution` contract。Admission lock 只存在于当前进程，scope
-仍携带 mutable objects，本 task 不实现 restart recovery；principal、core revision、route 与
-cancellation ownership 由后续 TurnExecution/PrincipalScope 工作完成。
+仍携带 mutable objects，本 task 不实现 restart recovery；core revision、route 与
+cancellation ownership 由后续 TurnExecution 工作完成。PrincipalScope consumer 也会逐步
+迁移：store-owned session/message/task predicate 与 same-origin manual resume 已存在，session
+list/search、task control 与 approval-cache enforcement 仍属于后续 DG-P2 task。
 
 ## Principal 与 Execution Context
 
 `PrincipalScope` 是 Host authority，不是 Agent Core capability grant。它由已认证的
 channel/operator/system facts 与持久 conversation/session bindings 派生，并为 session、
 history、task、wait、cancel、resume、search 与 approval-cache 操作提供 owner predicate。
+
+External adapter facts 通过 `InteractionInbound.principal_key` 进入 Host。该字段由 adapter
+在 transport authentication/allowlist 之后设置，与 delivery `source`、任意 metadata 和
+原始 webhook body identifier 分离。只有 key、channel、conversation binding 与 session
+owner 都匹配 durable state 时，conversation scope 才会被接受。
+只有 store-bound resolver 可以签发 scope。Operator issuance 不接受 caller-supplied
+session set；它会绑定单个 active session，要求 active Host 持有的 in-memory operator
+issuer 与显式 reason，并写入 `principal_scope.operator_issued` audit event。跨 session
+operator query 使用 relational `session_owners` predicate，不会物化无界 SQL `IN`
+list。由另一个 store instance 签发的 scope 会在 owned query 与 session persistence
+边界被拒绝。Host close 会在 tool shutdown 失败时也撤销 process-local operator
+capability，因此保留的 scope 无法在 `DemiurgeApp.close()` 后继续授权读取。
 
 `TurnExecutionContext` 把该 principal 绑定到一个 session、turn、core revision、
 capability snapshot、workspace、route token、admission lease、cancellation token 与

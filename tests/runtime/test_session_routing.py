@@ -6,6 +6,7 @@ import pytest
 
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
 from demiurge.runtime.store import RuntimeStore
@@ -57,7 +58,12 @@ def test_metadata_for_interaction_adds_route_and_timezone(tmp_path):
             source="chat_1",
             reply_to="msg_1",
             conversation_key="telegram:dm:chat_1",
-            metadata={"native_message_id": "native_1"},
+            metadata={
+                "native_message_id": "native_1",
+                "principal_id": "forged",
+                "authority": "operator",
+                "allowed_session_ids": ["session_other"],
+            },
         )
     )
 
@@ -66,6 +72,9 @@ def test_metadata_for_interaction_adds_route_and_timezone(tmp_path):
     assert metadata["reply_to"] == "msg_1"
     assert metadata["conversation_key"] == "telegram:dm:chat_1"
     assert metadata["native_message_id"] == "native_1"
+    assert "principal_id" not in metadata
+    assert "authority" not in metadata
+    assert "allowed_session_ids" not in metadata
     assert metadata["runtime_timezone"] == "UTC"
     assert metadata["runtime_timezone_source"] == "test"
     assert metadata["runtime_timezone_explicit"] is True
@@ -82,13 +91,20 @@ def test_ensure_current_creates_and_activates_session(tmp_path):
     assert events == [{"type": "session.created", "core_id": "assistant", "core_revision": "rev_1"}]
 
 
-def test_resolve_for_interaction_binds_current_empty_session(tmp_path):
+def test_resolve_for_interaction_does_not_adopt_legacy_empty_session(tmp_path):
     runtime, sessions, state, _, _ = _routing(tmp_path)
     binding = _binding()
     runtime.ensure_current(binding)
 
-    record = runtime.resolve_for_interaction(
+    scope = runtime.resolve_for_interaction(
         binding,
+        InteractionInbound(
+            channel="telegram",
+            text="hello",
+            source="chat_1",
+            principal_key="telegram:dm:chat_1",
+            conversation_key="telegram:dm:chat_1",
+        ),
         {
             "channel": "telegram",
             "conversation_key": "telegram:dm:chat_1",
@@ -97,8 +113,8 @@ def test_resolve_for_interaction_binds_current_empty_session(tmp_path):
         },
     )
 
-    assert record is not None
-    assert record.session_id == state["session_id"]
+    assert scope.session_id == state["session_id"]
+    assert scope.session_id != "session_current"
     persisted = sessions.get_session(state["session_id"])
     assert persisted.channel == "telegram"
     assert persisted.conversation_key == "telegram:dm:chat_1"
@@ -118,14 +134,27 @@ def test_resolve_for_interaction_switches_to_existing_route_session(tmp_path):
         workspace="/workspace",
         provider="fake",
         model="fake/model",
+        principal_scope=PrincipalScopeResolver(sessions.store).issue_conversation(
+            channel="telegram",
+            principal_key="telegram:dm:chat_1",
+            conversation_key="telegram:dm:chat_1",
+            session_id="session_existing",
+        ),
     )
 
-    record = runtime.resolve_for_interaction(
+    scope = runtime.resolve_for_interaction(
         binding,
+        InteractionInbound(
+            channel="telegram",
+            text="hello",
+            source="chat_1",
+            principal_key="telegram:dm:chat_1",
+            conversation_key="telegram:dm:chat_1",
+        ),
         {"channel": "telegram", "conversation_key": "telegram:dm:chat_1", "source": "chat_1"},
     )
 
-    assert record == existing
+    assert scope.session_id == existing.session_id
     assert state["session_id"] == "session_existing"
     assert activations[-1] == "session_existing"
     assert events[-1] == {
@@ -148,8 +177,16 @@ def test_resolve_for_interaction_creates_new_session_when_current_route_is_busy(
     )
     sessions.append_message(current.session_id, role="user", content="old message")
 
-    record = runtime.resolve_for_interaction(
+    scope = runtime.resolve_for_interaction(
         binding,
+        InteractionInbound(
+            channel="telegram",
+            text="hello",
+            source="chat_new",
+            principal_key="telegram:dm:new",
+            conversation_key="telegram:dm:new",
+            reply_to="msg_new",
+        ),
         {
             "channel": "telegram",
             "conversation_key": "telegram:dm:new",
@@ -158,9 +195,9 @@ def test_resolve_for_interaction_creates_new_session_when_current_route_is_busy(
         },
     )
 
-    assert record is not None
-    assert record.session_id != current.session_id
-    assert state["session_id"] == record.session_id
+    assert scope.session_id != current.session_id
+    assert state["session_id"] == scope.session_id
+    record = sessions.get_session(scope.session_id)
     assert record.channel == "telegram"
     assert record.conversation_key == "telegram:dm:new"
     assert record.metadata == {"source": "chat_new", "reply_to": "msg_new"}

@@ -9,6 +9,7 @@ pytestmark = pytest.mark.slow_integration
 from demiurge.app import create_app, source_agents_root
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.delegation import subagents_command_text
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.slash import specs_for_surface
@@ -52,7 +53,7 @@ class BlockingProvider:
 
 
 def _turn(app, core):
-    return TurnContext(
+    turn = TurnContext(
         session_id=app.runner.session_id,
         turn_id="turn_delegate",
         core_id=core.core_id,
@@ -60,6 +61,13 @@ def _turn(app, core):
         user_input=AgentInput(content="delegate", metadata={}),
         metadata={},
     )
+    scope = PrincipalScopeResolver(app.runtime_store).admit(app.runner.principal_scope)
+    app.task_worker.bind_turn_scope(
+        session_id=turn.session_id,
+        turn_id=turn.turn_id,
+        scope=scope,
+    )
+    return turn
 
 
 def _without_default_capability(core, name: str):

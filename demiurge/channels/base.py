@@ -99,6 +99,12 @@ class TextChannelBridgeBase:
         raise NotImplementedError
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
+        if not inbound.principal_key:
+            inbound.principal_key = inbound.conversation_key or build_conversation_key(
+                self.channel_name,
+                "source",
+                inbound.source,
+            )
         state = self._conversation_state(
             inbound.conversation_key or build_conversation_key(self.channel_name, "source", inbound.source)
         )

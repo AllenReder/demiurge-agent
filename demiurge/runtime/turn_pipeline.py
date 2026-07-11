@@ -9,6 +9,7 @@ from demiurge.core import LoadedCore
 from demiurge.providers import LLMMessage
 from demiurge.runtime.bootstrap import BootstrapSlotRequest
 from demiurge.runtime.interactions import InteractionDelivery, InteractionInbound, InteractionItem, SessionRouteBinding
+from demiurge.runtime.scope import PrincipalScope
 from demiurge.runtime.slot_context import ModuleResultClient, ModuleStateStores
 from demiurge.runtime.slots import InputPipelineRequest, InputPipelineResult, OutputPipelineRequest, ResolvedPhaseSlots
 from demiurge.runtime.turn import TurnEngineRequest, TurnEngineResult
@@ -63,6 +64,7 @@ class TurnPipelineRequest:
 @dataclass(frozen=True, slots=True)
 class TurnExecutionScope:
     session_id: str
+    principal_scope: PrincipalScope
     core: LoadedCore
     core_revision: str
     capability: CapabilityFacade
@@ -92,7 +94,12 @@ class TurnAdmissionHost(Protocol):
     def interaction_metadata(self, interaction: InteractionInbound | None) -> dict[str, Any]:
         ...
 
-    def resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
+    def resolve_session_for_interaction(
+        self,
+        core: LoadedCore,
+        interaction: InteractionInbound | None,
+        interaction_metadata: dict[str, Any],
+    ) -> PrincipalScope:
         ...
 
     def bind_route(self, route_binding: SessionRouteBinding, *, session_id: str) -> None:
@@ -155,6 +162,12 @@ class TurnPersistenceHost(Protocol):
 
 
 class TurnPipelineHost(Protocol):
+    def bind_principal_scope(self, scope: TurnExecutionScope) -> None:
+        ...
+
+    def release_principal_scope(self, scope: TurnExecutionScope) -> None:
+        ...
+
     async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
         ...
 
@@ -199,10 +212,17 @@ class RunnerTurnAdmissionHost:
     def interaction_metadata(self, interaction: InteractionInbound | None) -> dict[str, Any]:
         return self.runner.session_routes.metadata_for(interaction)
 
-    def resolve_session_for_interaction(self, core: LoadedCore, interaction_metadata: dict[str, Any]) -> None:
-        self.runner.session_routes.resolve_for_interaction(
+    def resolve_session_for_interaction(
+        self,
+        core: LoadedCore,
+        interaction: InteractionInbound | None,
+        interaction_metadata: dict[str, Any],
+    ) -> PrincipalScope:
+        return self.runner.session_routes.resolve_for_interaction(
             self.runner._session_core_binding(core),
+            interaction,
             interaction_metadata,
+            fixed_scope=self.runner.principal_scope,
         )
 
     def bind_route(self, route_binding: SessionRouteBinding, *, session_id: str) -> None:
@@ -310,6 +330,19 @@ class RunnerTurnPipelineHost:
     def __init__(self, runner: Any):
         self.runner = runner
 
+    def bind_principal_scope(self, scope: TurnExecutionScope) -> None:
+        self.runner.task_worker.bind_turn_scope(
+            session_id=scope.session_id,
+            turn_id=scope.lifecycle.turn_id,
+            scope=scope.principal_scope,
+        )
+
+    def release_principal_scope(self, scope: TurnExecutionScope) -> None:
+        self.runner.task_worker.release_turn_scope(
+            session_id=scope.session_id,
+            turn_id=scope.lifecycle.turn_id,
+        )
+
     async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
         return await self.runner.slot_pipeline.run_input(request)
 
@@ -346,8 +379,14 @@ class TurnAdmissionRuntime:
     async def admit(self, request: TurnPipelineRequest) -> TurnExecutionScope:
         core = await self.host.load_core(request.core_path)
         interaction_metadata = self.host.interaction_metadata(request.interaction)
-        self.host.resolve_session_for_interaction(core, interaction_metadata)
+        principal_scope = self.host.resolve_session_for_interaction(
+            core,
+            request.interaction,
+            interaction_metadata,
+        )
         session_id = self.host.session_id
+        if principal_scope.session_id != session_id:
+            raise RuntimeError("PrincipalScope session does not match admitted session")
         admission_lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         await admission_lock.acquire()
         try:
@@ -393,6 +432,7 @@ class TurnAdmissionRuntime:
             )
             return TurnExecutionScope(
                 session_id=session_id,
+                principal_scope=principal_scope,
                 core=core,
                 core_revision=core_revision,
                 capability=capability,
@@ -507,7 +547,10 @@ class TurnPipelineRuntime:
     async def run(self, request: TurnPipelineRequest) -> TurnResult:
         self._validate_request(request)
         scope = await self.admission.admit(request)
+        scope_bound = False
         try:
+            self.host.bind_principal_scope(scope)
+            scope_bound = True
             return await self._run_admitted(request, scope)
         except asyncio.CancelledError:
             self.persistence.interrupt_cancelled(scope)
@@ -516,6 +559,8 @@ class TurnPipelineRuntime:
             self.persistence.interrupt_failed(scope, exc)
             raise
         finally:
+            if scope_bound:
+                self.host.release_principal_scope(scope)
             self.admission.release(scope)
 
     async def _run_admitted(self, request: TurnPipelineRequest, scope: TurnExecutionScope) -> TurnResult:
