@@ -79,9 +79,10 @@ effects。
   `evolve_core(action="discard")` 通过 Host-owned evolution runtime 操作该 run id。
   Promotion 只会在 gates 通过后推进 Git refs。每个 action 都会在 dispatch 前解析
   capability 与 approval；action 与 target 进入 approval-cache rule，因此一个 mutation
-  action 不会授权另一个。该 cache 的 principal/session ownership 仍属于后续
-  `PrincipalScope` 工作。`EffectRuntime` 必须在不削弱该顺序的前提下删除剩余 dispatcher
-  duplication。
+  action 不会授权另一个。该 cache 还绑定 admitted principal、session、core revision、
+  capability snapshot、effective policy 与 effect entry；成功 promotion 或 rollback 会使
+  对应 core 的 cached authority 失效。`EffectRuntime` 必须在不削弱该顺序的前提下删除
+  剩余 dispatcher duplication。
 - `ctx.agents.spawn(...)` 由 runner 路由成 `agent.spawn` task。
 - `delegate_task(...)` 由 active runner context 执行，并创建 `agent.spawn` task，child
   output 会作为 parent evidence 返回。两条路径都会在 task metadata 中记录 requested 与

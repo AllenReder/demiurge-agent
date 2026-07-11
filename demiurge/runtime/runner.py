@@ -49,6 +49,7 @@ from demiurge.runtime.turn_pipeline import (
     RunnerTurnPersistenceHost,
     RunnerTurnPipelineHost,
     TurnAdmissionRuntime,
+    TurnExecutionContext,
     TurnPersistenceRuntime,
     TurnRequest,
     TurnExecution,
@@ -341,6 +342,7 @@ class SessionTurnStepRunner:
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> str:
+        previous_session_id = self.session_id
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
         new_scope: PrincipalScope | None = None
         resolver = PrincipalScopeResolver(self.session_runtime.store)
@@ -370,6 +372,10 @@ class SessionTurnStepRunner:
         )
         if new_scope is not None and new_scope.authority is AuthorityKind.OPERATOR:
             self.principal_scope = new_scope
+        if record.session_id != previous_session_id:
+            self.tool_runtime.approval_runtime.invalidate_session(
+                previous_session_id
+            )
         return record.session_id
 
     def resume_session(
@@ -462,6 +468,8 @@ class SessionTurnStepRunner:
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
         emit_event: Callable[..., dict[str, Any]] | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
@@ -472,6 +480,8 @@ class SessionTurnStepRunner:
             core=core,
             turn=turn,
             capability=capability,
+            execution_context=execution_context,
+            principal_scope=principal_scope,
             emit_event=emit_event,
             output_factory=output_factory,
         )
@@ -483,6 +493,7 @@ class SessionTurnStepRunner:
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
     ) -> ToolResult:
         return await self.execute_tool(
@@ -490,6 +501,7 @@ class SessionTurnStepRunner:
             core=core,
             turn=turn,
             capability=capability,
+            execution_context=execution_context,
             emit_event=lambda event_type, **payload: self.emit_turn_event(
                 event_type,
                 **{**payload, "session_id": turn.session_id},

@@ -96,8 +96,10 @@ resolution 绝不会自动提升这些 row；migration 失败时 version 4 datab
 当前 version 4 database 匹配时才会复用现有 backup；valid but stale backup 会停止
 migration。`RuntimeStore.query_owned()` 当前已在 SQL 内为
 session、message 与 task 应用 owner predicate，`SessionRuntime` 也提供 owned get/list
-interface。其余 slash command、model tool、task control 与 approval cache caller 会在后续
-PrincipalScope task 中迁移；当前实现不能被理解为 owner enforcement 已全部完成。
+interface。Approval request 现在从 admitted `TurnExecutionContext` 派生 owner 与
+correlation；非 turn 操作必须提供显式的 Host-issued `PrincipalScope`。其余 slash
+command、session search 与 task control caller 会在下一个 PrincipalScope task 中迁移；
+当前实现不能被理解为 owner enforcement 已全部完成。
 
 每个 detail、list、wait、cancel、history、resume、search 与 approval cache 操作，都由
 所属 module/store 应用 owner predicate。调用方不得先按 id 读取全局对象，再临时执行
@@ -109,6 +111,13 @@ revision、capability snapshot、effective approval policy 与相关 effect entr
 结束、authority 或 conversation-binding 改变、policy/revision 改变、显式 revocation 或
 有界 expiry 都会使 entry 失效。Session-scoped approval 不会变成进程范围的环境
 authority。
+
+当前实现按完整 cache identity 串行化并发 decision，并在 admission 后再次检查 cache；
+取消的 waiter 会被清理。Bounded TTL 为八小时。开始 replacement session 会使旧 session
+失效，Host shutdown 会清空所有 entry 并拒绝 pending decision，成功 promotion 或 rollback
+会使对应 core 的 cached authority 失效。Approval event 与 operator payload 使用 bounded、
+按字段名脱敏的 view；opaque `PrincipalScope`、capability snapshot 与原始 secret argument
+value 不会被序列化。
 
 ## TurnExecutionContext
 

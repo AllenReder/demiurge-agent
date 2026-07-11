@@ -82,8 +82,10 @@ Telegram 通过 `allowed_users` 与 `allowed_chats` 默认拒绝。
 当前 alpha 运行时不承诺 hardened multi-tenant sandbox。Agent Slot 代码默认运行在
 host-shared Python environment 中。Per-core environment 与 subprocess worker 是未来
 isolation option，不是默认运行模式。Capability grant 不授予 session/operator authority；
-在冻结目标中，拥有 session、task、approval 与 effect 的 module 将强制执行
-`PrincipalScope` 携带的 predicate；当前 alpha 尚未提供这种统一 owner scope。Runtime
+approval cache 现在强制执行 admitted `PrincipalScope`、session、core/capability policy
+fingerprint、bounded lifetime 与显式 revocation，tool argument 不能声明另一个 owner。
+Session browse/search、task control 与后续统一 EffectRuntime 仍需接入同一 owner seam，
+因此当前 alpha 尚未实现全路径统一 enforcement。Runtime
 task records、logs、scheduler instances 与 delivery outbox status 存储在 SQLite runtime
 database 中；in-process worker 仍负责 live execution，并且不会在 Host process restart
 后重放已经开始的危险 side effect。

@@ -359,6 +359,7 @@ class DemiurgeApp:
         try:
             await self.tool_runtime.close()
         finally:
+            self.approval_runtime.close()
             _deactivate_operator_authority(
                 self.runtime_store,
                 self,
@@ -645,7 +646,10 @@ def create_app(
     source_agents = source_agents_root(agents_root)
     interaction_router = SessionInteractionRouter()
     approval_runtime = ApprovalRuntime(BridgeApprovalProvider(interaction_router))
-    version_store = VersionStore(home)
+    version_store = VersionStore(
+        home,
+        on_core_changed=approval_runtime.invalidate_core,
+    )
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
     runtime_store = RuntimeStore.default(home)
     control_plane = RuntimeControlPlane(runtime_store)
@@ -706,6 +710,7 @@ def create_app(
             session_runtime=session_runtime,
             task_worker=task_worker,
         ),
+        on_core_changed=approval_runtime.invalidate_core,
     )
     tool_runtime.evolution_runtime = evolution_runtime
     runner_session_id = session_id or utc_id("session_")

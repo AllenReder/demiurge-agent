@@ -95,9 +95,11 @@ The current alpha runtime does not promise a hardened multi-tenant sandbox.
 Agent Slot code runs in the host-shared Python environment by default.
 Per-core environments and subprocess workers are future isolation options, not
 the default runtime mode. Capability grants do not confer session/operator
-authority. In the frozen target, owning session, task, approval, and effect
-modules will enforce predicates carried by `PrincipalScope`; the current alpha
-runtime does not yet provide that uniform owner scope. Runtime task records,
+authority. Approval caching now enforces the admitted `PrincipalScope`, session,
+core/capability policy fingerprint, bounded lifetime, and explicit revocation;
+tool arguments cannot declare another owner. Session browsing/search, task
+control, and the later unified EffectRuntime still need the same owner seam
+before the alpha runtime provides uniform enforcement. Runtime task records,
 logs, scheduler instances, and delivery outbox status are stored in the SQLite
 runtime database; in-process workers are still responsible for live execution
 and do not replay already started dangerous side effects after host process

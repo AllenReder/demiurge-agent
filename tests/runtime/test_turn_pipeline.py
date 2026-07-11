@@ -495,6 +495,7 @@ async def test_turn_execution_runs_full_host_lifecycle():
         }
     ]
     assert host.engine_requests[0].context[0].content == "extra context"
+    assert host.engine_requests[0].execution_context is host.bound_contexts[0]
     assert host.output_requests[0].current_output == "model answer"
     assert host.result_client_session_ids == ["session_1"]
     assert host.completed is not None

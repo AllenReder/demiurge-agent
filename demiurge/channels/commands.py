@@ -236,6 +236,7 @@ class ChannelCommandExecutor:
                 metadata=dict(inbound.metadata),
             ),
             capability=CapabilityFacade(core),
+            principal_scope=runner.principal_scope,
             emit_event=runner.event_log.emit,
         )
         content = result.content

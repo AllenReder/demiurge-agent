@@ -108,6 +108,7 @@ class _FakeTurnHost:
         core,
         turn: TurnContext,
         capability,
+        execution_context,
         output_factory,
     ) -> ToolResult:
         self.tool_calls.append(call)
@@ -156,6 +157,7 @@ def _request(*, context: list[ContextContribution] | None = None) -> TurnEngineR
             metadata={},
         ),
         capability=object(),
+        execution_context=object(),
         context=context or [],
         available_tools=[ToolDefinition(name="lookup", description="Lookup", input_schema={"type": "object"})],
         interaction_metadata={"channel": "test"},

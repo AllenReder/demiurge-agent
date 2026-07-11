@@ -16,8 +16,9 @@ import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from demiurge.runtime.tasks import (
     RuntimeTaskConflictError,
@@ -27,8 +28,13 @@ from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
 from demiurge.mcp import McpRuntime, McpToolInfo
-from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
-from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
+from demiurge.security.approval import ApprovalRequest, ApprovalRuntime, ApprovalScope
+from demiurge.security.capabilities import (
+    CapabilityDenied,
+    CapabilityFacade,
+    CapabilitySnapshot,
+)
 from demiurge.security.command_guard import CommandGuardDecision, review_command
 from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.core_repository import CoreRepositoryError
@@ -53,6 +59,9 @@ from demiurge.security.workspace import (
     WorkspaceScopeError,
     truncate_text,
 )
+
+if TYPE_CHECKING:
+    from demiurge.runtime.turn_pipeline import TurnExecutionContext
 
 
 _AUTHORED_PREVIEW_MAX_CHARS = 2048
@@ -286,6 +295,10 @@ class ToolRuntime:
             raise ValueError("ToolRuntime requires a RuntimeControlPlane-backed RuntimeTaskWorker")
         self.task_worker = task_worker
         self.session_runtime = session_runtime
+        self._approval_scope: ContextVar[ApprovalScope | None] = ContextVar(
+            f"demiurge_tool_approval_scope_{id(self)}",
+            default=None,
+        )
 
     async def prepare_for_turn(
         self,
@@ -401,9 +414,26 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
         emit_event: EventEmitter | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
+        try:
+            approval_scope = self._resolve_approval_scope(
+                core=core,
+                turn=turn,
+                capability=capability,
+                execution_context=execution_context,
+                principal_scope=principal_scope,
+            )
+        except (PermissionError, TypeError, ValueError) as exc:
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                data={"executionStarted": False},
+            )
+        scope_token = self._approval_scope.set(approval_scope)
         try:
             visible_tools = {
                 entry.name: entry
@@ -465,6 +495,63 @@ class ToolRuntime:
                 return ToolResult(content=f"tool not found: {call.name}", is_error=True)
         except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
             return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+        finally:
+            self._approval_scope.reset(scope_token)
+
+    def _resolve_approval_scope(
+        self,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None,
+        principal_scope: PrincipalScope | None,
+    ) -> ApprovalScope:
+        if execution_context is not None and principal_scope is not None:
+            raise ValueError(
+                "tool execution accepts either TurnExecutionContext or explicit PrincipalScope"
+            )
+        if execution_context is not None:
+            scope = ApprovalScope.from_execution_context(execution_context)
+            if (
+                scope.session_id != turn.session_id
+                or scope.turn_id != turn.turn_id
+                or scope.core_id != core.core_id
+                or scope.core_revision != turn.core_revision
+            ):
+                raise PermissionError(
+                    "TurnExecutionContext does not match tool execution identity"
+                )
+            if capability.snapshot is not scope.capability_snapshot:
+                raise PermissionError(
+                    "tool capability snapshot does not match TurnExecutionContext"
+                )
+            return scope
+        if principal_scope is None:
+            raise PermissionError(
+                "tool execution requires TurnExecutionContext or explicit Host PrincipalScope"
+            )
+        if self.session_runtime is None:
+            raise RuntimeError("explicit tool PrincipalScope requires SessionRuntime")
+        admitted_scope = PrincipalScopeResolver(self.session_runtime.store).admit(
+            principal_scope
+        )
+        if admitted_scope.session_id != turn.session_id:
+            raise PermissionError("PrincipalScope does not match tool session")
+        snapshot = capability.snapshot or CapabilitySnapshot.capture(core)
+        return ApprovalScope.for_host_operation(
+            principal_scope=admitted_scope,
+            turn_id=turn.turn_id,
+            core_id=core.core_id,
+            core_revision=turn.core_revision,
+            capability_snapshot=snapshot,
+        )
+
+    def _current_approval_scope(self) -> ApprovalScope:
+        scope = self._approval_scope.get()
+        if scope is None:
+            raise RuntimeError("approval scope is not bound to tool execution")
+        return scope
 
     def _tool_policy(self, turn: TurnContext | None) -> Mapping[str, Any]:
         if turn is None or not isinstance(turn.metadata, Mapping):
@@ -560,6 +647,8 @@ class ToolRuntime:
                     is_error=True,
                     model_output=str(exc),
                 )
+            if not getattr(self.version_store, "notifies_core_changes", False):
+                self.approval_runtime.invalidate_core(core.core_id)
             payload = asdict(pointer)
             return ToolResult(
                 content=f"rollback committed: {pointer.active_revision[:12]} (takes effect next turn)",
@@ -647,6 +736,12 @@ class ToolRuntime:
                     result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
                 except CoreRepositoryError as exc:
                     return ToolResult(content=str(exc), data={"error": str(exc)}, is_error=True, model_output=str(exc))
+                if result.promoted and not getattr(
+                    self.evolution_runtime,
+                    "notifies_core_changes",
+                    False,
+                ):
+                    self.approval_runtime.invalidate_core(core.core_id)
                 payload = asdict(result)
                 return ToolResult(content=result.summary, data=payload, is_error=not result.promoted, model_output=json.dumps(payload, ensure_ascii=False))
             if action == "discard":
@@ -2005,9 +2100,9 @@ class ToolRuntime:
             default_auto=auto_approve,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability=capability_name,
             action=action,
             risk=risk,
@@ -2017,7 +2112,6 @@ class ToolRuntime:
             cache_key=f"{call.name}:{capability_name}:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2066,9 +2160,9 @@ class ToolRuntime:
         if command_guard.action != "allow":
             summary = f"{summary}: {command_guard.reason}"
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability="terminal.exec",
             action="exec",
             risk=command_guard.risk,
@@ -2090,7 +2184,6 @@ class ToolRuntime:
             ),
             auto_approve=auto_approve,
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2120,9 +2213,9 @@ class ToolRuntime:
             default_auto=False,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability="network.fetch",
             action="fetch",
             risk="high",
@@ -2132,7 +2225,6 @@ class ToolRuntime:
             cache_key=f"web_extract:network.fetch:{url}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2163,9 +2255,9 @@ class ToolRuntime:
         )
         target = f"{tool.server_id}/{tool.server_tool_name}"
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability=capability_name,
             action="mcp.call",
             risk=risk,
@@ -2175,7 +2267,6 @@ class ToolRuntime:
             cache_key=f"{call.name}:{capability_name}:mcp.call:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2204,9 +2295,9 @@ class ToolRuntime:
             default_auto=False,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability="fs.write",
             action=f"skill.{action}",
             risk="high",
@@ -2216,7 +2307,6 @@ class ToolRuntime:
             cache_key=f"skill_manage:fs.write:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2246,9 +2336,9 @@ class ToolRuntime:
         )
         prompt = str(call.arguments.get("prompt") or "")
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability="schedule.manage",
             action=f"schedule.{action}",
             risk="high",
@@ -2263,7 +2353,6 @@ class ToolRuntime:
             cache_key=f"schedule_manage:schedule.manage:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2338,9 +2427,9 @@ class ToolRuntime:
             if configured:
                 policy = self._stricter_policy(policy, configured)
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=entry.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability=capability_name,
             action=action,
             risk=entry.risk,
@@ -2352,7 +2441,6 @@ class ToolRuntime:
             ),
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(
             request,

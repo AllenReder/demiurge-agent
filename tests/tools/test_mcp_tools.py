@@ -9,6 +9,7 @@ import yaml
 from demiurge.app import create_app
 from demiurge.core import McpServerDefinition
 from demiurge.providers import ToolCall
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.approval import StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
@@ -75,6 +76,23 @@ def _set_capabilities(app, capabilities: dict[str, dict]) -> None:
     manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
 
+def _principal_scope(app, core, turn):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    if not app.runtime_store.session_owner_exists(turn.session_id):
+        issued = resolver.local_operator(
+            active_session_id=turn.session_id,
+            reason="bind direct MCP tool test session",
+            allow_unowned_active=True,
+        )
+        app.session_runtime.create_session(
+            session_id=turn.session_id,
+            core_id=core.core_id,
+            core_revision=core.revision,
+            principal_scope=issued,
+        )
+    return resolver.origin_scope(session_id=turn.session_id)
+
+
 async def _prepare(app):
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     await app.tool_runtime.prepare_for_turn(core, _turn(core), emit_event=app.runner.event_log.emit)
@@ -82,11 +100,13 @@ async def _prepare(app):
 
 
 def _execute(app, core, name, arguments):
+    turn = _turn(core)
     return app.tool_runtime.execute(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
-        turn=_turn(core),
+        turn=turn,
         capability=CapabilityFacade(core),
+        principal_scope=_principal_scope(app, core, turn),
         emit_event=app.runner.event_log.emit,
     )
 
@@ -225,6 +245,19 @@ async def test_mcp_02_tool_dispatch_stays_bound_to_originating_session_connectio
         core_revision=core.revision,
         user_input=AgentInput(content="probe B"),
     )
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    issued_a = resolver.local_operator(
+        active_session_id=turn_a.session_id,
+        reason="bind MCP origin session A",
+        allow_unowned_active=True,
+    )
+    app.session_runtime.create_session(
+        session_id=turn_a.session_id,
+        core_id=core.core_id,
+        core_revision=core.revision,
+        principal_scope=issued_a,
+    )
+    scope_a = resolver.origin_scope(session_id=turn_a.session_id)
     connection_a = FakeMcpConnection([FakeListedTool(name="lookup")])
     connection_b = FakeMcpConnection([FakeListedTool(name="lookup")])
     connections = iter([connection_a, connection_b])
@@ -237,6 +270,7 @@ async def test_mcp_02_tool_dispatch_stays_bound_to_originating_session_connectio
         core=core,
         turn=turn_a,
         capability=CapabilityFacade(core),
+        principal_scope=scope_a,
         emit_event=app.runner.event_log.emit,
     )
 

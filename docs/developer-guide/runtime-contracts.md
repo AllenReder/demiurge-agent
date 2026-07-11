@@ -115,9 +115,12 @@ backup is reused only when its logical fingerprint matches the current version
 4 database; a valid but stale backup stops migration.
 `RuntimeStore.query_owned()` currently applies SQL owner predicates for
 sessions, messages, and tasks, and `SessionRuntime` exposes owned get/list
-interfaces. The remaining slash-command, model-tool, task-control, and
-approval-cache callers are intentionally migrated in the later PrincipalScope
-tasks; their presence must not be read as complete owner enforcement yet.
+interfaces. Approval requests now derive their owner and correlation from the
+admitted `TurnExecutionContext`, or from an explicit Host-issued
+`PrincipalScope` for non-turn operations. The remaining slash-command,
+session-search, and task-control callers are intentionally migrated in the
+next PrincipalScope task; their presence must not be read as complete owner
+enforcement yet.
 
 Every detail, list, wait, cancel, history, resume, search, and approval cache
 operation applies its owner predicate in the owning module/store. Callers must
@@ -130,6 +133,15 @@ relevant effect entry. Entries are invalidated on session end, authority or
 conversation-binding change, policy/revision change, explicit revocation, or
 bounded expiry. Session-scoped approval does not survive as ambient
 process-wide authority.
+
+The current implementation serializes concurrent decisions per complete cache
+identity, rechecks the cache after admission, and removes cancelled waiters.
+Its bounded TTL is eight hours. Starting a replacement session invalidates the
+old session, Host shutdown clears all entries and rejects pending decisions,
+and successful promotion or rollback invalidates the affected core. Approval
+events and operator payloads use a bounded, field-name-redacted view; the
+opaque `PrincipalScope`, capability snapshot, and raw secret argument values
+are not serialized.
 
 ## TurnExecutionContext
 

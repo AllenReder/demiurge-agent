@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import shutil
+import tempfile
 import urllib.error
 from pathlib import Path
 
@@ -10,7 +11,10 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from demiurge.security.approval import ApprovalRequest
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeStore
+from demiurge.security.approval import ApprovalRequest, ApprovalScope
+from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge import cli
 from demiurge.app import create_app, source_agents_root
 from demiurge.channels.gateway import build_enabled_gateway_channels
@@ -40,6 +44,31 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.util import write_json
+
+
+_APPROVAL_SCOPE_HOME = tempfile.TemporaryDirectory()
+
+
+def _approval_scope(session_id="session_1", turn_id="turn_1"):
+    principal_scope = PrincipalScopeResolver(
+        RuntimeStore(Path(_APPROVAL_SCOPE_HOME.name) / "runtime.sqlite3")
+    ).issue_conversation(
+        channel="telegram",
+        principal_key="chat_1",
+        conversation_key="telegram:dm:chat_1",
+        session_id=session_id,
+    )
+    return ApprovalScope.for_host_operation(
+        principal_scope=principal_scope,
+        turn_id=turn_id,
+        core_id="assistant",
+        core_revision="revision_1",
+        capability_snapshot=CapabilitySnapshot(
+            defaults=frozenset({"terminal.exec"}),
+            manifest_slots=(),
+            component_slots=(),
+        ),
+    )
 
 
 def _outbound(
@@ -146,10 +175,9 @@ class ApprovalRunner(FakeRunner):
         if route_binding is not None:
             route_binding.bind(self.interaction_router, "session_1")
         request = ApprovalRequest(
+            scope=_approval_scope(),
             tool_name="terminal",
             tool_call_id="call_1",
-            turn_id="turn_1",
-            session_id="session_1",
             capability="terminal.exec",
             action="exec",
             risk="critical",
@@ -666,10 +694,9 @@ async def test_interaction_runtime_calls_runner_with_metadata():
 async def test_bridge_approval_provider_fails_closed_without_bridge():
     router = SessionInteractionRouter()
     request = ApprovalRequest(
+        scope=_approval_scope(),
         tool_name="terminal",
         tool_call_id="call_1",
-        turn_id="turn_1",
-        session_id="session_1",
         capability="terminal.exec",
         action="exec",
         risk="high",

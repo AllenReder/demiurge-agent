@@ -11,6 +11,7 @@ from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.tools import runtime as tool_runtime
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
@@ -149,12 +150,31 @@ def _turn(core):
     )
 
 
+def _principal_scope(app, core, turn):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    if not app.runtime_store.session_owner_exists(turn.session_id):
+        issued = resolver.local_operator(
+            active_session_id=turn.session_id,
+            reason="bind direct tool test session",
+            allow_unowned_active=True,
+        )
+        app.session_runtime.create_session(
+            session_id=turn.session_id,
+            core_id=core.core_id,
+            core_revision=core.revision,
+            principal_scope=issued,
+        )
+    return resolver.origin_scope(session_id=turn.session_id)
+
+
 async def _execute(app, core, name, arguments):
+    turn = _turn(core)
     return await app.tool_runtime.execute(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
-        turn=_turn(core),
+        turn=turn,
         capability=CapabilityFacade(core),
+        principal_scope=_principal_scope(app, core, turn),
         emit_event=app.runner.event_log.emit,
     )
 
@@ -1656,16 +1676,16 @@ async def test_tool_03_evolve_session_allow_is_cached_per_mutation_action(tmp_pa
     app.approval_runtime.provider = provider
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
 
-    first = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
-    cached = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
+    first = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
+    cached = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
     different_action = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
 
     assert first.is_error is False
     assert cached.is_error is False
     assert different_action.is_error is True
-    assert fake.promote_calls == 2
+    assert fake.review_calls == 2
     assert fake.discard_calls == 0
-    assert [request.action for request in provider.requests] == ["evolve.promote", "evolve.discard"]
+    assert [request.action for request in provider.requests] == ["evolve.review", "evolve.discard"]
     assert different_action.data["approval"]["value"] == "deny"
 
 

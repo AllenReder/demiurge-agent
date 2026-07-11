@@ -843,6 +843,7 @@ class TurnExecution:
                 core=scope.core,
                 turn=turn,
                 capability=scope.capability,
+                execution_context=scope.context,
                 context=context,
                 available_tools=available_tools,
                 interaction_metadata=scope.interaction_metadata,

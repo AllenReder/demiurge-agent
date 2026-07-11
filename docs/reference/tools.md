@@ -234,9 +234,12 @@ Every action is classified as high risk with registry `prompt` policy.
 adapter calls or background task creation; `rollback_core` does the same before
 calling the version store. Approval rules are action-scoped, so a cached
 allow for `promote` does not authorize `discard`, `review`, `start`, or
-rollback. Principal/session ownership of that cache remains a separate alpha
-limitation. `rollback_core` creates a new rollback commit for the live Agent
-Core tree; the new revision takes effect on the next turn.
+rollback. Session allows are bound to the Host-issued principal, session, core,
+effective policy, and capability/core snapshot fingerprint. They expire after a
+bounded TTL and are invalidated when the owner is revoked, the session is
+replaced, the core changes, or the app closes. `rollback_core` creates a new
+rollback commit for the live Agent Core tree; the new revision takes effect on
+the next turn.
 
 ## Child Agent Controls
 

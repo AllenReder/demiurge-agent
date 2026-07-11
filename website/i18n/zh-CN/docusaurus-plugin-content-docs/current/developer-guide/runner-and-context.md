@@ -92,8 +92,9 @@ legacy session row 重新构造 authority。
 alpha compatibility surface，并非最终的 deeply immutable 1.0 product。Live core、
 lifecycle、state、lock 与 task control 是 private admitted-turn state，不是
 `TurnExecutionContext` 字段。PrincipalScope consumer 也会逐步
-迁移：store-owned session/message/task predicate 与 same-origin manual resume 已存在，session
-list/search、task control 与 approval-cache enforcement 仍属于后续 DG-P2 task。
+迁移：store-owned session/message/task predicate、same-origin manual resume 与绑定
+principal/session/policy 的 approval cache 已存在，session list/search 与 task control 仍属于
+下一个 DG-P2 task。
 
 ## Principal 与 Execution Context
 
@@ -206,9 +207,10 @@ Interactive prompt 与 approval decision 使用同一 router 的 session-aware l
 interactive route，approval provider 会以 `no_interactive_route` 拒绝，除非 Host、
 global 或 core policy 已经 auto-allow 该 action。
 
-当前 session-allow cache 尚未按 principal/session 划分 scope。目标 cache key 与每次
-lookup 归 `ApprovalRuntime` 管理，并消费不可变 `PrincipalScope`；仅有 route lookup 不等于
-authorization。
+Session-allow cache 归 `ApprovalRuntime` 管理，并消费从 `TurnExecutionContext` 派生的
+不可变 scope。其 key 绑定 principal、session、policy/effect fingerprint 与 rule；仅有
+route lookup 不等于 authorization。非 turn Host operation 必须提供显式 Host-issued
+`PrincipalScope`。
 
 ## Failure Handling
 

@@ -8,6 +8,7 @@ import pytest
 from baseline_support import BaselineContractFailure
 from demiurge.app import create_app
 from demiurge.providers import ToolCall
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.approval import StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
@@ -29,12 +30,31 @@ def _turn(core) -> TurnContext:
     )
 
 
+def _principal_scope(app, core, turn):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    if not app.runtime_store.session_owner_exists(turn.session_id):
+        issued = resolver.local_operator(
+            active_session_id=turn.session_id,
+            reason="bind direct stress tool session",
+            allow_unowned_active=True,
+        )
+        app.session_runtime.create_session(
+            session_id=turn.session_id,
+            core_id=core.core_id,
+            core_revision=core.revision,
+            principal_scope=issued,
+        )
+    return resolver.origin_scope(session_id=turn.session_id)
+
+
 async def _execute(app, core, name: str, arguments: dict):
+    turn = _turn(core)
     return await app.tool_runtime.execute(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
-        turn=_turn(core),
+        turn=turn,
         capability=CapabilityFacade(core),
+        principal_scope=_principal_scope(app, core, turn),
         emit_event=app.runner.event_log.emit,
     )
 

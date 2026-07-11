@@ -585,6 +585,10 @@ async def test_terminal_background_true_returns_runtime_task(tmp_path):
         core=core,
         turn=turn,
         capability=capability,
+        principal_scope=app.task_worker.scope_for_turn(
+            session_id=turn.session_id,
+            turn_id=turn.turn_id,
+        ),
         emit_event=app.runner.event_log.emit,
     )
 
@@ -641,6 +645,10 @@ async def test_tool_policy_denies_child_tool_execution(tmp_path):
         core=core,
         turn=turn,
         capability=capability,
+        principal_scope=app.task_worker.scope_for_turn(
+            session_id=turn.session_id,
+            turn_id=turn.turn_id,
+        ),
         emit_event=app.runner.event_log.emit,
     )
 

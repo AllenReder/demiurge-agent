@@ -121,6 +121,10 @@ class RunnerSlotContextHost:
             core=core,
             turn=turn,
             capability=capability,
+            principal_scope=self.runner.task_worker.scope_for_turn(
+                session_id=turn.session_id,
+                turn_id=turn.turn_id,
+            ),
             emit_event=emit_event,
             output_factory=output_factory,
         )

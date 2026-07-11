@@ -9,7 +9,8 @@ import pytest
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, ToolInteractionRecord, UserPromptRequest
-from demiurge.security.approval import ApprovalRequest
+from demiurge.security.approval import ApprovalRequest, ApprovalScope
+from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge.sdk import ToolResult
 from demiurge.slash import specs_for_surface
 from demiurge.tools.records import ToolExecutionRecord
@@ -929,10 +930,17 @@ async def test_tui_bridge_approval_request_round_trip(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
     bridge = OperatorGatewayRuntime(app, emit=sink)
+    core = await app.runner.load_active_core()
     request = ApprovalRequest(
+        scope=ApprovalScope.for_host_operation(
+            principal_scope=app.runner.principal_scope,
+            turn_id="turn_1",
+            core_id=core.core_id,
+            core_revision=core.revision,
+            capability_snapshot=CapabilitySnapshot.capture(core),
+        ),
         tool_name="terminal",
         tool_call_id="call_1",
-        turn_id="turn_1",
         capability="terminal.exec",
         action="exec",
         risk="critical",

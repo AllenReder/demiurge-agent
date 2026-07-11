@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from demiurge.core import LoadedCore, SlotDefinition
 from demiurge.providers import LLMMessage, LLMRequest, LLMResponse, ToolCall, ToolDefinition
@@ -11,12 +11,16 @@ from demiurge.sdk import ContextContribution, ToolResult, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.tools.records import ToolExecutionRecord
 
+if TYPE_CHECKING:
+    from demiurge.runtime.turn_pipeline import TurnExecutionContext
+
 
 @dataclass(slots=True)
 class TurnEngineRequest:
     core: LoadedCore
     turn: TurnContext
     capability: CapabilityFacade
+    execution_context: TurnExecutionContext
     context: list[ContextContribution]
     available_tools: list[ToolDefinition]
     interaction_metadata: dict[str, Any]
@@ -95,6 +99,7 @@ class TurnEngineHost(Protocol):
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
     ) -> ToolResult:
         ...
@@ -220,6 +225,7 @@ class RunnerTurnEngineHost:
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
     ) -> ToolResult:
         return await self.runner.execute_turn_tool(
@@ -227,6 +233,7 @@ class RunnerTurnEngineHost:
             core=core,
             turn=turn,
             capability=capability,
+            execution_context=execution_context,
             output_factory=output_factory,
         )
 
@@ -371,6 +378,7 @@ class TurnEngine:
                         core=request.core,
                         turn=request.turn,
                         capability=request.capability,
+                        execution_context=request.execution_context,
                         output_factory=lambda slot: self.host.output_client(
                             slot,
                             turn=request.turn,

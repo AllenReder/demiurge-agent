@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from demiurge.core_repository import CommitResult, CoreRepository, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateResult, GateRunner
@@ -72,10 +72,13 @@ class EvolutionRuntime:
         core_repository: CoreRepository,
         gate_runner: GateRunner,
         evolver_runner: EvolverRunner | None = None,
+        on_core_changed: Callable[[str], None] | None = None,
     ):
         self.core_repository = core_repository
         self.gate_runner = gate_runner
         self.evolver_runner = evolver_runner
+        self.on_core_changed = on_core_changed
+        self.notifies_core_changes = on_core_changed is not None
         self._active_runs: set[str] = set()
 
     async def start(
@@ -220,6 +223,8 @@ class EvolutionRuntime:
                 cleaned_artifacts=review.cleaned_artifacts,
             )
         result = self.core_repository.promote_run(run_id, reason=reason)
+        if self.on_core_changed is not None:
+            self.on_core_changed(target_core_id)
         return EvolveResult(
             run_id=run_id,
             target_core_id=target_core_id,

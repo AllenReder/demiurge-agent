@@ -110,9 +110,10 @@ implemented here, and `TurnRequest`/`TurnResult` still retain alpha compatibilit
 surfaces that are not the final deeply immutable 1.0 products. Live core,
 lifecycle, state, lock, and task controls are private admitted-turn state rather
 than fields on `TurnExecutionContext`. PrincipalScope consumers are also being moved
-incrementally: store-owned session/message/task predicates and same-origin
-manual resume exist now, while session listing/search, task control, and
-approval-cache enforcement remain assigned to their later DG-P2 tasks.
+incrementally: store-owned session/message/task predicates, same-origin manual
+resume, and principal/session/policy-scoped approval caching exist now, while
+session listing/search and task control remain assigned to the next DG-P2
+task.
 
 ## Principal and Execution Context
 
@@ -245,9 +246,10 @@ looked up by `turn.session_id`; when no interactive route is bound, the approval
 provider denies with `no_interactive_route` unless a host, global, or core
 policy has already auto-allowed the action.
 
-The current session-allow cache is not yet principal/session scoped. The target
-cache key and lookup are owned by `ApprovalRuntime`, which consumes an immutable
-`PrincipalScope`. Route lookup alone is not authorization.
+The session-allow cache is owned by `ApprovalRuntime` and consumes the immutable
+scope derived from `TurnExecutionContext`. Its key binds principal, session,
+policy/effect fingerprint, and rule; route lookup alone is not authorization.
+Non-turn Host operations must supply an explicit Host-issued `PrincipalScope`.
 
 ## Failure Handling
 

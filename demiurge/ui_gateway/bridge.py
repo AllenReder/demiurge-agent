@@ -215,7 +215,10 @@ class OperatorGatewayRuntime:
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
         pending = self._pending_approvals.open(request)
-        payload = {"approval_id": pending.approval_id, "request": asdict(request)}
+        payload = {
+            "approval_id": pending.approval_id,
+            "request": request.redacted_view(),
+        }
         await self.emit("operator.approval.opened", payload)
         await self._emit_status()
         try:
@@ -576,6 +579,7 @@ class OperatorGatewayRuntime:
             core=core,
             turn=self._tui_turn(core),
             capability=CapabilityFacade(core),
+            principal_scope=self.app.runner.principal_scope,
             emit_event=self.app.runner.event_log.emit,
         )
         content = result.content if result.is_error else str(result.data.get("content") if isinstance(result.data, dict) else result.content)
@@ -700,6 +704,7 @@ class OperatorGatewayRuntime:
                 summary = "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
                 raise PackageOperationError("package gates failed: " + summary)
             commit = repository.commit_live(reason=f"package {action}", summary=f"package {action}")
+            self.app.approval_runtime.invalidate_core(result.core_id)
             return replace(result, revision=commit.revision, previous_revision=commit.previous_revision)
 
     async def _sessions(self, args: str) -> bool:

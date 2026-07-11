@@ -219,8 +219,10 @@ turn 生效；当前 turn 不会 hot-reload active core。
 foreground adapter call 或 background task 创建前要求 resolved capability 与 approval；
 `rollback_core` 也会在调用 version store 前执行同样顺序。Approval rule 按 action
 隔离，因此 `promote` 的 cached allow 不会授权 `discard`、`review`、`start` 或 rollback。
-该 cache 的 principal/session ownership 仍是独立的 alpha limitation。`rollback_core` 会为
-live Agent Core tree 创建新的 rollback commit；新 revision 从下一个 turn 生效。
+Session allow 会绑定 Host-issued principal、session、core、effective policy，以及
+capability/core snapshot fingerprint；它有有界 TTL，并会在 owner revoke、session
+replacement、core change 或 app close 时失效。`rollback_core` 会为 live Agent Core
+tree 创建新的 rollback commit；新 revision 从下一个 turn 生效。
 
 ## Child Agent Controls
 

@@ -117,6 +117,12 @@ low < medium < high < critical
 不能把 terminal command guard 的 `prompt/high` 结果降级为自动执行；只有 `allow/low`
 terminal command 可以自动批准，hardline block 会在 approval 前终止。
 
+`always_allow_for_session` 绑定 Host-issued principal、active session、effective
+policy/effect fingerprint 与 rule key。它具有八小时的有界 lifetime；replacement session、
+Host close/revoke，以及对应 core 的 promotion/rollback 都会使其失效。并发的 matching
+request 共享一个 decision admission；一个 principal、session、revision 或 capability
+snapshot 的 cached allow 永远不会授权另一个。
+
 ## Core Approval Config
 
 ```yaml

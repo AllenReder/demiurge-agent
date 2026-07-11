@@ -54,10 +54,12 @@ async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
     repo = CoreRepository(tmp_path / "home")
     repo.initialize_from_source(source_agents_root(), reason="test init")
     original = repo.live_revision()
+    invalidated_cores = []
     runtime = EvolutionRuntime(
         core_repository=repo,
         gate_runner=GateRunner(project_root=tmp_path),
         evolver_runner=EditingRunner(),
+        on_core_changed=invalidated_cores.append,
     )
 
     started = await runtime.start(target_core_id="assistant", goal="make a test edit", source_turn_id="turn_parent")
@@ -80,6 +82,7 @@ async def test_evolution_runtime_start_review_promote_and_discard(tmp_path):
 
     assert promoted.promoted is True
     assert promoted.new_revision == review.proposal_revision
+    assert invalidated_cores == ["assistant"]
     assert repo.previous_revision() == original
     assert "Evolved: make a test edit" in (repo.agents_root / "assistant" / "agent" / "SOUL.md").read_text(encoding="utf-8")
 

@@ -117,6 +117,15 @@ async def test_fake_provider_read_file_tool_result_reaches_next_step(tmp_path):
     events = [event["type"] for event in app.runner.event_log.tail(20)]
     assert "approval.decided" in events
     assert "action.result" in events
+    approval = next(
+        event
+        for event in app.runner.event_log.tail(20)
+        if event["type"] == "approval.decided"
+    )
+    assert approval["session_id"] == result.session_id
+    assert approval["turn_id"] == result.turn_id
+    assert approval["principal"]["session_id"] == result.session_id
+    assert approval["core_revision"] == result.core_revision
 
 
 @pytest.mark.asyncio

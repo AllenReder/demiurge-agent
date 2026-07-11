@@ -10,7 +10,7 @@ import uuid
 import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -555,8 +555,15 @@ class VersionStore:
     revision behavior is delegated to CoreRepository.
     """
 
-    def __init__(self, home: Path):
+    def __init__(
+        self,
+        home: Path,
+        *,
+        on_core_changed: Callable[[str], None] | None = None,
+    ):
         self.home = home
+        self.on_core_changed = on_core_changed
+        self.notifies_core_changes = on_core_changed is not None
         self.core_repository = CoreRepository(home)
         self.agents_root = self.core_repository.agents_root
         self.runs_root = self.core_repository.evolve_root
@@ -628,6 +635,8 @@ class VersionStore:
 
     def rollback(self, core_id: str, target: str = "previous", reason: str = "") -> ActivePointer:
         result = self.core_repository.rollback(target=target, reason=reason or "rollback")
+        if self.on_core_changed is not None:
+            self.on_core_changed(core_id)
         return ActivePointer(
             core_id=core_id,
             active_revision=result.revision,

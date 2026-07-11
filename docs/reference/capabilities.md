@@ -122,6 +122,14 @@ Global fallback approval cannot lower a terminal command guard result from
 `prompt/high` to automatic execution. Only `allow/low` terminal commands can be
 auto-approved; hardline blocks terminate before approval.
 
+`always_allow_for_session` is scoped to the Host-issued principal, active
+session, effective policy/effect fingerprint, and rule key. It expires after a
+bounded eight-hour lifetime and is invalidated when the session is replaced,
+the Host closes or revokes authority, or the affected core is promoted or
+rolled back. Concurrent matching requests share one decision admission; a
+cached allow from one principal, session, revision, or capability snapshot
+never authorizes another.
+
 ## Core Approval Config
 
 ```yaml

@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from demiurge.runtime.approvals import (
@@ -12,14 +15,42 @@ from demiurge.runtime.approvals import (
     parse_approval_callback_data,
     parse_approval_response,
 )
-from demiurge.security.approval import ApprovalDecision, ApprovalRequest
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeStore
+from demiurge.security.approval import ApprovalDecision, ApprovalRequest, ApprovalScope
+from demiurge.security.capabilities import CapabilitySnapshot
+
+
+_APPROVAL_SCOPE_HOME = tempfile.TemporaryDirectory()
+
+
+def _scope():
+    principal_scope = PrincipalScopeResolver(
+        RuntimeStore(Path(_APPROVAL_SCOPE_HOME.name) / "runtime.sqlite3")
+    ).issue_conversation(
+        channel="test",
+        principal_key="user_1",
+        conversation_key="test:dm:user_1",
+        session_id="session_1",
+    )
+    return ApprovalScope.for_host_operation(
+        principal_scope=principal_scope,
+        turn_id="turn_1",
+        core_id="assistant",
+        core_revision="revision_1",
+        capability_snapshot=CapabilitySnapshot(
+            defaults=frozenset({"terminal.exec"}),
+            manifest_slots=(),
+            component_slots=(),
+        ),
+    )
 
 
 def _request(**overrides):
     data = {
+        "scope": _scope(),
         "tool_name": "terminal",
         "tool_call_id": "call_1",
-        "turn_id": "turn_1",
         "capability": "terminal.exec",
         "action": "execute",
         "risk": "high",

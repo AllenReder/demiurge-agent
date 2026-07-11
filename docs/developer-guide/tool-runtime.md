@@ -91,8 +91,10 @@ live worker for active work:
   evolution runtime. Promotion advances Git refs only after gates pass. Every
   action resolves capability and approval before dispatch; the action and
   target are part of the approval-cache rule so one mutation action does not
-  authorize another. Principal/session ownership of that cache remains later
-  `PrincipalScope` work. `EffectRuntime` must remove the remaining dispatcher
+  authorize another. The cache additionally binds the admitted principal,
+  session, core revision, capability snapshot, effective policy, and effect
+  entry. Successful promotion or rollback invalidates cached authority for the
+  affected core. `EffectRuntime` must remove the remaining dispatcher
   duplication without weakening this ordering.
 - `ctx.agents.spawn(...)` is routed by the runner into an `agent.spawn` task.
 - `delegate_task(...)` is executed by the active runner context and creates an
