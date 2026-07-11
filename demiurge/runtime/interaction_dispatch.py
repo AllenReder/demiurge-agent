@@ -18,6 +18,7 @@ class InteractionDispatchRuntime:
     ) -> None:
         self.delivery_runtime = delivery_runtime
         self.track_background_task = track_background_task
+        self._turn_tasks: dict[str, set[asyncio.Task[Any]]] = {}
 
     def schedule(
         self,
@@ -40,7 +41,32 @@ class InteractionDispatchRuntime:
                 event_metadata=self._delivery_event_metadata(metadata),
             )
         )
+        self._turn_tasks.setdefault(turn.turn_id, set()).add(task)
+        task.add_done_callback(
+            lambda completed, turn_id=turn.turn_id: self._discard_turn_task(
+                turn_id,
+                completed,
+            )
+        )
         self.track_background_task(task)
+
+    async def drain_turn(self, turn_id: str) -> None:
+        while tasks := set(self._turn_tasks.get(turn_id, set())):
+            await asyncio.gather(*tasks)
+
+    async def cancel_turn(self, turn_id: str) -> None:
+        while tasks := set(self._turn_tasks.get(turn_id, set())):
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _discard_turn_task(self, turn_id: str, task: asyncio.Task[Any]) -> None:
+        tasks = self._turn_tasks.get(turn_id)
+        if tasks is None:
+            return
+        tasks.discard(task)
+        if not tasks:
+            self._turn_tasks.pop(turn_id, None)
 
     async def dispatch_now(
         self,

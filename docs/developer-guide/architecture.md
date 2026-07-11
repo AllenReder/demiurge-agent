@@ -64,15 +64,15 @@ adding another policy or lifecycle owner.
 
 | Contract | Current alpha implementation | Frozen target |
 | --- | --- | --- |
-| `PrincipalScope` | Authority is inferred separately by channel, session, task, and approval callers. | One immutable owner predicate reaches every session, task, approval, history, and effect operation. |
-| `TurnExecutionContext` | `TurnExecutionScope` captures some turn data but still contains mutable objects and runner-backed paths. | Immutable principal, session, revision, capability, route, admission, cancellation, and trace bindings. |
-| `TurnExecution` | `SessionTurnStepRunner` delegates to admission, pipeline, persistence, IO, slot, and delivery helpers. | `run(TurnRequest) -> TurnResult` and owner-checked `cancel(...)` hide the full lifecycle. |
+| `PrincipalScope` | Immutable Host-derived authority and durable session-owner predicates exist; remaining approval/session/task consumers migrate in later DG-P2 work. | One immutable owner predicate reaches every session, task, approval, history, and effect operation. |
+| `TurnExecutionContext` | Frozen turn identity pins principal, session, revision, capability declarations, route, cancellation, admission, and trace; mutable lifecycle/state handles remain internal. | Deeply immutable principal, session, revision, capability, route, admission, cancellation, and trace bindings. |
+| `TurnExecution` | `run(TurnRequest)` owns admission through completion; owner-checked `cancel(...)`, captured-route delivery, concurrency, and cleanup are implemented. | Typed outcomes, durable admission/restart recovery, and final immutable result projections complete the lifecycle. |
 | `EffectRuntime` | `ToolRuntime`, `McpRuntime`, security helpers, and inline file/process/network code own different parts of dispatch. | One resolved effect entry and one policy/dispatch order for builtin, authored, and MCP effects. |
 | `ContextManager` | Layer assembly and manual compaction are separate; there is no automatic model-window budget. | `prepare()` and `observe()` own budgeting, pruning, compaction, usage calibration, and overflow semantics. |
 | `ChannelInbox` | Platform adapters pass inbound events directly to the runner; there is no shared durable inbound owner. | Durable accept, dedup, cursor, claim, complete/fail, retry, and DLQ semantics behind one interface. |
 
-These target names are contributor contracts, not claims that the corresponding
-production classes already exist.
+`EffectRuntime`, `ContextManager`, and `ChannelInbox` remain target contributor
+contracts rather than claims that matching production classes already exist.
 
 ## Major Subsystems
 

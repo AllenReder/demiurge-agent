@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Any, Mapping
 
@@ -86,6 +87,20 @@ class DeliveryRuntime:
                         },
                     )
                 )
+        except asyncio.CancelledError:
+            if claim is not None:
+                with contextlib.suppress(DurableClaimConflict):
+                    self.work.fail_delivery(claim, error="delivery cancelled")
+            self.mark_failed(
+                item,
+                session_id=session_id,
+                turn_id=turn_id,
+                error="delivery cancelled",
+                reason="delivery_cancelled",
+                event_metadata=event_metadata,
+                attempts=claim.attempt if claim is not None else None,
+            )
+            raise
         except Exception as exc:
             if claim is not None:
                 with contextlib.suppress(DurableClaimConflict):

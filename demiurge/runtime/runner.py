@@ -50,8 +50,8 @@ from demiurge.runtime.turn_pipeline import (
     RunnerTurnPipelineHost,
     TurnAdmissionRuntime,
     TurnPersistenceRuntime,
-    TurnPipelineRequest,
-    TurnPipelineRuntime,
+    TurnRequest,
+    TurnExecution,
     TurnResult,
 )
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
@@ -186,10 +186,11 @@ class SessionTurnStepRunner:
             refresh_history=self._refresh_history,
         )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
-        self.turn_pipeline = TurnPipelineRuntime(
+        self.turn_execution = TurnExecution(
             RunnerTurnPipelineHost(self),
             admission=TurnAdmissionRuntime(RunnerTurnAdmissionHost(self)),
             persistence=TurnPersistenceRuntime(RunnerTurnPersistenceHost(self)),
+            scope_resolver=PrincipalScopeResolver(self.session_runtime.store),
         )
         if initialize_session:
             self._ensure_current_session()
@@ -235,8 +236,8 @@ class SessionTurnStepRunner:
         use_bootstrap: bool = True,
         route_binding: SessionRouteBinding | None = None,
     ) -> TurnResult:
-        return await self.turn_pipeline.run(
-            TurnPipelineRequest(
+        return await self.turn_execution.run(
+            TurnRequest(
                 text=text,
                 core_path=core_path,
                 interaction=interaction,

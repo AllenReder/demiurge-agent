@@ -7,13 +7,14 @@ description: Contributor notes for turn execution and provider context assembly.
 
 The current alpha runner wires the turn lifecycle modules.
 `TurnAdmissionRuntime` resolves the core/session route and starts the turn,
-`TurnPipelineRuntime` runs the authored input -> model/tool -> output path, and
+`TurnExecution` owns the authored input -> model/tool -> output path, and
 `TurnPersistenceRuntime` records input, assistant output, display state,
 completion, and interruption. Agent Core slots participate through controlled
 interfaces; they do not own the lifecycle.
 
-This layout is the precursor to the frozen `TurnExecution`, `PrincipalScope`,
-immutable `TurnExecutionContext`, and `ContextManager` interfaces. See
+This layout now implements the scoped `TurnExecution`, `PrincipalScope`, and
+immutable execution-identity contracts. `ContextManager` and durable restart
+semantics remain later work. See
 [Host Runtime Contracts](runtime-contracts.md) for the authoritative target
 contract. The current runner does not yet satisfy every invariant below.
 
@@ -23,7 +24,8 @@ The current flow is:
 
 ```text
 inbound interaction
-  -> admit turn: resolve session/core, bind route, run bootstrap, begin turn
+  -> admit turn: resolve session/core, bind route, pin scope, begin turn
+  -> activate captured route/principal and run bootstrap
   -> run authored input pipeline
   -> assemble provider context
   -> call provider
@@ -33,13 +35,13 @@ inbound interaction
   -> persist input, assistant output, display state, completion, and session events
 ```
 
-## Target TurnExecution Interface
+## TurnExecution Interface
 
 The external Host seam is deliberately small:
 
 ```text
 TurnExecution.run(TurnRequest) -> TurnResult
-TurnExecution.cancel(TurnId, PrincipalScope) -> CancelResult
+TurnExecution.cancel(TurnId, PrincipalScope) -> TurnCancelResult
 ```
 
 `TurnExecution` must hide session admission, core-revision pinning, context
@@ -60,17 +62,41 @@ The module owns these observable contracts:
 - detached work is a separately owned runtime task, not a late mutation of a
   completed turn.
 
-The current containment implementation enforces one in-process active turn per
-session with a keyed admission lock; different sessions still run concurrently.
-Admission captures the resolved session before bootstrap, and the prompt, IO,
-slot history/result, event, artifact, and delivery hot paths use that captured
-session or the immutable `TurnContext.session_id` after an await. Cancellation
-and failure release the admission lock in `finally`. Admission also resolves a
-frozen `PrincipalScope` before bootstrap: external conversations are matched
+The current implementation exposes `TurnExecution.run()` and owner-checked
+`cancel()` as the Host test seam. It enforces one in-process active turn per
+session with a keyed admission lock, removes idle lock entries, and keeps
+different sessions concurrent. Admission captures the resolved session, loaded
+core plus revision, immutable capability declarations, route token, trace id,
+and cancellation identity in a frozen `TurnExecutionContext`. Replacing the
+active core or mutating its capability manifest later does not change the
+admitted turn's revision or capability decisions.
+Queued same-session requests reload and verify the active core/revision only
+after acquiring admission, so a promotion while waiting cannot pair old loaded
+content with the new revision label.
+
+The captured route is activated in Host execution-local context. Delivery,
+prompt, approval, and child asyncio tasks created during the turn therefore use
+the exact admitted token rather than the session's latest binding. A token that
+is unbound while the turn is running fails closed instead of switching to a new
+adapter. The token and principal never enter model-facing metadata or the
+authored `TurnContext` SDK.
+
+Prompt, IO, slot history/result, event, artifact, and delivery hot paths use the
+captured session or immutable `TurnContext.session_id` after an await. Owner
+cancel, coroutine cancellation, route activation failure, and unexpected
+exceptions persist interruption where the lifecycle has started and release
+principal binding, route context, and admission in nested `finally` cleanup.
+Live delivery tasks are tracked by turn and drained before that turn leaves the
+active registry; cancellation during adapter delivery therefore cancels the
+owned delivery claim, records failure, terminates the turn, and releases the
+session admission without waiting on unrelated sessions.
+Any earlier provider/tool/slot failure cancels and awaits already scheduled
+interim deliveries from the same lifecycle cleanup path.
+Admission also resolves a frozen `PrincipalScope` before bootstrap: external conversations are matched
 against the durable `session_owners` projection, TUI runs use explicit local
 operator authority, schedules use run-scoped system authority, and child agents
-own only their delegated child session. The scope is carried by the internal
-`TurnExecutionScope`; it is not added to the authored `TurnContext` SDK.
+own only their delegated child session. The scope is carried by
+`TurnExecutionContext`; it is not added to the authored `TurnContext` SDK.
 Background tasks capture a bounded record of that admitted scope before their
 detached task starts. Completion intake restores and validates the record
 against the durable session owner before claiming the event; route metadata
@@ -78,10 +104,12 @@ cannot elevate the completion, and the internal scope record is not exposed in
 model-facing metadata. Child spawn closures likewise capture the admitted
 parent scope instead of reconstructing authority from a legacy session row.
 
-This is not yet the final durable `TurnExecution` contract. Admission locks are
-process-local, the scope still carries mutable objects, restart recovery is not
-implemented here, and core-revision/route/cancellation ownership is completed
-by the later TurnExecution work. PrincipalScope consumers are also being moved
+This is not yet the final durable 1.0 lifecycle contract. Admission and the
+active-turn cancel registry are process-local, restart recovery is not
+implemented here, and `TurnRequest`/`TurnResult` still retain alpha compatibility
+surfaces that are not the final deeply immutable 1.0 products. Live core,
+lifecycle, state, lock, and task controls are private admitted-turn state rather
+than fields on `TurnExecutionContext`. PrincipalScope consumers are also being moved
 incrementally: store-owned session/message/task predicates and same-origin
 manual resume exist now, while session listing/search, task control, and
 approval-cache enforcement remain assigned to their later DG-P2 tasks.

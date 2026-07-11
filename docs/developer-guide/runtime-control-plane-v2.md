@@ -162,8 +162,10 @@ must not rewrite the original history body.
 - session creation, update, turn lifecycle, and message persistence to
   `SessionRuntime`;
 - foreground turn admission, including session/core resolution, route binding,
-  bootstrap, and turn begin, to `TurnAdmissionRuntime`;
-- authored input -> model/tool -> output execution to `TurnPipelineRuntime`;
+  revision/capability pinning, and turn begin, to `TurnAdmissionRuntime`;
+- authored input -> model/tool -> output execution, captured-route context,
+  bootstrap, owner-checked cancellation, delivery drain, and final cleanup to
+  `TurnExecution`;
 - foreground input records, assistant output records, display turns,
   completion, and interruption to `TurnPersistenceRuntime`;
 - provider/tool loop execution to `TurnEngine`;

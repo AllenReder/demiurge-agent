@@ -61,14 +61,15 @@ owner 前，请先查看其中的
 
 | 契约 | 当前 alpha 实现 | 冻结目标 |
 | --- | --- | --- |
-| `PrincipalScope` | Channel、session、task 与 approval 调用方各自推断 authority。 | 一个不可变 owner predicate 覆盖每个 session、task、approval、history 与 effect 操作。 |
-| `TurnExecutionContext` | `TurnExecutionScope` 捕获了部分 turn 数据，但仍包含 mutable object 与 runner-backed path。 | 不可变的 principal、session、revision、capability、route、admission、cancellation 与 trace bindings。 |
-| `TurnExecution` | `SessionTurnStepRunner` 委托给 admission、pipeline、persistence、IO、slot 与 delivery helpers。 | `run(TurnRequest) -> TurnResult` 与 owner-checked `cancel(...)` 隐藏完整 lifecycle。 |
+| `PrincipalScope` | 已有不可变 Host-derived authority 与 durable session-owner predicate；其余 approval/session/task consumer 会在后续 DG-P2 工作中迁移。 | 一个不可变 owner predicate 覆盖每个 session、task、approval、history 与 effect 操作。 |
+| `TurnExecutionContext` | Frozen turn identity 已固定 principal、session、revision、capability declarations、route、cancellation、admission 与 trace；mutable lifecycle/state handle 仍是内部对象。 | 深度不可变的 principal、session、revision、capability、route、admission、cancellation 与 trace bindings。 |
+| `TurnExecution` | `run(TurnRequest)` 拥有 admission 到 completion；owner-checked `cancel(...)`、captured-route delivery、并发与 cleanup 已实现。 | Typed outcome、durable admission/restart recovery 与最终 immutable result projection 完整闭合 lifecycle。 |
 | `EffectRuntime` | `ToolRuntime`、`McpRuntime`、security helpers 与内联 file/process/network 代码分别拥有 dispatch 的不同部分。 | Builtin、authored 与 MCP effect 使用同一个 resolved effect entry 和同一套 policy/dispatch 顺序。 |
 | `ContextManager` | Layer assembly 与 manual compaction 相互分离；没有自动 model-window budget。 | `prepare()` 与 `observe()` 拥有 budgeting、pruning、compaction、usage calibration 与 overflow semantics。 |
 | `ChannelInbox` | Platform adapter 把 inbound event 直接传给 runner；没有共享的 durable inbound owner。 | 一个接口后统一 durable accept、dedup、cursor、claim、complete/fail、retry 与 DLQ 语义。 |
 
-这些目标名称是贡献者契约，并不表示对应 production class 已经存在。
+`EffectRuntime`、`ContextManager` 与 `ChannelInbox` 仍是目标贡献者契约，并不表示匹配的
+production class 已经存在。
 
 ## 主要子系统
 

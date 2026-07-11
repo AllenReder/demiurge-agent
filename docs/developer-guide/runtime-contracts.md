@@ -38,7 +38,7 @@ reduced `ctx.*` SDK and model-visible tools.
 
 | Module | Frozen external interface | Current implementation precursor |
 | --- | --- | --- |
-| `TurnExecution` | `run(TurnRequest) -> TurnResult`; `cancel(TurnId, PrincipalScope) -> CancelResult` | `SessionTurnStepRunner.run_turn()` and `TurnPipelineRuntime.run()` |
+| `TurnExecution` | `run(TurnRequest) -> TurnResult`; `cancel(TurnId, PrincipalScope) -> TurnCancelResult` | implemented by `TurnExecution`; `SessionTurnStepRunner.run_turn()` is wiring |
 | `EffectRuntime` | `execute(EffectRequest, TurnExecutionContext) -> EffectResult` | `ToolRuntime`, security helpers, `McpRuntime`, and inline process/network code |
 | `ContextManager` | async `prepare(ContextRequest) -> PreparedContext`; async `observe(UsageObservation) -> None` | `ContextAssembler`, `PromptContextRuntime`, and `SessionCompactionRuntime` |
 | `ChannelInbox` | `accept(InboundEnvelope) -> InboxReceipt`; `claim() -> ClaimedInbound`; `complete(...)`; `fail(...)` | no durable inbound owner yet |
@@ -181,7 +181,7 @@ leases, Host stores, or operator authority.
 
 ```text
 TurnExecution.run(TurnRequest) -> TurnResult
-TurnExecution.cancel(TurnId, PrincipalScope) -> CancelResult
+TurnExecution.cancel(TurnId, PrincipalScope) -> TurnCancelResult
 ```
 
 `TurnRequest` contains deeply immutable values only:
@@ -281,12 +281,30 @@ completion authorities.
 - Admission lookup is keyed and effectively O(1); idle lock entries are
   removed; session/task owner queries are indexed, bounded, and paginated.
 
-The current `TurnExecutionScope` is a precursor, not the final context. The
-containment runtime now serializes same-session turns with an in-process keyed
-lock and carries the captured session through prompt, IO, slot history/result,
-event, artifact, and delivery paths. It still carries mutable objects, the lock
-is not restart-durable, and the full principal/revision/route/cancellation
-contract remains owned by the later `TurnExecution` implementation.
+The current runtime implements the external `TurnExecution` seam and a frozen
+`TurnExecutionContext`. Admission pins principal, session, loaded core and
+revision, an immutable capability declaration snapshot, route token, trace id,
+cancellation identity, and an admission-lease identity. Live core, lifecycle,
+state, lock, and task controls remain private admitted-turn state. Same-session turns
+serialize, different sessions remain concurrent, idle lock entries are
+removed, and owner-checked cancellation releases admission.
+Queued requests form a consistent post-admission core/revision snapshot; a
+promotion while waiting cannot label pre-promotion content with the new ref.
+
+The admitted route is execution-local Host state, not interaction metadata.
+Delivery, prompt, approval, and asyncio tasks created during the turn resolve
+the exact captured token; route rebinding affects future turns only, and an
+unbound captured token fails closed. `SessionTurnStepRunner` is wiring around
+this module rather than an alternate lifecycle implementation. Delivery tasks
+are tracked per turn and drained before the active-turn registry entry is
+released, so cancellation during adapter delivery finalizes its claim and does
+not wait on unrelated session deliveries. Earlier provider/tool/slot failures
+cancel and await any already scheduled interim deliveries in the same cleanup.
+
+This remains short of the full target above: admission and active cancellation
+are process-local, restart recovery and durable admission leases are later
+work, `TurnResult` has not yet migrated to the complete typed outcome snapshot,
+and mutable lifecycle/state handles remain internal implementation objects.
 
 ## EffectRuntime
 
