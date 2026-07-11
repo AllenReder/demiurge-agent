@@ -21,6 +21,19 @@ Built-in file read 可以读取 workspace 之外 Host 可见的路径。这类 w
 
 Workspace scope 不是唯一防线。Sensitive path 与危险操作仍可能需要 approval 或被拒绝。
 
+## Terminal Command Containment
+
+Terminal command guard 会同时检查 execution-faithful raw command 与额外的 ANSI/NFKC
+detection candidates。Literal `allow/low` command 可以使用 automatic approval；可执行或
+无法建模的 shell expansion、nested shell evaluation、malformed shell syntax 与 unknown
+command 都保持 `prompt/high`，global `auto` policy 不能削弱该结果。已知 destructive
+hardline payload 会在 approval 前被阻断。
+
+该 scanner 有意采用 fail-closed 策略，因此 ambiguous text（包括 comment 中类似
+expansion 的 syntax）可能触发 prompt。它是 containment，不是完整 shell parser 或
+sandbox。显式获批的 command 仍由 Host terminal runtime 执行；environment sanitization、
+process-tree control 与 principal-scoped approval 是独立的 security boundary。
+
 ## Capabilities
 
 Capabilities 描述以下 effect class：

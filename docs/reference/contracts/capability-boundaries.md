@@ -59,6 +59,9 @@ Approval policy can come from:
 
 `deny` is always terminal. `prompt` requires an approval provider. `auto` can
 run without asking only after capability and workspace checks pass.
+For terminal execution, `auto` additionally requires an `allow/low` command
+guard decision. Global fallback policy cannot lower a `prompt/high` or unknown
+terminal decision, and hardline blocks never reach approval.
 
 ## Workspace Rule
 

@@ -24,6 +24,21 @@ file is opened.
 Workspace scope is not the only guard. Sensitive paths and dangerous operations
 can still require approval or be rejected.
 
+## Terminal Command Containment
+
+The terminal command guard evaluates the execution-faithful raw command plus
+additive ANSI/NFKC detection candidates. Literal `allow/low` commands may use
+automatic approval. Executable or unmodelled shell expansion, nested shell
+evaluation, malformed shell syntax, and unknown commands remain `prompt/high`;
+global `auto` policy cannot weaken that result. Known destructive hardline
+payloads are blocked before approval.
+
+This scanner is deliberately fail-closed and may prompt for ambiguous text,
+including expansion-like syntax inside comments. It is containment, not a full
+shell parser or sandbox. Explicitly approved commands still execute in the
+Host terminal runtime; environment sanitization, process-tree control, and
+principal-scoped approval remain separate security boundaries.
+
 ## Capabilities
 
 Capabilities describe effect classes such as:

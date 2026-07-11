@@ -54,6 +54,9 @@ Approval policy 可以来自：
 - channel/runtime approval provider behavior
 
 `deny` 始终是终止性结果。`prompt` 需要 approval provider。只有在 capability 和 workspace checks 通过之后，`auto` 才能不询问就运行。
+对于 terminal execution，`auto` 还要求 command guard 返回 `allow/low`。Global fallback
+policy 不能把 `prompt/high` 或 unknown terminal decision 降级为自动执行；hardline block
+不会进入 approval。
 
 ## Workspace Rule
 

@@ -819,9 +819,19 @@ async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
     assert approval_events[0]["risk"] == "low"
 
 
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        pytest.param('echo "$(printf {sentinel})"', id="double-quoted"),
+        pytest.param("echo ＇$(printf {sentinel})＇", id="fullwidth-apostrophe"),
+        pytest.param("echo ＼$(printf {sentinel})", id="fullwidth-backslash"),
+        pytest.param("echo $\\\n(printf {sentinel})", id="line-continuation"),
+        pytest.param("printf {sentinel}_%s $[1+1]", id="legacy-arithmetic"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_sec_01_terminal_does_not_auto_execute_command_substitution(tmp_path):
-    """SEC-01: runtime must not auto-execute a harmless substitution sentinel."""
+async def test_sec_01_terminal_does_not_auto_execute_shell_expansion(tmp_path, command_template):
+    """SEC-01: runtime must not auto-execute a harmless expansion sentinel."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
@@ -833,7 +843,7 @@ async def test_sec_01_terminal_does_not_auto_execute_command_substitution(tmp_pa
         app,
         core,
         "terminal",
-        {"command": f'echo "$(printf {sentinel})"'},
+        {"command": command_template.format(sentinel=sentinel)},
     )
 
     assert {
@@ -845,6 +855,131 @@ async def test_sec_01_terminal_does_not_auto_execute_command_substitution(tmp_pa
         "execution_started": False,
         "sentinel_exposed": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_sec_01_global_auto_does_not_override_shell_expansion_guard(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    sentinel = "DEMIURGE_SEC_01_GLOBAL_AUTO_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": f'echo "$(printf {sentinel})"'},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert sentinel not in result.content
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_sec_01_session_allow_is_scoped_to_the_exact_expansion_command(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    first = await _execute(app, core, "terminal", {"command": 'echo "$(printf FIRST_SENTINEL)"'})
+    second = await _execute(app, core, "terminal", {"command": 'echo "$(printf SECOND_SENTINEL)"'})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all("SENTINEL" not in request.cache_key for request in provider.requests)
+    assert all(request.cache_key.startswith("terminal:terminal.exec:command-substitution:") for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_session_allow_is_scoped_to_the_exact_shell_eval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    first = await _execute(app, core, "terminal", {"command": "sh -c 'printf FIRST_SENTINEL'"})
+    second = await _execute(app, core, "terminal", {"command": "sh -c 'printf SECOND_SENTINEL'"})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all(request.cache_key.startswith("terminal:terminal.exec:shell-eval:") for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_expansion_approval_fingerprint_includes_env_overlay(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = 'printf "%s" "$VALUE"'
+
+    first = await _execute(app, core, "terminal", {"command": command, "env": {"VALUE": "FIRST_SENTINEL"}})
+    second = await _execute(app, core, "terminal", {"command": command, "env": {"VALUE": "SECOND_SENTINEL"}})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all("SENTINEL" not in request.cache_key for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_expansion_approval_fingerprint_includes_execution_options(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = 'printf "%s" "$VALUE"'
+    env = {"VALUE": "OPTIONS_SENTINEL"}
+
+    first = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 1})
+    second = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 2})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "OPTIONS_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "OPTIONS_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
 
 
 @pytest.mark.asyncio
@@ -1504,7 +1639,7 @@ async def test_core_approval_config_cannot_lower_host_safety_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
+async def test_global_approval_auto_cannot_lower_prompt_command_guard_decision(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     doomed = workspace / "doomed.txt"
@@ -1521,9 +1656,37 @@ async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
 
     result = await _execute(app, core, "terminal", {"command": "rm doomed.txt"})
 
-    assert result.is_error is False
-    assert result.data["executionStarted"] is True
-    assert not doomed.exists()
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert doomed.exists()
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_global_approval_auto_cannot_execute_unknown_terminal_command(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "id"})
+
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
 
 
 @pytest.mark.asyncio

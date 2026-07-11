@@ -4,6 +4,7 @@ import asyncio
 import codecs
 import difflib
 import fnmatch
+import hashlib
 import inspect
 import json
 import os
@@ -56,6 +57,19 @@ from demiurge.security.workspace import (
 
 EventEmitter = Callable[..., dict[str, Any]]
 SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "scripts", "assets"})
+_COMMAND_SPECIFIC_APPROVAL_RULES = frozenset(
+    {
+        "command-substitution",
+        "complex-shell",
+        "pipeline",
+        "process-substitution",
+        "script-eval",
+        "shell-eval",
+        "shell-expansion",
+        "shell-redirection",
+        "unknown-command",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -71,6 +85,32 @@ def _terminal_execution_command(command: str) -> str:
     if os.name != "nt":
         return command
     return _windows_posix_compat_command(command) or command
+
+
+def _terminal_approval_cache_key(
+    command: str,
+    decision: CommandGuardDecision,
+    *,
+    cwd: str,
+    env_overlay: Mapping[str, str],
+    execution_options: Mapping[str, Any],
+) -> str:
+    base = f"terminal:terminal.exec:{decision.rule_key}"
+    if decision.rule_key not in _COMMAND_SPECIFIC_APPROVAL_RULES:
+        return base
+    fingerprint = json.dumps(
+        {
+            "command": command,
+            "cwd": cwd,
+            "env": sorted((str(key), str(value)) for key, value in env_overlay.items()),
+            "execution_options": dict(execution_options),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return f"{base}:{digest}"
 
 
 def _windows_posix_compat_command(command: str) -> str | None:
@@ -788,6 +828,9 @@ class ToolRuntime:
                 is_error=True,
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
+        normalized_env_overlay = {str(key): str(value) for key, value in env_overlay.items()}
+        timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
+        background = bool(call.arguments.get("background", False))
         command_guard = review_command(command)
         if command_guard.action == "block":
             content = f"terminal command blocked: {command_guard.reason}"
@@ -803,18 +846,19 @@ class ToolRuntime:
             turn=turn,
             cwd=cwd.relative,
             command=command,
-            env_keys=sorted(str(key) for key in env_overlay.keys()),
+            env_keys=sorted(normalized_env_overlay),
+            env_overlay=normalized_env_overlay,
+            execution_options={"background": background, "timeout_seconds": timeout},
             command_guard=command_guard,
             emit_event=emit_event,
         )
         if denied:
             return denied
-        timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
         env = os.environ.copy()
-        env.update({str(key): str(value) for key, value in env_overlay.items()})
+        env.update(normalized_env_overlay)
         env = self.runtime_timezone.apply_subprocess_env(env)
         execution_command = _terminal_execution_command(command)
-        if bool(call.arguments.get("background", False)):
+        if background:
             return self._start_background_task(
                 command=command,
                 execution_command=execution_command,
@@ -1828,9 +1872,12 @@ class ToolRuntime:
         cwd: str,
         command: str,
         env_keys: list[str],
+        env_overlay: Mapping[str, str],
+        execution_options: Mapping[str, Any],
         command_guard: CommandGuardDecision,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
+        requires_explicit_approval = command_guard.action != "allow"
         if command_guard.action == "allow":
             policy = self._safe_command_approval_policy(
                 core,
@@ -1847,7 +1894,9 @@ class ToolRuntime:
                 risk=command_guard.risk,
                 default_auto=False,
             )
-            auto_approve = policy == "auto"
+            if requires_explicit_approval and policy == "auto":
+                policy = "prompt"
+            auto_approve = policy == "auto" and not requires_explicit_approval
         summary = f"Run terminal command in {cwd}"
         if command_guard.action != "allow":
             summary = f"{summary}: {command_guard.reason}"
@@ -1867,7 +1916,13 @@ class ToolRuntime:
                 "env_keys": env_keys,
                 "command_guard": asdict(command_guard),
             },
-            cache_key=f"terminal:terminal.exec:{command_guard.rule_key}",
+            cache_key=_terminal_approval_cache_key(
+                command,
+                command_guard,
+                cwd=cwd,
+                env_overlay=env_overlay,
+                execution_options=execution_options,
+            ),
             auto_approve=auto_approve,
             policy=policy,
             session_id=turn.session_id,

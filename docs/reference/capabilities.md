@@ -116,8 +116,11 @@ For builtin handlers that use the approval runtime, and for MCP calls, the Host
 starts from tool metadata, then applies core approval overrides, then global
 fallback approval. More restrictive core policy wins over tool metadata.
 Global fallback approval is Host-level policy and can be used as the final
-default. Authored singular metadata and the core-mutation builtin exceptions
-above are not yet passed through this resolution path.
+default, but it cannot lower a terminal command guard result from `prompt/high`
+to automatic execution. Only `allow/low` terminal commands can be auto-approved;
+hardline blocks terminate before approval. Authored singular metadata and the
+core-mutation builtin exceptions above are not yet passed through this
+resolution path.
 
 ## Core Approval Config
 

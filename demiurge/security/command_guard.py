@@ -27,9 +27,24 @@ class _ShellSplit:
     has_redirection: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _ShellExpansionScan:
+    reason: str | None = None
+    rule_key: str | None = None
+    hardline: tuple[str, str] | None = None
+
+
 _ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _SAFE_SCRIPT_RE = re.compile(r"^(test|tests|build|lint|check|typecheck|dev|preview)(:.+)?$")
+_SHELL_EXPANSION_PRIORITY = {
+    "shell-expansion": 1,
+    "process-substitution": 2,
+    "command-substitution": 3,
+}
+_MAX_SHELL_EXPANSION_DEPTH = 32
+_COMMAND_GUARD_ACTION_PRIORITY = {"allow": 0, "prompt": 1, "block": 2}
+_COMMAND_GUARD_RISK_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 _PROMPT_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE | re.DOTALL), key, reason)
@@ -41,15 +56,43 @@ _PROMPT_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
 
 
 def review_command(command: str) -> CommandGuardDecision:
-    normalized = _normalize(command)
-    if not normalized:
+    if "\x00" in command:
+        return CommandGuardDecision("prompt", "high", "null bytes are not supported in shell commands", "complex-shell")
+    candidates = _detection_candidates(command)
+    if not candidates:
+        return CommandGuardDecision("prompt", "high", "empty command", "empty-command")
+    decisions = [_review_detection_candidate(candidate) for candidate in candidates]
+    return max(
+        decisions,
+        key=lambda decision: (
+            _COMMAND_GUARD_ACTION_PRIORITY[decision.action],
+            _COMMAND_GUARD_RISK_PRIORITY.get(decision.risk, 0),
+        ),
+    )
+
+
+def _review_detection_candidate(command: str) -> CommandGuardDecision:
+    if not command:
         return CommandGuardDecision("prompt", "high", "empty command", "empty-command")
 
-    split = _split_shell(normalized)
-    hardline = _detect_hardline(normalized, split)
+    expansion = _scan_shell_expansions(command)
+    if expansion.hardline is not None:
+        reason, key = expansion.hardline
+        return CommandGuardDecision("block", "critical", reason, key)
+
+    split = _split_shell(command)
+    hardline = _detect_hardline(command, split)
     if hardline is not None:
         reason, key = hardline
         return CommandGuardDecision("block", "critical", reason, key)
+
+    if expansion.rule_key is not None:
+        return CommandGuardDecision(
+            "prompt",
+            "high",
+            expansion.reason or "shell expansion is not auto-approved",
+            expansion.rule_key,
+        )
 
     if split.unsupported is not None:
         return CommandGuardDecision("prompt", "high", split.unsupported, "complex-shell")
@@ -71,7 +114,7 @@ def review_command(command: str) -> CommandGuardDecision:
         reason, key = token_prompt
         return CommandGuardDecision("prompt", "high", reason, key)
 
-    prompt = _detect_promptable(normalized)
+    prompt = _detect_promptable(command)
     if prompt is not None:
         reason, key = prompt
         return CommandGuardDecision("prompt", "high", reason, key)
@@ -89,11 +132,189 @@ def review_command(command: str) -> CommandGuardDecision:
     return CommandGuardDecision("allow", "low", "safe terminal command", "safe-command")
 
 
-def _normalize(command: str) -> str:
-    command = _ANSI_RE.sub("", command)
-    command = command.replace("\x00", "")
-    command = unicodedata.normalize("NFKC", command)
-    return command.strip()
+def _detection_candidates(command: str) -> tuple[str, ...]:
+    raw = command.strip()
+    if not raw:
+        return ()
+    execution_faithful = _collapse_line_continuations(raw)
+    ansi_stripped = _collapse_line_continuations(_ANSI_RE.sub("", raw))
+    confusable_folded = unicodedata.normalize("NFKC", ansi_stripped)
+    candidates: list[str] = []
+    for candidate in (execution_faithful, ansi_stripped, confusable_folded):
+        candidate = candidate.strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _collapse_line_continuations(command: str) -> str:
+    return command.replace("\\\n", "")
+
+
+def _scan_shell_expansions(command: str, *, _depth: int = 0) -> _ShellExpansionScan:
+    issue_reason: str | None = None
+    issue_key: str | None = None
+    hardline: tuple[str, str] | None = None
+    quote: str | None = None
+    index = 0
+
+    def record_issue(reason: str, rule_key: str) -> None:
+        nonlocal issue_reason, issue_key
+        current_priority = _SHELL_EXPANSION_PRIORITY.get(issue_key or "", 0)
+        if _SHELL_EXPANSION_PRIORITY[rule_key] > current_priority:
+            issue_reason = reason
+            issue_key = rule_key
+
+    while index < len(command):
+        char = command[index]
+
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if char == "\\":
+            index += 2
+            continue
+
+        if quote is None and char == "'":
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+
+        if quote is None and command.startswith("<(", index):
+            end = _scan_parenthesized_end(command, index)
+            payload_end = end - 1 if end is not None else len(command)
+            nested_hardline = _hardline_in_expansion(command[index + 2 : payload_end], depth=_depth)
+            hardline = hardline or nested_hardline
+            record_issue("process substitution is not auto-approved", "process-substitution")
+            index = end if end is not None else len(command)
+            continue
+        if quote is None and command.startswith(">(", index):
+            end = _scan_parenthesized_end(command, index)
+            payload_end = end - 1 if end is not None else len(command)
+            nested_hardline = _hardline_in_expansion(command[index + 2 : payload_end], depth=_depth)
+            hardline = hardline or nested_hardline
+            record_issue("process substitution is not auto-approved", "process-substitution")
+            index = end if end is not None else len(command)
+            continue
+
+        if char == "`":
+            end = _scan_backtick_end(command, index)
+            payload_end = end - 1 if end is not None else len(command)
+            nested_hardline = _hardline_in_expansion(command[index + 1 : payload_end], depth=_depth)
+            hardline = hardline or nested_hardline
+            record_issue("command substitution is not auto-approved", "command-substitution")
+            index = end if end is not None else len(command)
+            continue
+
+        if char == "$":
+            if command.startswith("$(", index) and not command.startswith("$((", index):
+                end = _scan_parenthesized_end(command, index)
+                payload_end = end - 1 if end is not None else len(command)
+                nested_hardline = _hardline_in_expansion(command[index + 2 : payload_end], depth=_depth)
+                hardline = hardline or nested_hardline
+                record_issue("command substitution is not auto-approved", "command-substitution")
+                index = end if end is not None else len(command)
+                continue
+            if command.startswith("$((", index):
+                record_issue("shell expansion is not auto-approved", "shell-expansion")
+                index += 3
+                continue
+            if command.startswith("$[", index):
+                record_issue("shell expansion is not auto-approved", "shell-expansion")
+                index += 2
+                continue
+            if command.startswith("${", index) or _starts_shell_parameter(command, index):
+                record_issue("shell expansion is not auto-approved", "shell-expansion")
+
+        index += 1
+
+    return _ShellExpansionScan(reason=issue_reason, rule_key=issue_key, hardline=hardline)
+
+
+def _starts_shell_parameter(command: str, index: int) -> bool:
+    if index + 1 >= len(command):
+        return False
+    following = command[index + 1]
+    return following.isalnum() or following == "_" or following in "*@#?-$!\"'"
+
+
+def _scan_parenthesized_end(command: str, start: int) -> int | None:
+    depth = 1
+    quote: str | None = None
+    index = start + 2
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if quote is None and char == "'":
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote == '"':
+            if char == "`":
+                backtick_end = _scan_backtick_end(command, index)
+                index = backtick_end if backtick_end is not None else len(command)
+                continue
+            if command.startswith("$((", index):
+                depth += 2
+                index += 3
+                continue
+            if command.startswith("$(", index):
+                depth += 1
+                index += 2
+                continue
+            index += 1
+            continue
+        if char == "`":
+            backtick_end = _scan_backtick_end(command, index)
+            index = backtick_end if backtick_end is not None else len(command)
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _scan_backtick_end(command: str, start: int) -> int | None:
+    index = start + 1
+    while index < len(command):
+        if command[index] == "\\":
+            index += 2
+            continue
+        if command[index] == "`":
+            return index + 1
+        index += 1
+    return None
+
+
+def _hardline_in_expansion(payload: str, *, depth: int) -> tuple[str, str] | None:
+    if depth < _MAX_SHELL_EXPANSION_DEPTH:
+        nested = _scan_shell_expansions(payload, _depth=depth + 1)
+        if nested.hardline is not None:
+            return nested.hardline
+    split = _split_shell(payload)
+    return _detect_hardline(payload, split, _depth=depth + 1)
 
 
 def _split_shell(command: str) -> _ShellSplit:
@@ -165,7 +386,7 @@ def _split_shell(command: str) -> _ShellSplit:
     return _ShellSplit(tuple(segments), tuple(separators), has_redirection=has_redirection)
 
 
-def _detect_hardline(command: str, split: _ShellSplit) -> tuple[str, str] | None:
+def _detect_hardline(command: str, split: _ShellSplit, *, _depth: int = 0) -> tuple[str, str] | None:
     lowered = command.lower()
     if re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", lowered):
         return ("fork bomb", "fork-bomb")
@@ -182,10 +403,24 @@ def _detect_hardline(command: str, split: _ShellSplit) -> tuple[str, str] | None
             continue
         if _contains_sudo_stdin(tokens):
             return ("sudo password guessing via stdin", "sudo-stdin")
-        index, command_name = _effective_command(tokens)
+        tokens = _normalize_hardline_tokens(tokens)
+        index, command_name = _hardline_effective_command(tokens)
         if not command_name:
             continue
         args = tokens[index + 1 :]
+        if _depth < _MAX_SHELL_EXPANSION_DEPTH:
+            script = None
+            if command_name in {"bash", "sh", "zsh", "ksh"}:
+                script = _shell_eval_script(args)
+            elif command_name == "eval" and args:
+                script = " ".join(args)
+            if script is not None:
+                nested_expansion = _scan_shell_expansions(script, _depth=_depth + 1)
+                if nested_expansion.hardline is not None:
+                    return nested_expansion.hardline
+                nested_hardline = _detect_hardline(script, _split_shell(script), _depth=_depth + 1)
+                if nested_hardline is not None:
+                    return nested_hardline
         if command_name == "rm" and _rm_targets_critical(args):
             return ("recursive delete of root, home, or system directory", "rm-critical-path")
         if command_name.startswith("mkfs"):
@@ -202,6 +437,112 @@ def _detect_hardline(command: str, split: _ShellSplit) -> tuple[str, str] | None
             return ("systemctl shutdown or reboot", "shutdown")
         if command_name == "kill" and "-1" in args:
             return ("kill all processes", "kill-all")
+    return None
+
+
+def _normalize_hardline_tokens(tokens: list[str]) -> list[str]:
+    normalized = list(tokens)
+    while normalized and normalized[0] in {"(", "{", "!"}:
+        normalized.pop(0)
+    if normalized:
+        normalized[0] = normalized[0].lstrip("(")
+        if not normalized[0]:
+            normalized.pop(0)
+    while normalized and normalized[-1] in {")", "}"}:
+        normalized.pop()
+    if normalized:
+        normalized[-1] = normalized[-1].rstrip(")}")
+        if not normalized[-1]:
+            normalized.pop()
+    return normalized
+
+
+def _hardline_effective_command(tokens: list[str]) -> tuple[int, str]:
+    index = 0
+    while index < len(tokens) and _ASSIGNMENT_RE.match(tokens[index]):
+        index += 1
+    while index < len(tokens):
+        name = PurePosixPath(tokens[index]).name
+        if name not in {"command", "env", "exec", "nice", "nohup", "setsid", "sudo", "time"}:
+            return index, name
+        wrapper = name
+        wrapper_index = index
+        index += 1
+        if wrapper == "command" and any(arg in {"-v", "-V"} for arg in tokens[index:] if arg.startswith("-")):
+            return wrapper_index, wrapper
+        options_with_value: set[str] = set()
+        allow_plus = False
+        if wrapper == "env":
+            options_with_value = {"-a", "--argv0", "-C", "--chdir", "-S", "--split-string", "-u", "--unset"}
+        elif wrapper == "exec":
+            options_with_value = {"-a"}
+        elif wrapper == "nice":
+            options_with_value = {"-n", "--adjustment"}
+        elif wrapper == "sudo":
+            options_with_value = {
+                "-C",
+                "--close-from",
+                "-D",
+                "--chdir",
+                "-g",
+                "--group",
+                "-h",
+                "--host",
+                "-p",
+                "--prompt",
+                "-R",
+                "--chroot",
+                "-r",
+                "--role",
+                "-T",
+                "--command-timeout",
+                "-t",
+                "--type",
+                "-u",
+                "--user",
+            }
+        elif wrapper == "time":
+            options_with_value = {"-f", "--format", "-o", "--output"}
+            allow_plus = True
+        index = _skip_wrapper_options(tokens, index, options_with_value=options_with_value, allow_plus=allow_plus)
+        while index < len(tokens) and _ASSIGNMENT_RE.match(tokens[index]):
+            index += 1
+    return index, ""
+
+
+def _skip_wrapper_options(
+    tokens: list[str],
+    index: int,
+    *,
+    options_with_value: set[str],
+    allow_plus: bool,
+) -> int:
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            return index + 1
+        is_option = arg.startswith("-") or (allow_plus and arg.startswith("+"))
+        if not is_option or arg in {"-", "+"}:
+            return index
+        index += 2 if arg in options_with_value else 1
+    return index
+
+
+def _shell_eval_script(args: list[str]) -> str | None:
+    index = 0
+    options_with_value = {"-O", "+O", "--init-file", "--rcfile"}
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return None
+        if arg in options_with_value:
+            index += 2
+            continue
+        if not arg.startswith(("-", "+")) or arg in {"-", "+"}:
+            return None
+        if not arg.startswith("--") and "c" in arg[1:]:
+            return args[index + 1] if index + 1 < len(args) else ""
+        index += 1
     return None
 
 
@@ -254,6 +595,8 @@ def _detect_promptable_tokens(commands: list[list[str]]) -> tuple[str, str] | No
         if name in {"curl", "wget"}:
             return ("download from the network", "network-download")
         if name in {"bash", "sh", "zsh", "ksh"} and _has_short_flag(args, "c"):
+            return ("shell command evaluation", "shell-eval")
+        if name == "eval":
             return ("shell command evaluation", "shell-eval")
         if name.startswith("python"):
             if _has_short_flag(args, "c"):

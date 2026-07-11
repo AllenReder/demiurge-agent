@@ -47,6 +47,26 @@ example:
 | `evolve_core` | `tool.call:evolve_core` | `prompt` |
 | `rollback_core` | `tool.call:rollback_core` | `prompt` |
 
+Before terminal approval, the Host lexically reviews the execution-faithful raw
+command and additional ANSI-stripped/NFKC detection candidates. Normalization
+adds checks; it never replaces the raw shell interpretation. Only recognized
+literal commands classified `allow/low` can use automatic approval. Command
+substitution (`$()` and backticks), process substitution, parameter/arithmetic
+expansion (including legacy `$[...]`), malformed shell forms, and unknown
+commands remain `prompt/high`; a global `auto` fallback cannot lower that
+command-guard decision. Known destructive payloads are blocked before the
+approval provider is called. Single-quoted or escaped metacharacters remain
+literal when the scanner can prove that interpretation.
+
+This lexical guard is containment, not a shell sandbox or a complete shell AST.
+An explicitly approved command still runs through the Host terminal runtime.
+Ambiguous shell approvals use a fingerprint of the command, cwd, explicit
+environment overlay, and execution options such as foreground/background mode
+and timeout. One approval therefore does not authorize a different execution
+shape through the same coarse rule key. This fingerprint does not replace the
+separate session/principal ownership contract. Ambiguous shell text, including
+expansion syntax inside comments, can conservatively require approval.
+
 For builtin handlers that use approval resolution, core metadata can make the
 effective policy stricter but cannot lower risk or weaken the registry policy.
 The core-mutation alpha exception is described below.

@@ -223,6 +223,10 @@ approval:
     critical: deny
 ```
 
+For terminal calls, `auto` applies only after the Host command guard returns
+`allow/low`. It does not override `prompt/high`, unknown shell forms, or
+hardline blocks.
+
 The host combines tool metadata, core approval config, and global fallback
 approval config when deciding whether to prompt.
 

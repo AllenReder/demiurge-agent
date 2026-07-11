@@ -112,6 +112,8 @@ low < medium < high < critical
 对于使用 approval runtime 的 builtin handler 与 MCP call，Host 从 tool metadata 开始，
 再应用 core approval overrides，最后应用 global fallback approval。更严格的 core policy
 优先于 tool metadata。Global fallback approval 是 Host-level policy，可作为最终默认值。
+但它不能把 terminal command guard 的 `prompt/high` 结果降级为自动执行；只有
+`allow/low` terminal command 可以自动批准，hardline block 会在 approval 前终止。
 Authored 单数 metadata 与上面的 core-mutation builtin 例外尚未进入该 resolution path。
 
 ## Core Approval Config
