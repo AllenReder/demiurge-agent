@@ -537,6 +537,13 @@ class OperatorGatewayRuntime:
 
     async def _tools(self, _: str) -> bool:
         core = await self._active_core()
+        turn = TurnContext(
+            session_id=self.app.runner.session_id,
+            turn_id="tui_tools",
+            core_id=core.core_id,
+            core_revision=core.revision,
+            user_input=AgentInput(content="/tools"),
+        )
         rows = [
             (
                 entry.name,
@@ -546,7 +553,7 @@ class OperatorGatewayRuntime:
                 entry.approval_policy,
                 f"{entry.model_output_policy}/{entry.display_policy}",
             )
-            for entry in self.app.tool_runtime.registry_for(core)
+            for entry in self.app.tool_runtime.registry_for(core, turn=turn)
         ]
         await self._emit_command_output("tools", format_table(["name", "source", "risk", "capability", "approval", "output"], rows, title="Tools"))
         return True
@@ -570,7 +577,7 @@ class OperatorGatewayRuntime:
         name = parts[0]
         file_path = parts[1] if len(parts) > 1 else None
         core = await self._active_core()
-        result = await self.app.tool_runtime.execute(
+        result = await self.app.runner.execute_call(
             ToolCall(
                 name="skill_view",
                 arguments={"name": name, **({"file_path": file_path} if file_path else {})},

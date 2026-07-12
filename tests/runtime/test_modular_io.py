@@ -1760,7 +1760,7 @@ async def test_agents_run_rejects_child_tool_call_when_tools_are_hidden(tmp_path
 
     result = await app.runner.run_turn("hello")
 
-    assert "builtin tool is not allowed: read_file" in _delivery_texts(result)[1]
+    assert "tool not found or not allowed: read_file" in _delivery_texts(result)[1]
 
 
 @pytest.mark.asyncio

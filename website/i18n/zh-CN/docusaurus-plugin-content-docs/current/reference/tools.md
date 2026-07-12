@@ -12,12 +12,11 @@ Host 会为每个 turn 从以下来源构建可见 tool registry：
 - 从 `slots.mcp` 发现的 MCP tools
 
 Agent Core 声明 tool surface。Host 是 selection、dispatch、capability checks、approvals、
-workspace scope、task control 与 result conversion 的产品 owner。当前 alpha 实现仍有
-相互分离的 builtin、authored 与 MCP 路径。Authored dispatch 以及 `evolve_core` /
-`rollback_core` mutation 分支现在会在 module import、background task 创建或 mutation
-adapter 调用前，要求 resolved singular capability 并执行 approval policy；MCP
-connect/discovery 仍发生在 call approval 之前。剩余的 dispatch duplication 与 MCP 缺口
-已冻结为必须在
+workspace scope、task control 与 result conversion 的产品 owner。现在由一个 per-turn
+resolved catalog 同时生成 provider definitions、`tools_list` display、effective approval
+metadata，以及 dispatch 使用的 adapter-bound `EffectRequest`。Builtin、authored 与 MCP call
+不再按全局 tool name 做第二次 source lookup。MCP connect/discovery 仍发生在 call approval
+之前；该剩余缺口已冻结为必须在
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)中消除的目标。
 
 ## Built-In Toolsets
@@ -29,6 +28,13 @@ connect/discovery 仍发生在 call approval 之前。剩余的 dispatch duplica
 | `schedule` | `schedule_manage` |
 
 未知 toolset name 会导致 core loading 失败。
+
+## Tool Name 唯一性
+
+Model-visible tool name 在 builtin、authored 与 MCP source 之间必须唯一。Builtin/authored
+collision 会让 core loading 失败；涉及已发现 MCP tool 的 collision 会让最终 catalog
+构建失败。诊断会列出两侧 provenance，并要求重命名；Host 不会静默优先 builtin
+implementation。这是针对过去依赖含糊 name 的 core 的 intentional alpha breaking change。
 
 ## Built-In Tool Metadata
 
@@ -134,6 +140,11 @@ Host 传入包含以下内容的 `ToolContext`：
 | `ctx.workspace` | 解析后的 workspace root。 |
 
 返回 `demiurge.sdk.ToolResult`、兼容 dict，或任何可转换成文本的值。
+
+对于 error result，`executionStarted`、`denial` 与 `approval` 是 Host 保留的 lifecycle
+字段。Authored code 为这些 key 返回的值会被忽略：entrypoint 一旦被调用，Host 就记录
+`executionStarted: true`，并根据自身 capability、approval 与 dispatch state 推导 typed
+effect status。
 
 `ToolResult.content` 是默认 model-visible result。`model_output` 覆盖 model 所见内容，
 `display_output` 覆盖 operator UI 与 channel 的 tool card 内容。对于 `terminal`，display

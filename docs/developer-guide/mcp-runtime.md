@@ -29,9 +29,11 @@ Streamable HTTP declarations require an `http://` or `https://` URL.
 ## Naming
 
 Tool names are normalized, server-prefixed, and filtered before they become
-visible. The current alpha catalog and dispatcher do not yet share one opaque
-resolved entry, so namespacing is not a substitute for connection-bound
-dispatch or a single namespace authority.
+visible. The per-turn resolved catalog binds each visible MCP tool to its
+session/revision connection and dispatcher adapter. Calls therefore use that
+connection-bound entry instead of the legacy global name index. Cross-source
+name collisions fail with both provenances. Namespacing still does not replace
+the connect/discovery authority and lifecycle work owned by DG-P3-T02.
 
 ## Environment and Headers
 

@@ -13,6 +13,7 @@ from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.approval import StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.tools.registry import ToolRegistryCollisionError
 
 
 @dataclass(slots=True)
@@ -101,7 +102,7 @@ async def _prepare(app):
 
 def _execute(app, core, name, arguments):
     turn = _turn(core)
-    return app.tool_runtime.execute(
+    return app.runner.execute_call(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
         turn=turn,
@@ -142,6 +143,114 @@ async def test_mcp_discovery_adds_sanitized_filtered_tool(tmp_path):
     tools_list = await _execute(app, core, "tools_list", {})
     assert "docs-server__search-docs" in tools_list.content
     assert "delete docs" not in tools_list.content
+
+
+@pytest.mark.asyncio
+async def test_resolved_mcp_entry_is_bound_to_the_current_turn_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+    )
+    _set_capabilities(app, {"mcp.call:docs": {}})
+    connection_a = FakeMcpConnection([FakeListedTool(name="lookup")])
+    connection_b = FakeMcpConnection([FakeListedTool(name="lookup")])
+    connections = [connection_a, connection_b]
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connections.pop(0)
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = TurnContext(
+        session_id="session_A",
+        turn_id="turn_A",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="A"),
+    )
+    turn_b = TurnContext(
+        session_id="session_B",
+        turn_id="turn_B",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="B"),
+    )
+    await app.tool_runtime.prepare_for_turn(core, turn_a)
+    await app.tool_runtime.prepare_for_turn(core, turn_b)
+
+    catalog_a = app.tool_runtime.resolve_effects(core, turn=turn_a)
+    catalog_b = app.tool_runtime.resolve_effects(core, turn=turn_b)
+    entry_a = catalog_a.entry_for("docs__lookup")
+    entry_b = catalog_b.entry_for("docs__lookup")
+
+    assert entry_a is not None
+    assert entry_b is not None
+    assert entry_a.adapter_key.startswith("mcp:session_A:")
+    assert entry_b.adapter_key.startswith("mcp:session_B:")
+    request_a = catalog_a.request_for(
+        ToolCall(name="docs__lookup", arguments={"origin": "A"}, id="call_A")
+    )
+    assert request_a is not None
+    effect_result = await app.tool_runtime.execute(
+        request_a,
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=_principal_scope(app, core, turn_a),
+    )
+
+    assert effect_result.status == "succeeded"
+    result = effect_result.to_tool_result()
+    assert result.is_error is False
+    assert connection_a.calls == [("lookup", {"origin": "A"})]
+    assert connection_b.calls == []
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_final_registry_rejects_authored_mcp_name_collision(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    tool_root = (
+        app.version_store.active_core_path("assistant")
+        / "agent"
+        / "tools"
+        / "docs__lookup"
+    )
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Authored collision probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "def run(ctx, arguments):\n"
+        "    return {'content': 'authored'}\n",
+        encoding="utf-8",
+    )
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\ncommand: fake-mcp\napproval_policy: auto\n",
+    )
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: FakeMcpConnection(
+        [FakeListedTool(name="lookup")]
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(core)
+    await app.tool_runtime.prepare_for_turn(core, turn)
+
+    with pytest.raises(ToolRegistryCollisionError) as exc_info:
+        app.tool_runtime.resolve_effects(core, turn=turn)
+
+    message = str(exc_info.value)
+    assert "tool name collision: docs__lookup" in message
+    assert "authored:agent/tools/docs__lookup" in message
+    assert "mcp:agent/mcp/docs.yaml:docs/lookup" in message
+    await app.close()
 
 
 @pytest.mark.asyncio
@@ -265,14 +374,20 @@ async def test_mcp_02_tool_dispatch_stays_bound_to_originating_session_connectio
 
     await app.tool_runtime.prepare_for_turn(core, turn_a, emit_event=app.runner.event_log.emit)
     await app.tool_runtime.prepare_for_turn(core, turn_b, emit_event=app.runner.event_log.emit)
-    result = await app.tool_runtime.execute(
-        ToolCall(name="docs__lookup", arguments={"origin": "session_A"}, id="call_A"),
+    catalog_a = app.tool_runtime.resolve_effects(core, turn=turn_a)
+    request_a = catalog_a.request_for(
+        ToolCall(name="docs__lookup", arguments={"origin": "session_A"}, id="call_A")
+    )
+    assert request_a is not None
+    effect_result = await app.tool_runtime.execute(
+        request_a,
         core=core,
         turn=turn_a,
         capability=CapabilityFacade(core),
         principal_scope=scope_a,
         emit_event=app.runner.event_log.emit,
     )
+    result = effect_result.to_tool_result()
 
     assert result.is_error is False
     assert {"session_A": connection_a.calls, "session_B": connection_b.calls} == {

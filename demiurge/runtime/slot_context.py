@@ -116,11 +116,12 @@ class RunnerSlotContextHost:
         emit_event: Callable[..., dict[str, Any]] | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        return await self.runner.execute_tool(
+        return await self.runner.execute_call(
             call,
             core=core,
             turn=turn,
             capability=capability,
+            origin="authored",
             principal_scope=self.runner.task_worker.scope_for_turn(
                 session_id=turn.session_id,
                 turn_id=turn.turn_id,

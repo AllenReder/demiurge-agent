@@ -15,7 +15,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -48,13 +48,17 @@ from demiurge.tools.registry import (
     APPROVAL_ORDER,
     BUILTIN_TOOL_DEFINITIONS,
     BUILTIN_TOOL_METADATA,
+    EffectRequest,
+    EffectResult,
     RISK_ORDER,
-    ToolRegistryEntry,
+    ResolvedEffectCatalog,
+    ResolvedEffectEntry,
 )
 from demiurge.util import read_json, require_relative_path, write_json
 from demiurge.security.workspace import (
     DEFAULT_READ_LIMIT_CHARS,
     DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+    ResolvedPath,
     WorkspaceScope,
     WorkspaceScopeError,
     truncate_text,
@@ -80,6 +84,19 @@ _SENSITIVE_ARGUMENT_KEY_PARTS = (
     "secret",
     "token",
 )
+_ADAPTER_SPECIFIC_APPROVAL_TOOLS = {
+    "evolve_core",
+    "patch",
+    "read_file",
+    "rollback_core",
+    "schedule_manage",
+    "search_files",
+    "session_search",
+    "skill_manage",
+    "terminal",
+    "web_extract",
+    "write_file",
+}
 
 
 def _safe_authored_arguments_preview(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -299,6 +316,14 @@ class ToolRuntime:
             f"demiurge_tool_approval_scope_{id(self)}",
             default=None,
         )
+        self._resolved_effect_entry: ContextVar[ResolvedEffectEntry | None] = ContextVar(
+            f"demiurge_resolved_effect_entry_{id(self)}",
+            default=None,
+        )
+        self._resolved_effect_catalog: ContextVar[ResolvedEffectCatalog | None] = ContextVar(
+            f"demiurge_resolved_effect_catalog_{id(self)}",
+            default=None,
+        )
 
     async def prepare_for_turn(
         self,
@@ -315,18 +340,29 @@ class ToolRuntime:
         if self.mcp_runtime is not None:
             await self.mcp_runtime.close()
 
-    def registry_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolRegistryEntry]:
-        entries: list[ToolRegistryEntry] = []
+    def resolve_effects(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext | None = None,
+    ) -> ResolvedEffectCatalog:
+        entries: list[ResolvedEffectEntry] = []
+        core_revision = turn.core_revision if turn is not None else core.revision
         for name in core.builtin_tool_names:
             definition = BUILTIN_TOOL_DEFINITIONS.get(name)
             if not definition:
                 continue
             metadata = BUILTIN_TOOL_METADATA.get(name, {})
-            entry = ToolRegistryEntry(
+            entry = ResolvedEffectEntry(
                 name=definition.name,
                 description=definition.description,
                 input_schema=definition.input_schema,
                 source="builtin",
+                core_id=core.core_id,
+                core_revision=core_revision,
+                adapter_key=f"builtin:{definition.name}",
+                provenance=f"builtin:{definition.name}",
+                _adapter=definition.name,
                 risk=self._normalize_risk(str(metadata.get("risk") or "low")),
                 capability=metadata.get("capability"),
                 approval_policy=self._normalize_approval_policy(str(metadata.get("approval_policy") or "auto")),
@@ -335,15 +371,26 @@ class ToolRuntime:
             )
             configured = core.manifest.tools.metadata.get(name)
             if configured:
-                self._apply_metadata(entry, configured, allow_lower_risk=False, allow_weaker_approval=False)
+                entry = self._apply_metadata(
+                    entry,
+                    configured,
+                    allow_lower_risk=False,
+                    allow_weaker_approval=False,
+                )
+            entry = self._resolve_entry_approval_policy(core, entry)
             if entry.enabled:
                 entries.append(entry)
         for slot in core.tool_slots:
-            entry = ToolRegistryEntry(
+            entry = ResolvedEffectEntry(
                 name=slot.slot_id,
                 description=slot.description,
                 input_schema=slot.input_schema or {"type": "object", "properties": {}},
                 source="authored",
+                core_id=core.core_id,
+                core_revision=core_revision,
+                adapter_key=f"authored:{slot.relative_path}",
+                provenance=f"authored:{slot.relative_path}",
+                _adapter=slot,
                 slot_path=slot.relative_path,
                 risk=self._normalize_risk(str(slot.manifest.get("risk") or "medium")),
                 capability=slot.manifest.get("capability"),
@@ -354,16 +401,34 @@ class ToolRuntime:
             )
             configured = core.manifest.tools.metadata.get(slot.slot_id)
             if configured:
-                self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
+                entry = self._apply_metadata(
+                    entry,
+                    configured,
+                    allow_lower_risk=True,
+                    allow_weaker_approval=True,
+                )
+            entry = self._resolve_entry_approval_policy(core, entry)
             if entry.enabled:
                 entries.append(entry)
         if self.mcp_runtime is not None:
-            for tool in self.mcp_runtime.entries_for(core):
-                entry = ToolRegistryEntry(
+            for tool in self.mcp_runtime.entries_for(core, turn=turn):
+                entry = ResolvedEffectEntry(
                     name=tool.name,
                     description=tool.description,
                     input_schema=tool.input_schema or {"type": "object", "properties": {}},
                     source="mcp",
+                    core_id=core.core_id,
+                    core_revision=core_revision,
+                    adapter_key=(
+                        "mcp:"
+                        + ":".join(tool.connection_key)
+                        + f":{tool.server_tool_name}"
+                    ),
+                    provenance=(
+                        f"mcp:{tool.relative_path}:"
+                        f"{tool.server_id}/{tool.server_tool_name}"
+                    ),
+                    _adapter=tool,
                     slot_path=tool.relative_path,
                     risk=self._normalize_risk(tool.risk),
                     capability=tool.capability,
@@ -374,51 +439,101 @@ class ToolRuntime:
                 )
                 configured = core.manifest.tools.metadata.get(tool.name)
                 if configured:
-                    self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
+                    entry = self._apply_metadata(
+                        entry,
+                        configured,
+                        allow_lower_risk=True,
+                        allow_weaker_approval=True,
+                    )
+                entry = self._resolve_entry_approval_policy(core, entry)
                 if entry.enabled:
                     entries.append(entry)
-        return [entry for entry in entries if self._tool_policy_allows(entry, self._tool_policy(turn))]
+        catalog = ResolvedEffectCatalog(
+            core_id=core.core_id,
+            core_revision=core_revision,
+            entries=tuple(entries),
+        )
+        return catalog.filtered(
+            lambda entry: self._tool_policy_allows(entry, self._tool_policy(turn))
+        )
+
+    def registry_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ResolvedEffectEntry]:
+        return list(self.resolve_effects(core, turn=turn).entries)
 
     def _apply_metadata(
         self,
-        entry: ToolRegistryEntry,
+        entry: ResolvedEffectEntry,
         metadata: ToolMetadataInfo,
         *,
         allow_lower_risk: bool,
         allow_weaker_approval: bool,
-    ) -> None:
+    ) -> ResolvedEffectEntry:
+        updates: dict[str, Any] = {}
         if metadata.risk:
             risk = self._normalize_risk(metadata.risk)
             if allow_lower_risk or RISK_ORDER[risk] >= RISK_ORDER[entry.risk]:
-                entry.risk = risk
+                updates["risk"] = risk
         if metadata.capability:
-            entry.capability = metadata.capability
+            updates["capability"] = metadata.capability
         if metadata.approval_policy:
             policy = self._normalize_approval_policy(metadata.approval_policy)
             if allow_weaker_approval or APPROVAL_ORDER[policy] >= APPROVAL_ORDER[entry.approval_policy]:
-                entry.approval_policy = policy
+                updates["approval_policy"] = policy
         if metadata.model_output_policy:
-            entry.model_output_policy = metadata.model_output_policy
+            updates["model_output_policy"] = metadata.model_output_policy
         if metadata.display_policy:
-            entry.display_policy = metadata.display_policy
+            updates["display_policy"] = metadata.display_policy
         if metadata.enabled is not None:
-            entry.enabled = metadata.enabled
+            updates["enabled"] = metadata.enabled
+        return replace(entry, **updates)
+
+    def _resolve_entry_approval_policy(
+        self,
+        core: LoadedCore,
+        entry: ResolvedEffectEntry,
+    ) -> ResolvedEffectEntry:
+        policy = entry.approval_policy
+        capability_names = tuple(
+            dict.fromkeys(
+                value
+                for value in (entry.capability, f"tool.call:{entry.name}")
+                if value
+            )
+        )
+        for approval in (core.manifest.approval, self.global_approval):
+            for capability_name in capability_names:
+                configured = self._select_approval_policy(
+                    approval,
+                    tool_name=entry.name,
+                    capability_name=capability_name,
+                    risk=entry.risk,
+                )
+                if configured:
+                    policy = self._stricter_policy(policy, configured)
+        return replace(entry, approval_policy=policy)
 
     def definitions_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolDefinition]:
-        return [entry.to_definition() for entry in self.registry_for(core, turn=turn)]
+        return self.resolve_effects(core, turn=turn).definitions()
 
     async def execute(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         execution_context: TurnExecutionContext | None = None,
         principal_scope: PrincipalScope | None = None,
+        delegation_runtime: Any | None = None,
         emit_event: EventEmitter | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
-    ) -> ToolResult:
+    ) -> EffectResult:
+        if not isinstance(request, EffectRequest):
+            raise TypeError(
+                "ToolRuntime.execute requires an EffectRequest from a "
+                "ResolvedEffectCatalog"
+            )
+        entry = request.entry
         try:
             approval_scope = self.resolve_approval_scope(
                 core=core,
@@ -428,75 +543,184 @@ class ToolRuntime:
                 principal_scope=principal_scope,
             )
         except (PermissionError, TypeError, ValueError) as exc:
-            return ToolResult(
-                content=str(exc),
-                is_error=True,
-                data={"executionStarted": False},
+            return EffectResult.normalize(
+                entry,
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": False},
+                ),
             )
         scope_token = self._approval_scope.set(approval_scope)
+        entry_token = None
+        catalog_token = None
         try:
-            visible_tools = {
-                entry.name: entry
-                for entry in self.registry_for(core, turn=turn)
-            }
-            if call.name in BUILTIN_TOOL_DEFINITIONS:
-                entry = visible_tools.get(call.name)
-                if entry is None or entry.source != "builtin":
-                    return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
-                return await self._execute_builtin(
-                    call,
-                    entry=entry,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    emit_event=emit_event,
-                )
-            slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
-            if slot:
-                entry = visible_tools.get(call.name)
-                if entry is None or entry.source != "authored":
-                    return ToolResult(content=f"authored tool is not allowed: {call.name}", is_error=True)
-                if entry.capability:
-                    capability._require_registry_capability(
-                        entry.capability,
-                        slot_path=slot.relative_path,
-                    )
-                approval_denial = await self._approval_for_authored(
+            call = request.to_tool_call()
+            catalog = request.catalog
+            if entry.core_id != core.core_id or entry.core_revision != turn.core_revision:
+                return EffectResult.normalize(
                     entry,
-                    slot,
-                    call,
-                    core=core,
-                    turn=turn,
-                    emit_event=emit_event,
+                    ToolResult(
+                        content="resolved effect entry does not match the active core snapshot",
+                        is_error=True,
+                        data={"executionStarted": False},
+                    ),
                 )
-                if approval_denial is not None:
-                    return approval_denial
-                return await self._execute_authored(
-                    slot,
+
+            entry_token = self._resolved_effect_entry.set(entry)
+            catalog_token = self._resolved_effect_catalog.set(catalog)
+
+            self._require_resolved_capability(entry, call, capability)
+            preflight_denial = await self._resolved_approval_preflight(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                emit_event=emit_event,
+            )
+            if preflight_denial is not None:
+                return EffectResult.normalize(entry, preflight_denial)
+
+            try:
+                result = await self._execute_resolved_adapter(
+                    entry,
                     call,
                     core=core,
                     turn=turn,
                     capability=capability,
+                    delegation_runtime=delegation_runtime,
+                    emit_event=emit_event,
                     output_factory=output_factory,
                 )
-            mcp_tool = self.mcp_runtime.tool_info(call.name) if self.mcp_runtime is not None else None
-            if mcp_tool is not None:
-                if call.name not in visible_tools:
-                    return ToolResult(content=f"MCP tool is not allowed: {call.name}", is_error=True)
-                return await self._execute_mcp(
-                    mcp_tool,
-                    call,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    emit_event=emit_event,
+            except Exception as exc:
+                result = ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": True},
                 )
-            else:
-                return ToolResult(content=f"tool not found: {call.name}", is_error=True)
-        except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
-            return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+            return EffectResult.normalize(entry, result)
+        except CapabilityDenied as exc:
+            return EffectResult.normalize(
+                entry,
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={
+                        "executionStarted": False,
+                        "denial": "capability",
+                    },
+                ),
+            )
+        except (WorkspaceScopeError, ValueError, OSError) as exc:
+            return EffectResult.normalize(
+                entry,
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": False},
+                ),
+            )
         finally:
+            if catalog_token is not None:
+                self._resolved_effect_catalog.reset(catalog_token)
+            if entry_token is not None:
+                self._resolved_effect_entry.reset(entry_token)
             self._approval_scope.reset(scope_token)
+
+    async def _execute_resolved_adapter(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        delegation_runtime: Any | None,
+        emit_event: EventEmitter | None,
+        output_factory: Callable[[SlotDefinition], Any] | None,
+    ) -> ToolResult:
+        if entry.source == "builtin":
+            return await self._execute_builtin(
+                call,
+                entry=entry,
+                core=core,
+                turn=turn,
+                capability=capability,
+                delegation_runtime=delegation_runtime,
+                emit_event=emit_event,
+            )
+        if entry.source == "authored":
+            slot = entry._adapter
+            if not isinstance(slot, SlotDefinition):
+                return ToolResult(
+                    content=f"invalid authored effect adapter: {entry.adapter_key}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            approval_denial = await self._approval_for_authored(
+                entry,
+                slot,
+                call,
+                core=core,
+                turn=turn,
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
+            return await self._execute_authored(
+                slot,
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                output_factory=output_factory,
+            )
+        if entry.source == "mcp":
+            mcp_tool = entry._adapter
+            if not isinstance(mcp_tool, McpToolInfo):
+                return ToolResult(
+                    content=f"invalid MCP effect adapter: {entry.adapter_key}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            return await self._execute_mcp(
+                entry,
+                mcp_tool,
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                emit_event=emit_event,
+            )
+        return ToolResult(
+            content=f"unsupported effect source: {entry.source}",
+            is_error=True,
+            data={"executionStarted": False},
+        )
+
+    @staticmethod
+    def _preflight_error(exc: Exception) -> ToolResult:
+        return ToolResult(
+            content=str(exc),
+            is_error=True,
+            data={"executionStarted": False},
+        )
+
+    def _resolve_workspace_path(
+        self,
+        value: str | Path | None,
+        *,
+        operation: str,
+        allow_outside_read: bool = False,
+    ) -> ResolvedPath | ToolResult:
+        try:
+            return self.workspace.resolve_path(
+                value,
+                operation=operation,
+                allow_outside_read=allow_outside_read,
+            )
+        except (WorkspaceScopeError, ValueError, OSError) as exc:
+            return self._preflight_error(exc)
 
     def resolve_approval_scope(
         self,
@@ -553,13 +777,80 @@ class ToolRuntime:
             raise RuntimeError("approval scope is not bound to tool execution")
         return scope
 
+    def _require_resolved_capability(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        capability: CapabilityFacade,
+    ) -> None:
+        if (
+            entry.source == "builtin"
+            and entry.name == "schedule_manage"
+            and str(call.arguments.get("action") or "list").strip().lower() == "list"
+        ):
+            return
+        required = []
+        if entry.source == "builtin" and entry.name == "session_search":
+            required.append("session.read")
+        if entry.capability and entry.capability not in required:
+            required.append(entry.capability)
+        for capability_name in required:
+            if entry.source == "authored" and isinstance(entry._adapter, SlotDefinition):
+                capability._require_registry_capability(
+                    capability_name,
+                    slot_path=entry._adapter.relative_path,
+                )
+            else:
+                capability.require(capability_name)
+
+    def _resolved_effect_capability(self, default: str) -> str:
+        entry = self._resolved_effect_entry.get()
+        if entry is None:
+            return default
+        return entry.capability or default
+
+    async def _resolved_approval_preflight(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        if entry.approval_policy == "auto":
+            return None
+        schedule_list_denial = (
+            entry.source == "builtin"
+            and entry.name == "schedule_manage"
+            and str(call.arguments.get("action") or "list").strip().lower()
+            == "list"
+            and entry.approval_policy == "deny"
+        )
+        if (
+            entry.source in {"authored", "mcp"}
+            or entry.name in _ADAPTER_SPECIFIC_APPROVAL_TOOLS
+        ) and not schedule_list_denial:
+            return None
+        return await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="effect.call",
+            summary=f"Call {entry.source} tool {entry.name}",
+            target=entry.provenance,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            emit_event=emit_event,
+        )
+
     def _tool_policy(self, turn: TurnContext | None) -> Mapping[str, Any]:
         if turn is None or not isinstance(turn.metadata, Mapping):
             return {}
         policy = turn.metadata.get("tool_policy")
         return policy if isinstance(policy, Mapping) else {}
 
-    def _tool_policy_allows(self, entry: ToolRegistryEntry, policy: Mapping[str, Any]) -> bool:
+    def _tool_policy_allows(self, entry: ResolvedEffectEntry, policy: Mapping[str, Any]) -> bool:
         if not policy:
             return True
         deny = self._policy_patterns(policy.get("deny"))
@@ -597,7 +888,7 @@ class ToolRuntime:
             return {str(item).strip() for item in value if str(item).strip()}
         return set()
 
-    def _policy_pattern_matches(self, entry: ToolRegistryEntry, pattern: str) -> bool:
+    def _policy_pattern_matches(self, entry: ResolvedEffectEntry, pattern: str) -> bool:
         normalized = pattern.strip()
         if not normalized:
             return False
@@ -612,14 +903,14 @@ class ToolRuntime:
         self,
         call: ToolCall,
         *,
-        entry: ToolRegistryEntry,
+        entry: ResolvedEffectEntry,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        delegation_runtime: Any | None = None,
         emit_event: EventEmitter | None = None,
     ) -> ToolResult:
         if call.name == "rollback_core":
-            capability.require(entry.capability or "tool.call:rollback_core")
             target = str(call.arguments.get("target") or "previous")
             approval_denial = await self._approval_for_resolved_entry(
                 entry,
@@ -656,7 +947,6 @@ class ToolRuntime:
                 model_output=json.dumps(payload, ensure_ascii=False),
             )
         if call.name == "evolve_core":
-            capability.require(entry.capability or "tool.call:evolve_core")
             if self.evolution_runtime is None:
                 return ToolResult(content="evolution runtime is not configured", is_error=True)
             action = str(call.arguments.get("action") or "start").strip().lower()
@@ -781,7 +1071,19 @@ class ToolRuntime:
                 principal_scope=self._current_approval_scope().principal_scope,
             )
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
-            return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
+            if delegation_runtime is None:
+                return ToolResult(
+                    content=f"delegation tool requires the active turn runtime: {call.name}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            return await delegation_runtime.execute(
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name == "skills_list":
             return self._skills_list(call, core=core)
         if call.name == "skill_view":
@@ -795,7 +1097,6 @@ class ToolRuntime:
         if call.name == "web_extract":
             return await self._web_extract(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "session_search":
-            capability.require("session.read")
             target_session_id = str(call.arguments.get("session_id") or "").strip()
             approval_denial = await self._approval_for_resolved_entry(
                 entry,
@@ -822,6 +1123,7 @@ class ToolRuntime:
 
     async def _execute_mcp(
         self,
+        entry: ResolvedEffectEntry,
         tool: McpToolInfo,
         call: ToolCall,
         *,
@@ -832,17 +1134,16 @@ class ToolRuntime:
     ) -> ToolResult:
         if self.mcp_runtime is None:
             return ToolResult(content="MCP runtime is not configured", is_error=True, data={"executionStarted": False})
-        entry = next((item for item in self.registry_for(core) if item.name == call.name), None)
-        capability_name = (entry.capability if entry is not None else None) or tool.capability
-        risk = (entry.risk if entry is not None else None) or tool.risk
-        capability.require(capability_name)
-        denied = await self._approval_for_mcp(
+        target = f"{tool.server_id}/{tool.server_tool_name}"
+        denied = await self._approval_for_resolved_entry(
+            entry,
             call,
             core=core,
             turn=turn,
-            tool=tool,
-            capability_name=capability_name,
-            risk=risk,
+            action="mcp.call",
+            summary=f"Call MCP tool {target}",
+            target=target,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
             emit_event=emit_event,
         )
         if denied:
@@ -858,18 +1159,19 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.read")
-        target = self.workspace.resolve_path(
+        target = self._resolve_workspace_path(
             str(call.arguments.get("path") or ""),
             operation="read",
             allow_outside_read=True,
         )
+        if isinstance(target, ToolResult):
+            return target
         needs_prompt = target.outside or target.sensitive
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.read",
+            capability_name=self._resolved_effect_capability("fs.read"),
             action="read",
             target=target.relative,
             risk="low" if not needs_prompt else "high",
@@ -908,18 +1210,19 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.read")
         query = str(call.arguments.get("query") or "")
         target_kind = str(call.arguments.get("target") or "content").strip().lower()
         if target_kind not in {"content", "name", "both"}:
             return ToolResult(content=f"unsupported search target: {target_kind}", is_error=True)
         if not query and target_kind in {"content", "both"}:
             return ToolResult(content="query is required for content search", is_error=True)
-        target = self.workspace.resolve_path(
+        target = self._resolve_workspace_path(
             call.arguments.get("path") or ".",
             operation="read",
             allow_outside_read=True,
         )
+        if isinstance(target, ToolResult):
+            return target
         include_sensitive = bool(call.arguments.get("include_sensitive", False))
         needs_prompt = target.outside or target.sensitive or (
             include_sensitive and self.workspace.contains_sensitive_children(target.path, operation="read")
@@ -928,7 +1231,7 @@ class ToolRuntime:
             call,
             core=core,
             turn=turn,
-            capability_name="fs.read",
+            capability_name=self._resolved_effect_capability("fs.read"),
             action="search",
             target=target.relative,
             risk="low" if not needs_prompt else "high",
@@ -1008,13 +1311,17 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
-        target = self.workspace.resolve_path(str(call.arguments.get("path") or ""), operation="write")
+        target = self._resolve_workspace_path(
+            str(call.arguments.get("path") or ""),
+            operation="write",
+        )
+        if isinstance(target, ToolResult):
+            return target
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             action="write",
             target=target.relative,
             risk="high",
@@ -1042,13 +1349,17 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
-        target = self.workspace.resolve_path(str(call.arguments.get("path") or ""), operation="write")
+        target = self._resolve_workspace_path(
+            str(call.arguments.get("path") or ""),
+            operation="write",
+        )
+        if isinstance(target, ToolResult):
+            return target
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             action="patch",
             target=target.relative,
             risk="high",
@@ -1092,7 +1403,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("terminal.exec")
         command = str(call.arguments.get("command") or "").strip()
         if not command:
             content = "command is required"
@@ -1102,7 +1412,12 @@ class ToolRuntime:
                 is_error=True,
                 display_output=self._format_command_display(command, cwd_display, content),
             )
-        cwd = self.workspace.resolve_path(call.arguments.get("cwd") or ".", operation="write")
+        cwd = self._resolve_workspace_path(
+            call.arguments.get("cwd") or ".",
+            operation="write",
+        )
+        if isinstance(cwd, ToolResult):
+            return cwd
         env_overlay = call.arguments.get("env") or {}
         if not isinstance(env_overlay, Mapping):
             content = "env must be an object"
@@ -1328,7 +1643,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         principal_scope: PrincipalScope,
     ) -> ToolResult:
-        capability.require("task.control")
         kind = call.arguments.get("kind")
         include_completed = bool(call.arguments.get("include_completed", True))
         try:
@@ -1359,7 +1673,14 @@ class ToolRuntime:
 
     def _skill_view(self, call: ToolCall, *, core: LoadedCore) -> ToolResult:
         name = str(call.arguments.get("name") or "").strip()
-        return self._skill_view_by_name(core, name=name, file_path=call.arguments.get("file_path"))
+        try:
+            return self._skill_view_by_name(
+                core,
+                name=name,
+                file_path=call.arguments.get("file_path"),
+            )
+        except ValueError as exc:
+            return self._preflight_error(exc)
 
     async def _skill_manage(
         self,
@@ -1370,7 +1691,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
         action = str(call.arguments.get("action") or "").strip().lower()
         name = str(call.arguments.get("name") or "").strip()
         if action not in {"create", "update", "delete", "patch", "write_file", "remove_file"}:
@@ -1378,15 +1698,23 @@ class ToolRuntime:
         if not name:
             return ToolResult(content="name is required", is_error=True)
 
-        skill_root = self._skill_root(core)
-        target_or_error = self._skill_target(core, name, skill_root)
-        if isinstance(target_or_error, ToolResult):
-            return target_or_error
-        target = target_or_error
+        try:
+            skill_root = self._skill_root(core)
+            target_or_error = self._skill_target(core, name, skill_root)
+            if isinstance(target_or_error, ToolResult):
+                return target_or_error
+            target = target_or_error
 
-        prepared = self._prepare_skill_manage_action(core, action, target, call.arguments)
-        if isinstance(prepared, ToolResult):
-            return prepared
+            prepared = self._prepare_skill_manage_action(
+                core,
+                action,
+                target,
+                call.arguments,
+            )
+            if isinstance(prepared, ToolResult):
+                return prepared
+        except (ValueError, OSError) as exc:
+            return self._preflight_error(exc)
         approval_target, mutation_root, mutate = prepared
 
         denied = await self._approval_for_skill_manage(
@@ -1830,7 +2158,11 @@ class ToolRuntime:
         }
 
     def _tools_list(self, core: LoadedCore) -> ToolResult:
-        tools = [entry.to_model_metadata() for entry in self.registry_for(core)]
+        catalog = self._resolved_effect_catalog.get()
+        if catalog is None:
+            raise RuntimeError("tools_list requires the bound resolved effect catalog")
+        entries = catalog.entries
+        tools = [entry.to_model_metadata() for entry in entries]
         model_tools = [
             {
                 "name": tool["name"],
@@ -1918,7 +2250,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("network.fetch")
         url = str(call.arguments.get("url") or "").strip()
         if not url:
             return ToolResult(content="url is required", is_error=True)
@@ -2065,7 +2396,6 @@ class ToolRuntime:
             if action == "list":
                 return self._schedule_manage_result(manager.list())
 
-            capability.require("schedule.manage")
             schedule_id = str(call.arguments.get("schedule_id") or "").strip() or None
             schedule = call.arguments.get("schedule")
             prompt = call.arguments.get("prompt")
@@ -2186,7 +2516,7 @@ class ToolRuntime:
             policy = self._safe_command_approval_policy(
                 core,
                 tool_name=call.name,
-                capability_name="terminal.exec",
+                capability_name=self._resolved_effect_capability("terminal.exec"),
                 risk=command_guard.risk,
             )
             auto_approve = policy != "deny"
@@ -2194,7 +2524,7 @@ class ToolRuntime:
             policy = self._effective_approval_policy(
                 core,
                 tool_name=call.name,
-                capability_name="terminal.exec",
+                capability_name=self._resolved_effect_capability("terminal.exec"),
                 risk=command_guard.risk,
                 default_auto=False,
             )
@@ -2208,7 +2538,7 @@ class ToolRuntime:
             scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            capability="terminal.exec",
+            capability=self._resolved_effect_capability("terminal.exec"),
             action="exec",
             risk=command_guard.risk,
             summary=summary,
@@ -2253,7 +2583,7 @@ class ToolRuntime:
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="network.fetch",
+            capability_name=self._resolved_effect_capability("network.fetch"),
             risk="high",
             default_auto=False,
         )
@@ -2261,7 +2591,7 @@ class ToolRuntime:
             scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            capability="network.fetch",
+            capability=self._resolved_effect_capability("network.fetch"),
             action="fetch",
             risk="high",
             summary=f"Extract URL {url}",
@@ -2280,48 +2610,6 @@ class ToolRuntime:
             is_error=True,
         )
 
-    async def _approval_for_mcp(
-        self,
-        call: ToolCall,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        tool: McpToolInfo,
-        capability_name: str,
-        risk: str,
-        emit_event: EventEmitter | None,
-    ) -> ToolResult | None:
-        policy = self._effective_approval_policy(
-            core,
-            tool_name=call.name,
-            capability_name=capability_name,
-            risk=risk,
-            default_auto=tool.approval_policy == "auto",
-        )
-        target = f"{tool.server_id}/{tool.server_tool_name}"
-        request = ApprovalRequest(
-            scope=self._current_approval_scope(),
-            tool_name=call.name,
-            tool_call_id=call.id,
-            capability=capability_name,
-            action="mcp.call",
-            risk=risk,
-            summary=f"Call MCP tool {target}",
-            target=target,
-            arguments_preview=dict(call.arguments),
-            cache_key=f"{call.name}:{capability_name}:mcp.call:{target}",
-            auto_approve=policy == "auto",
-            policy=policy,
-        )
-        decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
-        if decision.allowed:
-            return None
-        return ToolResult(
-            content=f"approval denied: MCP tool {target}",
-            data={"executionStarted": False, "approval": asdict(decision)},
-            is_error=True,
-        )
-
     async def _approval_for_skill_manage(
         self,
         call: ToolCall,
@@ -2335,7 +2623,7 @@ class ToolRuntime:
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             risk="high",
             default_auto=False,
         )
@@ -2343,7 +2631,7 @@ class ToolRuntime:
             scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            capability="fs.write",
+            capability=self._resolved_effect_capability("fs.write"),
             action=f"skill.{action}",
             risk="high",
             summary=f"{action} skill {target}",
@@ -2375,7 +2663,7 @@ class ToolRuntime:
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="schedule.manage",
+            capability_name=self._resolved_effect_capability("schedule.manage"),
             risk="high",
             default_auto=False,
         )
@@ -2384,7 +2672,7 @@ class ToolRuntime:
             scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            capability="schedule.manage",
+            capability=self._resolved_effect_capability("schedule.manage"),
             action=f"schedule.{action}",
             risk="high",
             summary=f"{action} schedule {target}",
@@ -2420,7 +2708,7 @@ class ToolRuntime:
 
     async def _approval_for_authored(
         self,
-        entry: ToolRegistryEntry,
+        entry: ResolvedEffectEntry,
         slot: SlotDefinition,
         call: ToolCall,
         *,
@@ -2442,7 +2730,7 @@ class ToolRuntime:
 
     async def _approval_for_resolved_entry(
         self,
-        entry: ToolRegistryEntry,
+        entry: ResolvedEffectEntry,
         call: ToolCall,
         *,
         core: LoadedCore,
@@ -2455,22 +2743,6 @@ class ToolRuntime:
     ) -> ToolResult | None:
         capability_name = entry.capability or f"tool.call:{entry.name}"
         policy = entry.approval_policy
-        for configured in (
-            self._select_approval_policy(
-                core.manifest.approval,
-                tool_name=entry.name,
-                capability_name=capability_name,
-                risk=entry.risk,
-            ),
-            self._select_approval_policy(
-                self.global_approval,
-                tool_name=entry.name,
-                capability_name=capability_name,
-                risk=entry.risk,
-            ),
-        ):
-            if configured:
-                policy = self._stricter_policy(policy, configured)
         request = ApprovalRequest(
             scope=self._current_approval_scope(),
             tool_name=entry.name,
@@ -2509,7 +2781,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        func = load_slot_callable(slot)
         output = output_factory(slot) if output_factory is not None else None
         ctx = ToolContext(
             turn=turn,
@@ -2520,6 +2791,7 @@ class ToolRuntime:
             workspace=self.workspace.root,
         )
         try:
+            func = load_slot_callable(slot)
             value = func(ctx, call.arguments)
             if inspect.isawaitable(value):
                 value = await value
@@ -2533,17 +2805,27 @@ class ToolRuntime:
                 is_error=True,
             )
         if isinstance(value, ToolResult):
-            return value
+            return self._mark_authored_execution(value)
         if isinstance(value, dict):
-            return ToolResult(
+            return self._mark_authored_execution(ToolResult(
                 content=str(value.get("content", "")),
                 data=value.get("data"),
                 is_error=bool(value.get("is_error", False)),
                 terminate=bool(value.get("terminate", False)),
                 model_output=value.get("model_output"),
                 display_output=value.get("display_output"),
-            )
+            ))
         return ToolResult(content=str(value))
+
+    @staticmethod
+    def _mark_authored_execution(result: ToolResult) -> ToolResult:
+        if not result.is_error:
+            return result
+        data = dict(result.data) if isinstance(result.data, Mapping) else {}
+        data.pop("denial", None)
+        data.pop("approval", None)
+        data["executionStarted"] = True
+        return replace(result, data=data)
 
     def _effective_approval_policy(
         self,
@@ -2555,9 +2837,10 @@ class ToolRuntime:
         default_auto: bool,
     ) -> str:
         baseline = "auto" if default_auto else "prompt"
-        entry = next((item for item in self.registry_for(core) if item.name == tool_name), None)
-        if entry:
+        entry = self._resolved_effect_entry.get()
+        if entry is not None and entry.name == tool_name:
             baseline = self._stricter_policy(baseline, entry.approval_policy)
+            return baseline
         core_policy = self._select_approval_policy(
             core.manifest.approval,
             tool_name=tool_name,
@@ -2584,6 +2867,13 @@ class ToolRuntime:
         capability_name: str,
         risk: str,
     ) -> str:
+        entry = self._resolved_effect_entry.get()
+        if (
+            entry is not None
+            and entry.name == tool_name
+            and entry.approval_policy == "deny"
+        ):
+            return "deny"
         global_policy = self._select_approval_policy(
             self.global_approval,
             tool_name=tool_name,

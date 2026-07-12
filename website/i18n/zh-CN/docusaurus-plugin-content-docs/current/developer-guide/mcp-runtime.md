@@ -28,8 +28,10 @@ declaration 必须使用 `http://` 或 `https://` URL。
 ## 命名
 
 Tool name 会在可见前被 normalized、加上 server prefix 并过滤。当前 alpha catalog 与
-dispatcher 尚未共享同一个 opaque resolved entry，因此 namespacing 不能代替
-connection-bound dispatch 或统一 namespace authority。
+dispatcher 已通过 per-turn resolved catalog，把每个可见 MCP tool 绑定到对应的
+session/revision connection 与 dispatcher adapter。Call 会使用该 connection-bound entry，
+不再依赖 legacy global name index。跨 source name collision 会同时报告两侧 provenance 并
+失败。Namespacing 仍不能替代 DG-P3-T02 负责的 connect/discovery authority 与 lifecycle。
 
 ## 环境与 Headers
 

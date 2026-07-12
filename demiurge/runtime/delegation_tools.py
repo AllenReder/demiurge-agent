@@ -25,10 +25,6 @@ class DelegationToolHost(Protocol):
     def task_worker(self) -> RuntimeTaskWorker:
         ...
 
-    @property
-    def tool_runtime(self) -> Any:
-        ...
-
 
 class RunnerDelegationToolHost:
     """Adapter from SessionTurnStepRunner to DelegationToolHost."""
@@ -43,11 +39,6 @@ class RunnerDelegationToolHost:
     @property
     def task_worker(self) -> RuntimeTaskWorker:
         return self.runner.task_worker
-
-    @property
-    def tool_runtime(self) -> Any:
-        return self.runner.tool_runtime
-
 
 class DelegationToolRuntime:
     """Handles model-facing delegation and background-task control tools."""
@@ -68,9 +59,6 @@ class DelegationToolRuntime:
         principal_scope: PrincipalScope,
     ) -> ToolResult:
         try:
-            visible_tools = {entry.name for entry in self.host.tool_runtime.registry_for(core, turn=turn)}
-            if call.name not in visible_tools:
-                return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
             if call.name == "delegate_task":
                 return await self.host.child_agents.handle_delegate_task(
                     call,
@@ -79,23 +67,27 @@ class DelegationToolRuntime:
                     capability=capability,
                 )
             if call.name == "task_status":
-                capability.require("task.control")
                 return self._task_status(call, principal_scope=principal_scope)
             if call.name == "task_control":
-                capability.require("task.control")
                 return await self._task_control(
                     call,
                     principal_scope=principal_scope,
                 )
             if call.name == "yield_until":
-                capability.require("task.control")
                 return await self._yield_until(
                     call,
                     principal_scope=principal_scope,
                 )
             return ToolResult(content=f"unsupported delegation tool: {call.name}", is_error=True)
         except CapabilityDenied as exc:
-            return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "denial": "capability",
+                },
+            )
 
     def _task_status(
         self,

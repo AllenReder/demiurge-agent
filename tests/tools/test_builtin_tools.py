@@ -100,6 +100,7 @@ def _load_core_with(
     *,
     toolsets: list[str] | None = None,
     capabilities: dict[str, dict] | None = None,
+    tool_metadata: dict[str, dict] | None = None,
 ):
     manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
     raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -108,6 +109,9 @@ def _load_core_with(
     defaults = raw.setdefault("capabilities", {}).setdefault("defaults", {})
     for capability, value in (capabilities or {}).items():
         defaults[capability] = value
+    raw.setdefault("tools", {}).setdefault("metadata", {}).update(
+        tool_metadata or {}
+    )
     manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return app.core_loader.load(app.version_store.active_core_path("assistant"))
 
@@ -196,7 +200,7 @@ def _conversation_scope(app, core, suffix):
 
 async def _execute(app, core, name, arguments):
     turn = _turn(core)
-    return await app.tool_runtime.execute(
+    return await app.runner.execute_call(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
         turn=turn,
@@ -1422,6 +1426,34 @@ async def test_global_terminal_deny_blocks_safe_commands(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_resolved_terminal_deny_blocks_safe_commands(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(
+        home=tmp_path / "home",
+        provider_name="fake",
+        workspace=workspace,
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={"terminal.exec": {"scope": "workspace"}},
+        tool_metadata={
+            "terminal": {
+                "approval_policy": "deny",
+            }
+        },
+    )
+
+    result = await _execute(app, core, "terminal", {"command": "printf no"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert "no" not in result.content
+
+
+@pytest.mark.asyncio
 async def test_terminal_background_task_can_be_listed_and_waited(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2284,7 +2316,10 @@ async def test_session_search_requires_session_read_capability(tmp_path):
     )
 
     assert result.is_error is True
-    assert result.data == {"executionStarted": False}
+    assert result.data == {
+        "executionStarted": False,
+        "denial": "capability",
+    }
     assert result.content == "capability denied: session.read for host"
     await app.close()
 
@@ -2314,7 +2349,10 @@ async def test_session_search_core_metadata_cannot_replace_host_capability(tmp_p
     )
 
     assert result.is_error is True
-    assert result.data == {"executionStarted": False}
+    assert result.data == {
+        "executionStarted": False,
+        "denial": "capability",
+    }
     assert result.content == "capability denied: session.read for host"
     await app.close()
 
@@ -2338,7 +2376,7 @@ async def test_session_search_approval_denial_prevents_history_read(tmp_path):
     )
     app.approval_runtime.provider = StaticApprovalProvider("deny")
 
-    result = await app.tool_runtime.execute(
+    result = await app.runner.execute_call(
         ToolCall(
             name="session_search",
             arguments={"query": "private", "limit": 5},
@@ -2383,7 +2421,7 @@ async def test_session_search_does_not_read_another_principal_session(tmp_path):
         user_input=AgentInput(content="search alpha"),
     )
 
-    result = await app.tool_runtime.execute(
+    result = await app.runner.execute_call(
         ToolCall(
             name="session_search",
             arguments={"query": "alpha", "limit": 10},
@@ -2395,7 +2433,7 @@ async def test_session_search_does_not_read_another_principal_session(tmp_path):
         principal_scope=scope_a,
         emit_event=app.runner.event_log.emit,
     )
-    browse = await app.tool_runtime.execute(
+    browse = await app.runner.execute_call(
         ToolCall(
             name="session_search",
             arguments={"limit": 10},
@@ -2407,7 +2445,7 @@ async def test_session_search_does_not_read_another_principal_session(tmp_path):
         principal_scope=scope_a,
         emit_event=app.runner.event_log.emit,
     )
-    direct = await app.tool_runtime.execute(
+    direct = await app.runner.execute_call(
         ToolCall(
             name="session_search",
             arguments={"session_id": scope_b.session_id, "limit": 10},

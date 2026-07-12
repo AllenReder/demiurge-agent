@@ -5,9 +5,13 @@ description: 面向贡献者的 tool discovery、metadata、dispatch、approvals
 
 # 工具运行时
 
-当前 `ToolRuntime` 构建可见的 tool registry 并执行调用。它是冻结的 Host-owned
-`EffectRuntime` 接口的前身，但 alpha 实现尚未为所有 effect 提供同一条 policy/dispatch
-路径。参见 [Host 运行时契约](runtime-contracts.md#effectruntime)。
+当前 `ToolRuntime` 已包含冻结 Host-owned `EffectRuntime` 的第一段实现：builtin、authored
+与 MCP model call 共用一个 per-turn resolved catalog 和 adapter-bound dispatcher。Adapter
+result 会先归一化为最小 typed `EffectResult`/`EffectError`，turn loop 再转换为旧的
+model-facing `ToolResult`；runtime event 会保留 typed status/error。Connect policy、扩展
+lifecycle outcome、process/network lifecycle、
+output limits 与 redaction 会在后续 DG-P3 tasks 中继续完成。参见
+[Host 运行时契约](runtime-contracts.md#effectruntime)。
 
 ## Registry Sources
 
@@ -21,21 +25,34 @@ Tools 可以来自：
 
 ## 当前 Dispatch
 
-当前运行时解析 model tool name 后，分别进入 builtin、authored 或 MCP 分支。许多 builtin
-handler 会自行执行 capability、approval、workspace、command 与 network checks，并且
-目前仍没有通用 builtin gate。Core-mutation 分支现在接收与 visibility 相同的 resolved
-registry entry，要求其 singular capability，并在任何 evolution/version-store adapter call
-或 background task 创建前应用单调收紧的 approval policy。MCP call dispatch 会应用
-call capability 与 approval policy。Authored dispatch 使用同一个对 model/operator 可见的
-resolved registry entry，在 import/call entrypoint 前要求 singular `capability` 并解析
-`risk`/`approval_policy`。Core/global approval 可以收紧该 policy，但不能削弱它。
-Approval request 携带受限长、按字段名脱敏的 argument preview。该 containment 不是后续
-`EffectRuntime`/SEC-02 所属的最终 cross-effect `SecretRedactor`。
+当前运行时为每个 turn 解析一次不可变 `ResolvedEffectCatalog`。Provider definitions、
+`tools_list`、capability/approval metadata 与 dispatch 都使用该 catalog 的同一 entry。
+`TurnEngine` 会把 provider tool call 转成携带精确 resolved entry 的 `EffectRequest`；dispatch
+不会再次搜索 builtin definitions、authored slots 或全局 MCP name index。每个 entry 都绑定
+source kind、core revision、adapter key、schema、capability、effective approval policy、risk
+与 provenance。
+
+统一 dispatcher 会先验证 core snapshot，并在选择 builtin、authored 或 MCP adapter 前执行
+resolved capability。Workspace sensitivity、command review 等动态 builtin 检查仍会收紧该
+policy；authored 与 MCP 保留各自的 approval summary。Core/global approval 在 catalog
+解析时合并，且只能收紧 policy。Approval request 携带受限长、按字段名脱敏的 argument
+preview。该 containment 不是后续 `EffectRuntime`/SEC-02 所属的最终 cross-effect
+`SecretRedactor`。
+
+`ToolRuntime.execute()` 只接受由其 catalog 拥有的 `EffectRequest`，并返回 typed
+`EffectResult`。直接 Host caller 使用 `SessionTurnStepRunner.execute_call()` 完成一次 resolve，
+或把已有 request 交给 `execute_tool()` 显式转换为 legacy result；不存在裸 `ToolCall`
+execution fallback。
+
+跨 source 的 tool name 必须唯一。Core loader 拒绝 builtin/authored collision；最终 catalog
+拒绝涉及 MCP 的 collision。错误会同时报告两侧 provenance，并要求重命名 authored 或 MCP
+tool，不存在隐式 builtin 优先级。
 
 MCP discovery 也会在 model execution 前准备。Catalog cache miss 时，当前运行时可能在
 之后的 `mcp.call:*` capability 与 approval check 之前 spawn/connect 并调用
-`list_tools()`。Registry display 与 execution 随后可能通过不同 lookup state 解析 MCP
-tool。这些是已知 alpha 缺口，不是受支持的 extension point。
+`list_tools()`。Call dispatch 现在已绑定当前 turn/session entry；connect/discovery authority、
+timeout、failure cache 与旧全局 index 的完整删除仍属于 DG-P3-T02。这些是已知 alpha 缺口，
+不是受支持的 extension point。
 
 ## 目标 EffectRuntime 接口
 
@@ -114,20 +131,19 @@ bounded log tail、result reference 与可选 `write_scope`。具有相同非空
 
 ## Authored Tools
 
-Authored tools 的目标角色是 EffectRuntime adapters。目前它们与 builtins 共用 registry
-discovery，当前 dispatch 已在 import/invocation 前执行 singular registry
-capability/approval metadata。其 `capabilities` list 仍是独立 grant surface，并对显式
+Authored tools 是 EffectRuntime adapters。它们与 builtins、MCP 共用 per-turn resolved
+catalog，dispatch 会在 import/invocation 前执行 singular registry capability/approval
+metadata。其 `capabilities` list 仍是独立 grant surface，并对显式
 `ctx.capability.require(...)` check 有效，且不能 self-grant singular dispatch gate。后续
-`EffectRuntime` 会删除剩余的 builtin/authored/MCP dispatch duplication。
+EffectRuntime 工作会扩展 typed lifecycle outcome，并增加 output/redaction policy 与 adapter
+lifecycle，但不会重新引入 name-based dispatch。
 
 ## MCP Tools
 
 MCP tools 使用 normalized server-prefixed names 与 include/exclude filters。Transport、
-discovery、timeouts 与 result conversion 归 Host 所有，但当前 alpha 运行时尚未封闭
-connect/discovery policy ordering 与 connection-bound dispatch。
-
-目标 catalog 把每个可见 MCP definition 绑定到一个 session/revision connection 与一个
-opaque effect reference。Call 绝不回退到全局 tool-name index。
+discovery、timeouts 与 result conversion 归 Host 所有。每个可见 MCP definition 现在都
+绑定当前 session/revision connection 与 resolved effect entry，因此 call dispatch 不会
+回退到全局 tool-name index。Connect/discovery policy ordering 仍留待 DG-P3-T02。
 
 ## 边界
 

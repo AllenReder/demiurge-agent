@@ -318,9 +318,15 @@ class ChildAgentRuntime:
             return CHILD_AGENT_ALL_SLOTS
         return list(normalized)
 
-    def resolve_tools(self, core: LoadedCore, requested: ChildToolRequest) -> ResolvedChildAgentTools:
+    def resolve_tools(
+        self,
+        core: LoadedCore,
+        requested: ChildToolRequest,
+        *,
+        turn: TurnContext | None = None,
+    ) -> ResolvedChildAgentTools:
         requested_tools = self.normalize_tool_request(requested)
-        registry_entries = self.host.tool_runtime.registry_for(core)
+        registry_entries = self.host.tool_runtime.registry_for(core, turn=turn)
         available_tool_ids = [entry.name for entry in registry_entries]
         available_tool_id_set = set(available_tool_ids)
         if requested_tools == CHILD_AGENT_ALL_TOOLS:
@@ -364,13 +370,17 @@ class ChildAgentRuntime:
         session_id: str,
     ) -> ResolvedChildAgentTools:
         normalized = self.normalize_tool_request(requested)
+        turn = None
         if normalized != CHILD_AGENT_NO_TOOLS:
-            await self.prepare_tool_registry(core, session_id=session_id)
-        return self.resolve_tools(core, normalized)
+            turn = await self.prepare_tool_registry(core, session_id=session_id)
+        return self.resolve_tools(core, normalized, turn=turn)
 
-    async def prepare_tool_registry(self, core: LoadedCore, *, session_id: str) -> None:
-        if not core.mcp_servers:
-            return
+    async def prepare_tool_registry(
+        self,
+        core: LoadedCore,
+        *,
+        session_id: str,
+    ) -> TurnContext:
         turn = TurnContext(
             session_id=session_id,
             turn_id=utc_id("turn_child_tools_"),
@@ -379,14 +389,16 @@ class ChildAgentRuntime:
             user_input=AgentInput(content=""),
             metadata={},
         )
-        await self.host.tool_runtime.prepare_for_turn(
-            core,
-            turn,
-            emit_event=lambda event_type, **payload: self.host.emit_event(
-                event_type,
-                **{**payload, "session_id": session_id},
-            ),
-        )
+        if core.mcp_servers:
+            await self.host.tool_runtime.prepare_for_turn(
+                core,
+                turn,
+                emit_event=lambda event_type, **payload: self.host.emit_event(
+                    event_type,
+                    **{**payload, "session_id": session_id},
+                ),
+            )
+        return turn
 
     def requested_tools_for_core_id(self, core_id: str, requested: ChildToolRequest) -> str | list[str]:
         normalized = self.normalize_tool_request(requested)

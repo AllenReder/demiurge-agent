@@ -49,7 +49,7 @@ def _principal_scope(app, core, turn):
 
 async def _execute(app, core, name: str, arguments: dict):
     turn = _turn(core)
-    return await app.tool_runtime.execute(
+    return await app.runner.execute_call(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
         turn=turn,

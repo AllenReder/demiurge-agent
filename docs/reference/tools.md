@@ -13,13 +13,12 @@ The host builds the visible tool registry for each turn from:
 
 The Agent Core declares tool surfaces. The Host is the product owner for
 selection, dispatch, capability checks, approvals, workspace scope, task
-control, and result conversion. The current alpha implementation still has
-separate builtin, authored, and MCP paths. Authored dispatch and the
-`evolve_core` / `rollback_core` mutation branches now require their resolved
-singular capability and approval policy before importing a module, creating a
-background task, or calling a mutation adapter. MCP connect/discovery still
-occurs before call approval. The remaining dispatch duplication and MCP gap
-are frozen for removal in
+control, and result conversion. One per-turn resolved catalog now produces the
+provider definitions, `tools_list` display, effective approval metadata, and
+the exact adapter-bound `EffectRequest` used by dispatch. Builtin, authored,
+and MCP calls no longer perform a second source lookup by global tool name.
+MCP connect/discovery still occurs before call approval; that remaining gap is
+frozen for removal in
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 ## Built-In Toolsets
@@ -31,6 +30,15 @@ are frozen for removal in
 | `schedule` | `schedule_manage` |
 
 Unknown toolset names fail core loading.
+
+## Tool Name Uniqueness
+
+Model-visible tool names must be unique across builtin, authored, and MCP
+sources. A builtin/authored collision fails core loading. A collision involving
+a discovered MCP tool fails final catalog construction. The diagnostic includes
+both provenances and requires a rename; the Host never silently prefers the
+builtin implementation. This is an intentional alpha breaking change for cores
+that previously relied on ambiguous names.
 
 ## Built-In Tool Metadata
 
@@ -144,6 +152,11 @@ The host passes a `ToolContext` with:
 
 Return `demiurge.sdk.ToolResult`, a compatible dict, or any value that can be
 converted to text.
+
+For error results, `executionStarted`, `denial`, and `approval` are reserved
+Host lifecycle fields. Authored values for those keys are ignored: once the
+entrypoint is invoked, the Host records `executionStarted: true` and derives
+the typed effect status from its own capability, approval, and dispatch state.
 
 `ToolResult.content` is the default model-visible result. `model_output`
 overrides what the model sees, and `display_output` overrides what operator UIs

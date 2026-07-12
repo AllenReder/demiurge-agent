@@ -5,10 +5,14 @@ description: Contributor notes for tool discovery, metadata, dispatch, approvals
 
 # Tool Runtime
 
-The current `ToolRuntime` builds the visible tool registry and executes calls.
-It is the precursor to the frozen Host-owned `EffectRuntime` interface, but the
-alpha implementation does not yet provide one policy/dispatch path for every
-effect. See [Host Runtime Contracts](runtime-contracts.md#effectruntime).
+The current `ToolRuntime` contains the first frozen Host-owned `EffectRuntime`
+slice: one resolved per-turn catalog and one adapter-bound dispatcher for
+builtin, authored, and MCP model calls. Adapter results are normalized into a
+minimal typed `EffectResult`/`EffectError` before the turn loop converts them to
+the legacy model-facing `ToolResult`; runtime events retain typed status/error.
+Connect policy, extended lifecycle
+outcomes, process/network lifecycle, output limits, and redaction continue
+through later DG-P3 tasks. See [Host Runtime Contracts](runtime-contracts.md#effectruntime).
 
 ## Registry Sources
 
@@ -22,26 +26,40 @@ Tools can come from:
 
 ## Current Dispatch
 
-The current runtime resolves a model tool name and then takes separate builtin,
-authored, or MCP branches. Many builtin handlers apply their own capability,
-approval, workspace, command, and network checks, and there is still no generic
-builtin gate. The core-mutation branches now receive the same resolved registry
-entry used for visibility, require its singular capability, and apply its
-monotonic approval policy before any evolution/version-store adapter call or
-background task creation. MCP call dispatch applies its call capability and
-approval policy. Authored tool
-dispatch uses the same resolved registry entry exposed to the model/operator,
-requires its singular `capability`, and resolves `risk`/`approval_policy` before
-the authored entrypoint is imported and called. Core/global approval can make
-that policy stricter but cannot weaken it. Approval requests carry a bounded,
+The current runtime resolves one immutable `ResolvedEffectCatalog` per turn.
+Provider definitions, `tools_list`, capability and approval metadata, and
+dispatch all use entries from that catalog. `TurnEngine` converts a provider
+tool call into an `EffectRequest` containing the exact resolved entry; dispatch
+does not search builtin definitions, authored slots, or the global MCP name
+index again. Each entry binds source kind, core revision, adapter key, schema,
+capability, effective approval policy, risk, and provenance.
+
+The common dispatcher validates the core snapshot and applies the resolved
+capability before selecting the builtin, authored, or MCP adapter. Dynamic
+builtin checks such as workspace sensitivity and command review still refine
+the resolved policy, while authored and MCP calls retain their adapter-specific
+approval summaries. Core/global approval is folded into the catalog and can
+only make policy stricter. Approval requests carry a bounded,
 field-name-redacted argument preview. This containment is not the final
 cross-effect `SecretRedactor` owned by the later `EffectRuntime`/SEC-02 work.
 
+`ToolRuntime.execute()` accepts only an `EffectRequest` owned by its catalog and
+returns a typed `EffectResult`. Direct Host callers use
+`SessionTurnStepRunner.execute_call()` to resolve once, or pass an existing
+request through `execute_tool()` for an explicit legacy conversion; there is no
+bare-`ToolCall` execution fallback.
+
+Tool names are unique across sources. The core loader rejects builtin/authored
+collisions, and final catalog construction rejects collisions involving MCP
+tools. Errors include both provenances and require the authored or MCP tool to
+be renamed; there is no implicit builtin priority.
+
 MCP discovery is also prepared before model execution. On a catalog cache miss,
 the current runtime can spawn/connect and call `list_tools()` before the later
-`mcp.call:*` capability and approval check. Registry display and execution can
-then resolve MCP tools through different lookup state. These are known alpha
-gaps, not supported extension points.
+`mcp.call:*` capability and approval check. Call dispatch is now bound to the
+current turn/session entry, but connect/discovery authority, timeout, failure
+cache, and full removal of the legacy global index remain DG-P3-T02 work. These
+are known alpha gaps, not supported extension points.
 
 ## Target EffectRuntime Interface
 
@@ -134,24 +152,23 @@ status, summary, bounded log tail, result reference, and an optional
 
 ## Authored Tools
 
-Authored tools are intended EffectRuntime adapters. Today they share registry
-discovery with builtins, and their current dispatch now enforces singular
-registry capability/approval metadata before import/invocation. Their
+Authored tools are EffectRuntime adapters. They share the resolved per-turn
+catalog with builtins and MCP tools, and dispatch enforces singular registry
+capability/approval metadata before import/invocation. Their
 `capabilities` list remains a separate grant surface for explicit
 `ctx.capability.require(...)` checks and cannot self-grant the singular dispatch
-gate. The later `EffectRuntime` removes the remaining builtin/authored/MCP
-dispatch duplication.
+gate. Later EffectRuntime work extends typed lifecycle outcomes and adds
+output/redaction policy and adapter lifecycle without reopening name-based
+dispatch.
 
 ## MCP Tools
 
 MCP tools receive normalized server-prefixed names and include/exclude filters.
-Transport, discovery, timeouts, and result conversion are Host-owned, but
-connect/discovery policy ordering and connection-bound dispatch are not yet
-closed in the current alpha runtime.
-
-The target catalog binds each visible MCP definition to one session/revision
-connection and one opaque effect reference. A call never falls back to a global
-tool-name index.
+Transport, discovery, timeouts, and result conversion are Host-owned. Each
+visible MCP definition is now bound to the current session/revision connection
+and one resolved effect entry, so call dispatch never falls back to the global
+tool-name index. Connect/discovery policy ordering remains open until
+DG-P3-T02.
 
 ## Boundary
 

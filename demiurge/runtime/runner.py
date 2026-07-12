@@ -15,7 +15,11 @@ from demiurge.runtime.child_agents import (
     ChildAgentRuntime,
     RunnerChildAgentHost,
 )
-from demiurge.runtime.delegation_tools import DelegationToolRuntime, RunnerDelegationToolHost
+from demiurge.runtime.delegation_tools import (
+    DELEGATION_TOOL_NAMES,
+    DelegationToolRuntime,
+    RunnerDelegationToolHost,
+)
 from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import (
     InteractionInbound,
@@ -64,6 +68,7 @@ from demiurge.sdk import (
 )
 from demiurge.storage import EventLog, VersionStore
 from demiurge.tools.runtime import ToolRuntime
+from demiurge.tools.registry import EffectOrigin, EffectRequest, EffectResult
 from demiurge.util import utc_id
 
 
@@ -476,7 +481,7 @@ class SessionTurnStepRunner:
 
     async def execute_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
@@ -486,35 +491,51 @@ class SessionTurnStepRunner:
         emit_event: Callable[..., dict[str, Any]] | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        if self.delegation_tools.can_handle(call.name):
-            if execution_context is None and principal_scope is None:
-                principal_scope = self.task_worker.scope_for_turn(
-                    session_id=turn.session_id,
-                    turn_id=turn.turn_id,
-                )
-            try:
-                delegation_scope = self.tool_runtime.resolve_approval_scope(
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    execution_context=execution_context,
-                    principal_scope=principal_scope,
-                ).principal_scope
-            except (PermissionError, TypeError, ValueError) as exc:
-                return ToolResult(
-                    content=str(exc),
-                    is_error=True,
-                    data={"executionStarted": False},
-                )
-            return await self.delegation_tools.execute(
-                call,
-                core=core,
-                turn=turn,
-                capability=capability,
-                principal_scope=delegation_scope,
+        effect_result = await self.tool_runtime.execute(
+            request,
+            core=core,
+            turn=turn,
+            capability=capability,
+            execution_context=execution_context,
+            principal_scope=principal_scope,
+            delegation_runtime=self.delegation_tools,
+            emit_event=emit_event,
+            output_factory=output_factory,
+        )
+        return effect_result.to_tool_result()
+
+    async def execute_call(
+        self,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        origin: EffectOrigin = "host",
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
+        emit_event: Callable[..., dict[str, Any]] | None = None,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
+    ) -> ToolResult:
+        catalog = self.tool_runtime.resolve_effects(core, turn=turn)
+        request = catalog.request_for(call, origin=origin)
+        if request is None:
+            return EffectResult.not_found(
+                name=call.name,
+                core_id=turn.core_id,
+                core_revision=turn.core_revision,
+            ).to_tool_result()
+        if (
+            execution_context is None
+            and principal_scope is None
+            and request.entry.name in DELEGATION_TOOL_NAMES
+        ):
+            principal_scope = self.task_worker.scope_for_turn(
+                session_id=turn.session_id,
+                turn_id=turn.turn_id,
             )
-        return await self.tool_runtime.execute(
-            call,
+        return await self.execute_tool(
+            request,
             core=core,
             turn=turn,
             capability=capability,
@@ -526,20 +547,21 @@ class SessionTurnStepRunner:
 
     async def execute_turn_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
-    ) -> ToolResult:
-        return await self.execute_tool(
-            call,
+    ) -> EffectResult:
+        return await self.tool_runtime.execute(
+            request,
             core=core,
             turn=turn,
             capability=capability,
             execution_context=execution_context,
+            delegation_runtime=self.delegation_tools,
             emit_event=lambda event_type, **payload: self.emit_turn_event(
                 event_type,
                 **{**payload, "session_id": turn.session_id},

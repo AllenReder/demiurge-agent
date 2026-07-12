@@ -23,6 +23,7 @@ from demiurge.runtime.turn_lifecycle import TurnLifecycle, TurnLifecycleCompleti
 from demiurge.security.capabilities import CapabilityFacade, CapabilitySnapshot
 from demiurge.sdk import AgentInput, InputEnvelope, TurnContext
 from demiurge.tools.records import ToolExecutionRecord
+from demiurge.tools.registry import ResolvedEffectCatalog
 
 
 @dataclass(slots=True)
@@ -252,7 +253,11 @@ class TurnPipelineHost(Protocol):
     async def prepare_tools(self, core: LoadedCore, turn: TurnContext) -> None:
         ...
 
-    def tool_definitions_for(self, core: LoadedCore, turn: TurnContext) -> list[Any]:
+    def effect_catalog_for(
+        self,
+        core: LoadedCore,
+        turn: TurnContext,
+    ) -> ResolvedEffectCatalog:
         ...
 
     async def run_turn_engine(self, request: TurnEngineRequest) -> TurnEngineResult:
@@ -461,8 +466,12 @@ class RunnerTurnPipelineHost:
             ),
         )
 
-    def tool_definitions_for(self, core: LoadedCore, turn: TurnContext) -> list[Any]:
-        return self.runner.tool_runtime.definitions_for(core, turn=turn)
+    def effect_catalog_for(
+        self,
+        core: LoadedCore,
+        turn: TurnContext,
+    ) -> ResolvedEffectCatalog:
+        return self.runner.tool_runtime.resolve_effects(core, turn=turn)
 
     async def run_turn_engine(self, request: TurnEngineRequest) -> TurnEngineResult:
         return await self.runner.turn_engine.run(request)
@@ -836,7 +845,8 @@ class TurnExecution:
         self.persistence.record_input(scope, input_result)
         items: list[InteractionItem] = list(input_result.items)
         await self.host.prepare_tools(scope.core, turn)
-        available_tools = self.host.tool_definitions_for(scope.core, turn)
+        effect_catalog = self.host.effect_catalog_for(scope.core, turn)
+        available_tools = effect_catalog.definitions()
 
         engine_result = await self.host.run_turn_engine(
             TurnEngineRequest(
@@ -846,6 +856,7 @@ class TurnExecution:
                 execution_context=scope.context,
                 context=context,
                 available_tools=available_tools,
+                effect_catalog=effect_catalog,
                 interaction_metadata=scope.interaction_metadata,
                 use_bootstrap_context=request.use_bootstrap,
             )

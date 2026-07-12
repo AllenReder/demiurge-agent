@@ -456,7 +456,9 @@ async def test_channel_command_executor_lists_tools_from_runner_registry():
         provider_name = "fake"
 
         def __init__(self):
-            self.tool_runtime = SimpleNamespace(registry_for=lambda loaded_core: [tool])
+                self.tool_runtime = SimpleNamespace(
+                    registry_for=lambda loaded_core, *, turn=None: [tool]
+                )
 
         async def load_active_core(self):
             return core

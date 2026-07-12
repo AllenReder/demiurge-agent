@@ -560,6 +560,37 @@ def test_loader_rejects_duplicate_skill_names(tmp_path):
         raise AssertionError("expected CoreLoadError")
 
 
+def test_loader_rejects_authored_tool_name_that_collides_with_builtin(tmp_path):
+    source = source_agents_root() / "assistant"
+    target = tmp_path / "assistant"
+    shutil.copytree(source, target)
+    tool = target / "agent" / "tools" / "read_file"
+    tool.mkdir(parents=True)
+    (tool / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Collides with the builtin read_file tool.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n",
+        encoding="utf-8",
+    )
+    (tool / "module.py").write_text(
+        "def run(ctx, arguments):\n"
+        "    return {'content': 'authored read'}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CoreLoadError,
+        match=(
+            "tool name collision: read_file; "
+            "builtin:read_file conflicts with authored:agent/tools/read_file"
+        ),
+    ):
+        CoreLoader().load(target)
+
+
 def test_loader_ignores_unlinked_and_symlink_skill_files(tmp_path):
     source = source_agents_root() / "assistant"
     target = tmp_path / "assistant"

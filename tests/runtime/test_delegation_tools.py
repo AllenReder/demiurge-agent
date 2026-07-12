@@ -12,7 +12,7 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.delegation import subagents_command_text
 from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeQuery
-from demiurge.sdk import AgentInput, TurnContext
+from demiurge.sdk import AgentInput, ToolResult, TurnContext
 from demiurge.security.capabilities import CapabilityFacade, CapabilitySnapshot
 from demiurge.slash import specs_for_surface
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
@@ -52,6 +52,15 @@ class BlockingProvider:
             self.release = asyncio.Event()
         await self.release.wait()
         return LLMResponse(content="child done")
+
+
+class LabeledDelegationRuntime:
+    def __init__(self, label: str):
+        self.label = label
+
+    async def execute(self, call, **kwargs):
+        await asyncio.sleep(0)
+        return ToolResult(content=self.label, data={"runner": self.label})
 
 
 def _conversation_scope(app, suffix: str):
@@ -153,7 +162,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
         core=core,
         turn=turn,
@@ -165,7 +174,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     assert delegated.is_error is False
     assert set(delegated.data) == {"task_id"}
     task_id = delegated.data["task_id"]
-    status = await app.runner.execute_tool(
+    status = await app.runner.execute_call(
         ToolCall(name="task_status", arguments={"task_id": task_id}),
         core=core,
         turn=turn,
@@ -173,7 +182,7 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
         principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
-    waited = await app.runner.execute_tool(
+    waited = await app.runner.execute_call(
         ToolCall(
             name="yield_until",
             arguments={"task_id": task_id, "timeout_seconds": CHILD_AGENT_COMPLETION_TIMEOUT},
@@ -200,6 +209,63 @@ async def test_delegate_task_status_and_yield_until_use_runtime_tasks(tmp_path):
     )
     assert task_id in listing
     assert "Subagent" in detail
+
+
+@pytest.mark.asyncio
+async def test_shared_tool_runtime_uses_the_calling_runner_delegation_adapter(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn_a = _turn(app, core)
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    issued_b = resolver.local_operator(
+        active_session_id="session_runner_b",
+        reason="bind second runner delegation adapter",
+        allow_unowned_active=True,
+    )
+    app.session_runtime.create_session(
+        session_id="session_runner_b",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        principal_scope=issued_b,
+    )
+    scope_b = resolver.origin_scope(session_id="session_runner_b")
+    runner_b = app.runner.child_agents.host.create_child_runner(
+        core_id=core.core_id,
+        session_id="session_runner_b",
+        principal_scope=scope_b,
+    )
+    turn_b = TurnContext(
+        session_id="session_runner_b",
+        turn_id="turn_runner_b",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="inspect"),
+    )
+    app.runner.delegation_tools = LabeledDelegationRuntime("runner-a")
+    runner_b.delegation_tools = LabeledDelegationRuntime("runner-b")
+
+    result_a, result_b = await asyncio.gather(
+        app.runner.execute_call(
+            ToolCall(name="task_status", arguments={"task_id": "task_a"}),
+            core=core,
+            turn=turn_a,
+            capability=CapabilityFacade(core),
+            principal_scope=app.runner.principal_scope,
+        ),
+        runner_b.execute_call(
+            ToolCall(name="task_status", arguments={"task_id": "task_b"}),
+            core=core,
+            turn=turn_b,
+            capability=CapabilityFacade(core),
+            principal_scope=scope_b,
+        ),
+    )
+
+    assert result_a.data == {"runner": "runner-a"}
+    assert result_b.data == {"runner": "runner-b"}
+    await app.close()
 
 
 @pytest.mark.asyncio
@@ -235,7 +301,7 @@ async def test_task_status_hides_task_owned_by_another_principal_scope(tmp_path)
     )
 
     try:
-        result = await app.runner.execute_tool(
+        result = await app.runner.execute_call(
             ToolCall(name="task_status", arguments={"task_id": task.task_id}),
             core=core,
             turn=turn_a,
@@ -306,7 +372,7 @@ async def test_task_status_hides_cross_core_task_owned_by_another_session(tmp_pa
     )
 
     try:
-        result = await app.runner.execute_tool(
+        result = await app.runner.execute_call(
             ToolCall(name="task_status", arguments={"task_id": task.task_id}),
             core=core_a,
             turn=turn_a,
@@ -379,7 +445,7 @@ async def test_model_task_status_cannot_request_operator_or_debug_log_view(tmp_p
 
     try:
         for requested_view in ("operator", "debug"):
-            result = await app.runner.execute_tool(
+            result = await app.runner.execute_call(
                 ToolCall(
                     name="task_status",
                     arguments={"task_id": task.task_id, "view": requested_view},
@@ -410,7 +476,7 @@ async def test_model_task_status_cannot_request_operator_or_debug_log_view(tmp_p
         schema = BUILTIN_TOOL_DEFINITIONS["task_status"].input_schema
         assert "view" not in schema["properties"]
 
-        timed_out = await app.runner.execute_tool(
+        timed_out = await app.runner.execute_call(
             ToolCall(
                 name="yield_until",
                 arguments={"task_id": task.task_id, "timeout_seconds": 0},
@@ -426,7 +492,7 @@ async def test_model_task_status_cannot_request_operator_or_debug_log_view(tmp_p
         assert "log_tail" not in timed_out.data
         assert private_log not in timed_out.content
 
-        cancelled = await app.runner.execute_tool(
+        cancelled = await app.runner.execute_call(
             ToolCall(
                 name="task_control",
                 arguments={"task_id": task.task_id, "command": "cancel"},
@@ -442,7 +508,7 @@ async def test_model_task_status_cannot_request_operator_or_debug_log_view(tmp_p
         assert "log_tail" not in cancelled.data
         assert private_log not in cancelled.content
 
-        waited = await app.runner.execute_tool(
+        waited = await app.runner.execute_call(
             ToolCall(
                 name="yield_until",
                 arguments={"task_id": task.task_id, "timeout_seconds": 1},
@@ -509,7 +575,7 @@ async def test_delegation_tool_uses_shared_execution_identity_validation(tmp_pat
     )
 
     try:
-        result = await app.runner.execute_tool(
+        result = await app.runner.execute_call(
             ToolCall(name="task_status", arguments={"task_id": task.task_id}),
             core=core,
             turn=turn,
@@ -705,7 +771,7 @@ async def test_task_control_cannot_cancel_task_owned_by_another_principal_scope(
     )
 
     try:
-        result = await app.runner.execute_tool(
+        result = await app.runner.execute_call(
             ToolCall(
                 name="task_control",
                 arguments={"task_id": task.task_id, "command": "cancel"},
@@ -760,7 +826,7 @@ async def test_yield_until_cannot_wait_for_task_owned_by_another_principal_scope
     )
 
     try:
-        result = await app.runner.execute_tool(
+        result = await app.runner.execute_call(
             ToolCall(
                 name="yield_until",
                 arguments={"task_id": task.task_id, "timeout_seconds": 0},
@@ -843,7 +909,7 @@ async def test_delegate_task_defaults_to_base_slots_and_records_metadata(tmp_pat
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
         core=core,
         turn=turn,
@@ -884,7 +950,7 @@ async def test_delegate_task_all_slots_preserves_child_pipeline_metadata(tmp_pat
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={
@@ -920,7 +986,7 @@ async def test_delegate_task_returns_tool_error_for_invalid_child_slot_selection
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.runner.execute_tool(
+    result = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do child work", "core_id": "evolver", "input_slots": ["missing"]},
@@ -956,7 +1022,7 @@ async def test_delegate_task_returns_tool_error_for_invalid_child_tool_selection
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.runner.execute_tool(
+    result = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do child work", "core_id": "evolver", "tools": ["missing"]},
@@ -978,7 +1044,7 @@ async def test_delegate_task_rejects_legacy_tool_policy_argument(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.runner.execute_tool(
+    result = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do child work", "core_id": "evolver", "tool_policy": {"deny": ["read_file"]}},
@@ -1002,7 +1068,7 @@ async def test_delegate_task_passes_child_tool_selection_to_spawned_task(tmp_pat
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do child work", "core_id": "evolver", "tools": ["read_file"]},
@@ -1059,7 +1125,7 @@ async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "do slow child work", "core_id": "evolver"}),
         core=core,
         turn=turn,
@@ -1073,7 +1139,7 @@ async def test_yield_until_timeout_returns_running_status_without_tool_error(tmp
         await asyncio.sleep(0.01)
     assert provider.release is not None
 
-    waited = await app.runner.execute_tool(
+    waited = await app.runner.execute_call(
         ToolCall(name="yield_until", arguments={"task_id": task_id, "timeout_seconds": 0.01}),
         core=core,
         turn=turn,
@@ -1100,7 +1166,7 @@ async def test_delegation_tools_require_capabilities(tmp_path):
     turn = _turn(app, core)
 
     no_spawn = _without_default_capability(core, "agents.spawn:evolver")
-    spawn = await app.runner.execute_tool(
+    spawn = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "do child work", "core_id": "evolver"}),
         core=no_spawn,
         turn=turn,
@@ -1110,21 +1176,21 @@ async def test_delegation_tools_require_capabilities(tmp_path):
 
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     no_task_control = _without_default_capability(core, "task.control")
-    status = await app.runner.execute_tool(
+    status = await app.runner.execute_call(
         ToolCall(name="task_status", arguments={"task_id": "task_missing"}),
         core=no_task_control,
         turn=turn,
         capability=CapabilityFacade(no_task_control),
         emit_event=app.runner.event_log.emit,
     )
-    control = await app.runner.execute_tool(
+    control = await app.runner.execute_call(
         ToolCall(name="task_control", arguments={"task_id": "task_missing"}),
         core=no_task_control,
         turn=turn,
         capability=CapabilityFacade(no_task_control),
         emit_event=app.runner.event_log.emit,
     )
-    waited = await app.runner.execute_tool(
+    waited = await app.runner.execute_call(
         ToolCall(name="yield_until", arguments={"task_id": "task_missing"}),
         core=no_task_control,
         turn=turn,
@@ -1150,7 +1216,7 @@ async def test_task_control_rejects_unsupported_commands(tmp_path, command):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.runner.execute_tool(
+    result = await app.runner.execute_call(
         ToolCall(name="task_control", arguments={"task_id": "task_missing", "command": command}),
         core=core,
         turn=turn,
@@ -1170,7 +1236,7 @@ async def test_delegate_task_silent_notify_policy_suppresses_completion_event(tm
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    delegated = await app.runner.execute_tool(
+    delegated = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do quiet child work", "core_id": "evolver", "notify_policy": "silent"},
@@ -1194,7 +1260,7 @@ async def test_delegate_task_rejects_unknown_notify_policy(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.runner.execute_tool(
+    result = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "do child work", "core_id": "evolver", "notify_policy": "notify"},
@@ -1218,14 +1284,14 @@ async def test_delegate_task_allows_two_concurrent_children(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    first = await app.runner.execute_tool(
+    first = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "first child", "core_id": "evolver"}),
         core=core,
         turn=turn,
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    second = await app.runner.execute_tool(
+    second = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "second child", "core_id": "evolver"}),
         core=core,
         turn=turn,
@@ -1253,7 +1319,7 @@ async def test_terminal_background_true_returns_runtime_task(tmp_path):
     turn = _turn(app, core)
     capability = CapabilityFacade(core)
 
-    result = await app.tool_runtime.execute(
+    result = await app.runner.execute_call(
         ToolCall(name="terminal", arguments={"command": "printf ok", "background": True}),
         core=core,
         turn=turn,
@@ -1280,14 +1346,14 @@ async def test_delegate_task_rejects_depth_excess_and_accepts_tool_selection(tmp
     turn.metadata["delegation_depth"] = 2
     capability = CapabilityFacade(core)
 
-    too_deep = await app.runner.execute_tool(
+    too_deep = await app.runner.execute_call(
         ToolCall(name="delegate_task", arguments={"goal": "nested", "core_id": "evolver"}),
         core=core,
         turn=turn,
         capability=capability,
         emit_event=app.runner.event_log.emit,
     )
-    tool_selection = await app.runner.execute_tool(
+    tool_selection = await app.runner.execute_call(
         ToolCall(
             name="delegate_task",
             arguments={"goal": "nested", "core_id": "evolver", "tools": "none"},
@@ -1313,7 +1379,7 @@ async def test_tool_policy_denies_child_tool_execution(tmp_path):
     turn.metadata["tool_policy"] = {"deny": ["read_file"]}
     capability = CapabilityFacade(core)
 
-    result = await app.tool_runtime.execute(
+    result = await app.runner.execute_call(
         ToolCall(name="read_file", arguments={}),
         core=core,
         turn=turn,

@@ -51,6 +51,11 @@ capabilities: []
 The tool id is the directory name. The model sees the description and
 `input_schema` when the host exposes the tool.
 
+Choose an id that does not collide with a selected builtin tool or a discovered
+MCP tool. Builtin/authored collisions fail core loading, while MCP collisions
+fail final catalog construction. The error lists both provenances; rename the
+authored tool instead of relying on source priority.
+
 The singular `capability` is the primary registry capability for this tool's
 metadata and approval policy. The `capabilities` list is different: it declares
 capabilities that the tool implementation may require through
@@ -136,3 +141,4 @@ The tool should appear as an authored tool. If it does not, confirm that:
 - The tool directory contains `tool.yaml`.
 - `tool.yaml` uses only supported fields.
 - The tool id matches the directory name.
+- The tool id does not collide with a builtin or MCP model-visible name.

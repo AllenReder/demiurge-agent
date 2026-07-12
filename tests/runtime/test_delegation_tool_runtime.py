@@ -49,14 +49,6 @@ def _scope():
     return SimpleNamespace(session_id="session_1")
 
 
-class _ToolRuntime:
-    def __init__(self, names):
-        self.names = list(names)
-
-    def registry_for(self, core, *, turn=None):
-        return [SimpleNamespace(name=name) for name in self.names]
-
-
 class _ChildAgents:
     def __init__(self):
         self.calls = []
@@ -100,24 +92,14 @@ class _TaskWorker:
 
 
 class _Host:
-    def __init__(self, *, visible_names=None):
+    def __init__(self):
         self.child_agents = _ChildAgents()
         self.task_worker = _TaskWorker()
-        self.tool_runtime = _ToolRuntime(
-            [
-                "delegate_task",
-                "task_status",
-                "task_control",
-                "yield_until",
-            ]
-            if visible_names is None
-            else visible_names
-        )
 
 
 @pytest.mark.asyncio
-async def test_delegation_runtime_rejects_hidden_builtin_tool():
-    host = _Host(visible_names=[])
+async def test_delegation_adapter_does_not_repeat_visibility_resolution():
+    host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core()
 
@@ -130,12 +112,12 @@ async def test_delegation_runtime_rejects_hidden_builtin_tool():
     )
 
     assert result.is_error is True
-    assert result.content == "builtin tool is not allowed: task_status"
+    assert result.content == "background task not found: task_1"
 
 
 @pytest.mark.asyncio
-async def test_delegation_runtime_rejects_unsupported_visible_tool():
-    host = _Host(visible_names=["unsupported_builtin"])
+async def test_delegation_runtime_rejects_unsupported_tool():
+    host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core()
 
@@ -225,7 +207,7 @@ async def test_yield_until_missing_task_returns_model_facing_error():
 
 
 @pytest.mark.asyncio
-async def test_task_control_capability_denial_becomes_tool_error():
+async def test_delegation_adapter_does_not_repeat_capability_preflight():
     host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core(task_control=False)
@@ -239,5 +221,4 @@ async def test_task_control_capability_denial_becomes_tool_error():
     )
 
     assert result.is_error is True
-    assert "capability denied: task.control" in result.content
-    assert result.data == {"executionStarted": False}
+    assert result.content == "background task not found: task_1"

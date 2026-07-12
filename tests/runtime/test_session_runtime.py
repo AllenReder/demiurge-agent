@@ -255,7 +255,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         user_input=AgentInput(content="", metadata={}),
         metadata={},
     )
-    status = await app.runner.execute_tool(
+    status = await app.runner.execute_call(
         ToolCall(name="task_status", arguments={"task_id": result.turn_id}),
         core=core,
         turn=status_turn,
@@ -263,7 +263,7 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
-    control = await app.runner.execute_tool(
+    control = await app.runner.execute_call(
         ToolCall(name="task_control", arguments={"task_id": result.turn_id}),
         core=core,
         turn=status_turn,

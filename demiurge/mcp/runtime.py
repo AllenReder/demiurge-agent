@@ -113,13 +113,20 @@ class McpRuntime:
                 self._tool_index[tool.name] = tool
             return catalog
 
-    def entries_for(self, core: LoadedCore) -> list[McpToolInfo]:
+    def entries_for(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext | None = None,
+    ) -> list[McpToolInfo]:
         fingerprint = self._fingerprint(core)
         tools: list[McpToolInfo] = []
         seen: set[str] = set()
         for key, catalog in self._catalogs.items():
-            _session_id, core_root, workspace, catalog_fingerprint = key
+            session_id, core_root, workspace, catalog_fingerprint = key
             if core_root != str(core.root) or workspace != str(self.workspace) or catalog_fingerprint != fingerprint:
+                continue
+            if turn is not None and session_id != turn.session_id:
                 continue
             for tool in catalog.tools:
                 if tool.name in seen:

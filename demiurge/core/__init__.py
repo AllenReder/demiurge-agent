@@ -676,6 +676,7 @@ class CoreLoader:
             manifest.slots.get("mcp") or (surface_root / "mcp").relative_to(core_root).as_posix(),
         )
         self._reject_duplicate_ids(bootstrap_slots + input_slots + output_slots + tool_slots)
+        self._reject_builtin_authored_tool_collisions(manifest, tool_slots)
         self._reject_duplicate_skills(skills)
         self._validate_slots(bootstrap_slots, kind="bootstrap")
         self._validate_io_modules(input_slots, output_slots)
@@ -989,6 +990,25 @@ class CoreLoader:
             if prior:
                 raise CoreLoadError(f"duplicate slot id {slot.slot_id}: {prior}, {slot.relative_path}")
             seen[slot.slot_id] = slot.relative_path
+
+    def _reject_builtin_authored_tool_collisions(
+        self,
+        manifest: CoreManifest,
+        tool_slots: list[SlotDefinition],
+    ) -> None:
+        builtin_names = {
+            name
+            for toolset in manifest.tools.toolsets
+            for name in BUILTIN_TOOLSETS[toolset]
+        }
+        for slot in tool_slots:
+            if slot.slot_id in builtin_names:
+                raise CoreLoadError(
+                    f"tool name collision: {slot.slot_id}; "
+                    f"builtin:{slot.slot_id} conflicts with "
+                    f"authored:{slot.relative_path}; rename the authored tool "
+                    "or remove the conflicting builtin toolset"
+                )
 
     def _discover_skills(self, core_root: Path, configured: str | None) -> list[SkillDefinition]:
         if not configured:

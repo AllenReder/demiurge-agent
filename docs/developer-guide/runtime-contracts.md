@@ -346,6 +346,18 @@ resolved reference. `execute()` never performs a second global name lookup.
 Capability, workspace, principal, approval, secret values, and adapter choice
 are not caller-supplied request fields.
 
+The current alpha runtime implements the per-turn `ResolvedEffectCatalog`,
+adapter-bound `ResolvedEffectEntry`, deeply frozen `EffectRequest`, and the
+minimal typed `EffectResult`/`EffectError` portion of this seam. Definitions,
+display, effective approval metadata, capability preflight, and dispatch share
+that entry, and cross-source name collisions fail with both provenances.
+Current results normalize adapter output into `succeeded`, `denied`, `invalid`,
+`not_found`, or `failed` before the turn loop explicitly converts them to the
+legacy model-facing `ToolResult`; runtime events retain the typed status and
+error. Timeout, cancellation, indeterminate outcomes,
+connect authority, lifecycle, streaming limits, and redaction remain later
+EffectRuntime work.
+
 ### Internal Catalog Seam
 
 Catalog preparation is a real internal seam owned by the `EffectRuntime`
@@ -376,6 +388,10 @@ succeeded | denied | invalid | not_found | failed | timed_out | cancelled | inde
 It records whether execution started and provides independently bounded,
 redacted model, operator, event, and durable views. Raw adapter output remains
 internal.
+
+The current slice implements the first five statuses above. The remaining
+statuses and independently bounded/redacted views are completion requirements
+for later DG-P3 lifecycle and security tasks.
 
 ### Ordering and Invariants
 

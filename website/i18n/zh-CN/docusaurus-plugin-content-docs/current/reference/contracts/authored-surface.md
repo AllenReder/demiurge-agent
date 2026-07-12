@@ -55,6 +55,9 @@ agent/output/
 
 Skills、schedules 和 MCP roots 会推断为 `agent/skills`、`agent/schedules` 和 `agent/mcp`，除非配置了 `slots.skills`、`slots.schedules` 或 `slots.mcp`。Authored tools 会从配置好的 `slots.tools` root 发现。
 
+Authored tool id 不得与已选择的 builtin tool name 冲突。Loader 会报告两侧 provenance
+并失败，而不是应用 source 优先级。MCP name collision 会在构建最终 per-turn catalog 时被拒绝。
+
 ## Core-Owned Files
 
 Agent Core authors 可以编辑：

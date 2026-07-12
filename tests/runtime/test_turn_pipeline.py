@@ -36,6 +36,7 @@ from demiurge.runtime.turn_pipeline import (
     TurnPersistenceRuntime,
     TurnRequest,
 )
+from demiurge.tools.registry import ResolvedEffectCatalog
 from tests.runtime.operator_authority_support import activate_test_operator_authority
 from demiurge.sdk import AgentInput, ContextContribution, InputEnvelope, TurnContext
 
@@ -278,8 +279,12 @@ class _FakeTurnRuntimeHost:
         await self._maybe_block_stage("tool")
         self.prepared_tools_for = turn.turn_id
 
-    def tool_definitions_for(self, core, turn):
-        return []
+    def effect_catalog_for(self, core, turn):
+        return ResolvedEffectCatalog(
+            core_id=turn.core_id,
+            core_revision=turn.core_revision,
+            entries=(),
+        )
 
     async def run_turn_engine(self, request: TurnEngineRequest):
         self.engine_requests.append(request)

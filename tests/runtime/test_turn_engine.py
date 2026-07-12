@@ -10,6 +10,12 @@ from demiurge.runtime.interactions import InteractionItem, ToolInteractionRecord
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime.turn import TurnEngine, TurnEngineRequest
 from demiurge.sdk import AgentInput, ContextContribution, ToolResult, TurnContext
+from demiurge.tools.registry import (
+    EffectRequest,
+    EffectResult,
+    ResolvedEffectCatalog,
+    ResolvedEffectEntry,
+)
 from demiurge.tools.records import ToolExecutionRecord
 
 
@@ -40,7 +46,7 @@ class _FakeTurnHost:
         self.events: list[dict[str, Any]] = []
         self.runtime_events: list[RuntimeEvent] = []
         self.provider_requests: list[LLMRequest] = []
-        self.tool_calls: list[ToolCall] = []
+        self.effect_requests: list[EffectRequest] = []
         self.debug_messages: list[list[LLMMessage]] = []
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
@@ -103,16 +109,19 @@ class _FakeTurnHost:
 
     async def execute_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core,
         turn: TurnContext,
         capability,
         execution_context,
         output_factory,
-    ) -> ToolResult:
-        self.tool_calls.append(call)
-        return self.tool_results[call.name]
+    ) -> EffectResult:
+        self.effect_requests.append(request)
+        return EffectResult.normalize(
+            request.entry,
+            self.tool_results[request.name],
+        )
 
     def output_client(
         self,
@@ -145,7 +154,45 @@ class _FakeTurnHost:
         return content[:80]
 
 
+class _ResolvedRequestHost(_FakeTurnHost):
+    def __init__(self, responses: list[LLMResponse], *, tool_results: dict[str, ToolResult]):
+        super().__init__(responses, tool_results=tool_results)
+        self.effect_requests: list[EffectRequest] = []
+
+    async def execute_tool(
+        self,
+        request: EffectRequest,
+        *,
+        core,
+        turn: TurnContext,
+        capability,
+        execution_context,
+        output_factory,
+    ) -> EffectResult:
+        self.effect_requests.append(request)
+        return EffectResult.normalize(
+            request.entry,
+            self.tool_results[request.name],
+        )
+
+
 def _request(*, context: list[ContextContribution] | None = None) -> TurnEngineRequest:
+    entry = ResolvedEffectEntry(
+        name="lookup",
+        description="Lookup",
+        input_schema={"type": "object"},
+        source="authored",
+        core_id="assistant",
+        core_revision="rev_1",
+        adapter_key="authored:agent/tools/lookup",
+        provenance="authored:agent/tools/lookup",
+        _adapter=object(),
+    )
+    catalog = ResolvedEffectCatalog(
+        core_id="assistant",
+        core_revision="rev_1",
+        entries=(entry,),
+    )
     return TurnEngineRequest(
         core=_Core(),
         turn=TurnContext(
@@ -159,7 +206,8 @@ def _request(*, context: list[ContextContribution] | None = None) -> TurnEngineR
         capability=object(),
         execution_context=object(),
         context=context or [],
-        available_tools=[ToolDefinition(name="lookup", description="Lookup", input_schema={"type": "object"})],
+        available_tools=catalog.definitions(),
+        effect_catalog=catalog,
         interaction_metadata={"channel": "test"},
     )
 
@@ -192,12 +240,120 @@ async def test_turn_engine_feeds_tool_result_back_to_provider():
 
     assert result.final_output == "done"
     assert [record.call.name for record in result.tool_records] == ["lookup"]
-    assert host.tool_calls == [call]
+    assert len(host.effect_requests) == 1
+    assert host.effect_requests[0].name == call.name
+    assert host.effect_requests[0].call_id == call.id
+    assert dict(host.effect_requests[0].arguments) == call.arguments
     assert len(host.provider_requests) == 2
     second_messages = host.provider_requests[1].messages
     assert any(message.role == "tool" and message.content == "model-visible data" for message in second_messages)
     assert [event.type for event in host.runtime_events] == ["tool.call.started", "tool.call.completed"]
     assert [event.payload["step_id"] for event in host.runtime_events] == ["turn_1_step_1", "turn_1_step_1"]
+    assert host.runtime_events[-1].payload["effect_status"] == "succeeded"
+    assert host.runtime_events[-1].payload["effect_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_turn_engine_executes_the_same_resolved_entry_used_for_definitions():
+    call = ToolCall(id="call_1", name="lookup", arguments={"q": "demo"})
+    entry = ResolvedEffectEntry(
+        name="lookup",
+        description="Lookup",
+        input_schema={"type": "object"},
+        source="authored",
+        core_id="assistant",
+        core_revision="rev_1",
+        adapter_key="authored:agent/tools/lookup",
+        provenance="authored:agent/tools/lookup",
+        _adapter=object(),
+    )
+    catalog = ResolvedEffectCatalog(
+        core_id="assistant",
+        core_revision="rev_1",
+        entries=(entry,),
+    )
+    host = _ResolvedRequestHost(
+        [LLMResponse(tool_calls=[call]), LLMResponse(content="done")],
+        tool_results={"lookup": ToolResult(content="tool data")},
+    )
+    base = _request()
+    request = TurnEngineRequest(
+        core=base.core,
+        turn=base.turn,
+        capability=base.capability,
+        execution_context=base.execution_context,
+        context=base.context,
+        available_tools=catalog.definitions(),
+        effect_catalog=catalog,
+        interaction_metadata=base.interaction_metadata,
+    )
+
+    result = await TurnEngine(host).run(request)
+
+    assert result.final_output == "done"
+    assert len(host.effect_requests) == 1
+    assert host.effect_requests[0].entry is entry
+    assert host.effect_requests[0].name == call.name
+    assert host.effect_requests[0].call_id == call.id
+    assert dict(host.effect_requests[0].arguments) == call.arguments
+    assert [event.payload["effect_provenance"] for event in host.runtime_events] == [
+        "authored:agent/tools/lookup",
+        "authored:agent/tools/lookup",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_turn_engine_records_typed_denial_status_and_error():
+    call = ToolCall(id="call_1", name="lookup", arguments={})
+    host = _FakeTurnHost(
+        [LLMResponse(tool_calls=[call]), LLMResponse(content="done")],
+        tool_results={
+            "lookup": ToolResult(
+                content="capability denied: probe.effect",
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "denial": "capability",
+                },
+            )
+        },
+    )
+
+    result = await TurnEngine(host).run(_request())
+
+    assert result.final_output == "done"
+    event = host.runtime_events[-1]
+    assert event.type == "tool.call.failed"
+    assert event.payload["status"] == "failed"
+    assert event.payload["effect_status"] == "denied"
+    assert event.payload["effect_error"] == {
+        "code": "denied",
+        "message": "capability denied: probe.effect",
+        "execution_started": False,
+        "provenance": "authored:agent/tools/lookup",
+    }
+
+
+@pytest.mark.asyncio
+async def test_turn_engine_records_typed_not_found_for_unknown_model_call():
+    call = ToolCall(id="call_missing", name="missing", arguments={})
+    host = _FakeTurnHost(
+        [LLMResponse(tool_calls=[call]), LLMResponse(content="done")],
+    )
+
+    result = await TurnEngine(host).run(_request())
+
+    assert result.final_output == "done"
+    assert host.effect_requests == []
+    event = host.runtime_events[-1]
+    assert event.type == "tool.call.failed"
+    assert event.payload["effect_status"] == "not_found"
+    assert event.payload["effect_error"] == {
+        "code": "not_found",
+        "message": "tool not found or not allowed: missing",
+        "execution_started": False,
+        "provenance": "unresolved:assistant@rev_1:missing",
+    }
 
 
 @pytest.mark.asyncio

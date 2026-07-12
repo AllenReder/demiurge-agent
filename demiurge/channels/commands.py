@@ -218,8 +218,19 @@ class ChannelCommandExecutor:
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: Any) -> None:
         runner = state.runtime.runner
         core = await runner.load_active_core()
+        turn = TurnContext(
+            session_id=runner.session_id,
+            turn_id=f"{self.channel_name}_tools",
+            core_id=core.core_id,
+            core_revision=getattr(core, "revision", "untracked"),
+            user_input=AgentInput(
+                content=inbound.text,
+                metadata=dict(inbound.metadata),
+            ),
+            metadata=dict(inbound.metadata),
+        )
         lines = ["# Tools"]
-        for entry in runner.tool_runtime.registry_for(core):
+        for entry in runner.tool_runtime.registry_for(core, turn=turn):
             lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
         await self._send(inbound, "\n".join(lines))
 
@@ -241,7 +252,7 @@ class ChannelCommandExecutor:
         runner = state.runtime.runner
         core = await runner.load_active_core()
         principal_scope = await runner.resolve_command_principal_scope(inbound)
-        result = await runner.tool_runtime.execute(
+        result = await runner.execute_call(
             ToolCall(name="skill_view", arguments={"name": parts[0]}, id=f"{self.channel_name}_skill_view"),
             core=core,
             turn=TurnContext(

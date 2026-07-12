@@ -24,7 +24,7 @@ from demiurge.packages import (
 )
 from demiurge.providers import LLMResponse
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
-from demiurge.security.approval import ApprovalDecision
+from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.ui_gateway import OperatorGatewayRuntime
 
 
@@ -36,6 +36,10 @@ def _manager(app, repository_root: Path | None = None) -> PackageManager:
     )
     repositories = load_package_repository_collection(home=app.home, repository_configs=configs)
     return PackageManager(version_store=app.version_store, repository=repositories)
+
+
+def _allow_model_tool_approval(app) -> None:
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
 
 
 def _pipeline(core_path: Path, phase: str) -> dict:
@@ -1980,6 +1984,7 @@ async def test_brave_web_search_tool_normalizes_results(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id="web_search_brave")
     calls = _mock_brave_search_http(monkeypatch)
 
@@ -2042,6 +2047,7 @@ async def test_tavily_web_search_tool_normalizes_results(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id="web_search_tavily")
     calls = _mock_tavily_search_http(monkeypatch)
 
@@ -2093,6 +2099,7 @@ async def test_web_search_tool_reports_missing_api_key_without_network(tmp_path,
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id="web_search_brave")
 
     result = await app.runner.run_turn("search missing key")
@@ -2124,6 +2131,7 @@ async def test_web_search_tool_redacts_api_key_from_provider_error(tmp_path, mon
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id="web_search_brave")
 
     result = await app.runner.run_turn("search redact")
@@ -2150,6 +2158,7 @@ async def test_web_search_tool_requires_network_fetch_capability(tmp_path, monke
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id="web_search_brave")
     core_path = app.version_store.active_core_path("assistant")
     manifest_path = core_path / "agent.yaml"
@@ -2382,6 +2391,7 @@ async def test_minimax_tool_generates_audio_with_shared_lib(tmp_path, monkeypatc
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
+    _allow_model_tool_approval(app)
     manager = _manager(app)
     manager.install(core_id="assistant", package_id="tts_minimax", option_answers={"enable_tool": True})
     calls = _mock_minimax_http(monkeypatch)
@@ -2591,6 +2601,7 @@ async def test_provider_tts_tool_generates_audio_with_shared_tool_name(
         encoding="utf-8",
     )
     app = create_app(home=tmp_path / "home", provider_name="fake", fake_script=script, workspace=workspace)
+    _allow_model_tool_approval(app)
     _manager(app).install(core_id="assistant", package_id=package_id, option_answers={"enable_tool": True})
     calls = _mock_provider_tts_http(monkeypatch, provider=provider, audio=expected_bytes)
     bridge = _RecordingBridge()

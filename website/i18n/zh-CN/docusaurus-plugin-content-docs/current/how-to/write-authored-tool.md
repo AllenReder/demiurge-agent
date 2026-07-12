@@ -47,6 +47,10 @@ capabilities: []
 
 Tool id 是目录名。Host 暴露 tool 时，模型会看到 description 和 `input_schema`。
 
+请选择不会与已选择 builtin tool 或已发现 MCP tool 冲突的 id。Builtin/authored collision
+会让 core loading 失败，MCP collision 会让最终 catalog 构建失败。错误会列出两侧
+provenance；应重命名 authored tool，而不是依赖 source 优先级。
+
 单数的 `capability` 是这个 tool 的 metadata 和 approval policy 使用的主要 registry capability。`capabilities` 列表不同：它声明 tool implementation 可能通过 `ctx.capability.require(...)` 需要的 capabilities。
 
 ## 实现 `module.py`
@@ -123,3 +127,4 @@ uv run demiurge --provider fake
 - Tool 目录包含 `tool.yaml`。
 - `tool.yaml` 只使用支持的字段。
 - Tool id 与目录名匹配。
+- Tool id 不与 builtin 或 MCP 的 model-visible name 冲突。

@@ -10,6 +10,7 @@ from demiurge.runtime.store import RuntimeEvent
 from demiurge.sdk import ContextContribution, ToolResult, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
 from demiurge.tools.records import ToolExecutionRecord
+from demiurge.tools.registry import EffectRequest, EffectResult, ResolvedEffectCatalog
 
 if TYPE_CHECKING:
     from demiurge.runtime.turn_pipeline import TurnExecutionContext
@@ -23,6 +24,7 @@ class TurnEngineRequest:
     execution_context: TurnExecutionContext
     context: list[ContextContribution]
     available_tools: list[ToolDefinition]
+    effect_catalog: ResolvedEffectCatalog
     interaction_metadata: dict[str, Any]
     use_bootstrap_context: bool = True
 
@@ -34,6 +36,24 @@ class TurnEngineResult:
     tool_records: list[ToolExecutionRecord] = field(default_factory=list)
     turn_messages: list[LLMMessage] = field(default_factory=list)
     items: list[InteractionItem] = field(default_factory=list)
+
+
+def _resolved_effect_event_fields(
+    catalog: ResolvedEffectCatalog | None,
+    *,
+    tool_name: str,
+    fallback_core_revision: str,
+) -> dict[str, str | None]:
+    entry = catalog.entry_for(tool_name) if catalog is not None else None
+    return {
+        "effect_source": entry.source if entry is not None else None,
+        "effect_provenance": entry.provenance if entry is not None else None,
+        "core_revision": (
+            entry.core_revision
+            if entry is not None
+            else fallback_core_revision
+        ),
+    }
 
 
 class TurnEngineHost(Protocol):
@@ -94,14 +114,14 @@ class TurnEngineHost(Protocol):
 
     async def execute_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
-    ) -> ToolResult:
+    ) -> EffectResult:
         ...
 
     def output_client(
@@ -220,16 +240,16 @@ class RunnerTurnEngineHost:
 
     async def execute_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
         execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
-    ) -> ToolResult:
+    ) -> EffectResult:
         return await self.runner.execute_turn_tool(
-            call,
+            request,
             core=core,
             turn=turn,
             capability=capability,
@@ -367,26 +387,40 @@ class TurnEngine:
                                 "tool_name": call.name,
                                 "status": "running",
                                 "args": dict(call.arguments),
+                                **_resolved_effect_event_fields(
+                                    request.effect_catalog,
+                                    tool_name=call.name,
+                                    fallback_core_revision=request.turn.core_revision,
+                                ),
                             },
                         )
                     )
                 terminated = False
                 for call in response.tool_calls:
                     tool_items: list[InteractionItem] = []
-                    result: ToolResult = await self.host.execute_tool(
-                        call,
-                        core=request.core,
-                        turn=request.turn,
-                        capability=request.capability,
-                        execution_context=request.execution_context,
-                        output_factory=lambda slot: self.host.output_client(
-                            slot,
+                    effect_request = request.effect_catalog.request_for(call)
+                    if effect_request is None:
+                        effect_result = EffectResult.not_found(
+                            name=call.name,
+                            core_id=request.turn.core_id,
+                            core_revision=request.turn.core_revision,
+                        )
+                    else:
+                        effect_result = await self.host.execute_tool(
+                            effect_request,
+                            core=request.core,
                             turn=request.turn,
                             capability=request.capability,
-                            interaction_metadata=request.interaction_metadata,
-                            items=tool_items,
-                        ),
-                    )
+                            execution_context=request.execution_context,
+                            output_factory=lambda slot: self.host.output_client(
+                                slot,
+                                turn=request.turn,
+                                capability=request.capability,
+                                interaction_metadata=request.interaction_metadata,
+                                items=tool_items,
+                            ),
+                        )
+                    result = effect_result.to_tool_result()
                     self.host.append_runtime_event(
                         RuntimeEvent(
                             type="tool.call.failed" if result.is_error else "tool.call.completed",
@@ -397,6 +431,19 @@ class TurnEngine:
                                 "step_id": step_id,
                                 "tool_name": call.name,
                                 "status": "failed" if result.is_error else "succeeded",
+                                "effect_status": (
+                                    effect_result.status
+                                ),
+                                "effect_error": (
+                                    asdict(effect_result.error)
+                                    if effect_result.error is not None
+                                    else None
+                                ),
+                                **_resolved_effect_event_fields(
+                                    request.effect_catalog,
+                                    tool_name=call.name,
+                                    fallback_core_revision=request.turn.core_revision,
+                                ),
                                 "result": {
                                     "content": result.content,
                                     "data": result.data,

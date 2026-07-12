@@ -300,6 +300,16 @@ Per-turn catalog 同时生成 provider-visible definitions 与 opaque resolved r
 `execute()` 绝不再次执行全局 name lookup。Capability、workspace、principal、approval、
 secret values 与 adapter choice 都不是调用方提供的 request 字段。
 
+当前 alpha 运行时已经实现该 seam 中的 per-turn `ResolvedEffectCatalog`、adapter-bound
+`ResolvedEffectEntry`、深度冻结的 `EffectRequest`，以及最小 typed
+`EffectResult`/`EffectError`。Definitions、display、effective approval metadata、capability
+preflight 与 dispatch 共用同一 entry；跨 source name collision 会同时报告两侧 provenance
+并失败。当前 result 会先归一化为 `succeeded`、`denied`、`invalid`、`not_found` 或
+`failed`，随后 turn loop 才显式转换为旧的 model-facing `ToolResult`；runtime event 会保留
+typed status 与 error。Timeout、cancellation、
+indeterminate outcome、connect authority、lifecycle、streaming limits 与 redaction 仍属于后续
+EffectRuntime 工作。
+
 ### 内部 Catalog Seam
 
 Catalog preparation 是由 `EffectRuntime` module 拥有的真实内部 seam；它不是第二个
@@ -328,6 +338,9 @@ succeeded | denied | invalid | not_found | failed | timed_out | cancelled | inde
 
 它会记录 execution 是否已开始，并提供各自独立有界且脱敏的 model、operator、event 与
 durable views。Raw adapter output 只在内部保留。
+
+当前 slice 已实现上面的前五种状态。其余状态与各自独立有界、脱敏的 view 仍是后续
+DG-P3 lifecycle/security task 的完成要求。
 
 ### 顺序与不变量
 

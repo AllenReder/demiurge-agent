@@ -62,6 +62,10 @@ Skills, schedules, and MCP roots are inferred as `agent/skills`,
 `slots.mcp` are configured. Authored tools are discovered from the configured
 `slots.tools` root.
 
+An authored tool id must not collide with a selected builtin tool name. The
+loader fails with both provenances instead of applying source priority. MCP
+name collisions are rejected when the final per-turn catalog is constructed.
+
 ## Core-Owned Files
 
 Agent Core authors may edit:
