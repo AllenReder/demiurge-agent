@@ -76,7 +76,7 @@ uv run demiurge core diff
 uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
-uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve promote <run_id> --manual-review-token <token>
 uv run demiurge core evolve discard <run_id>
 uv run demiurge core rollback
 uv run demiurge core rollback <revision>
@@ -88,7 +88,10 @@ uv run demiurge core rollback <revision>
 `core check` 会对 live agents tree 运行 host-owned gates。`core evolve start`
 会在 `.evolve/runs/<run_id>/agents` 下创建隔离 worktree。Review 会记录
 `refs/demiurge/runs/<run_id>`，promote 会推进 `refs/demiurge/live`，rollback
-会创建新的 rollback commit。
+会创建新的 rollback commit。如果 review 报告 MCP declaration security diff，它还会输出
+内容绑定的 `mcp-review:<sha256>` token。调用 `core evolve promote` 时必须通过
+`--manual-review-token` 原样传回；token 缺失或已过期时 Git refs 保持不变。没有这项
+security diff 的 run 不需要该 option。
 
 `core diff` 会显示 `~/.demiurge/agents` 中的 local agent edits，不写入文件。
 `core save` 会验证这些 edits，并提交为新的 `core_revision`。`core discard --yes`

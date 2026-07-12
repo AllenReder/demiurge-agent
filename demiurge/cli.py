@@ -110,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("review", "promote", "discard"):
         evolve_action = core_evolve_subparsers.add_parser(name, help=f"{name.title()} an evolve run")
         evolve_action.add_argument("run_id", help="Evolve run id")
+        if name == "promote":
+            evolve_action.add_argument(
+                "--manual-review-token",
+                help="Token printed by review for security-sensitive changes",
+            )
         evolve_action.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     core_rollback = core_subparsers.add_parser("rollback", help="Create a rollback commit")
     core_rollback.add_argument("target", nargs="?", default="previous", help="Target revision or 'previous'")
@@ -698,12 +703,22 @@ def _handle_core_evolve_command(args: argparse.Namespace, *, home: Path) -> None
                 return
             print(f"review {args.run_id}: {'passed' if result.passed else 'failed'}")
             print(f"proposal revision: {result.proposal_revision or '(none)'}")
+            review_token = result.gates.review_token
+            if review_token:
+                print(f"manual review token: {review_token}")
             print(f"report: {result.report_path}")
             if not result.passed:
                 raise SystemExit(1)
             return
         if action == "promote":
-            result = asyncio.run(app.evolution_runtime.promote(args.run_id, target_core_id=app.runner.core_id, reason="cli promote"))
+            result = asyncio.run(
+                app.evolution_runtime.promote(
+                    args.run_id,
+                    target_core_id=app.runner.core_id,
+                    reason="cli promote",
+                    manual_review_token=args.manual_review_token,
+                )
+            )
             _print_core_evolve_result(result, as_json=args.json)
             if not result.promoted:
                 raise SystemExit(1)

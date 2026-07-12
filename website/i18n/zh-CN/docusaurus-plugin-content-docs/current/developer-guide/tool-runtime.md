@@ -10,7 +10,7 @@ description: 面向贡献者的 tool discovery、metadata、dispatch、approvals
 result 会先归一化为最小 typed `EffectResult`/`EffectError`，turn loop 再转换为旧的
 model-facing `ToolResult`；runtime event 会保留 typed status/error。Connect policy、扩展
 lifecycle outcome、process/network lifecycle、
-output limits 与 redaction 会在后续 DG-P3 tasks 中继续完成。参见
+output limits 与 redaction 会在后续 EffectRuntime 工作中继续完成。参见
 [Host 运行时契约](runtime-contracts.md#effectruntime)。
 
 ## Registry Sources
@@ -48,11 +48,23 @@ execution fallback。
 拒绝涉及 MCP 的 collision。错误会同时报告两侧 provenance，并要求重命名 authored 或 MCP
 tool，不存在隐式 builtin 优先级。
 
-MCP discovery 也会在 model execution 前准备。Catalog cache miss 时，当前运行时可能在
-之后的 `mcp.call:*` capability 与 approval check 之前 spawn/connect 并调用
-`list_tools()`。Call dispatch 现在已绑定当前 turn/session entry；connect/discovery authority、
-timeout、failure cache 与旧全局 index 的完整删除仍属于 DG-P3-T02。这些是已知 alpha 缺口，
-不是受支持的 extension point。
+MCP discovery 也会在 model execution 前准备。Catalog cache miss 时，普通
+`TurnExecution` 现在会先要求 `mcp.connect:<server>` 并解析 connect approval，然后才允许
+client construction 或 `list_tools()`；后续 tool call 有独立的 `mcp.call:*` gate。Call
+dispatch 仍绑定当前 turn/session entry。`list_tools()` 目前按 server 使用
+`connect_timeout_seconds` 限时；超时 server 会被关闭，且不会阻止后续 server。Discovery
+在整个 runtime 内跨 session 最多并发处理四个 server，并在之后确定性组装 name。Current
+failure diagnostic 按 server 使用 30 秒 negative-cache TTL；在同一 catalog authority 内，
+过期时只重试失败 server，健康 peer 保持连接，authority denial 则在下一个 turn 按 server
+重新检查。Per-server manifest fingerprint 只在整体 authority/core snapshot 不变时支持
+targeted reconnect。Configured cwd 会在 approval/client construction 前按 Host workspace
+校验。Catalog identity 绑定 principal、capability snapshot、core revision 与 effective
+connect policy，任一绑定变化都会在复用前驱逐整个旧 catalog。Declaration 变化也必须重新通过 connect
+approval，replacement client 才能启动；删除全部 declaration 会关闭剩余 connection。
+切换到新 session 或 resume 其他 session 时会跟踪驱逐旧 session。显式 session eviction 只关闭目标 session 的
+catalogs；delegated child 使用 Host-issued scope，并在 child completion 时释放 connection。
+Sanitized env/secret binding 与 URL validation 仍属于后续 security 工作。旧 global
+MCP tool-name index 已删除；call dispatch 只接受 connection-bound resolved entry。
 
 ## 目标 EffectRuntime 接口
 
@@ -94,7 +106,10 @@ effects。
   run。它不会切换 live core。
 - `evolve_core(action="review")`、`evolve_core(action="promote")` 与
   `evolve_core(action="discard")` 通过 Host-owned evolution runtime 操作该 run id。
-  Promotion 只会在 gates 通过后推进 Git refs。每个 action 都会在 dispatch 前解析
+  Promotion 只会在 gates 通过后推进 Git refs。MCP declaration 变化会在 review 中附带
+  secret-safe 的 command/argument、URL、cwd、environment/header 名称、risk、approval 与
+  capability diff；只有成功的 promote approval 同时确认 manual security review 后，才会
+  允许推进 refs。每个 action 都会在 dispatch 前解析
   capability 与 approval；action 与 target 进入 approval-cache rule，因此一个 mutation
   action 不会授权另一个。该 cache 还绑定 admitted principal、session、core revision、
   capability snapshot、effective policy 与 effect entry；成功 promotion 或 rollback 会使
@@ -143,7 +158,8 @@ lifecycle，但不会重新引入 name-based dispatch。
 MCP tools 使用 normalized server-prefixed names 与 include/exclude filters。Transport、
 discovery、timeouts 与 result conversion 归 Host 所有。每个可见 MCP definition 现在都
 绑定当前 session/revision connection 与 resolved effect entry，因此 call dispatch 不会
-回退到全局 tool-name index。Connect/discovery policy ordering 仍留待 DG-P3-T02。
+回退到全局 tool-name index。Connect/discovery 使用独立的 pre-client capability 与
+approval gate；session、authority 或 declaration 变化会 eviction stale connection。
 
 ## 边界
 

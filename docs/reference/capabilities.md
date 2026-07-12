@@ -12,10 +12,10 @@ Declaring a tool, slot, schedule, or MCP server does not grant a capability by
 itself. Builtin and MCP call handlers generally check their required
 capabilities at execution time. Authored tool dispatch requires the singular
 registry capability before module import, while authored SDK clients continue
-to enforce explicit `ctx.capability.require(...)` calls inside the module.
-
-Current alpha limitation: MCP spawn/connect/discovery occurs before the later
-call capability and approval check. Core mutation builtins now require the
+to enforce explicit `ctx.capability.require(...)` calls inside the module. MCP
+spawn/connect/discovery requires `mcp.connect:<server>` and connect approval
+before client construction; later tool calls use the manifest call capability.
+Core mutation builtins require the
 resolved registry capability and effective approval policy before every
 evolution/version-store adapter call or background task creation. See
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime)
@@ -71,11 +71,13 @@ The capability checker supports exact keys and prefix wildcards:
 ```yaml
 capabilities:
   defaults:
+    mcp.connect:*:
+      scope: core
     mcp.call:*:
       scope: core
 ```
 
-This grants capabilities such as `mcp.call:docs`.
+This grants capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
 
 ## Common Capabilities
 
@@ -89,6 +91,7 @@ This grants capabilities such as `mcp.call:docs`.
 | `task.control` | List, inspect, wait for, or cancel background runtime tasks. |
 | `session.read` | Browse or search session history through owner-scoped Host queries. `session_search` also requires approval. |
 | `tool.call:<tool>` | Let authored code call a visible tool through `ctx.tools.call(...)`. |
+| `mcp.connect:<server>` | Let the Host start/connect and discover one MCP server after approval. |
 | `mcp.call:<server>` | Let the model call tools from an MCP server. |
 | `skill.activate` | Let input slots activate skills. |
 | `skill.activate:<skill>` | Let input slots activate a specific skill. |

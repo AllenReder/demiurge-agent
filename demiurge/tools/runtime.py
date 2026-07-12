@@ -28,6 +28,10 @@ from demiurge.runtime.tasks import (
     RuntimeTaskWorker,
 )
 from demiurge.mcp import McpRuntime, McpToolInfo
+from demiurge.mcp.security import (
+    mcp_connect_security_summary,
+    mcp_server_fingerprint,
+)
 from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime, ApprovalScope
 from demiurge.security.capabilities import (
@@ -36,7 +40,7 @@ from demiurge.security.capabilities import (
     CapabilitySnapshot,
 )
 from demiurge.security.command_guard import CommandGuardDecision, review_command
-from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
+from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, McpServerDefinition, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.core_repository import CoreRepositoryError
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
@@ -330,15 +334,235 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         *,
+        capability: CapabilityFacade | None = None,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
         emit_event: EventEmitter | None = None,
     ) -> None:
-        if self.mcp_runtime is None or not core.mcp_servers:
+        if self.mcp_runtime is None:
             return
-        await self.mcp_runtime.prepare_for_turn(core, turn, emit_event=emit_event)
+        if not core.mcp_servers:
+            await self.mcp_runtime.evict_session(turn.session_id)
+            return
+        if capability is None or (
+            execution_context is None and principal_scope is None
+        ):
+            for server in core.mcp_servers:
+                if server.enabled and emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=f"mcp.connect:{server.server_id}",
+                        reason="MCP connect authority is not bound to tool preparation",
+                    )
+            return
+        try:
+            approval_scope = self.resolve_approval_scope(
+                core=core,
+                turn=turn,
+                capability=capability,
+                execution_context=execution_context,
+                principal_scope=principal_scope,
+            )
+        except (PermissionError, TypeError, ValueError) as exc:
+            for server in core.mcp_servers:
+                if server.enabled and emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=f"mcp.connect:{server.server_id}",
+                        reason=str(exc),
+                    )
+            return
+
+        authority_key = self._mcp_connect_authority_key(
+            core,
+            turn=turn,
+            approval_scope=approval_scope,
+        )
+        scope_token = self._approval_scope.set(approval_scope)
+
+        async def authorize_server(server: McpServerDefinition) -> bool:
+            return await self._authorize_mcp_connect(
+                server,
+                core=core,
+                turn=turn,
+                capability=capability,
+                emit_event=emit_event,
+            )
+
+        try:
+            await self.mcp_runtime.prepare_for_turn(
+                core,
+                turn,
+                authority_key=authority_key,
+                authorize_server=authorize_server,
+                emit_event=emit_event,
+            )
+        finally:
+            self._approval_scope.reset(scope_token)
+
+    def _mcp_connect_authority_key(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext,
+        approval_scope: ApprovalScope,
+    ) -> str:
+        snapshot = approval_scope.capability_snapshot
+        server_authority = []
+        for server in core.mcp_servers:
+            if not server.enabled:
+                continue
+            entry = self._mcp_connect_entry(server, core=core, turn=turn)
+            server_authority.append(
+                {
+                    "server_id": server.server_id,
+                    "capability": entry.capability,
+                    "risk": entry.risk,
+                    "approval_policy": entry.approval_policy,
+                }
+            )
+        payload = {
+            "principal_id": approval_scope.principal_id,
+            "core_revision": turn.core_revision,
+            "capabilities": {
+                "defaults": sorted(snapshot.defaults),
+                "manifest_slots": [
+                    (path, sorted(names))
+                    for path, names in snapshot.manifest_slots
+                ],
+                "component_slots": [
+                    (path, sorted(names))
+                    for path, names in snapshot.component_slots
+                ],
+            },
+            "servers": server_authority,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _mcp_connect_entry(
+        self,
+        server: McpServerDefinition,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+    ) -> ResolvedEffectEntry:
+        capability_name = f"mcp.connect:{server.server_id}"
+        return self._resolve_entry_approval_policy(
+            core,
+            ResolvedEffectEntry(
+                name=capability_name,
+                description=f"Connect and discover MCP server {server.server_id}",
+                input_schema={"type": "object", "properties": {}},
+                source="mcp_connect",
+                core_id=core.core_id,
+                core_revision=turn.core_revision,
+                adapter_key=f"mcp-connect:{server.relative_path}",
+                provenance=f"mcp-connect:{server.relative_path}",
+                _adapter=server,
+                slot_path=server.relative_path,
+                risk=server.manifest.risk,
+                capability=capability_name,
+                approval_policy=self._stricter_policy(
+                    "prompt",
+                    server.manifest.approval_policy,
+                ),
+            ),
+        )
+
+    async def _authorize_mcp_connect(
+        self,
+        server: McpServerDefinition,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        emit_event: EventEmitter | None,
+    ) -> bool:
+        capability_name = f"mcp.connect:{server.server_id}"
+        entry = self._mcp_connect_entry(
+            server,
+            core=core,
+            turn=turn,
+        )
+        call = ToolCall(
+            name=entry.name,
+            arguments=_safe_authored_arguments_preview(
+                mcp_connect_security_summary(server)
+            ),
+            id=f"{turn.turn_id}:{entry.name}",
+        )
+        try:
+            self._require_resolved_capability(entry, call, capability)
+        except CapabilityDenied as exc:
+            if emit_event is not None:
+                emit_event(
+                    "mcp.server_denied",
+                    server_id=server.server_id,
+                    path=server.relative_path,
+                    capability=capability_name,
+                    reason=str(exc),
+                )
+            return False
+        if server.manifest.cwd:
+            try:
+                self.workspace.resolve_path(
+                    server.manifest.cwd,
+                    operation="write",
+                )
+            except (WorkspaceScopeError, ValueError, OSError) as exc:
+                if emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=capability_name,
+                        reason=str(exc),
+                    )
+                return False
+        denied = await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="mcp.connect",
+            summary=f"Connect and discover MCP server {server.server_id}",
+            target=server.relative_path,
+            arguments_preview=call.arguments,
+            cache_key=(
+                f"mcp.connect:{server.server_id}:"
+                f"{mcp_server_fingerprint(server)}"
+            ),
+            emit_event=emit_event,
+        )
+        if denied is None:
+            return True
+        if emit_event is not None:
+            emit_event(
+                "mcp.server_denied",
+                server_id=server.server_id,
+                path=server.relative_path,
+                capability=capability_name,
+                reason=denied.content,
+            )
+        return False
 
     async def close(self) -> None:
         if self.mcp_runtime is not None:
             await self.mcp_runtime.close()
+
+    async def evict_session(self, session_id: str) -> None:
+        if self.mcp_runtime is not None:
+            await self.mcp_runtime.evict_session(session_id)
 
     def resolve_effects(
         self,
@@ -420,9 +644,8 @@ class ToolRuntime:
                     core_id=core.core_id,
                     core_revision=core_revision,
                     adapter_key=(
-                        "mcp:"
-                        + ":".join(tool.connection_key)
-                        + f":{tool.server_tool_name}"
+                        f"mcp:{tool.connection_key.adapter_identity()}:"
+                        f"{tool.server_tool_name}"
                     ),
                     provenance=(
                         f"mcp:{tool.relative_path}:"
@@ -566,6 +789,23 @@ class ToolRuntime:
                         data={"executionStarted": False},
                     ),
                 )
+            if entry.source == "mcp" and not self._mcp_entry_matches_execution(
+                entry,
+                core=core,
+                turn=turn,
+                approval_scope=approval_scope,
+            ):
+                return EffectResult.normalize(
+                    entry,
+                    ToolResult(
+                        content=(
+                            "resolved MCP effect entry does not match the "
+                            "active execution authority"
+                        ),
+                        is_error=True,
+                        data={"executionStarted": False},
+                    ),
+                )
 
             entry_token = self._resolved_effect_entry.set(entry)
             catalog_token = self._resolved_effect_catalog.set(catalog)
@@ -626,6 +866,42 @@ class ToolRuntime:
             if entry_token is not None:
                 self._resolved_effect_entry.reset(entry_token)
             self._approval_scope.reset(scope_token)
+
+    def _mcp_entry_matches_execution(
+        self,
+        entry: ResolvedEffectEntry,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        approval_scope: ApprovalScope,
+    ) -> bool:
+        mcp_tool = entry._adapter
+        if not isinstance(mcp_tool, McpToolInfo):
+            return False
+        connection_key = mcp_tool.connection_key
+        server = next(
+            (
+                definition
+                for definition in core.mcp_servers
+                if definition.server_id == connection_key.server_id
+            ),
+            None,
+        )
+        return bool(
+            server is not None
+            and connection_key.session_id == turn.session_id
+            and connection_key.authority_key
+            == self._mcp_connect_authority_key(
+                core,
+                turn=turn,
+                approval_scope=approval_scope,
+            )
+            and connection_key.core_root == str(core.root)
+            and connection_key.core_revision == turn.core_revision
+            and connection_key.workspace == str(self.workspace.root)
+            and connection_key.server_fingerprint
+            == mcp_server_fingerprint(server)
+        )
 
     async def _execute_resolved_adapter(
         self,
@@ -1009,6 +1285,30 @@ class ToolRuntime:
             if action == "promote":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core promote", is_error=True)
+                approval_arguments = dict(call.arguments)
+                security_preview: dict[str, Any] = {}
+                preview_loader = getattr(
+                    self.evolution_runtime,
+                    "promotion_security_preview",
+                    None,
+                )
+                if callable(preview_loader):
+                    try:
+                        security_preview = preview_loader(
+                            run_id,
+                            target_core_id=core.core_id,
+                        )
+                    except CoreRepositoryError as exc:
+                        return ToolResult(
+                            content=str(exc),
+                            data={"error": str(exc)},
+                            is_error=True,
+                            model_output=str(exc),
+                        )
+                    if security_preview:
+                        approval_arguments["mcp_security_review"] = (
+                            security_preview
+                        )
                 approval_denial = await self._approval_for_resolved_entry(
                     entry,
                     call,
@@ -1017,13 +1317,25 @@ class ToolRuntime:
                     action="evolve.promote",
                     summary=f"Promote evolve run {run_id} for core {core.core_id}",
                     target=f"{core.core_id}:{run_id}",
-                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    arguments_preview=_safe_authored_arguments_preview(
+                        approval_arguments
+                    ),
                     emit_event=emit_event,
                 )
                 if approval_denial is not None:
                     return approval_denial
                 try:
-                    result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
+                    manual_review_token = None
+                    if security_preview:
+                        manual_review_token = str(
+                            security_preview.get("review_token") or ""
+                        ) or None
+                    result = await self.evolution_runtime.promote(
+                        run_id,
+                        target_core_id=core.core_id,
+                        reason=reason,
+                        manual_review_token=manual_review_token,
+                    )
                 except CoreRepositoryError as exc:
                     return ToolResult(content=str(exc), data={"error": str(exc)}, is_error=True, model_output=str(exc))
                 if result.promoted and not getattr(
@@ -2740,6 +3052,7 @@ class ToolRuntime:
         target: str | None,
         arguments_preview: dict[str, Any],
         emit_event: EventEmitter | None,
+        cache_key: str | None = None,
     ) -> ToolResult | None:
         capability_name = entry.capability or f"tool.call:{entry.name}"
         policy = entry.approval_policy
@@ -2753,7 +3066,7 @@ class ToolRuntime:
             summary=summary,
             target=target,
             arguments_preview=arguments_preview,
-            cache_key=(
+            cache_key=cache_key or (
                 f"{entry.name}:{capability_name}:{action}:{target or ''}"
             ),
             auto_approve=policy == "auto",

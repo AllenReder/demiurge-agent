@@ -250,7 +250,14 @@ class TurnPipelineHost(Protocol):
     async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
         ...
 
-    async def prepare_tools(self, core: LoadedCore, turn: TurnContext) -> None:
+    async def prepare_tools(
+        self,
+        core: LoadedCore,
+        turn: TurnContext,
+        *,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
+    ) -> None:
         ...
 
     def effect_catalog_for(
@@ -456,10 +463,19 @@ class RunnerTurnPipelineHost:
     async def run_input_slots(self, request: InputPipelineRequest) -> InputPipelineResult:
         return await self.runner.slot_pipeline.run_input(request)
 
-    async def prepare_tools(self, core: LoadedCore, turn: TurnContext) -> None:
+    async def prepare_tools(
+        self,
+        core: LoadedCore,
+        turn: TurnContext,
+        *,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
+    ) -> None:
         await self.runner.tool_runtime.prepare_for_turn(
             core,
             turn,
+            capability=capability,
+            execution_context=execution_context,
             emit_event=lambda event_type, **payload: self.runner.emit_turn_event(
                 event_type,
                 **{**payload, "session_id": turn.session_id},
@@ -844,7 +860,12 @@ class TurnExecution:
         context = input_result.context
         self.persistence.record_input(scope, input_result)
         items: list[InteractionItem] = list(input_result.items)
-        await self.host.prepare_tools(scope.core, turn)
+        await self.host.prepare_tools(
+            scope.core,
+            turn,
+            capability=scope.capability,
+            execution_context=scope.context,
+        )
         effect_catalog = self.host.effect_catalog_for(scope.core, turn)
         available_tools = effect_catalog.definitions()
 

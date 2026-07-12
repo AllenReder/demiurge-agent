@@ -354,9 +354,22 @@ that entry, and cross-source name collisions fail with both provenances.
 Current results normalize adapter output into `succeeded`, `denied`, `invalid`,
 `not_found`, or `failed` before the turn loop explicitly converts them to the
 legacy model-facing `ToolResult`; runtime events retain the typed status and
-error. Timeout, cancellation, indeterminate outcomes,
-connect authority, lifecycle, streaming limits, and redaction remain later
-EffectRuntime work.
+error. Normal turn catalog preparation also enforces the first
+`mcp.connect:<server>` capability/approval gate before client construction and
+discovery, and bounds each `list_tools()` call by the server's
+`connect_timeout_seconds`. Discovery uses one runtime-wide four-server
+concurrency window across sessions and deterministic catalog assembly. Failure
+diagnostics use a per-server 30-second retry TTL, preserving healthy peer
+connections, while authority denial is rechecked per server on the next turn.
+Timeout, authority or declaration changes evict stale session connections
+before reuse; declaration removal and ordinary session replacement also close
+the prior session resources. Delegated children use their own Host-issued
+authority and release connections at child completion. Evolution gates attach
+a secret-safe MCP declaration security diff and content-bound
+`mcp-review:<sha256>` token; promotion requires that exact token and leaves Git
+refs unchanged for missing or stale confirmation. Indeterminate outcomes,
+sanitized env/secret binding, URL policy, streaming limits, and redaction remain
+later EffectRuntime work.
 
 ### Internal Catalog Seam
 
@@ -391,7 +404,7 @@ internal.
 
 The current slice implements the first five statuses above. The remaining
 statuses and independently bounded/redacted views are completion requirements
-for later DG-P3 lifecycle and security tasks.
+for later lifecycle and security work.
 
 ### Ordering and Invariants
 

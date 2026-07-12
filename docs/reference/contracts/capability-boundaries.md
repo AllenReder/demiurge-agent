@@ -42,8 +42,8 @@ The capability must be declared in one of these places:
 - `agent.yaml` under `capabilities.slots.<slot_path>`
 - the component manifest's `capabilities` list
 
-Prefix grants such as `mcp.call:*` may grant scoped capabilities such as
-`mcp.call:docs`.
+Prefix grants such as `mcp.connect:*` and `mcp.call:*` may grant scoped
+capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
 
 ## Approval Rule
 

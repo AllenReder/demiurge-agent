@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from baseline_support import BaselineContractFailure
 from demiurge.app import create_app
 from demiurge.sdk import AgentInput, TurnContext
 
@@ -67,12 +66,20 @@ def _turn(core) -> TurnContext:
     )
 
 
+async def _authorize_server(_server) -> bool:
+    return True
+
+
+def _prepare(app, core):
+    return app.tool_runtime.mcp_runtime.prepare_for_turn(
+        core,
+        _turn(core),
+        authority_key="stress-authorized",
+        authorize_server=_authorize_server,
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=BaselineContractFailure,
-    reason="MCP-03: enabled server discovery is currently serial",
-)
 async def test_mcp_03_enabled_server_discovery_overlaps(tmp_path, baseline_recorder):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     _write_server(app, "alpha")
@@ -85,9 +92,7 @@ async def test_mcp_03_enabled_server_discovery_overlaps(tmp_path, baseline_recor
         lambda server, *_args: connections[server.server_id]
     )
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    prepare_task = asyncio.create_task(
-        app.tool_runtime.mcp_runtime.prepare_for_turn(core, _turn(core))
-    )
+    prepare_task = asyncio.create_task(_prepare(app, core))
     overlap_observed = False
     catalog = None
     try:
@@ -125,11 +130,6 @@ async def test_mcp_03_enabled_server_discovery_overlaps(tmp_path, baseline_recor
         await app.close()
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=BaselineContractFailure,
-    reason="MCP-03: list_tools has no per-server timeout and a hung server hides later healthy servers",
-)
 async def test_mcp_03_hung_discovery_times_out_without_hiding_fast_server(
     tmp_path,
     baseline_recorder,
@@ -145,9 +145,7 @@ async def test_mcp_03_hung_discovery_times_out_without_hiding_fast_server(
         lambda server, *_args: connections[server.server_id]
     )
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
-    prepare_task = asyncio.create_task(
-        app.tool_runtime.mcp_runtime.prepare_for_turn(core, _turn(core))
-    )
+    prepare_task = asyncio.create_task(_prepare(app, core))
     catalog = None
     completed_within_guard = False
     try:

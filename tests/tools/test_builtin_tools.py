@@ -53,9 +53,30 @@ class FakeEvolutionAdapter:
         self.review_calls += 1
         return FakeCoreMutationResult()
 
-    async def promote(self, run_id, *, target_core_id, reason):
+    async def promote(
+        self,
+        run_id,
+        *,
+        target_core_id,
+        reason,
+        manual_review_token=None,
+    ):
         self.promote_calls += 1
+        self.manual_review_token = manual_review_token
         return FakeCoreMutationResult()
+
+    def promotion_security_preview(self, run_id, *, target_core_id):
+        return {
+            "manual_review_required": True,
+            "review_token": "mcp-review:synthetic",
+            "changed_paths": [f"{target_core_id}/agent/mcp/docs.yaml"],
+            "changes": [
+                {
+                    "path": f"{target_core_id}/agent/mcp/docs.yaml",
+                    "change": "modified",
+                }
+            ],
+        }
 
     def discard(self, run_id):
         self.discard_calls += 1
@@ -1722,6 +1743,7 @@ async def test_tool_03_evolve_allow_uses_resolved_entry_and_safe_preview(tmp_pat
     )
 
     assert fake.promote_calls == 1
+    assert fake.manual_review_token == "mcp-review:synthetic"
     assert result.is_error is False
     assert len(provider.requests) == 1
     request = provider.requests[0]
@@ -1730,11 +1752,42 @@ async def test_tool_03_evolve_allow_uses_resolved_entry_and_safe_preview(tmp_pat
     assert request.risk == "high"
     assert request.policy == "prompt"
     assert request.action == "evolve.promote"
+    assert request.arguments_preview["mcp_security_review"][
+        "manual_review_required"
+    ] is True
+    assert request.arguments_preview["mcp_security_review"][
+        "changed_paths"
+    ] == ["assistant/agent/mcp/docs.yaml"]
     assert request.target == "assistant:run_probe"
     assert request.arguments_preview["secret_token"] == "<redacted>"
     assert len(request.arguments_preview["reason"]) <= 300
     assert "[truncated 4744 chars]" in request.arguments_preview["reason"]
     assert len(json.dumps(request.arguments_preview, ensure_ascii=False)) <= 2048
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_promote_supports_adapter_without_security_preview(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    fake.promotion_security_preview = None
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(
+        app.version_store.active_core_path("assistant")
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "promote", "run_id": "run_probe"},
+    )
+
+    assert fake.promote_calls == 1
+    assert fake.manual_review_token is None
+    assert result.is_error is False
 
 
 @pytest.mark.asyncio

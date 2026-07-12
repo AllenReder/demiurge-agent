@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -394,6 +395,7 @@ class SessionTurnStepRunner:
             self.tool_runtime.approval_runtime.invalidate_session(
                 previous_session_id
             )
+            self._schedule_session_effect_eviction(previous_session_id)
         return record.session_id
 
     def resume_session(
@@ -407,6 +409,7 @@ class SessionTurnStepRunner:
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> None:
+        previous_session_id = self.session_id
         resolver = PrincipalScopeResolver(self.session_runtime.store)
         if self.principal_scope is not None and self.principal_scope.authority is AuthorityKind.OPERATOR:
             resume_scope = resolver.local_operator(
@@ -432,6 +435,21 @@ class SessionTurnStepRunner:
             reply_to=reply_to,
             replace_conversation_binding=replace_conversation_binding,
             principal_scope=resume_scope,
+        )
+        if self.session_id != previous_session_id:
+            self.tool_runtime.approval_runtime.invalidate_session(
+                previous_session_id
+            )
+            self._schedule_session_effect_eviction(previous_session_id)
+
+    def _schedule_session_effect_eviction(self, session_id: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.tool_runtime.evict_session(session_id))
+            return
+        self.background_tasks.track(
+            loop.create_task(self.tool_runtime.evict_session(session_id))
         )
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:

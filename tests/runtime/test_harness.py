@@ -151,7 +151,13 @@ async def test_model_loop_executes_mcp_tool_and_returns_result_to_provider(tmp_p
             return LLMResponse(content=f"mcp result visible: {'from mcp' in tool_text}")
 
     app = create_app(home=tmp_path / "home", provider_name="fake")
-    _set_capabilities(app, capabilities={"mcp.call:docs": {}})
+    _set_capabilities(
+        app,
+        capabilities={
+            "mcp.connect:docs": {},
+            "mcp.call:docs": {},
+        },
+    )
     _install_mcp_server(
         app,
         "docs",
@@ -161,6 +167,7 @@ async def test_model_loop_executes_mcp_tool_and_returns_result_to_provider(tmp_p
     )
     connection = _HarnessMcpConnection()
     app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     app.runner.provider = McpCallingProvider()
 
     result = await app.runner.run_turn("use mcp")

@@ -39,7 +39,8 @@ Capability 必须在以下任一位置声明：
 - `agent.yaml` 下的 `capabilities.slots.<slot_path>`
 - component manifest 的 `capabilities` 列表
 
-`mcp.call:*` 这样的 prefix grants 可以授予 `mcp.call:docs` 等 scoped capabilities。
+`mcp.connect:*` 与 `mcp.call:*` 这样的 prefix grants 可以授予
+`mcp.connect:docs`、`mcp.call:docs` 等 scoped capabilities。
 
 ## Approval Rule
 

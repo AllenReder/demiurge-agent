@@ -700,6 +700,60 @@ def test_operator_gateway_long_command_isolation_predicate():
 
 
 @pytest.mark.asyncio
+async def test_tui_evolve_promote_forwards_manual_review_token(tmp_path):
+    class FakeEvolutionRuntime:
+        def __init__(self):
+            self.calls = []
+
+        async def promote(
+            self,
+            run_id,
+            *,
+            target_core_id,
+            reason,
+            manual_review_token=None,
+        ):
+            self.calls.append(
+                {
+                    "run_id": run_id,
+                    "target_core_id": target_core_id,
+                    "reason": reason,
+                    "manual_review_token": manual_review_token,
+                }
+            )
+            return type(
+                "PromoteResult",
+                (),
+                {
+                    "summary": "promoted",
+                    "report_path": str(tmp_path / "report.md"),
+                },
+            )()
+
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionRuntime()
+    app.evolution_runtime = fake
+    bridge = OperatorGatewayRuntime(app, emit=sink)
+
+    result = await bridge.command(
+        "/evolve promote run_probe mcp-review:probe"
+    )
+
+    assert result["handled"] is True
+    assert fake.calls == [
+        {
+            "run_id": "run_probe",
+            "target_core_id": "assistant",
+            "reason": "tui promote",
+            "manual_review_token": "mcp-review:probe",
+        }
+    ]
+    assert "promoted" in sink.texts()
+    await app.close()
+
+
+@pytest.mark.asyncio
 async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -733,6 +787,8 @@ async def test_tui_bridge_ready_includes_tui_slash_command_catalog(tmp_path):
     assert "busy" in names
     assert "stop" not in names
     assert "queue" not in names
+    evolve = next(command for command in commands if command["name"] == "evolve")
+    assert "promote <run_id> [manual_review_token]" in evolve["usage"]
     assert {"name", "description", "group", "usage"} <= set(commands[0])
     assert ready["user_message_align"] == "left"
     assert ready["demiurge_theme_color"] == "#ff9afc"

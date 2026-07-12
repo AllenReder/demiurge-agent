@@ -9,12 +9,13 @@ Agent Cores declare MCP servers with YAML files. The host owns transport
 startup, tool discovery, namespacing, approvals, capability checks, and tool
 execution.
 
-Current alpha security boundary: on a catalog cache miss, the Host may
-spawn/connect and call `list_tools()` before the later `mcp.call:*` capability
-and approval check. Review a declaration's command, package runner, URL, cwd,
-environment, and headers as trusted code/configuration before enabling it. The
-target runtime adds a separate `mcp.connect:<server_id>` effect before any
-connect or discovery side effect.
+On a catalog cache miss, the Host first requires
+`mcp.connect:<server_id>` and applies the declaration's risk/approval policy.
+Denied authority stops before client construction, process/network startup, and
+`list_tools()`. The later tool invocation separately requires the server call
+capability and approval. Continue to review a declaration's command, package
+runner, URL, environment, and headers before enabling it: sanitized secret
+binding and full URL safety remain later security layers.
 
 By default, the loader looks under:
 
@@ -53,9 +54,10 @@ supports_parallel_tool_calls: false
 `transport: stdio` requires `command`. `args`, `env`, and `cwd` are optional.
 Relative `cwd` values are resolved from the runtime workspace.
 
-Environment references such as `${DOCS_TOKEN}` are resolved when the MCP catalog
-is built. If an environment variable is missing, the host records a diagnostic
-and skips that server for the turn.
+Environment references such as `${DOCS_TOKEN}` are resolved only after connect
+authority allows the server. If a variable is missing, the Host records a
+diagnostic and skips that server for the turn. A configured cwd must resolve
+inside the Host workspace before approval or client construction.
 
 ## Add a Streamable HTTP Server
 
@@ -85,8 +87,9 @@ supports_parallel_tool_calls: false
 The server manifest's `capability` names the capability required to call tools
 from that server. It does not grant the capability by itself.
 
-This is currently a **call** capability. It does not yet authorize or deny the
-earlier spawn/connect/discovery step.
+The Host uses a separate `mcp.connect:<server_id>` capability for
+spawn/connect/discovery. The manifest's `capability` remains the **call**
+capability for tools from that server.
 
 Add the capability under the existing `capabilities.defaults` map in the
 concrete core manifest:
@@ -94,6 +97,8 @@ concrete core manifest:
 ```yaml
 capabilities:
   defaults:
+    mcp.connect:docs:
+      scope: core
     mcp.call:docs:
       scope: core
 ```
@@ -131,6 +136,19 @@ Inside the TUI:
 /tools
 ```
 
+`list_tools()` uses `connect_timeout_seconds`. Discovery uses one runtime-wide
+limit of four servers across sessions. A failed server does not block or close a
+healthy peer; its diagnostic is cached for 30 seconds before only that server
+is retried. Connect denial is rechecked per server on the next turn.
+Declaration or authority changes close the older session-bound catalog and
+require connect reapproval. Removing every declaration closes remaining
+connections, and starting or resuming another session tracks cleanup of the
+previous session. Delegated child sessions use their own Host-issued authority
+and release MCP connections when the child run ends. Evolution review records a
+secret-safe MCP security diff and prints a content-bound `mcp-review:<sha256>`
+token. Promotion requires that exact token; missing or stale tokens leave the
+live and previous Git refs unchanged.
+
 If a server starts but tool discovery fails, inspect the runtime MCP stderr log:
 
 ```text
@@ -141,7 +159,6 @@ If a server starts but tool discovery fails, inspect the runtime MCP stderr log:
 
 An Agent Core declares MCP servers. The host owns process startup, HTTP
 transport sessions, environment interpolation, catalog caching, approval
-prompts, capability enforcement, result conversion, and runtime cleanup. The
-ownership statement describes the intended Host policy owner; the alpha
-connect/discovery ordering limitation above remains until `EffectRuntime` is
-implemented.
+prompts, capability enforcement, result conversion, and runtime cleanup. MCP is
+still not a sandbox: stdio commands and remote URLs remain trusted effects, and
+later security work adds sanitized secret binding and shared URL validation.

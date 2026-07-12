@@ -81,7 +81,7 @@ uv run demiurge core diff
 uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
-uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve promote <run_id> --manual-review-token <token>
 uv run demiurge core evolve discard <run_id>
 uv run demiurge core rollback
 uv run demiurge core rollback <revision>
@@ -96,7 +96,11 @@ start` creates an isolated worktree under `.evolve/runs/<run_id>/agents`.
 Review records `refs/demiurge/runs/<run_id>`, promote advances
 `refs/demiurge/live`, and rollback creates a new rollback commit. Promotion
 rejects stale evolve proposals whose recorded base revision no longer matches
-the current live revision.
+the current live revision. If review reports an MCP declaration security diff,
+it also prints a content-bound `mcp-review:<sha256>` token. Pass that exact token
+to `core evolve promote --manual-review-token`; a missing or stale token leaves
+the Git refs unchanged. Runs without that security diff do not require the
+option.
 
 `core diff` shows local agent edits in `~/.demiurge/agents` without writing
 files. `core save` validates those edits and commits them as a new

@@ -168,7 +168,11 @@ class EvolutionRuntime:
                 proposal_metadata = json.loads(change_set.proposal_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 proposal_metadata = {}
-        gates = await self.gate_runner.run(change_set.agents_root, changed_paths=changed_files)
+        gates = await self.gate_runner.run(
+            change_set.agents_root,
+            changed_paths=changed_files,
+            reference_agents_root=self.core_repository.active_agents_root(),
+        )
         payload = {
             **proposal_metadata,
             "run_id": run_id,
@@ -191,7 +195,14 @@ class EvolutionRuntime:
             cleaned_artifacts=cleaned_artifacts,
         )
 
-    async def promote(self, run_id: str, *, target_core_id: str = "assistant", reason: str = "evolve promote") -> EvolveResult:
+    async def promote(
+        self,
+        run_id: str,
+        *,
+        target_core_id: str = "assistant",
+        reason: str = "evolve promote",
+        manual_review_token: str | None = None,
+    ) -> EvolveResult:
         self.core_repository.prepare_live_for_switch()
         review = await self.review(run_id, target_core_id=target_core_id, goal=reason)
         if not review.passed:
@@ -201,6 +212,28 @@ class EvolutionRuntime:
                 goal=reason,
                 agents_root=str(self.core_repository.change_set(run_id).agents_root),
                 summary=f"evolve run {run_id} failed gates",
+                report_path=review.report_path,
+                changed_files=review.changed_files,
+                proposal_revision=review.proposal_revision,
+                gates=review.gates.as_dict(),
+                promoted=False,
+                cleaned_artifacts=review.cleaned_artifacts,
+            )
+        required_review_token = review.gates.review_token or ""
+        if (
+            review.gates.manual_review_required
+            and manual_review_token != required_review_token
+        ):
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(
+                    self.core_repository.change_set(run_id).agents_root
+                ),
+                summary=(
+                    f"evolve run {run_id} requires manual MCP security review"
+                ),
                 report_path=review.report_path,
                 changed_files=review.changed_files,
                 proposal_revision=review.proposal_revision,
@@ -239,6 +272,22 @@ class EvolutionRuntime:
             new_revision=result.revision,
             cleaned_artifacts=review.cleaned_artifacts,
         )
+
+    def promotion_security_preview(
+        self,
+        run_id: str,
+        *,
+        target_core_id: str = "assistant",
+    ) -> dict[str, Any]:
+        change_set = self.core_repository.change_set(run_id)
+        phase = self.gate_runner.mcp_security_review(
+            change_set.agents_root,
+            changed_paths=change_set.changed_paths(),
+            reference_agents_root=self.core_repository.active_agents_root(),
+        )
+        if not phase.passed:
+            raise CoreRepositoryError(phase.detail)
+        return phase.data
 
     def discard(self, run_id: str) -> dict[str, Any]:
         change_set = self.core_repository.change_set(run_id)

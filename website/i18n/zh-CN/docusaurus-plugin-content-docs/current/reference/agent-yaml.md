@@ -182,6 +182,8 @@ capabilities:
   defaults:
     fs.read:
       scope: workspace
+    mcp.connect:docs:
+      scope: core
     mcp.call:docs:
       scope: core
   slots:
@@ -190,7 +192,8 @@ capabilities:
         scope: workspace
 ```
 
-Host 会把 capability keys 和 prefix wildcards 视为 grants。例如，`mcp.call:*` 可以授予 `mcp.call:docs`。
+Host 会把 capability keys 和 prefix wildcards 视为 grants。例如，`mcp.connect:*` 可以授予
+`mcp.connect:docs`，`mcp.call:*` 可以授予 `mcp.call:docs`。
 
 Slot 和 authored-tool manifests 也可以为对应组件声明 `capabilities` 列表。
 

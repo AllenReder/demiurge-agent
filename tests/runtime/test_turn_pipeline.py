@@ -273,7 +273,7 @@ class _FakeTurnRuntimeHost:
             }
         )
 
-    async def prepare_tools(self, core, turn):
+    async def prepare_tools(self, core, turn, *, capability, execution_context):
         if self.prepare_error is not None:
             raise self.prepare_error
         await self._maybe_block_stage("tool")

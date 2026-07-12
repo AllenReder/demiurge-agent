@@ -570,7 +570,7 @@ class OperatorGatewayRuntime:
         return True
 
     async def _skill(self, args: str) -> bool:
-        parts = args.split(maxsplit=1)
+        parts = args.split(maxsplit=2)
         if not parts:
             await self._emit_command_output("skill", "usage: /skill <name> [file_path]")
             return True
@@ -647,9 +647,12 @@ class OperatorGatewayRuntime:
         return True
 
     async def _evolve(self, args: str) -> bool:
-        parts = args.split(maxsplit=1)
+        parts = args.split(maxsplit=2)
         if not parts:
-            await self._emit_command_output("evolve", "usage: /evolve <goal>|review <run_id>|promote <run_id>|discard <run_id>")
+            await self._emit_command_output(
+                "evolve",
+                "usage: /evolve <goal>|review <run_id>|promote <run_id> [manual_review_token]|discard <run_id>",
+            )
             return True
         action = parts[0]
         if action in {"review", "promote", "discard"}:
@@ -659,15 +662,31 @@ class OperatorGatewayRuntime:
                 return True
             if action == "review":
                 result = await self.app.evolution_runtime.review(run_id, target_core_id=self.app.runner.core_id)
-                await self._emit_command_output(
-                    "evolve",
+                manual_review_token = result.gates.review_token
+                token_line = (
+                    f"manual review token: {manual_review_token}\n"
+                    if manual_review_token
+                    else ""
+                )
+                message = (
                     f"review {run_id}: {'passed' if result.passed else 'failed'}\n"
                     f"proposal: {result.proposal_revision or '(none)'}\n"
-                    f"report: {result.report_path}",
+                    f"{token_line}"
+                    f"report: {result.report_path}"
+                )
+                await self._emit_command_output(
+                    "evolve",
+                    message,
                 )
                 return True
             if action == "promote":
-                result = await self.app.evolution_runtime.promote(run_id, target_core_id=self.app.runner.core_id, reason="tui promote")
+                manual_review_token = parts[2].strip() if len(parts) > 2 else None
+                result = await self.app.evolution_runtime.promote(
+                    run_id,
+                    target_core_id=self.app.runner.core_id,
+                    reason="tui promote",
+                    manual_review_token=manual_review_token,
+                )
                 await self._emit_command_output("evolve", f"{result.summary}\nreport: {result.report_path}")
                 return True
             payload = self.app.evolution_runtime.discard(run_id)

@@ -10,6 +10,7 @@ from rich.console import Console
 from demiurge import cli
 from demiurge import setup_cli
 from demiurge.app import init_runtime, source_agents_root
+from demiurge.evolution import EvolveResult
 from demiurge.provider_presets import get_provider_preset
 from demiurge.providers import LLMResponse
 from demiurge.storage import VersionStore
@@ -379,6 +380,76 @@ def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
     rollback_output = capsys.readouterr().out
     assert "rollback committed:" in rollback_output
     assert "CLI rollback setup." not in soul.read_text(encoding="utf-8")
+
+
+def test_core_cli_evolve_promote_forwards_manual_review_token(
+    tmp_path, monkeypatch, capsys
+):
+    class FakeEvolutionRuntime:
+        def __init__(self):
+            self.calls = []
+
+        async def promote(
+            self,
+            run_id,
+            *,
+            target_core_id,
+            reason,
+            manual_review_token=None,
+        ):
+            self.calls.append(
+                {
+                    "run_id": run_id,
+                    "target_core_id": target_core_id,
+                    "reason": reason,
+                    "manual_review_token": manual_review_token,
+                }
+            )
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(tmp_path / "agents"),
+                summary="promoted",
+                report_path=str(tmp_path / "report.md"),
+                promoted=True,
+            )
+
+    class FakeApp:
+        def __init__(self):
+            self.runner = type("Runner", (), {"core_id": "assistant"})()
+            self.evolution_runtime = FakeEvolutionRuntime()
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    app = FakeApp()
+    monkeypatch.setattr(cli, "create_app", lambda **kwargs: app)
+
+    cli.main(
+        [
+            "--home",
+            str(tmp_path / "home"),
+            "core",
+            "evolve",
+            "promote",
+            "run_probe",
+            "--manual-review-token",
+            "mcp-review:probe",
+        ]
+    )
+
+    assert app.evolution_runtime.calls == [
+        {
+            "run_id": "run_probe",
+            "target_core_id": "assistant",
+            "reason": "cli promote",
+            "manual_review_token": "mcp-review:probe",
+        }
+    ]
+    assert app.closed is True
+    assert "promoted" in capsys.readouterr().out
 
 
 def test_core_cli_status_shows_repository_consistency_issues(tmp_path, capsys):

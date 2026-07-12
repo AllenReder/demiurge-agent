@@ -15,9 +15,9 @@ Agent Core 声明 tool surface。Host 是 selection、dispatch、capability chec
 workspace scope、task control 与 result conversion 的产品 owner。现在由一个 per-turn
 resolved catalog 同时生成 provider definitions、`tools_list` display、effective approval
 metadata，以及 dispatch 使用的 adapter-bound `EffectRequest`。Builtin、authored 与 MCP call
-不再按全局 tool name 做第二次 source lookup。MCP connect/discovery 仍发生在 call approval
-之前；该剩余缺口已冻结为必须在
-[Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)中消除的目标。
+不再按全局 tool name 做第二次 source lookup。MCP connect/discovery 现在拥有独立的
+`mcp.connect:<server>` capability/approval gate，并在 client construction 前执行；后续 call
+使用独立且 connection-bound 的 `mcp.call:<server>` path。
 
 ## Built-In Toolsets
 
@@ -161,18 +161,32 @@ agent/mcp/<server_id>.yaml
 
 对于每个 enabled server，Host 会：
 
-1. 启动或连接 server；
-2. 列出 server tools；
-3. 应用 `tools.include` 与 `tools.exclude`；
-4. 构建 `docs__search_docs` 之类的 safe name；
-5. 通过与 built-in 和 authored tool 相同的 registry 暴露这些 tools。
+1. 要求 `mcp.connect:<server_id>` 并解析 connect approval；
+2. 只在 connect authority 允许时启动或连接 server；
+3. 列出 server tools；
+4. 应用 `tools.include` 与 `tools.exclude`；
+5. 构建 `docs__search_docs` 之类的 safe name；
+6. 通过与 built-in 和 authored tool 相同的 registry 暴露这些 tools。
 
-MCP tool call 要求 server capability；除非 server manifest 设置 `capability`，否则默认
-为 `mcp.call:<server_id>`。
+MCP tool call 随后要求独立的 server call capability；除非 server manifest 设置
+`capability`，否则默认为 `mcp.call:<server_id>`。
 
-当前 alpha 限制：步骤 1 和 2 在准备 catalog 时发生，早于之后的 `mcp.call:*`
-capability 与 approval check。未来的 `mcp.connect:<server_id>` effect 会单独管理
-spawn/connect/discovery。
+当前行为按 `connect_timeout_seconds` 限制 `list_tools()`；超时会关闭该 server connection、
+记录 diagnostic，并继续处理后续 server。Discovery 在整个 runtime 内跨 session 最多并发
+处理四个 server，并保持 deterministic naming。Discovery failure diagnostic 按 server 使用
+30 秒 negative-cache TTL；在同一 catalog authority 内，过期后只重试该 server，健康 peer
+connection 保持可用。Connect denial 会在下一个 turn 按 server 重新检查。Per-server
+manifest fingerprint 只在整体 authority/core snapshot 不变时支持 targeted reconnect。
+Catalog identity 还绑定 principal、capability snapshot、core revision 与 effective connect
+policy；这些绑定变化时会驱逐整个旧 catalog。Configured cwd 必须在
+approval/client construction 前解析到 Host workspace 内。
+Declaration 变化会关闭旧 connection，并要求 connect reapproval 后才能启动 replacement
+client。删除全部 declaration 会关闭剩余 connection。切换到新 session 或 resume 其他
+session 时会跟踪驱逐旧 session；显式 session eviction 只关闭选定 session 的 catalogs。
+Delegated child 使用 Host-issued authority，并在 child run 结束时关闭 MCP connection。
+Connect approval preview 会显示安全 launch metadata，而不会包含 environment、header、URL
+credential/query 或 argument secret value。Sanitized env/secret binding 与 URL policy 仍属于
+后续独立 security 工作。
 
 ## Tool Metadata Overrides
 
@@ -226,7 +240,12 @@ turn 生效；当前 turn 不会 hot-reload active core。
 | `promote` | `run_id` | 重新运行 gates，并推进 `refs/demiurge/previous` 与 `refs/demiurge/live`。 |
 | `discard` | `run_id` | 删除 run worktree 与 metadata。 |
 
-每个 action 都被归类为 high risk，并使用 registry `prompt` policy。`evolve_core` 会在
+每个 action 都被归类为 high risk，并使用 registry `prompt` policy。MCP declaration
+变化时，review 会记录准确 changed paths 与 secret-safe before/after security summary。
+review 还会输出内容绑定的 `mcp-review:<sha256>` token。Model-visible promote 会把该
+token 绑定到普通 promote approval；CLI/TUI caller 必须原样返回。缺失或已过期的确认不会
+移动 Git refs。
+`evolve_core` 会在
 foreground adapter call 或 background task 创建前要求 resolved capability 与 approval；
 `rollback_core` 也会在调用 version store 前执行同样顺序。Approval rule 按 action
 隔离，因此 `promote` 的 cached allow 不会授权 `discard`、`review`、`start` 或 rollback。

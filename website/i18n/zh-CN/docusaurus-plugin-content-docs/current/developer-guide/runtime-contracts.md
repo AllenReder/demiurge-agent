@@ -306,9 +306,18 @@ secret values 与 adapter choice 都不是调用方提供的 request 字段。
 preflight 与 dispatch 共用同一 entry；跨 source name collision 会同时报告两侧 provenance
 并失败。当前 result 会先归一化为 `succeeded`、`denied`、`invalid`、`not_found` 或
 `failed`，随后 turn loop 才显式转换为旧的 model-facing `ToolResult`；runtime event 会保留
-typed status 与 error。Timeout、cancellation、
-indeterminate outcome、connect authority、lifecycle、streaming limits 与 redaction 仍属于后续
-EffectRuntime 工作。
+typed status 与 error。普通 turn 的 catalog preparation 也会在 client construction 与
+discovery 前执行第一段 `mcp.connect:<server>` capability/approval gate，并按 server 的
+`connect_timeout_seconds` 限制每次 `list_tools()`。Discovery 在整个 runtime 内跨 session
+使用最多四个 server 的并发窗口，并确定性组装 catalog。Failure diagnostic 按 server 使用
+30 秒 retry TTL，健康 peer connection 保持可用；authority denial 则在下一个 turn 按 server
+重新检查。Authority 或 declaration 变化会在复用前 eviction 同 session 的旧 connection；
+删除 declaration 与普通 session replacement 也会关闭旧 session resource。Delegated child
+使用独立的 Host-issued authority，并在 child completion 释放 connection。Evolution gate
+会附带 secret-safe MCP declaration security diff 和内容绑定的 `mcp-review:<sha256>`
+token；promotion 必须原样返回该 token，缺失或已过期时 Git refs 保持不变。
+Indeterminate outcome、sanitized env/secret binding、URL policy、
+streaming limits 与 redaction 仍属于后续 EffectRuntime 工作。
 
 ### 内部 Catalog Seam
 
@@ -340,7 +349,7 @@ succeeded | denied | invalid | not_found | failed | timed_out | cancelled | inde
 durable views。Raw adapter output 只在内部保留。
 
 当前 slice 已实现上面的前五种状态。其余状态与各自独立有界、脱敏的 view 仍是后续
-DG-P3 lifecycle/security task 的完成要求。
+lifecycle/security 工作的完成要求。
 
 ### 顺序与不变量
 

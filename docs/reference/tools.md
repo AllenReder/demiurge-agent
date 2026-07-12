@@ -17,9 +17,9 @@ control, and result conversion. One per-turn resolved catalog now produces the
 provider definitions, `tools_list` display, effective approval metadata, and
 the exact adapter-bound `EffectRequest` used by dispatch. Builtin, authored,
 and MCP calls no longer perform a second source lookup by global tool name.
-MCP connect/discovery still occurs before call approval; that remaining gap is
-frozen for removal in
-[Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
+MCP connect/discovery now has its own `mcp.connect:<server>` capability and
+approval gate before client construction; a later call uses the separate
+connection-bound `mcp.call:<server>` path.
 
 ## Built-In Toolsets
 
@@ -174,18 +174,37 @@ agent/mcp/<server_id>.yaml
 
 For each enabled server, the host:
 
-1. Starts or connects to the server.
-2. Lists server tools.
-3. Applies `tools.include` and `tools.exclude`.
-4. Builds safe names such as `docs__search_docs`.
-5. Exposes those tools through the same registry as built-in and authored tools.
+1. Requires `mcp.connect:<server_id>` and resolves connect approval.
+2. Starts or connects to the server only when connect authority allows it.
+3. Lists server tools.
+4. Applies `tools.include` and `tools.exclude`.
+5. Builds safe names such as `docs__search_docs`.
+6. Exposes those tools through the same registry as built-in and authored tools.
 
-MCP tool calls require the server capability, defaulting to
+MCP tool calls then require the separate server call capability, defaulting to
 `mcp.call:<server_id>` unless the server manifest sets `capability`.
 
-Current alpha limitation: steps 1 and 2 happen while the catalog is prepared,
-before the later `mcp.call:*` capability and approval check. A future
-`mcp.connect:<server_id>` effect will govern spawn/connect/discovery separately.
+Current behavior bounds `list_tools()` by `connect_timeout_seconds`; a timeout
+closes that server connection, records a diagnostic, and continues to later
+servers. Discovery uses one runtime-wide limit of four concurrent server
+operations across sessions and preserves deterministic naming. Discovery
+failure diagnostics use a per-server 30-second negative-cache TTL; within one
+catalog authority, expiry retries only that server and preserves healthy peer
+connections. Connect denial is rechecked per server on the next turn.
+Per-server manifest fingerprints support targeted reconnects only while the
+overall authority/core snapshot is unchanged. Catalog identity also binds
+principal, capability snapshot, core revision, and effective connect policy;
+changes to those bindings evict the whole stale catalog. Configured cwd must resolve inside the Host workspace before
+approval/client construction.
+Declaration changes close the older connection and require connect reapproval
+before a replacement client starts. Removing all declarations closes remaining
+connections. Starting or resuming another session tracks eviction of the
+previous session, while explicit eviction closes only the selected session's
+catalogs. Delegated children use their Host-issued authority and close MCP
+connections when the child run ends. Connect approval previews expose safe
+launch metadata without environment, header, URL credential/query, or argument
+secret values. Sanitized env/secret binding and URL policy remain separate
+later security work.
 
 ## Tool Metadata Overrides
 
@@ -243,6 +262,11 @@ does not hot-reload the active core.
 | `discard` | `run_id` | Removes the run worktree and metadata. |
 
 Every action is classified as high risk with registry `prompt` policy.
+When MCP declarations change, review records the exact changed declaration
+paths plus a secret-safe before/after security summary and content-bound
+`mcp-review:<sha256>` token. The model-visible promote path binds that token to
+the normal promote approval; CLI/TUI callers must return the exact printed
+token. Missing or stale confirmation does not move Git refs.
 `evolve_core` requires its resolved capability and approval before foreground
 adapter calls or background task creation; `rollback_core` does the same before
 calling the version store. Approval rules are action-scoped, so a cached

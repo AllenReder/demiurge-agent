@@ -30,7 +30,9 @@ Review the run:
 ```
 
 Review runs host-owned gates and creates or updates
-`refs/demiurge/runs/<run_id>`.
+`refs/demiurge/runs/<run_id>`. If MCP declarations changed, the output includes
+a secret-safe before/after diff and a content-bound token such as
+`mcp-review:<sha256>`.
 
 Promote the reviewed run:
 
@@ -38,8 +40,23 @@ Promote the reviewed run:
 /evolve promote <run_id>
 ```
 
+For a run whose review printed an MCP security token, include that exact token:
+
+```text
+/evolve promote <run_id> <mcp-review:sha256>
+```
+
 Promote reruns gates, advances `refs/demiurge/previous` and
-`refs/demiurge/live`, and takes effect on the next turn.
+`refs/demiurge/live`, and takes effect on the next turn. A missing or stale
+required token fails closed without moving either ref. Review again after any
+candidate change and use the newly printed token.
+
+The CLI equivalent is:
+
+```bash
+uv run demiurge core evolve promote <run_id> \
+  --manual-review-token <mcp-review:sha256>
+```
 
 Promote does not auto-save local agent edits. If the live agents tree is dirty,
 save those edits with `uv run demiurge core save` or discard them with

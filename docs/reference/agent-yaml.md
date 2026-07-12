@@ -194,6 +194,8 @@ capabilities:
   defaults:
     fs.read:
       scope: workspace
+    mcp.connect:docs:
+      scope: core
     mcp.call:docs:
       scope: core
   slots:
@@ -203,7 +205,8 @@ capabilities:
 ```
 
 The host treats capability keys and prefix wildcards as grants. For example,
-`mcp.call:*` can grant `mcp.call:docs`.
+`mcp.connect:*` can grant `mcp.connect:docs`, and `mcp.call:*` can grant
+`mcp.call:docs`.
 
 Slot and authored-tool manifests can also declare a `capabilities` list for
 that specific component.

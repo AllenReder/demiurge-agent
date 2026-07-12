@@ -12,7 +12,8 @@ minimal typed `EffectResult`/`EffectError` before the turn loop converts them to
 the legacy model-facing `ToolResult`; runtime events retain typed status/error.
 Connect policy, extended lifecycle
 outcomes, process/network lifecycle, output limits, and redaction continue
-through later DG-P3 tasks. See [Host Runtime Contracts](runtime-contracts.md#effectruntime).
+through later EffectRuntime work. See
+[Host Runtime Contracts](runtime-contracts.md#effectruntime).
 
 ## Registry Sources
 
@@ -55,11 +56,29 @@ tools. Errors include both provenances and require the authored or MCP tool to
 be renamed; there is no implicit builtin priority.
 
 MCP discovery is also prepared before model execution. On a catalog cache miss,
-the current runtime can spawn/connect and call `list_tools()` before the later
-`mcp.call:*` capability and approval check. Call dispatch is now bound to the
-current turn/session entry, but connect/discovery authority, timeout, failure
-cache, and full removal of the legacy global index remain DG-P3-T02 work. These
-are known alpha gaps, not supported extension points.
+normal `TurnExecution` now requires `mcp.connect:<server>` and resolves connect
+approval before client construction or `list_tools()`; the later tool call has
+its own `mcp.call:*` gate. Call dispatch remains bound to the current
+turn/session entry. `list_tools()` is bounded per server by
+`connect_timeout_seconds`, and a timed-out server is closed without blocking
+later servers. Discovery uses one runtime-wide limit of four concurrent server
+operations across sessions and assembles names deterministically afterward.
+Current failure diagnostics use a per-server 30-second negative-cache TTL;
+within one catalog authority, expiry retries only the failed server while
+healthy peers stay connected, and authority denial is rechecked per server on
+the next turn. Per-server manifest fingerprints support targeted reconnects
+only while the overall authority/core snapshot is unchanged. Catalog identity
+binds principal, capability snapshot, core revision, and effective connect
+policy; any such change evicts the whole stale catalog before reuse. Configured cwd
+is validated against the Host workspace before approval/client construction.
+Declaration changes also require connect reapproval before a replacement client
+starts; removing all declarations closes the remaining connections. Starting
+or resuming another session tracks eviction of the previous session. Explicit
+session eviction closes only the selected session's catalogs;
+delegated children use their Host-issued scope and release connections at child
+completion. Sanitized env/secret binding and URL validation remain later
+security work. The legacy global MCP tool-name index has been removed;
+call dispatch accepts only the connection-bound resolved entry.
 
 ## Target EffectRuntime Interface
 
@@ -106,7 +125,11 @@ live worker for active work:
   the live core.
 - `evolve_core(action="review")`, `evolve_core(action="promote")`, and
   `evolve_core(action="discard")` operate on that run id through the host-owned
-  evolution runtime. Promotion advances Git refs only after gates pass. Every
+  evolution runtime. Promotion advances Git refs only after gates pass. An MCP
+  declaration change adds a secret-safe command/argument, URL, cwd,
+  environment/header-name, risk, approval, and capability diff to the review;
+  promotion remains blocked until that manual security review is confirmed by
+  the successful promote approval. Every
   action resolves capability and approval before dispatch; the action and
   target are part of the approval-cache rule so one mutation action does not
   authorize another. The cache additionally binds the admitted principal,
@@ -167,8 +190,8 @@ MCP tools receive normalized server-prefixed names and include/exclude filters.
 Transport, discovery, timeouts, and result conversion are Host-owned. Each
 visible MCP definition is now bound to the current session/revision connection
 and one resolved effect entry, so call dispatch never falls back to the global
-tool-name index. Connect/discovery policy ordering remains open until
-DG-P3-T02.
+tool-name index. Connect/discovery uses a separate pre-client capability and
+approval gate; session/authority/declaration changes evict stale connections.
 
 ## Boundary
 

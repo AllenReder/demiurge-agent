@@ -1670,6 +1670,15 @@ async def test_agents_run_tool_allowlist_uses_exact_tool_ids(tmp_path):
 @pytest.mark.asyncio
 async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     agents = _copy_agents(tmp_path)
+    evolver_manifest = agents / "evolver" / "agent.yaml"
+    raw = yaml.safe_load(evolver_manifest.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {})[
+        "mcp.connect:docs"
+    ] = {}
+    evolver_manifest.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
     mcp_dir = agents / "evolver" / "agent" / "mcp"
     mcp_dir.mkdir(parents=True, exist_ok=True)
     (mcp_dir / "docs.yaml").write_text(
@@ -1695,6 +1704,7 @@ async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     connection = FakeMcpConnection([FakeMcpTool("lookup")])
     app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     provider = RecordingProvider(responses=["parent", "child"])
     app.runner.provider = provider
 
@@ -1703,6 +1713,7 @@ async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     assert [tool.name for tool in provider.requests[1].tools] == ["docs__lookup"]
     assert _delivery_texts(result) == ["parent", "docs__lookup"]
     assert connection.list_count == 1
+    assert connection.closed is True
 
 
 @pytest.mark.asyncio
