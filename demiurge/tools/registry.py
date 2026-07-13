@@ -132,6 +132,20 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "background": {"type": "boolean", "default": False},
                 "notify_on_complete": {"type": "boolean", "default": True},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "secret_bindings": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string", "pattern": "^env:[A-Za-z_][A-Za-z0-9_]*$"},
+                            "target": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                            "expires_in_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                        },
+                        "required": ["source"],
+                        "additionalProperties": False,
+                    },
+                },
             },
             required=["command"],
         ),

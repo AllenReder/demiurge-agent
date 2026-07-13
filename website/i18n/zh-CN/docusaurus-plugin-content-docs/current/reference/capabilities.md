@@ -74,6 +74,8 @@ capabilities:
 ```
 
 这会授予 `mcp.connect:docs` 与 `mcp.call:docs` 等 capabilities。
+Secret binding 是例外：`secret.bind:<ENV_NAME>` 必须作为 exact default capability 声明；
+`secret.bind:*` 永远不会授予 ambient Host secret。
 
 ## 常见 Capabilities
 
@@ -82,6 +84,7 @@ capabilities:
 | `fs.read` | 通过 Host check 或要求该 capability 的 authored component 读取 Host-visible files。Workspace 外与 sensitive read 需要 approval。 |
 | `fs.write` | 写入 workspace files。 |
 | `terminal.exec` | 在 workspace scope 运行 terminal command。 |
+| `secret.bind:<ENV_NAME>` | 允许 foreground terminal effect 请求一个指定的 Host environment secret；仍必须一次性 approval，且最晚随 command timeout 过期。 |
 | `network.fetch` | 获取 network content。 |
 | `schedule.manage` | 管理 core schedule YAML files。 |
 | `task.control` | 列出、检查、等待或取消 background runtime tasks。 |
@@ -118,7 +121,9 @@ low < medium < high < critical
 的 core/global approval policy：core/global `auto` 不能削弱 registry `prompt` 或 `deny`。
 其他 builtin handler 与 MCP call 保持各自文档定义的 resolution。Global fallback approval
 不能把 terminal command guard 的 `prompt/high` 结果降级为自动执行；只有 `allow/low`
-terminal command 可以自动批准，hardline block 会在 approval 前终止。
+terminal command 可以自动批准，hardline block 会在 approval 前终止。执行
+workspace/project code 的 command 与带显式 environment overlay 的 call 都要求
+`prompt/high`。Secret binding 即使收到 `always_allow_for_session` 也不会进入 session cache。
 
 `always_allow_for_session` 绑定 Host-issued principal、active session、effective
 policy/effect fingerprint 与 rule key。它具有八小时的有界 lifetime；replacement session、

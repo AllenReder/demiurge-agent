@@ -105,6 +105,26 @@ class CapabilityFacade:
             include_component_manifest=True,
         )
 
+    def require_exact(self, capability: str) -> None:
+        if self.snapshot is not None:
+            allowed = capability in self.snapshot.defaults
+        else:
+            declarations = self.core.raw_manifest.get("capabilities", {}) or {}
+            defaults = declarations.get("defaults", {}) or {}
+            allowed = capability in defaults
+        self.audit.append(
+            {
+                "capability": capability,
+                "slot_path": None,
+                "allowed": allowed,
+                "exact": True,
+            }
+        )
+        if not allowed:
+            raise CapabilityDenied(
+                f"exact capability denied: {capability} for host"
+            )
+
     def _require_registry_capability(
         self,
         capability: str,

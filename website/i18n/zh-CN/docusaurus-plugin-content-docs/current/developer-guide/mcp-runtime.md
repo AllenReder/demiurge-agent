@@ -41,7 +41,9 @@ connect capability/approval 通过后发生；configured cwd 还必须在 approv
 construction 前解析到 Host workspace 内。Approval preview 会显示 command、cwd、option
 形状、environment/header 名称以及移除 credential 的 URL；positional value 只显示
 hash/length 摘要，secret-bearing option value 会被脱敏。Sanitized environment/secret binding
-与共享 URL policy 仍属于后续 security 工作。
+现在会让 stdio subprocess 始终使用共享 Host environment allowlist 与专用 runtime `HOME`；
+connect approval 后只添加 declaration 列出的 `env` entry。共享 URL policy 仍属于后续
+security 工作。
 
 ## 结果转换
 
@@ -65,5 +67,5 @@ session；显式 eviction 仍只关闭选定 session 的 catalogs。Delegated ch
 scope 准备 catalog，并在 child run 结束时释放 MCP connections。Evolution review 会为
 MCP declaration 变化生成 secret-safe before/after security diff 和内容绑定的
 `mcp-review:<sha256>` token；除普通 promote approval 外，promotion 还要求原样返回该
-token。token 缺失或已过期时 Git refs 保持不变。Sanitized env/secret binding 与 URL
-validation 仍属于后续 security layer。
+token。token 缺失或已过期时 Git refs 保持不变。Stdio env sanitization 与
+declaration-bound secret injection 已实现；URL validation 仍属于后续 security layer。

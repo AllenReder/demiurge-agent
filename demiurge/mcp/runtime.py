@@ -19,6 +19,10 @@ from demiurge.mcp.security import (
 )
 from demiurge.providers import ToolDefinition
 from demiurge.sdk import ToolResult, TurnContext
+from demiurge.security.subprocess_env import (
+    build_sanitized_subprocess_env,
+    ensure_subprocess_home,
+)
 
 
 TOOL_NAME_SEPARATOR = "__"
@@ -928,16 +932,15 @@ class DefaultMcpClientConnection:
             path = self.workspace / path
         return path.resolve()
 
-    def _stdio_env(self) -> dict[str, str] | None:
-        if not self.env:
-            return None
-        merged = {
-            key: value
-            for key, value in os.environ.items()
-            if key in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"}
-        }
-        merged.update(self.env)
-        return merged
+    def _stdio_env(self) -> dict[str, str]:
+        home = ensure_subprocess_home(
+            self.stderr_log_path.parent.parent / "mcp-home"
+        )
+        return build_sanitized_subprocess_env(
+            os.environ,
+            self.env,
+            home=home,
+        )
 
 
 def mcp_result_to_tool_result(tool: McpToolInfo, result: Any) -> ToolResult:

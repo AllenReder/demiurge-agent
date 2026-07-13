@@ -78,6 +78,9 @@ capabilities:
 ```
 
 This grants capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
+Secret binding is the exception: `secret.bind:<ENV_NAME>` must be declared as
+an exact default capability. `secret.bind:*` never grants access to ambient
+Host secrets.
 
 ## Common Capabilities
 
@@ -86,6 +89,7 @@ This grants capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
 | `fs.read` | Read host-visible files through host checks or an authored component that requires it. Outside-workspace and sensitive reads require approval. |
 | `fs.write` | Write workspace files. |
 | `terminal.exec` | Run terminal commands in workspace scope. |
+| `secret.bind:<ENV_NAME>` | Allow a foreground terminal effect to request one named Host environment secret. It still requires one-shot approval and expires no later than the command timeout. |
 | `network.fetch` | Fetch network content. |
 | `schedule.manage` | Manage core schedule YAML files. |
 | `task.control` | List, inspect, wait for, or cancel background runtime tasks. |
@@ -124,7 +128,10 @@ core/global `auto` cannot weaken registry `prompt` or `deny`. Other builtin
 handlers and MCP calls retain their documented handler-specific resolution.
 Global fallback approval cannot lower a terminal command guard result from
 `prompt/high` to automatic execution. Only `allow/low` terminal commands can be
-auto-approved; hardline blocks terminate before approval.
+auto-approved; hardline blocks terminate before approval. Commands that execute
+workspace/project code and calls with an explicit environment overlay require
+`prompt/high`. Secret bindings are never session-cacheable even when the
+provider returns `always_allow_for_session`.
 
 `always_allow_for_session` is scoped to the Host-issued principal, active
 session, effective policy/effect fingerprint, and rule key. It expires after a

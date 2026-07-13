@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from demiurge.security.sensitive_paths import (
+    CREDENTIAL_DIRECTORY_NAMES,
+    CREDENTIAL_FILE_NAMES,
+)
+
 
 DEFAULT_READ_LIMIT_CHARS = 20_000
 DEFAULT_TOOL_OUTPUT_LIMIT_CHARS = 12_000
@@ -90,9 +95,15 @@ class WorkspaceScope:
                 lowered = [name.lower() for name in resolved.parts]
             else:
                 lowered = [name.lower() for name in relative.parts]
-        if any(name in {".git", ".ssh", ".venv", ".demiurge"} for name in lowered):
+        if any(
+            name in {".git", ".venv", ".demiurge"}
+            or name in CREDENTIAL_DIRECTORY_NAMES
+            for name in lowered
+        ):
             return True
         if any(name.startswith(".env") for name in lowered):
+            return True
+        if lowered and lowered[-1] in CREDENTIAL_FILE_NAMES:
             return True
         if self._looks_like_private_key(lowered):
             return True

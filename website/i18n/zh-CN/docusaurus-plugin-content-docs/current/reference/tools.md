@@ -67,6 +67,44 @@ options 的 fingerprint。因此一次 approval 不会通过同一粗粒度 rule
 execution shape；该 fingerprint 不能替代独立的 session/principal ownership contract。
 Ambiguous shell text（包括 comment 中的 expansion syntax）可能会保守地要求 approval。
 
+### Terminal environment 与 secret bindings
+
+Terminal subprocess 从 environment allowlist 构建，而不是直接复制 `os.environ`。Host
+保留基本 execution/locale/temp variables，把 `HOME` 指向专用 runtime directory，应用
+已配置 timezone，并剥离 provider、channel、MCP、cloud 与 desktop credentials。显式
+`env` overlay 必须 approval，并按 key/value 进入 command fingerprint；approval/event view
+只暴露 key。
+
+`pytest`、`python -m pytest`、`uv run`、`npm run`、`cargo test/build` 与 `make`
+可能执行 repository code、plugin 或 build script，因此分类为 `prompt/high`，而不是无条件
+safe command。Literal read-only command 仍可自动批准；`rg --pre`、`find -exec`、GNU
+`sed` 的 `e` command，以及 Git external diff/textconv/pager option 等可执行形式同样分类为
+`prompt/high`。Git auto-approval 只覆盖明确的 read-only shape；remote network operation
+以及 branch、tag、remote、worktree mutation 都必须 approval，`--output` file write
+也不例外。其他 read-oriented command 的 embedded write mode、inline environment
+assignment 也必须 approval；system-time mutation 永远不会被当作 literal read。
+Auto-approved executable name 必须是 bare command，不能是 workspace-relative path。
+Wrapper/shell cwd change、command file、embedded read-path option 与未引用的 filename
+expansion 都必须 approval。`.npmrc`、`.pypirc`、`.netrc`、`.aws/`、`.kube/`、`.ssh/`
+与 `.env*` 等常见 credential path 属于 defense-in-depth sensitive path。
+
+`terminal.secret_bindings` 是 object array，字段包括 `source`（`env:<NAME>`）、可选
+`target` 与可选 `expires_in_seconds`。每个 source 都要求精确的
+`secret.bind:<NAME>` capability。Binding 只允许 foreground 使用、不能超过 terminal
+timeout、不会复用 session approval，并在完成后从 Host-side environment 移除。
+Approval/audit view 记录 source、target、capability、expiry、实际 cwd、environment keys、
+resolved shell/process executable 与 best-effort command executable，但不记录 value。Stdout/stderr 中与绑定值
+完全相同的内容会替换为 `<redacted:TARGET>`。
+
+`secret.bind:*` 等 wildcard grant 会被拒绝。Binding target 也不能替换 `PATH`、`HOME`、
+`COMSPEC`、loader injection variables、language runtime search path 或 option hook 等
+execution-control variable。最早 binding expiry 会收紧 foreground subprocess timeout；即使
+请求的 command timeout 更长，expiry 也会终止 shell process。完整 descendant
+process-tree termination 仍属于独立 process-lifecycle contract。
+
+该 filtering/redaction 不是 OS isolation。获批 command 仍由 Host shell 执行；经过转换或
+编码的 secret output 不在 exact-value redactor 的保证范围内。
+
 对于使用 approval resolution 的 builtin handler，core metadata 可以让 effective policy
 更严格，但不能降低 risk 或削弱 registry policy。该规则包括所有 `evolve_core` action 与
 `rollback_core`。
@@ -185,8 +223,9 @@ client。删除全部 declaration 会关闭剩余 connection。切换到新 sess
 session 时会跟踪驱逐旧 session；显式 session eviction 只关闭选定 session 的 catalogs。
 Delegated child 使用 Host-issued authority，并在 child run 结束时关闭 MCP connection。
 Connect approval preview 会显示安全 launch metadata，而不会包含 environment、header、URL
-credential/query 或 argument secret value。Sanitized env/secret binding 与 URL policy 仍属于
-后续独立 security 工作。
+credential/query 或 argument secret value。Stdio child 使用共享 allowlisted environment，
+并只在 connect approval 后添加 manifest-declared env entry。URL policy 仍属于后续独立
+security 工作。
 
 ## Tool Metadata Overrides
 

@@ -36,6 +36,12 @@ _SENSITIVE_COMMAND_NAME = (
     r"(?:api[-_]?key|authorization|cookie|credential|password|passwd|"
     r"private[-_]?key|secret|token)"
 )
+_SECRET_BINDING_METADATA_FIELDS = {
+    "source",
+    "target",
+    "capability",
+    "expires_at",
+}
 
 
 def _redact_approval_command(command: str | None) -> str | None:
@@ -75,8 +81,41 @@ def _truncate_approval_text(value: str | None, *, limit: int) -> str | None:
     return f"{value[:limit]}...[truncated {len(value) - limit} chars]"
 
 
+def _redact_secret_binding_metadata(value: Any, *, depth: int) -> Any:
+    if not isinstance(value, list | tuple):
+        return "<redacted>"
+    bindings: list[Any] = []
+    for item in value[:_APPROVAL_PREVIEW_MAX_ITEMS]:
+        if not isinstance(item, Mapping):
+            bindings.append("<redacted>")
+            continue
+        bindings.append(
+            {
+                str(item_key): (
+                    _redact_approval_value(
+                        item_value,
+                        key=str(item_key),
+                        depth=depth + 1,
+                    )
+                    if str(item_key) in _SECRET_BINDING_METADATA_FIELDS
+                    else "<redacted>"
+                )
+                for item_key, item_value in list(item.items())[
+                    :_APPROVAL_PREVIEW_MAX_ITEMS
+                ]
+            }
+        )
+    if len(value) > _APPROVAL_PREVIEW_MAX_ITEMS:
+        bindings.append(
+            f"<truncated {len(value) - _APPROVAL_PREVIEW_MAX_ITEMS} items>"
+        )
+    return bindings
+
+
 def _redact_approval_value(value: Any, *, key: str = "", depth: int = 0) -> Any:
     normalized_key = key.strip().lower().replace("-", "_")
+    if normalized_key == "secret_bindings":
+        return _redact_secret_binding_metadata(value, depth=depth)
     if normalized_key in {"cmd", "command", "shell_command"} and isinstance(
         value, str
     ):
@@ -209,6 +248,7 @@ class ApprovalRequest:
     cache_key: str | None = None
     auto_approve: bool = False
     policy: str = "prompt"
+    session_cacheable: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -318,6 +358,7 @@ class ApprovalRequest:
             "arguments_preview": dict(self.arguments_preview),
             "cache_key_fingerprint": cache_key_fingerprint,
             "policy": self.policy,
+            "session_cacheable": self.session_cacheable,
         }
 
 
@@ -538,7 +579,7 @@ class ApprovalRuntime:
                     emit_event=emit_event,
                     reason="approval scope invalidated while waiting for decision admission",
                 )
-            if self._is_cached(cache_key):
+            if request.session_cacheable and self._is_cached(cache_key):
                 decision = ApprovalDecision("allow", "session allowlist")
                 self._emit_decided(request, decision, emit_event=emit_event, cached=True, automatic=False)
                 return decision
@@ -550,13 +591,21 @@ class ApprovalRuntime:
             if inspect.isawaitable(value):
                 value = await value
             decision = self._normalize_decision(value)
+            if (
+                decision.value == "always_allow_for_session"
+                and not request.session_cacheable
+            ):
+                decision = ApprovalDecision(
+                    "allow",
+                    "approved once; session caching is disabled for this request",
+                )
             if self._owner_generation(request) != admission_generation:
                 decision = self._invalidated_decision(
                     request,
                     emit_event=None,
                     reason="approval scope invalidated while decision was pending",
                 )
-            if decision.value == "always_allow_for_session":
+            if decision.value == "always_allow_for_session" and request.session_cacheable:
                 self._session_allowlist[cache_key] = _CachedAllow(
                     core_id=request.core_id,
                     expires_at=self._clock() + self._session_allow_ttl_seconds,

@@ -13,9 +13,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timedelta, timezone
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -40,6 +42,12 @@ from demiurge.security.capabilities import (
     CapabilitySnapshot,
 )
 from demiurge.security.command_guard import CommandGuardDecision, review_command
+from demiurge.security.subprocess_env import (
+    ENV_NAME_RE,
+    RESERVED_SUBPROCESS_ENV_TARGETS,
+    build_sanitized_subprocess_env,
+    ensure_subprocess_home,
+)
 from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, McpServerDefinition, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.core_repository import CoreRepositoryError
 from demiurge.providers import ToolCall, ToolDefinition
@@ -176,6 +184,27 @@ _COMMAND_SPECIFIC_APPROVAL_RULES = frozenset(
         "unknown-command",
     }
 )
+_TERMINAL_ENV_NAME_RE = ENV_NAME_RE
+_TERMINAL_SECRET_BINDING_LIMIT = 16
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalSecretBinding:
+    source_name: str
+    target: str
+    expires_in_seconds: int
+
+    @property
+    def capability(self) -> str:
+        return f"secret.bind:{self.source_name}"
+
+    def audit_view(self, *, expires_at: str) -> dict[str, Any]:
+        return {
+            "source": f"env:{self.source_name}",
+            "target": self.target,
+            "capability": self.capability,
+            "expires_at": expires_at,
+        }
 
 
 @dataclass(slots=True)
@@ -202,7 +231,11 @@ def _terminal_approval_cache_key(
     execution_options: Mapping[str, Any],
 ) -> str:
     base = f"terminal:terminal.exec:{decision.rule_key}"
-    if decision.rule_key not in _COMMAND_SPECIFIC_APPROVAL_RULES:
+    if (
+        decision.rule_key not in _COMMAND_SPECIFIC_APPROVAL_RULES
+        and not env_overlay
+        and not execution_options.get("secret_bindings")
+    ):
         return base
     fingerprint = json.dumps(
         {
@@ -217,6 +250,127 @@ def _terminal_approval_cache_key(
     )
     digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
     return f"{base}:{digest}"
+
+
+def _terminal_timeout_seconds(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 30
+    if parsed <= 0:
+        parsed = 30
+    return min(parsed, 120)
+
+
+def _terminal_secret_bindings(arguments: Mapping[str, Any]) -> tuple[_TerminalSecretBinding, ...]:
+    raw_bindings = arguments.get("secret_bindings")
+    if raw_bindings in (None, []):
+        return ()
+    if not isinstance(raw_bindings, list):
+        raise ValueError("secret_bindings must be an array")
+    if len(raw_bindings) > _TERMINAL_SECRET_BINDING_LIMIT:
+        raise ValueError(
+            f"secret_bindings supports at most {_TERMINAL_SECRET_BINDING_LIMIT} entries"
+        )
+    if bool(arguments.get("background", False)):
+        raise ValueError("secret_bindings are not supported for background terminal commands")
+
+    timeout = _terminal_timeout_seconds(arguments.get("timeout_seconds"))
+    bindings: list[_TerminalSecretBinding] = []
+    targets: set[str] = set()
+    for index, raw in enumerate(raw_bindings):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"secret_bindings[{index}] must be an object")
+        source = str(raw.get("source") or "").strip()
+        if not source.startswith("env:"):
+            raise ValueError(
+                f"secret_bindings[{index}].source must use env:<NAME>"
+            )
+        source_name = source[4:]
+        target = str(raw.get("target") or source_name).strip()
+        if not _TERMINAL_ENV_NAME_RE.fullmatch(source_name):
+            raise ValueError(f"secret_bindings[{index}].source has an invalid environment name")
+        if not _TERMINAL_ENV_NAME_RE.fullmatch(target):
+            raise ValueError(f"secret_bindings[{index}].target has an invalid environment name")
+        if target.upper() in RESERVED_SUBPROCESS_ENV_TARGETS:
+            raise ValueError(
+                f"secret_bindings[{index}].target is a reserved execution environment target: {target}"
+            )
+        if target in targets:
+            raise ValueError(f"duplicate secret binding target: {target}")
+        try:
+            expires_in_seconds = int(raw.get("expires_in_seconds", timeout))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"secret_bindings[{index}].expires_in_seconds must be an integer"
+            ) from exc
+        if expires_in_seconds <= 0 or expires_in_seconds > timeout:
+            raise ValueError(
+                f"secret_bindings[{index}].expires_in_seconds must be between 1 and the terminal timeout ({timeout})"
+            )
+        targets.add(target)
+        bindings.append(
+            _TerminalSecretBinding(
+                source_name=source_name,
+                target=target,
+                expires_in_seconds=expires_in_seconds,
+            )
+        )
+    return tuple(bindings)
+
+
+def _terminal_executable_audit(
+    command: str,
+    env: Mapping[str, str],
+) -> tuple[str, str, str]:
+    if os.name == "nt":
+        shell_executable = str(
+            env.get("COMSPEC")
+            or env.get("ComSpec")
+            or os.environ.get("COMSPEC")
+            or "cmd.exe"
+        )
+    else:
+        shell_executable = "/bin/sh"
+    try:
+        tokens = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        tokens = []
+    index = 0
+    while index < len(tokens):
+        name, separator, _value = tokens[index].partition("=")
+        if not separator or not _TERMINAL_ENV_NAME_RE.fullmatch(name):
+            break
+        index += 1
+    command_executable = tokens[index] if index < len(tokens) else shell_executable
+    resolved_command = (
+        shutil.which(command_executable, path=env.get("PATH"))
+        or command_executable
+    )
+    resolved_shell = (
+        shutil.which(shell_executable, path=env.get("PATH"))
+        or shell_executable
+    )
+    return str(resolved_shell), shell_executable, str(resolved_command)
+
+
+def _redact_terminal_bound_secrets(
+    text: str,
+    bound_secrets: Mapping[str, str],
+) -> str:
+    redacted = text
+    ordered = sorted(
+        (
+            (target, value)
+            for target, value in bound_secrets.items()
+            if value
+        ),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    for target, value in ordered:
+        redacted = redacted.replace(value, f"<redacted:{target}>")
+    return redacted
 
 
 def _windows_posix_compat_command(command: str) -> str | None:
@@ -1066,10 +1220,15 @@ class ToolRuntime:
         ):
             return
         required = []
+        terminal_secret_bindings: tuple[_TerminalSecretBinding, ...] = ()
         if entry.source == "builtin" and entry.name == "session_search":
             required.append("session.read")
         if entry.capability and entry.capability not in required:
             required.append(entry.capability)
+        if entry.source == "builtin" and entry.name == "terminal":
+            terminal_secret_bindings = _terminal_secret_bindings(
+                call.arguments
+            )
         for capability_name in required:
             if entry.source == "authored" and isinstance(entry._adapter, SlotDefinition):
                 capability._require_registry_capability(
@@ -1078,6 +1237,8 @@ class ToolRuntime:
                 )
             else:
                 capability.require(capability_name)
+        for binding in terminal_secret_bindings:
+            capability.require_exact(binding.capability)
 
     def _resolved_effect_capability(self, default: str) -> str:
         entry = self._resolved_effect_entry.get()
@@ -1739,14 +1900,76 @@ class ToolRuntime:
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
         normalized_env_overlay = {str(key): str(value) for key, value in env_overlay.items()}
-        timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
+        invalid_env_key = next(
+            (key for key in normalized_env_overlay if not _TERMINAL_ENV_NAME_RE.fullmatch(key)),
+            None,
+        )
+        if invalid_env_key is not None:
+            content = f"invalid terminal environment name: {invalid_env_key}"
+            return ToolResult(
+                content=content,
+                is_error=True,
+                data={"executionStarted": False},
+                display_output=self._format_command_display(command, cwd.relative, content),
+            )
+        timeout = _terminal_timeout_seconds(call.arguments.get("timeout_seconds"))
         background = bool(call.arguments.get("background", False))
+        secret_bindings = _terminal_secret_bindings(call.arguments)
+        binding_started_at = time.monotonic()
+        binding_deadlines = [
+            binding_started_at + binding.expires_in_seconds
+            for binding in secret_bindings
+        ]
+        binding_expiries = [
+            (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=binding.expires_in_seconds)
+            ).isoformat()
+            for binding in secret_bindings
+        ]
+        terminal_home = self.version_store.home / "terminal-home"
+        env = build_sanitized_subprocess_env(
+            os.environ,
+            normalized_env_overlay,
+            home=terminal_home,
+        )
+        env = self.runtime_timezone.apply_subprocess_env(env)
+        (
+            resolved_executable,
+            shell_executable,
+            command_executable,
+        ) = _terminal_executable_audit(command, env)
+        secret_binding_audit = [
+            binding.audit_view(expires_at=expires_at)
+            for binding, expires_at in zip(
+                secret_bindings,
+                binding_expiries,
+                strict=True,
+            )
+        ]
+        audit = {
+            "cwd": str(cwd.path),
+            "cwd_relative": cwd.relative,
+            "resolved_executable": resolved_executable,
+            "shell_executable": shell_executable,
+            "command_executable": command_executable,
+            "timeout_seconds": min(
+                [timeout, *(binding.expires_in_seconds for binding in secret_bindings)]
+            ),
+            "env_keys": sorted({*env, *(binding.target for binding in secret_bindings)}),
+            "overlay_env_keys": sorted(normalized_env_overlay),
+            "secret_bindings": secret_binding_audit,
+        }
         command_guard = review_command(command)
         if command_guard.action == "block":
             content = f"terminal command blocked: {command_guard.reason}"
             return ToolResult(
                 content=content,
-                data={"executionStarted": False, "command_guard": asdict(command_guard)},
+                data={
+                    "executionStarted": False,
+                    "command_guard": asdict(command_guard),
+                    "audit": audit,
+                },
                 is_error=True,
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
@@ -1755,18 +1978,65 @@ class ToolRuntime:
             core=core,
             turn=turn,
             cwd=cwd.relative,
+            resolved_cwd=str(cwd.path),
             command=command,
-            env_keys=sorted(normalized_env_overlay),
+            execution_audit=audit,
             env_overlay=normalized_env_overlay,
-            execution_options={"background": background, "timeout_seconds": timeout},
+            execution_options={
+                "background": background,
+                "timeout_seconds": timeout,
+                "secret_bindings": secret_binding_audit,
+            },
             command_guard=command_guard,
+            has_secret_bindings=bool(secret_bindings),
+            has_env_overlay=bool(normalized_env_overlay),
             emit_event=emit_event,
         )
         if denied:
             return denied
-        env = os.environ.copy()
-        env.update(normalized_env_overlay)
-        env = self.runtime_timezone.apply_subprocess_env(env)
+        ensure_subprocess_home(terminal_home)
+        bound_secret_values: dict[str, str] = {}
+        for binding, deadline in zip(secret_bindings, binding_deadlines, strict=True):
+            if time.monotonic() >= deadline:
+                content = f"secret binding expired before execution: env:{binding.source_name}"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            value = os.environ.get(binding.source_name)
+            if value is None:
+                content = f"secret binding source is unavailable: env:{binding.source_name}"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            env[binding.target] = value
+            bound_secret_values[binding.target] = value
+        execution_timeout = float(timeout)
+        if binding_deadlines:
+            remaining_binding_seconds = min(binding_deadlines) - time.monotonic()
+            if remaining_binding_seconds <= 0:
+                content = "secret binding expired before execution"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            execution_timeout = min(
+                execution_timeout,
+                remaining_binding_seconds,
+            )
+        audit["effective_timeout_seconds"] = execution_timeout
+        audit["timeout_reason"] = (
+            "secret_binding_expiry"
+            if binding_deadlines and execution_timeout < timeout
+            else "command_timeout"
+        )
         execution_command = _terminal_execution_command(command)
         if background:
             return self._start_background_task(
@@ -1774,6 +2044,7 @@ class ToolRuntime:
                 execution_command=execution_command,
                 cwd=cwd,
                 env=env,
+                audit=audit,
                 owner_session_id=turn.session_id,
                 owner_turn_id=turn.turn_id,
                 notify_on_complete=bool(call.arguments.get("notify_on_complete", True)),
@@ -1788,10 +2059,13 @@ class ToolRuntime:
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=timeout,
+                timeout=execution_timeout,
                 check=False,
             )
-            content = self._format_command_result(completed)
+            content = _redact_terminal_bound_secrets(
+                self._format_command_result(completed),
+                bound_secret_values,
+            )
             return ToolResult(
                 content=content,
                 is_error=completed.returncode != 0,
@@ -1800,19 +2074,33 @@ class ToolRuntime:
                     "exit_code": completed.returncode,
                     "cwd": cwd.relative,
                     "timed_out": False,
+                    "audit": audit,
                 },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
-            content = self._format_command_output(124, stdout, stderr, timed_out=True)
+            content = _redact_terminal_bound_secrets(
+                self._format_command_output(124, stdout, stderr, timed_out=True),
+                bound_secret_values,
+            )
             return ToolResult(
                 content=content,
                 is_error=True,
-                data={"executionStarted": True, "exit_code": 124, "cwd": cwd.relative, "timed_out": True},
+                data={
+                    "executionStarted": True,
+                    "exit_code": 124,
+                    "cwd": cwd.relative,
+                    "timed_out": True,
+                    "audit": audit,
+                },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
+        finally:
+            for binding in secret_bindings:
+                env.pop(binding.target, None)
+            bound_secret_values.clear()
 
     def _start_background_task(
         self,
@@ -1821,6 +2109,7 @@ class ToolRuntime:
         execution_command: str,
         cwd: Any,
         env: Mapping[str, str],
+        audit: Mapping[str, Any],
         owner_session_id: str,
         owner_turn_id: str,
         notify_on_complete: bool,
@@ -1871,7 +2160,7 @@ class ToolRuntime:
                 task_factory=terminal_task,
                 write_scope=f"terminal:{cwd.path}",
                 notify_on_complete=notify_on_complete,
-                metadata={"command": command, "cwd": cwd.relative},
+                metadata={"command": command, "cwd": cwd.relative, "audit": dict(audit)},
             )
         except RuntimeTaskConflictError as exc:
             content = str(exc)
@@ -2816,20 +3105,36 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         cwd: str,
+        resolved_cwd: str,
         command: str,
-        env_keys: list[str],
+        execution_audit: Mapping[str, Any],
         env_overlay: Mapping[str, str],
         execution_options: Mapping[str, Any],
         command_guard: CommandGuardDecision,
+        has_secret_bindings: bool,
+        has_env_overlay: bool,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
-        requires_explicit_approval = command_guard.action != "allow"
-        if command_guard.action == "allow":
+        requires_explicit_approval = (
+            command_guard.action != "allow"
+            or has_secret_bindings
+            or has_env_overlay
+        )
+        approval_risk = (
+            "high"
+            if has_secret_bindings or has_env_overlay
+            else command_guard.risk
+        )
+        if (
+            command_guard.action == "allow"
+            and not has_secret_bindings
+            and not has_env_overlay
+        ):
             policy = self._safe_command_approval_policy(
                 core,
                 tool_name=call.name,
                 capability_name=self._resolved_effect_capability("terminal.exec"),
-                risk=command_guard.risk,
+                risk=approval_risk,
             )
             auto_approve = policy != "deny"
         else:
@@ -2837,7 +3142,7 @@ class ToolRuntime:
                 core,
                 tool_name=call.name,
                 capability_name=self._resolved_effect_capability("terminal.exec"),
-                risk=command_guard.risk,
+                risk=approval_risk,
                 default_auto=False,
             )
             if requires_explicit_approval and policy == "auto":
@@ -2846,20 +3151,26 @@ class ToolRuntime:
         summary = f"Run terminal command in {cwd}"
         if command_guard.action != "allow":
             summary = f"{summary}: {command_guard.reason}"
+        if has_secret_bindings:
+            summary = f"{summary}: bind explicitly authorized secret environment"
+        elif has_env_overlay:
+            summary = f"{summary}: apply explicit environment overlay"
         request = ApprovalRequest(
             scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
             capability=self._resolved_effect_capability("terminal.exec"),
             action="exec",
-            risk=command_guard.risk,
+            risk=approval_risk,
             summary=summary,
-            target=cwd,
+            target=resolved_cwd,
             command=command,
             arguments_preview={
-                "cwd": cwd,
                 "command": command,
-                "env_keys": env_keys,
+                "execution": dict(execution_audit),
+                "secret_bindings": list(
+                    execution_audit.get("secret_bindings", [])
+                ),
                 "command_guard": asdict(command_guard),
             },
             cache_key=_terminal_approval_cache_key(
@@ -2871,6 +3182,7 @@ class ToolRuntime:
             ),
             auto_approve=auto_approve,
             policy=policy,
+            session_cacheable=not has_secret_bindings,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2878,7 +3190,11 @@ class ToolRuntime:
         content = f"approval denied: terminal command in {cwd}"
         return ToolResult(
             content=content,
-            data={"executionStarted": False, "approval": asdict(decision)},
+            data={
+                "executionStarted": False,
+                "approval": asdict(decision),
+                "audit": dict(execution_audit),
+            },
             is_error=True,
             display_output=self._format_command_display(command, cwd, content),
         )

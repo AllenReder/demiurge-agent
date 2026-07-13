@@ -63,8 +63,20 @@ connect policy，任一绑定变化都会在复用前驱逐整个旧 catalog。D
 approval，replacement client 才能启动；删除全部 declaration 会关闭剩余 connection。
 切换到新 session 或 resume 其他 session 时会跟踪驱逐旧 session。显式 session eviction 只关闭目标 session 的
 catalogs；delegated child 使用 Host-issued scope，并在 child completion 时释放 connection。
-Sanitized env/secret binding 与 URL validation 仍属于后续 security 工作。旧 global
+Terminal subprocess 现在使用 allowlisted environment 与一次性的
+capability/approval/expiry-bound secret injection；MCP stdio child 复用该 allowlist，并只添加
+获批 manifest env entry。URL validation 仍属于后续 security 工作。旧 global
 MCP tool-name index 已删除；call dispatch 只接受 connection-bound resolved entry。
+
+Terminal preflight 会把 project-code execution 与 literal read-only command 分开，对显式
+environment overlay 要求 approval，并构造包含实际 cwd、environment keys、resolved
+shell/process 与 best-effort command executable、secret-binding metadata 的 audit view。Secret value 只在
+approval 后解析，返回 stdout/stderr 中完全相同的值会被脱敏。Background terminal task
+在 process/expiry lifecycle 能提供相同保证之前拒绝 secret binding。
+
+Secret capability 使用 exact-default lookup，而不是普通 prefix wildcard matcher。Binding
+target 会拒绝 execution-control variable，最早 binding deadline 会收紧 foreground
+`subprocess.run()` timeout。
 
 ## 目标 EffectRuntime 接口
 

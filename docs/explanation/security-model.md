@@ -36,8 +36,12 @@ payloads are blocked before approval.
 This scanner is deliberately fail-closed and may prompt for ambiguous text,
 including expansion-like syntax inside comments. It is containment, not a full
 shell parser or sandbox. Explicitly approved commands still execute in the
-Host terminal runtime; environment sanitization, process-tree control, and
-principal-scoped approval remain separate security boundaries.
+Host terminal runtime. Terminal subprocesses now start from a Host allowlist
+instead of inheriting the full process environment, use a dedicated runtime
+`HOME`, and omit provider, channel, MCP, cloud, and desktop credentials by
+default. Commands that execute workspace/project code, plus any explicit
+environment overlay, require approval even when their outer command is a known
+development command. Process-tree control remains a separate boundary.
 
 ## Capabilities
 
@@ -46,6 +50,7 @@ Capabilities describe effect classes such as:
 - `fs.read`
 - `fs.write`
 - `terminal.exec`
+- `secret.bind:<ENV_NAME>`
 - `task.control`
 - `network.fetch`
 - `schedule.manage`
@@ -75,6 +80,20 @@ task.
 Provider secrets belong in host config, environment variables, or
 `~/.demiurge/.env`. Status commands should report secret sources without
 printing secret values.
+
+The terminal does not inherit those values. A foreground call can request a
+one-shot `secret_bindings` entry sourced from `env:<NAME>` only when the active
+capability snapshot grants `secret.bind:<NAME>`. The Host prompts, bounds the
+binding by the terminal timeout, rejects background use, records only
+source/target/capability/expiry metadata, and replaces exact bound values in
+stdout/stderr with a redaction marker. This is controlled injection, not a
+sandbox or a guarantee against transformed/encoded disclosure.
+
+The capability must be exact (`secret.bind:*` does not match), and a binding
+cannot override `PATH`, `HOME`, shell/loader controls, or language runtime
+search paths after approval. The earliest binding expiry shortens the
+foreground subprocess timeout; descendant process-tree cleanup remains a
+separate lifecycle boundary.
 
 Package component options of type `secret` can write component-local config, but
 `packages.yaml` stores only redacted option values. Package provenance hashes in

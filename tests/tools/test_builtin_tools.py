@@ -1244,6 +1244,308 @@ async def test_env_01_project_code_execution_requires_approval(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_terminal_secret_binding_requires_specific_capability_before_approval(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": variable,
+                    "expires_in_seconds": 30,
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert f"secret.bind:{variable}" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_wildcard_capability(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "secret.bind:*": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [{"source": f"env:{variable}"}],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert f"exact capability denied: secret.bind:{variable}" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_execution_control_target(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {"source": f"env:{variable}", "target": "PATH"}
+            ],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "reserved execution environment target" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_is_one_shot_redacted_and_auditable(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    sentinel = "SYNTHETIC_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = sentinel
+        stderr = ""
+
+    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+        captured["bound_secret"] = env["BOUND_SECRET"]
+        captured["timeout"] = timeout
+        return Completed()
+
+    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                    "expires_in_seconds": 5,
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is False
+    assert captured["bound_secret"] == sentinel
+    assert 0 < captured["timeout"] <= 5
+    assert sentinel not in result.content
+    assert "<redacted:BOUND_SECRET>" in result.content
+    assert app.approval_runtime.cached_allow_count == 0
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    first_decision = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    encoded_request = json.dumps(request.redacted_view(), ensure_ascii=False)
+    encoded_events = json.dumps(app.runner.event_log.tail(20), ensure_ascii=False)
+    encoded_audit = json.dumps(result.data["audit"], ensure_ascii=False)
+    assert sentinel not in encoded_request
+    assert sentinel not in encoded_events
+    assert sentinel not in encoded_audit
+    assert first_decision["decision"] == "allow"
+    assert first_decision["session_cacheable"] is False
+    assert request.arguments_preview["secret_bindings"][0]["source"] == f"env:{variable}"
+    assert result.data["audit"]["secret_bindings"][0]["target"] == "BOUND_SECRET"
+    assert result.data["audit"]["secret_bindings"][0]["capability"] == f"secret.bind:{variable}"
+    assert result.data["audit"]["secret_bindings"][0]["expires_at"]
+
+    denied_reuse = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                    "expires_in_seconds": 5,
+                }
+            ],
+        },
+    )
+    assert denied_reuse.is_error is True
+    assert denied_reuse.data["executionStarted"] is False
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_expired_or_background_scope_before_approval(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+    binding = {
+        "source": f"env:{variable}",
+        "target": variable,
+        "expires_in_seconds": 0,
+    }
+
+    expired = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "env", "secret_bindings": [binding]},
+    )
+    background = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "background": True,
+            "secret_bindings": [{**binding, "expires_in_seconds": 30}],
+        },
+    )
+
+    assert expired.is_error is True
+    assert expired.data["executionStarted"] is False
+    assert "expires_in_seconds" in expired.content
+    assert background.is_error is True
+    assert background.data["executionStarted"] is False
+    assert "background" in background.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_binds_actual_environment_cwd_and_executable(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET", "SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "env", "cwd": "."})
+
+    audit = result.data["audit"]
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    preview = approval["arguments_preview"]["execution"]
+    assert audit["cwd"] == str(workspace.resolve())
+    assert audit["resolved_executable"]
+    assert audit["shell_executable"]
+    assert audit["command_executable"]
+    assert "PATH" in audit["env_keys"]
+    assert "DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET" not in audit["env_keys"]
+    assert preview["cwd"] == audit["cwd"]
+    assert preview["env_keys"] == audit["env_keys"]
+    assert preview["resolved_executable"] == audit["resolved_executable"]
+    assert preview["command_executable"] == audit["command_executable"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_explicit_environment_overlay_requires_approval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "printf safe", "env": {"VISIBLE_SETTING": "synthetic-value"}},
+    )
+
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    encoded = json.dumps(approval, ensure_ascii=False)
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert approval["automatic"] is False
+    assert approval["arguments_preview"]["execution"]["overlay_env_keys"] == [
+        "VISIBLE_SETTING"
+    ]
+    assert "synthetic-value" not in encoded
+    assert not (tmp_path / "home/terminal-home").exists()
+
+
+@pytest.mark.asyncio
 async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -114,5 +114,23 @@ def test_workspace_scope_marks_sensitive_paths(tmp_path):
     assert scope.resolve_path("pyproject.toml", operation="read").sensitive is False
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".aws/credentials",
+        ".kube/config",
+    ],
+)
+def test_workspace_scope_marks_common_credential_files_sensitive(tmp_path, path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scope = WorkspaceScope(workspace)
+
+    assert scope.resolve_path(path, operation="read").sensitive is True
+
+
 def test_truncate_text_reports_omitted_chars():
     assert truncate_text("abcdef", limit=3) == "abc\n...[truncated 3 chars]"

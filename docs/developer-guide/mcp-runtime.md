@@ -44,8 +44,9 @@ and configured cwd must resolve inside the Host workspace before approval and
 client construction. The approval preview shows the command, cwd, option shape,
 environment/header names, and a credential-free URL; positional values are
 represented by hash/length summaries and secret-bearing option values are
-redacted. Sanitized environment/secret binding and shared URL policy remain
-later security work.
+redacted. Stdio subprocesses always use the shared Host environment allowlist
+and a dedicated runtime `HOME`; only declaration-listed `env` entries are added
+after connect approval. Shared URL policy remains later security work.
 
 ## Result Conversion
 
@@ -77,5 +78,6 @@ with their Host-issued scope and release their MCP connections when the child
 run ends. Evolution review emits a secret-safe before/after security diff for
 changed MCP declarations and a content-bound `mcp-review:<sha256>` token.
 Promotion requires that exact token in addition to the normal promote approval;
-missing or stale tokens leave Git refs unchanged. Sanitized env/secret binding
-and URL validation remain later security layers.
+missing or stale tokens leave Git refs unchanged. Stdio env sanitization and
+declaration-bound secret injection are implemented; URL validation remains a
+later security layer.

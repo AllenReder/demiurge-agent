@@ -76,6 +76,53 @@ shape through the same coarse rule key. This fingerprint does not replace the
 separate session/principal ownership contract. Ambiguous shell text, including
 expansion syntax inside comments, can conservatively require approval.
 
+### Terminal environment and secret bindings
+
+Terminal subprocesses are built from an environment allowlist rather than
+`os.environ`. The Host preserves basic execution/locale/temp variables, sets
+`HOME` to a dedicated runtime directory, applies the configured timezone, and
+omits provider, channel, MCP, cloud, and desktop credentials. Explicit `env`
+overlays require approval and are included in the command fingerprint by key
+and value; approval/event views expose keys only.
+
+Commands such as `pytest`, `python -m pytest`, `uv run`, `npm run`, `cargo
+test/build`, and `make` can execute repository code, plugins, or build scripts,
+so they are `prompt/high` rather than unconditional safe commands. Literal
+read-only commands remain eligible for automatic approval. Execution-capable
+forms such as `rg --pre`, `find -exec`, GNU `sed` `e`, and Git external
+diff/textconv/pager options are also `prompt/high`. Git auto-approval is limited
+to explicit read-only shapes; remote network operations and branch, tag, remote,
+or worktree mutations require approval, as do `--output` file writes. Common
+embedded write modes in otherwise read-oriented commands and inline environment
+assignments also require approval; system-time mutation is never treated as a
+literal read. Auto-approved executable names must be bare commands rather than
+workspace-relative paths. Wrapper or shell cwd changes, command files, embedded
+read-path options, and unquoted filename expansion require approval. Common
+credential paths such as `.npmrc`, `.pypirc`, `.netrc`, `.aws/`, `.kube/`,
+`.ssh/`, and `.env*` are sensitive defense-in-depth paths.
+
+`terminal.secret_bindings` is an array of objects with `source` (`env:<NAME>`),
+optional `target`, and optional `expires_in_seconds`. Each source requires the
+exact `secret.bind:<NAME>` capability. Bindings are foreground-only, cannot
+outlive the terminal timeout, never reuse a session approval, and are removed
+from the Host-side environment after completion. Approval/audit views record
+source, target, capability, expiry, actual cwd, environment keys, the resolved
+shell/process executable, and the best-effort command executable without
+values. Exact bound values in
+stdout/stderr are replaced with `<redacted:TARGET>`.
+
+Wildcard grants such as `secret.bind:*` are rejected. Binding targets also
+cannot replace execution-control variables such as `PATH`, `HOME`, `COMSPEC`,
+loader injection variables, language runtime search paths, or option hooks.
+The earliest binding expiry clamps the foreground subprocess timeout; expiry
+therefore terminates the shell process even when the requested command timeout
+is longer. Full descendant process-tree termination remains the separate
+process-lifecycle contract.
+
+This filtering and redaction are not OS isolation. An approved command still
+runs through the Host shell, and transformed/encoded secret output is outside
+the exact-value redactor's guarantee.
+
 For builtin handlers that use approval resolution, core metadata can make the
 effective policy stricter but cannot lower risk or weaken the registry policy.
 This includes every `evolve_core` action and `rollback_core`.
@@ -203,8 +250,9 @@ previous session, while explicit eviction closes only the selected session's
 catalogs. Delegated children use their Host-issued authority and close MCP
 connections when the child run ends. Connect approval previews expose safe
 launch metadata without environment, header, URL credential/query, or argument
-secret values. Sanitized env/secret binding and URL policy remain separate
-later security work.
+secret values. Stdio children use the shared allowlisted environment plus only
+manifest-declared env entries after connect approval. URL policy remains
+separate later security work.
 
 ## Tool Metadata Overrides
 

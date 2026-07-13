@@ -367,9 +367,19 @@ the prior session resources. Delegated children use their own Host-issued
 authority and release connections at child completion. Evolution gates attach
 a secret-safe MCP declaration security diff and content-bound
 `mcp-review:<sha256>` token; promotion requires that exact token and leaves Git
-refs unchanged for missing or stale confirmation. Indeterminate outcomes,
-sanitized env/secret binding, URL policy, streaming limits, and redaction remain
-later EffectRuntime work.
+refs unchanged for missing or stale confirmation. Indeterminate outcomes, URL
+policy, streaming limits, and general cross-effect redaction remain later
+EffectRuntime work. Terminal execution
+already uses an allowlisted environment, separates project-code execution from
+literal reads, and supports foreground-only `secret.bind:<ENV_NAME>` injection
+after one-shot approval. Its audit view binds actual cwd/environment
+keys/resolved process and command executables, and exact bound values are redacted from terminal
+output. MCP stdio children reuse the same allowlist and add only
+manifest-declared env entries after connect approval.
+Terminal secret capabilities require exact grants, reject execution-control
+targets, and clamp the foreground subprocess deadline to the earliest binding
+expiry. Descendant process-tree termination remains owned by the later process
+lifecycle slice.
 
 ### Internal Catalog Seam
 

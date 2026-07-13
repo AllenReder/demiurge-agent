@@ -5,10 +5,253 @@ from demiurge.security.command_guard import review_command
 
 def test_command_guard_allows_common_safe_commands():
     assert review_command("printf hello").action == "allow"
-    assert review_command("uv run pytest tests/tools/test_builtin_tools.py").action == "allow"
     assert review_command("rg needle . | head -20").action == "allow"
     assert review_command("rg rm .").action == "allow"
-    assert review_command("cd ui-tui && npm run build").action == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status --short",
+        "git diff --check",
+        "git log -1 --oneline",
+        "git rev-parse HEAD",
+        "git ls-files",
+        "git grep needle",
+        "git describe --always",
+        "git remote",
+        "git branch",
+        "git branch --show-current",
+        "git branch --list 'feat/*'",
+        "git tag",
+        "git tag --list 'v*'",
+        "git worktree list",
+    ],
+)
+def test_command_guard_allows_explicit_readonly_git_shapes(command):
+    assert review_command(command).action == "allow"
+
+
+@pytest.mark.parametrize(
+    ("command", "rule_key"),
+    [
+        ("git remote update", "network-command"),
+        ("git remote prune origin", "network-command"),
+        (
+            "git remote add attacker https://example.invalid/repo.git",
+            "repository-mutation",
+        ),
+        ("git branch new-topic", "repository-mutation"),
+        ("git tag v-test", "repository-mutation"),
+        ("git worktree lock .", "repository-mutation"),
+    ],
+)
+def test_command_guard_prompts_for_git_network_and_repository_mutation(
+    command,
+    rule_key,
+):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == rule_key
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git diff --output=/tmp/demiurge.diff",
+        "git log --output=history.txt -1",
+        "git show --output=commit.txt HEAD",
+    ],
+)
+def test_command_guard_prompts_for_git_output_file_writes(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "file-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "TRACE=1 printf hello",
+        "env TRACE=1 printf hello",
+        "PATH=. ls",
+        "LD_PRELOAD=./malicious.so printf hello",
+    ],
+)
+def test_command_guard_prompts_for_inline_environment_overlays(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "environment-overlay"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o sorted.txt input.txt",
+        "sort --output=sorted.txt input.txt",
+        "tree -o tree.txt .",
+        "uniq input.txt output.txt",
+        "file --compile",
+        "file -C",
+        "find . -fprint matches.txt",
+        "find . -fprintf matches.txt '%p\\n'",
+        "sed -n 'w output.txt' README.md",
+        "sed -n 's/a/b/w output.txt' README.md",
+    ],
+)
+def test_command_guard_prompts_for_embedded_file_write_modes(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "file-write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "date --set='2026-07-13 12:00:00'",
+        "date -s '2026-07-13 12:00:00'",
+    ],
+)
+def test_command_guard_prompts_for_system_time_mutation(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "system-time"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "./cat README.md",
+        "bin/rg needle .",
+        "bin/git status --short",
+    ],
+)
+def test_command_guard_prompts_for_relative_executable_paths(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "project-code-execution"
+
+
+@pytest.mark.parametrize(
+    ("command", "rule_key"),
+    [
+        ("env -C/etc cat passwd", "cwd-change"),
+        ("env --chdir=linked cat passwd", "cwd-change"),
+        ("cd linked && cat passwd", "cwd-change"),
+        ("sort -T/tmp input.txt", "file-write"),
+        ("sort --temporary-directory=tmp input.txt", "file-write"),
+        ("rg -f/etc/passwd README.md", "path-outside-workspace"),
+        ("grep -f/etc/passwd needle README.md", "path-outside-workspace"),
+        ("file -m/etc/passwd README.md", "path-outside-workspace"),
+        ("date -f/etc/passwd", "path-outside-workspace"),
+        ("git grep -f/etc/passwd needle", "path-outside-workspace"),
+        ("git diff -O/etc/passwd", "path-outside-workspace"),
+        ("git ls-files -X.netrc", "sensitive-path"),
+        ("git ls-files -X/etc/passwd", "path-outside-workspace"),
+        ("git ls-files -X../secret", "path-outside-workspace"),
+        ("du -X.netrc .", "sensitive-path"),
+        ("du -X/etc/passwd .", "path-outside-workspace"),
+        ("du -X~/.netrc .", "sensitive-path"),
+        ("sed -n -fscript.sed README.md", "project-code-execution"),
+    ],
+)
+def test_command_guard_prompts_for_wrapper_and_attached_path_effects(
+    command,
+    rule_key,
+):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == rule_key
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -n 'r /etc/passwd' README.md",
+        "sed -n 'R .netrc' README.md",
+    ],
+)
+def test_command_guard_prompts_for_sed_embedded_file_reads(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "file-read"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .s[s]h/id_ed25519",
+        "cat .a[w]s/credentials",
+        "cat .k[u]be/config",
+        "cat .n[e]trc",
+        "cat .n[p]mrc",
+        "cat .p[y]pirc",
+        "cat .p[g]pass",
+        "cat .e[n]v",
+        "cat .s{s,x}h/id_ed25519",
+        "cat .a{w,x}s/credentials",
+        "cat .k{u,x}be/config",
+        "cat .n{e,x}trc",
+        "cat .n{p,x}mrc",
+        "cat .p{y,x}pirc",
+        "cat .p{g,x}pass",
+        "cat .e{n,x}v",
+    ],
+)
+def test_command_guard_prompts_for_unquoted_filename_expansion(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "filename-expansion"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest tests/tools/test_builtin_tools.py",
+        "python -m pytest tests/tools/test_builtin_tools.py",
+        "uv run pytest tests/tools/test_builtin_tools.py",
+        "npm run build",
+        "cargo test",
+        "make test",
+        "rg --pre 'python malicious.py' needle .",
+        "sort --compress-program='python malicious.py' input.txt",
+        "git diff --ext-diff",
+        "git show --ext-diff HEAD",
+        "git diff --textconv HEAD^ HEAD",
+        "git log --show-signature -1",
+        "git show --show-signature HEAD",
+        "git grep --open-files-in-pager='python malicious.py' needle",
+        r"find . -exec python malicious.py \;",
+        r"find . -exec sh -c 'printf unsafe' \;",
+        "sed -n 'e python malicious.py' README.md",
+        "sed -n '1~2e python malicious.py' README.md",
+        "sed -n '1,+2e python malicious.py' README.md",
+    ],
+)
+def test_command_guard_prompts_before_executing_project_code(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "project-code-execution"
 
 
 def test_command_guard_prompts_for_dependency_and_shell_risk():
@@ -16,6 +259,36 @@ def test_command_guard_prompts_for_dependency_and_shell_risk():
     assert review_command("printf hello > out.txt").rule_key == "shell-redirection"
     assert review_command("python <<'PY'\nprint('hello')\nPY").rule_key == "complex-shell"
     assert review_command("bash -c 'echo hello'").rule_key == "shell-eval"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .npmrc",
+        "cat .pypirc",
+        "cat .netrc",
+        "cat .aws/credentials",
+        "cat .kube/config",
+        "cat $HOME/.npmrc",
+        "grep --exclude-from=.netrc needle README.md",
+    ],
+)
+def test_command_guard_prompts_for_common_credential_files(command):
+    decision = review_command(command)
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key in {"sensitive-path", "shell-expansion"}
+
+
+def test_command_guard_prompts_for_embedded_absolute_option_path():
+    decision = review_command(
+        "sort --random-source=/tmp/random-seed input.txt"
+    )
+
+    assert decision.action == "prompt"
+    assert decision.risk == "high"
+    assert decision.rule_key == "path-outside-workspace"
 
 
 def test_command_guard_blocks_hardline_commands():

@@ -76,9 +76,24 @@ starts; removing all declarations closes the remaining connections. Starting
 or resuming another session tracks eviction of the previous session. Explicit
 session eviction closes only the selected session's catalogs;
 delegated children use their Host-issued scope and release connections at child
-completion. Sanitized env/secret binding and URL validation remain later
-security work. The legacy global MCP tool-name index has been removed;
+completion. Terminal subprocesses now use an allowlisted environment and
+one-shot capability/approval/expiry-bound secret injection; MCP stdio children
+reuse that allowlist and add only approved manifest env entries. URL validation
+remains later security work. The legacy global
+MCP tool-name index has been removed;
 call dispatch accepts only the connection-bound resolved entry.
+
+Terminal preflight classifies project-code execution separately from literal
+read-only commands, requires approval for explicit environment overlays, and
+constructs an audit view containing actual cwd, environment keys, resolved
+shell/process and best-effort command executables, and secret-binding metadata. Secret values are
+resolved only after approval and exact values are redacted from returned
+stdout/stderr. Background terminal tasks reject secret bindings until their
+process/expiry lifecycle can provide the same guarantee.
+
+Secret capabilities use exact-default lookup rather than the normal prefix
+wildcard matcher. Binding targets reject execution-control variables, and the
+earliest binding deadline clamps the foreground `subprocess.run()` timeout.
 
 ## Target EffectRuntime Interface
 

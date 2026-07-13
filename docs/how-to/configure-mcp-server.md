@@ -15,7 +15,9 @@ Denied authority stops before client construction, process/network startup, and
 `list_tools()`. The later tool invocation separately requires the server call
 capability and approval. Continue to review a declaration's command, package
 runner, URL, environment, and headers before enabling it: sanitized secret
-binding and full URL safety remain later security layers.
+binding now limits stdio children to an allowlisted environment plus the
+declaration's approved `env` entries, while full URL safety remains a later
+security layer.
 
 By default, the loader looks under:
 
@@ -161,4 +163,5 @@ An Agent Core declares MCP servers. The host owns process startup, HTTP
 transport sessions, environment interpolation, catalog caching, approval
 prompts, capability enforcement, result conversion, and runtime cleanup. MCP is
 still not a sandbox: stdio commands and remote URLs remain trusted effects, and
-later security work adds sanitized secret binding and shared URL validation.
+stdio processes receive an allowlisted environment plus only declaration-bound
+values after approval. Shared URL validation remains later security work.

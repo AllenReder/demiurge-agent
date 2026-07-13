@@ -526,6 +526,33 @@ def test_approval_event_and_operator_views_redact_secret_arguments(tmp_path):
     }
 
 
+def test_approval_secret_binding_metadata_exposes_names_not_values(tmp_path):
+    request = _request(
+        scope=_scope(tmp_path),
+        arguments_preview={
+            "secret_bindings": [
+                {
+                    "source": "env:DEMIURGE_TEST_SECRET",
+                    "target": "BOUND_SECRET",
+                    "capability": "secret.bind:DEMIURGE_TEST_SECRET",
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                    "value": "SYNTHETIC_SECRET_VALUE",
+                }
+            ]
+        },
+    )
+
+    binding = request.redacted_view()["arguments_preview"]["secret_bindings"][0]
+    assert binding == {
+        "source": "env:DEMIURGE_TEST_SECRET",
+        "target": "BOUND_SECRET",
+        "capability": "secret.bind:DEMIURGE_TEST_SECRET",
+        "expires_at": "2026-07-13T12:00:00+00:00",
+        "value": "<redacted>",
+    }
+    assert "SYNTHETIC_SECRET_VALUE" not in json.dumps(request.redacted_view())
+
+
 def test_approval_event_and_operator_text_fields_are_bounded(tmp_path):
     request = _request(
         scope=_scope(tmp_path),

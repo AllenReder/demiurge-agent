@@ -190,6 +190,36 @@ def _execute(app, core, name, arguments):
     )
 
 
+def test_mcp_stdio_environment_uses_shared_allowlist(monkeypatch, tmp_path):
+    variable = "DEMIURGE_MCP_SYNTHETIC_PROVIDER_SECRET"
+    sentinel = "SYNTHETIC_MCP_PROVIDER_SECRET"
+    monkeypatch.setenv(variable, sentinel)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\ncommand: fake-mcp\napproval_policy: auto\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    connection = DefaultMcpClientConnection(
+        core.mcp_servers[0],
+        {"DECLARED_SETTING": "visible"},
+        {},
+        workspace,
+        tmp_path / "home/logs/mcp-stderr.log",
+    )
+
+    env = connection._stdio_env()
+
+    assert env["DECLARED_SETTING"] == "visible"
+    assert variable not in env
+    assert sentinel not in env.values()
+    assert env["HOME"] == str((tmp_path / "home/mcp-home").resolve())
+    assert env["PATH"]
+
+
 @pytest.mark.asyncio
 async def test_mcp_discovery_adds_sanitized_filtered_tool(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")

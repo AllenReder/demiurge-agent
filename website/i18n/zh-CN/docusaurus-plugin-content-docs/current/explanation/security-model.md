@@ -31,8 +31,11 @@ hardline payload 会在 approval 前被阻断。
 
 该 scanner 有意采用 fail-closed 策略，因此 ambiguous text（包括 comment 中类似
 expansion 的 syntax）可能触发 prompt。它是 containment，不是完整 shell parser 或
-sandbox。显式获批的 command 仍由 Host terminal runtime 执行；environment sanitization、
-process-tree control 与 principal-scoped approval 是独立的 security boundary。
+sandbox。显式获批的 command 仍由 Host terminal runtime 执行。Terminal subprocess
+现在从 Host allowlist 构建环境，而不是继承完整 process environment；它使用专用 runtime
+`HOME`，并默认剥离 provider、channel、MCP、cloud 与 desktop credentials。执行
+workspace/project code 的 command，以及任何显式 environment overlay，即使外层是已知
+development command，也必须 approval。Process-tree control 仍是独立边界。
 
 ## Capabilities
 
@@ -41,6 +44,7 @@ Capabilities 描述以下 effect class：
 - `fs.read`
 - `fs.write`
 - `terminal.exec`
+- `secret.bind:<ENV_NAME>`
 - `task.control`
 - `network.fetch`
 - `schedule.manage`
@@ -65,6 +69,18 @@ task 前通过 resolved capability 与 action-specific approval。
 
 Provider secret 应放在 Host config、environment variables 或 `~/.demiurge/.env` 中。
 Status command 应报告 secret source，但不打印 secret value。
+
+Terminal 不会继承这些值。Foreground call 只有在 active capability snapshot 授予
+`secret.bind:<NAME>` 时，才能请求 source 为 `env:<NAME>` 的一次性
+`secret_bindings`。Host 会 prompt、把 binding 的有效期限制在 terminal timeout 内、拒绝
+background 使用，只记录 source/target/capability/expiry metadata，并把 stdout/stderr 中
+与绑定值完全相同的内容替换为 redaction marker。这是受控注入，不是 sandbox，也不保证
+阻止经过转换或编码后的泄露。
+
+Capability 必须精确（`secret.bind:*` 不匹配），binding 也不能在 approval 后覆盖
+`PATH`、`HOME`、shell/loader control 或 language runtime search path。最早 binding
+expiry 会缩短 foreground subprocess timeout；descendant process-tree cleanup 仍是独立
+lifecycle boundary。
 
 类型为 `secret` 的 package component option 可以写入 component-local config，但
 `packages.yaml` 只保存脱敏后的 option value。该文件中的 package provenance hash 用于
