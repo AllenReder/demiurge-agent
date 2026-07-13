@@ -94,6 +94,15 @@ callbacks 和 live completion subscribers。Public task reads、lists、logs、
 waits、cancellation results 和 pending completion notifications 都从
 `RuntimeControlPlane` / SQLite projections 与 runtime events 重建。
 
+Terminal task handle 还携带 Host-issued process `spawn_id` 与 OS process-start marker；durable
+metadata 包含 PID/process-group/platform identity，但绝不会单独用这些 metadata 杀进程。并发
+cancellation 是 single-flight：一个 cleanup callback 会先把 return code/exit reason 提交到唯一
+terminal event，再发布 completion-ready，所有 caller 观察同一结果。`DemiurgeApp.close()` 会在
+关闭 tool resource 前 cancel/drain active runtime task 与已登记的 foreground terminal owner。
+Task admission 会在 shutdown snapshot active work 之前关闭，因此 late approval 不能在 drain
+期间启动新的 background process。Output-persistence failure 也会先清理 process tree，再提交 `task.failed`。完整 terminal stream
+会持久化为 artifact row/file；task log 与 model result 仍是有界 projection。
+
 `BackgroundWorkRuntime` 跟踪 parallel slots 和 delivery dispatch 创建的
 in-process background coroutines。它把这些 local tasks 与 durable
 `RuntimeTaskWorker` 组合起来提供 drain 和 active-count 行为；foreground runner

@@ -10,9 +10,9 @@ slice: one resolved per-turn catalog and one adapter-bound dispatcher for
 builtin, authored, and MCP model calls. Adapter results are normalized into a
 minimal typed `EffectResult`/`EffectError` before the turn loop converts them to
 the legacy model-facing `ToolResult`; runtime events retain typed status/error.
-Connect policy, extended lifecycle
-outcomes, process/network lifecycle, output limits, and redaction continue
-through later EffectRuntime work. See
+Connect policy, terminal process-tree ownership, and bounded terminal draining
+are implemented slices. Extended lifecycle outcomes, URL/network policy, and
+cross-effect redaction continue through later EffectRuntime work. See
 [Host Runtime Contracts](runtime-contracts.md#effectruntime).
 
 ## Registry Sources
@@ -93,7 +93,26 @@ process/expiry lifecycle can provide the same guarantee.
 
 Secret capabilities use exact-default lookup rather than the normal prefix
 wildcard matcher. Binding targets reject execution-control variables, and the
-earliest binding deadline clamps the foreground `subprocess.run()` timeout.
+earliest binding deadline clamps the foreground process-owner timeout.
+
+Foreground and background terminal adapters share
+`demiurge.tools.process_lifecycle`. It captures a PID, unique `spawn_id`, and OS
+process-start marker, then revalidates the marker before PID/PGID fallback
+cleanup. POSIX uses a new session/process group with TERM-to-KILL escalation.
+Windows starts suspended, enters a kill-on-close Job Object, and only then
+resumes. Foreground stdout/stderr are drained by bounded reader
+threads; background streams are drained in 8 KiB async chunks. Both retain a
+12,000-character tail and total byte/character/truncation statistics. The live
+process handle and start identity stay process-local; task projections receive
+only audit metadata. Full streams are written incrementally to 0600 terminal
+artifacts; exact bound secrets are redacted across chunk boundaries before
+artifact persistence. Artifact descriptors expose an opaque Host-derived
+`root` plus stream-relative paths; untrusted session identifiers are never
+used as filesystem components. An artifact open/write/flush failure is a
+terminal execution failure even though pipe draining continues until the child
+can be reaped. Host shutdown owns foreground registrations as well as
+background tasks; cancellation is single-flight, and drain/log persistence
+failure terminates the tree before a terminal failure is published.
 
 ## Target EffectRuntime Interface
 
@@ -133,7 +152,8 @@ typed actions to the host runtime and use the shared `RuntimeTaskWorker` as the
 live worker for active work:
 
 - `terminal(background=true)` creates a `terminal.exec` task and captures
-  stdout/stderr into `task_logs`.
+  stdout/stderr into bounded `task_logs` chunks. Cancellation terminates the
+  process tree, persists return code/exit reason, then publishes completion.
 - `evolve_core(action="start", background=true)` creates an `evolver.run` task
   that edits an isolated agents-tree worktree. It returns a task id; the
   completed task metadata/result identifies the evolve run. It does not switch

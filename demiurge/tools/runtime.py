@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,7 @@ from demiurge.runtime.tasks import (
     RuntimeTaskKindError,
     RuntimeTaskOutcome,
     RuntimeTaskWorker,
+    RuntimeTaskWorkerClosedError,
 )
 from demiurge.mcp import McpRuntime, McpToolInfo
 from demiurge.mcp.security import (
@@ -35,6 +37,7 @@ from demiurge.mcp.security import (
     mcp_server_fingerprint,
 )
 from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeEvent
 from demiurge.security.approval import ApprovalRequest, ApprovalRuntime, ApprovalScope
 from demiurge.security.capabilities import (
     CapabilityDenied,
@@ -66,7 +69,19 @@ from demiurge.tools.registry import (
     ResolvedEffectCatalog,
     ResolvedEffectEntry,
 )
-from demiurge.util import read_json, require_relative_path, write_json
+from demiurge.tools.process_lifecycle import (
+    BoundedProcessOutput,
+    ProcessExecutionCancelled,
+    ProcessLifecycleOwner,
+    bind_process_identity,
+    capture_process_identity,
+    drain_async_process_output,
+    process_group_spawn_kwargs,
+    release_process_resources,
+    run_foreground_process,
+    terminate_async_process_tree,
+)
+from demiurge.util import read_json, require_relative_path, utc_id, write_json
 from demiurge.security.workspace import (
     DEFAULT_READ_LIMIT_CHARS,
     DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
@@ -470,6 +485,7 @@ class ToolRuntime:
             raise ValueError("ToolRuntime requires a RuntimeControlPlane-backed RuntimeTaskWorker")
         self.task_worker = task_worker
         self.session_runtime = session_runtime
+        self.process_lifecycle = ProcessLifecycleOwner()
         self._approval_scope: ContextVar[ApprovalScope | None] = ContextVar(
             f"demiurge_tool_approval_scope_{id(self)}",
             default=None,
@@ -711,8 +727,104 @@ class ToolRuntime:
         return False
 
     async def close(self) -> None:
-        if self.mcp_runtime is not None:
-            await self.mcp_runtime.close()
+        try:
+            await self.process_lifecycle.shutdown()
+        finally:
+            if self.mcp_runtime is not None:
+                await self.mcp_runtime.close()
+
+    def _terminal_output_artifact_paths(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[str, dict[str, Path]]:
+        artifact_id = utc_id("artifact_terminal_")
+        _, session_root = self._terminal_output_artifact_session_root(
+            session_id=session_id,
+        )
+        artifact_root = session_root / artifact_id
+        return artifact_id, {
+            "stdout": artifact_root / "stdout.txt",
+            "stderr": artifact_root / "stderr.txt",
+        }
+
+    def _terminal_output_artifact_session_root(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[Path, Path]:
+        runtime_root = (self.version_store.home / "runtime").resolve()
+        artifacts_root = (runtime_root / "artifacts").resolve()
+        try:
+            artifacts_root.relative_to(runtime_root)
+        except ValueError as exc:
+            raise RuntimeError("terminal artifact root escapes runtime home") from exc
+        session_component = (
+            "session-"
+            + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+        )
+        session_root = (artifacts_root / session_component).resolve()
+        try:
+            session_root.relative_to(artifacts_root)
+        except ValueError as exc:
+            raise RuntimeError("terminal session artifact root escapes runtime home") from exc
+        return artifacts_root, session_root
+
+    def _register_terminal_output_artifact(
+        self,
+        *,
+        artifact_id: str,
+        session_id: str,
+        turn_id: str,
+        paths: Mapping[str, str],
+        stats: Mapping[str, Mapping[str, object]],
+    ) -> dict[str, object] | None:
+        artifacts_root, session_root = self._terminal_output_artifact_session_root(
+            session_id=session_id,
+        )
+        root = session_root.relative_to(artifacts_root).as_posix()
+        streams: dict[str, str] = {}
+        for label, raw_path in paths.items():
+            if int(stats.get(label, {}).get("total_bytes") or 0) <= 0:
+                continue
+            path = Path(raw_path).resolve()
+            try:
+                streams[label] = path.relative_to(session_root).as_posix()
+            except ValueError:
+                continue
+        if not streams:
+            return None
+        descriptor: dict[str, object] = {
+            "artifact_id": artifact_id,
+            "kind": "terminal-output",
+            "root": root,
+            "streams": streams,
+        }
+        self.task_worker.control_plane.store.append(
+            (
+                RuntimeEvent(
+                    type="artifact.stored",
+                    aggregate_type="artifact",
+                    aggregate_id=artifact_id,
+                    payload={
+                        "owner_turn_id": turn_id,
+                        "kind": "terminal-output",
+                        "uri": artifact_id,
+                        "metadata": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "root": root,
+                            "streams": streams,
+                            "output": {
+                                key: dict(value)
+                                for key, value in stats.items()
+                            },
+                        },
+                    },
+                ),
+            )
+        )
+        return descriptor
 
     async def evict_session(self, session_id: str) -> None:
         if self.mcp_runtime is not None:
@@ -2049,22 +2161,65 @@ class ToolRuntime:
                 owner_turn_id=turn.turn_id,
                 notify_on_complete=bool(call.arguments.get("notify_on_complete", True)),
             )
+        artifact_id, artifact_paths = self._terminal_output_artifact_paths(
+            session_id=turn.session_id,
+        )
         try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                execution_command,
-                cwd=cwd.path,
-                env=env,
-                shell=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=execution_timeout,
-                check=False,
+            self.process_lifecycle.ensure_open()
+            cancel_event = threading.Event()
+            foreground_task = asyncio.create_task(
+                asyncio.to_thread(
+                    run_foreground_process,
+                    execution_command,
+                    cwd=cwd.path,
+                    env=env,
+                    timeout_seconds=execution_timeout,
+                    output_limit_chars=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+                    cancel_event=cancel_event,
+                    output_artifact_paths=artifact_paths,
+                    artifact_redactions=bound_secret_values,
+                )
             )
+            foreground_registration = self.process_lifecycle.track_foreground(
+                cancel_event=cancel_event,
+                task=foreground_task,
+            )
+            try:
+                try:
+                    completed = await asyncio.shield(foreground_task)
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    try:
+                        await asyncio.shield(foreground_task)
+                    except ProcessExecutionCancelled:
+                        pass
+                    except Exception as cleanup_error:
+                        raise RuntimeError(
+                            "foreground terminal cancellation cleanup failed"
+                        ) from cleanup_error
+                    raise
+                except ProcessExecutionCancelled:
+                    raise asyncio.CancelledError from None
+            finally:
+                self.process_lifecycle.release_foreground(
+                    foreground_registration
+                )
             content = _redact_terminal_bound_secrets(
                 self._format_command_result(completed),
                 bound_secret_values,
+            )
+            process_identity = getattr(completed, "process_identity", None)
+            output_stats = getattr(completed, "output_stats", None)
+            output_artifact = (
+                self._register_terminal_output_artifact(
+                    artifact_id=artifact_id,
+                    session_id=turn.session_id,
+                    turn_id=turn.turn_id,
+                    paths=getattr(completed, "output_artifacts", {}),
+                    stats=output_stats,
+                )
+                if output_stats is not None
+                else None
             )
             return ToolResult(
                 content=content,
@@ -2075,12 +2230,36 @@ class ToolRuntime:
                     "cwd": cwd.relative,
                     "timed_out": False,
                     "audit": audit,
+                    **(
+                        {"process": process_identity.audit_view()}
+                        if process_identity is not None
+                        else {}
+                    ),
+                    **({"output": output_stats} if output_stats is not None else {}),
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
                 },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
+            process_identity = getattr(exc, "process_identity", None)
+            output_stats = getattr(exc, "output_stats", None)
+            output_artifact = (
+                self._register_terminal_output_artifact(
+                    artifact_id=artifact_id,
+                    session_id=turn.session_id,
+                    turn_id=turn.turn_id,
+                    paths=getattr(exc, "output_artifacts", {}),
+                    stats=output_stats,
+                )
+                if output_stats is not None
+                else None
+            )
             content = _redact_terminal_bound_secrets(
                 self._format_command_output(124, stdout, stderr, timed_out=True),
                 bound_secret_values,
@@ -2094,6 +2273,17 @@ class ToolRuntime:
                     "cwd": cwd.relative,
                     "timed_out": True,
                     "audit": audit,
+                    **(
+                        {"process": process_identity.audit_view()}
+                        if process_identity is not None
+                        else {}
+                    ),
+                    **({"output": output_stats} if output_stats is not None else {}),
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
                 },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
@@ -2115,16 +2305,28 @@ class ToolRuntime:
         notify_on_complete: bool,
     ) -> ToolResult:
         async def terminal_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+            artifact_id, artifact_paths = self._terminal_output_artifact_paths(
+                session_id=owner_session_id,
+            )
             process = await asyncio.create_subprocess_shell(
                 execution_command,
                 cwd=cwd.path,
                 env=dict(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_spawn_kwargs(),
             )
+            process_identity = capture_process_identity(process.pid)
+            try:
+                bind_process_identity(process, process_identity)
+            except Exception:
+                process.kill()
+                await process.wait()
+                raise
             ctx.update_metadata(
                 {
                     "pid": process.pid,
+                    "process": process_identity.audit_view(),
                     "command": command,
                     "cwd": cwd.relative,
                     "returncode": None,
@@ -2132,19 +2334,67 @@ class ToolRuntime:
             )
 
             async def cancel_process() -> None:
-                if process.returncode is not None:
-                    return
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                ctx.update_metadata(
+                    {
+                        "returncode": process.returncode,
+                        "exit_reason": "cancelled",
+                    }
+                )
 
             ctx.set_cancel_callback(cancel_process)
-            await self._capture_process_output(process, ctx)
+            try:
+                output = await self._capture_process_output(
+                    process,
+                    ctx,
+                    output_artifact_paths=artifact_paths,
+                )
+            except asyncio.CancelledError:
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                raise
+            except Exception:
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                ctx.update_metadata(
+                    {
+                        "returncode": process.returncode,
+                        "exit_reason": "failed",
+                    }
+                )
+                raise
+            release_process_resources(process)
+            output_artifact = self._register_terminal_output_artifact(
+                artifact_id=artifact_id,
+                session_id=owner_session_id,
+                turn_id=owner_turn_id,
+                paths=output.artifacts,
+                stats=output.stats,
+            )
             returncode = process.returncode
-            ctx.update_metadata({"returncode": returncode})
+            ctx.update_metadata(
+                {
+                    "returncode": returncode,
+                    "exit_reason": "completed",
+                    "output": output.stats,
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
+                }
+            )
+            if output_artifact is not None:
+                ctx.set_result_ref(
+                    f"artifact:{output_artifact['artifact_id']}"
+                )
             summary = f"terminal command exited {returncode}"
             ctx.set_summary(summary)
             if returncode != 0 and self.task_worker.get(ctx.task_id).status != "cancelled":
@@ -2162,7 +2412,7 @@ class ToolRuntime:
                 notify_on_complete=notify_on_complete,
                 metadata={"command": command, "cwd": cwd.relative, "audit": dict(audit)},
             )
-        except RuntimeTaskConflictError as exc:
+        except (RuntimeTaskConflictError, RuntimeTaskWorkerClosedError) as exc:
             content = str(exc)
             return ToolResult(
                 content=content,
@@ -2182,18 +2432,17 @@ class ToolRuntime:
         self,
         process: asyncio.subprocess.Process,
         ctx: RuntimeTaskContext,
-    ) -> None:
-        async def read_stream(stream: asyncio.StreamReader | None, label: str) -> None:
-            if stream is None:
-                return
-            while True:
-                chunk = await stream.readline()
-                if not chunk:
-                    break
-                ctx.append_log(f"{label}: {chunk.decode('utf-8', errors='replace').rstrip()}")
-
-        await asyncio.gather(read_stream(process.stdout, "stdout"), read_stream(process.stderr, "stderr"))
-        await process.wait()
+        *,
+        output_artifact_paths: Mapping[str, Path] | None = None,
+    ) -> BoundedProcessOutput:
+        return await drain_async_process_output(
+            process,
+            output_limit_chars=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+            on_chunk=lambda label, text: ctx.append_log(
+                f"{label}: {text.rstrip()}"
+            ),
+            output_artifact_paths=output_artifact_paths,
+        )
 
     def _start_evolve_task(
         self,
@@ -2231,7 +2480,7 @@ class ToolRuntime:
                 notify_on_complete=notify_on_complete,
                 metadata={"target_core_id": core.core_id, "goal": goal},
             )
-        except RuntimeTaskConflictError as exc:
+        except (RuntimeTaskConflictError, RuntimeTaskWorkerClosedError) as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
         payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)

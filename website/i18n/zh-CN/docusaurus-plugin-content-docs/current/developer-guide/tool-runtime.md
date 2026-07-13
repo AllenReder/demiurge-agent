@@ -8,9 +8,9 @@ description: 面向贡献者的 tool discovery、metadata、dispatch、approvals
 当前 `ToolRuntime` 已包含冻结 Host-owned `EffectRuntime` 的第一段实现：builtin、authored
 与 MCP model call 共用一个 per-turn resolved catalog 和 adapter-bound dispatcher。Adapter
 result 会先归一化为最小 typed `EffectResult`/`EffectError`，turn loop 再转换为旧的
-model-facing `ToolResult`；runtime event 会保留 typed status/error。Connect policy、扩展
-lifecycle outcome、process/network lifecycle、
-output limits 与 redaction 会在后续 EffectRuntime 工作中继续完成。参见
+model-facing `ToolResult`；runtime event 会保留 typed status/error。Connect policy、terminal
+process-tree ownership 与 bounded terminal draining 已实现；扩展 lifecycle outcome、URL/network
+policy 与 cross-effect redaction 会在后续 EffectRuntime 工作中继续完成。参见
 [Host 运行时契约](runtime-contracts.md#effectruntime)。
 
 ## Registry Sources
@@ -76,7 +76,21 @@ approval 后解析，返回 stdout/stderr 中完全相同的值会被脱敏。Ba
 
 Secret capability 使用 exact-default lookup，而不是普通 prefix wildcard matcher。Binding
 target 会拒绝 execution-control variable，最早 binding deadline 会收紧 foreground
-`subprocess.run()` timeout。
+process-owner timeout。
+
+Foreground 与 background terminal adapter 共用 `demiurge.tools.process_lifecycle`。它捕获
+PID、唯一 `spawn_id` 与 OS process-start marker，并在 PID/PGID fallback cleanup 前重新核对
+marker。POSIX 使用新 session/process group 与 TERM-to-KILL escalation；Windows 先 suspended
+spawn、分配 kill-on-close Job Object，再 resume。
+Foreground stdout/stderr 由有界 reader thread drain；background stream 以 8 KiB async
+chunk drain。两者都保留 12,000-character tail 与总 byte/character/truncation statistics。
+Live process handle 与 start identity 只存在于当前进程；task projection 只接收 audit metadata。
+完整 stream 会增量写入 0600 terminal artifact；exact bound secret 会跨 chunk redaction 后再持久化。
+Artifact descriptor 暴露 Host 派生的 opaque `root` 与 stream-relative path；不可信 session id
+不会直接成为 filesystem component。Artifact open/write/flush 失败会成为 terminal execution
+failure，但 pipe 仍会继续 drain，直到 child 可被回收。
+Host shutdown 同时拥有 foreground registration 与 background task；cancellation 是 single-flight，
+drain/log persistence failure 会在发布 terminal failure 前终止 process tree。
 
 ## 目标 EffectRuntime 接口
 
@@ -112,7 +126,8 @@ effects。
 运行时，并使用共享的 `RuntimeTaskWorker` 作为 active work 的 live worker：
 
 - `terminal(background=true)` 创建 `terminal.exec` task，并把 stdout/stderr 捕获到
-  `task_logs`。
+  bounded `task_logs` chunk。Cancellation 会终止 process tree、持久化 return code/exit
+  reason，再发布 completion。
 - `evolve_core(action="start", background=true)` 创建 `evolver.run` task，编辑隔离的
   agents-tree worktree。它返回 task id；完成后的 task metadata/result 会标识 evolve
   run。它不会切换 live core。

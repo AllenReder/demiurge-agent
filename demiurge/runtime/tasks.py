@@ -34,6 +34,10 @@ class RuntimeTaskKindError(ValueError):
     pass
 
 
+class RuntimeTaskWorkerClosedError(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class RuntimeTaskOutcome:
     summary: str = ""
@@ -240,8 +244,11 @@ class RuntimeTaskWorker:
         self._cancel_callbacks: dict[str, RuntimeTaskCancelCallback] = {}
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
+        self._cancellations_in_progress: set[str] = set()
+        self._cancellation_tasks: dict[str, asyncio.Task[None]] = {}
         self._completion_consumers: dict[str, int] = {}
         self._turn_principal_scopes: dict[tuple[str, str], PrincipalScope] = {}
+        self._closed = False
         self.host_work = host_work or HostWorkLifecycleRuntime(store=control_plane.store)
 
     def bind_turn_scope(
@@ -275,6 +282,8 @@ class RuntimeTaskWorker:
         metadata: Mapping[str, Any] | None = None,
         task_id: str | None = None,
     ) -> RuntimeTaskRecord:
+        if self._closed:
+            raise RuntimeTaskWorkerClosedError("runtime task worker is closed")
         task_kind = self._validate_background_kind(kind)
         normalized_scope = self._normalize_scope(write_scope)
         self._ensure_scope_available(normalized_scope)
@@ -342,20 +351,32 @@ class RuntimeTaskWorker:
                 record.completed_at = _now()
                 self._append_runtime_status_event(record, f"task.{record.status}")
         except asyncio.CancelledError:
-            if record.status != "cancelled":
+            if record.status not in TERMINAL_TASK_STATUSES:
                 record.status = "cancelled"
                 record.summary = record.summary or "task cancelled"
                 record.completed_at = _now()
-            self._append_runtime_status_event(record, "task.cancelled")
+            if record.task_id not in self._cancellations_in_progress:
+                self._append_runtime_status_event(record, "task.cancelled")
             raise
         except Exception as exc:
             record.status = "failed"
             record.summary = str(exc)
             record.completed_at = _now()
-            self.append_log(record.task_id, f"error: {exc}")
+            try:
+                self.append_log(record.task_id, f"error: {exc}")
+            except Exception as log_error:
+                record.metadata["error_log_persist_error_type"] = type(
+                    log_error
+                ).__name__
             self._append_runtime_status_event(record, "task.failed")
         finally:
-            if record.status in TERMINAL_TASK_STATUSES or record.status == "blocked_needs_user":
+            if (
+                record.task_id not in self._cancellations_in_progress
+                and (
+                    record.status in TERMINAL_TASK_STATUSES
+                    or record.status == "blocked_needs_user"
+                )
+            ):
                 self._emit_completion_once(record)
             self._cancel_callbacks.pop(record.task_id, None)
 
@@ -566,30 +587,62 @@ class RuntimeTaskWorker:
         record = self.get(task_id)
         if record.status in TERMINAL_TASK_STATUSES:
             return record
+        cancellation_task = self._cancellation_tasks.get(task_id)
+        if cancellation_task is None:
+            cancellation_task = asyncio.create_task(
+                self._cancel_once(task_id)
+            )
+            self._cancellation_tasks[task_id] = cancellation_task
+
+            def release_cancel_task(completed: asyncio.Task[None]) -> None:
+                if self._cancellation_tasks.get(task_id) is completed:
+                    self._cancellation_tasks.pop(task_id, None)
+
+            cancellation_task.add_done_callback(release_cancel_task)
+        await asyncio.shield(cancellation_task)
+        return self.get(task_id)
+
+    async def _cancel_once(self, task_id: str) -> None:
+        record = self.get(task_id)
+        if record.status in TERMINAL_TASK_STATUSES:
+            return
         active_record = self._active_records.get(task_id)
         if active_record is None:
             self.control_plane.cancel(task_id)
-            return self.get(task_id)
+            return
         record = active_record
         record.status = "cancelled"
         record.summary = record.summary or "task cancelled"
         record.completed_at = _now()
-        self._append_runtime_status_event(record, "task.cancelled")
-        callback = self._cancel_callbacks.get(task_id)
-        if callback is not None:
-            value = callback()
-            if inspect.isawaitable(value):
-                await value
-        task = self._active_tasks.get(task_id)
-        if task is not None and not task.done():
-            task.cancel()
-            with_context = asyncio.gather(task, return_exceptions=True)
-            try:
-                await asyncio.wait_for(with_context, timeout=5)
-            except asyncio.TimeoutError:
-                pass
+        self._cancellations_in_progress.add(task_id)
+        try:
+            terminal_event_type = "task.cancelled"
+            callback = self._cancel_callbacks.get(task_id)
+            if callback is not None:
+                try:
+                    value = callback()
+                    if inspect.isawaitable(value):
+                        await value
+                except Exception as exc:
+                    record.status = "failed"
+                    record.summary = (
+                        "task cancellation cleanup failed: "
+                        f"{type(exc).__name__}"
+                    )
+                    record.metadata["cancel_cleanup_error_type"] = type(exc).__name__
+                    terminal_event_type = "task.failed"
+            self._append_runtime_status_event(record, terminal_event_type)
+            task = self._active_tasks.get(task_id)
+            if task is not None and not task.done():
+                task.cancel()
+                with_context = asyncio.gather(task, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(with_context, timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self._cancellations_in_progress.discard(task_id)
         self._emit_completion_once(record)
-        return self.get(task_id)
 
     async def cancel_owned(
         self,
@@ -605,6 +658,17 @@ class RuntimeTaskWorker:
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        self._closed = True
+        task_ids = [
+            task_id
+            for task_id, task in self._active_tasks.items()
+            if not task.done()
+        ]
+        for task_id in task_ids:
+            await self.cancel(task_id)
+        await self.drain()
 
     @property
     def active_count(self) -> int:

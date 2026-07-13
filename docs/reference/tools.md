@@ -115,9 +115,42 @@ Wildcard grants such as `secret.bind:*` are rejected. Binding targets also
 cannot replace execution-control variables such as `PATH`, `HOME`, `COMSPEC`,
 loader injection variables, language runtime search paths, or option hooks.
 The earliest binding expiry clamps the foreground subprocess timeout; expiry
-therefore terminates the shell process even when the requested command timeout
-is longer. Full descendant process-tree termination remains the separate
-process-lifecycle contract.
+therefore terminates the owned process tree even when the requested command
+timeout is longer.
+
+### Terminal process and output lifecycle
+
+Foreground and background terminal calls start under one Host-owned process
+lifecycle and both are registered with Host shutdown. POSIX starts a new
+session/process group, sends TERM, waits for a short grace deadline, then sends
+KILL. Windows creates the process suspended, assigns a kill-on-close Job Object,
+then resumes it. Timeout, foreground turn cancellation,
+`task_control(command="cancel")`, and Host shutdown terminate the owned tree.
+Cancellation is single-flight, and its terminal state is persisted before its
+completion notification. Drain or task-log persistence failure also triggers
+tree cleanup before a failed task is published.
+
+The Host records the PID, process-group id, platform, a unique `spawn_id`, and
+an OS process-start marker. Live cancellation closes over that process handle
+and revalidates the marker before PID/PGID fallback termination rather than
+trusting a caller-supplied or stale PID. This covers descendants that stay
+in the owned OS process tree; it is not a hardened sandbox against approved
+`host_shared` code that deliberately creates a new session or otherwise
+escapes the platform tree boundary.
+
+Stdout and stderr are drained continuously. Foreground results retain at most
+12,000 characters per stream as a tail plus total byte/character and truncation
+metadata; they do not first materialize complete output in memory. Background
+terminal output is drained in bounded chunks into `task_logs`, with the same
+bounded tail statistics stored in operator/debug task metadata. In parallel,
+full streams are written incrementally to private durable terminal artifacts
+and registered in the runtime artifact projection; a background task's
+`result_ref` points to that artifact. Exact bound secrets are redacted before
+artifact persistence. The artifact descriptor contains an opaque `root` and
+stream-relative paths; the Host derives that root from session identity and
+enforces containment below `runtime/artifacts`. If artifact open, write, flush,
+or sync fails, the operation fails after continuing to drain the child pipes.
+Durable log retention remains a separate runtime-store policy.
 
 This filtering and redaction are not OS isolation. An approved command still
 runs through the Host shell, and transformed/encoded secret output is outside
@@ -428,6 +461,11 @@ does not also trigger a separate background-completion turn. If `yield_until`
 reaches its timeout while the task is still running, it returns the current task
 status with `timed_out=true`; the timeout does not mean the task failed.
 `task_list` is scoped to the current session.
+
+Cancelling a background terminal task first seals its in-memory state as
+cancelled, terminates the owned process tree, records return code and exit
+reason in the durable terminal event, and only then emits completion-ready.
+Closing the Host applies the same cancellation path to active runtime tasks.
 
 ## Session History Search
 

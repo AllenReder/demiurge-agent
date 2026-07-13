@@ -99,8 +99,32 @@ resolved shell/process executable 与 best-effort command executable，但不记
 `secret.bind:*` 等 wildcard grant 会被拒绝。Binding target 也不能替换 `PATH`、`HOME`、
 `COMSPEC`、loader injection variables、language runtime search path 或 option hook 等
 execution-control variable。最早 binding expiry 会收紧 foreground subprocess timeout；即使
-请求的 command timeout 更长，expiry 也会终止 shell process。完整 descendant
-process-tree termination 仍属于独立 process-lifecycle contract。
+请求的 command timeout 更长，expiry 也会终止 owned process tree。
+
+### Terminal process 与 output lifecycle
+
+Foreground 与 background terminal call 共用一个 Host-owned process lifecycle，并都注册到
+Host shutdown。POSIX 创建新 session/process group，发送 TERM、等待短 grace deadline，再发送
+KILL。Windows 先以 suspended 状态创建 process、分配 kill-on-close Job Object，再 resume。
+Timeout、foreground turn cancellation、`task_control(command="cancel")` 与 Host shutdown 会终止
+owned tree。Cancellation 是 single-flight，terminal state 会先持久化，再发布 completion
+notification。Drain 或 task-log persistence failure 也会先清理 tree，再发布 failed task。
+
+Host 会记录 PID、process-group id、platform、唯一 `spawn_id` 与 OS process-start marker。
+Live cancellation 闭包持有 process handle，并在 PID/PGID fallback termination 前重新核对
+start marker，不会仅凭 caller 提供或已陈旧的 PID 执行终止。该边界覆盖
+仍留在 owned OS process tree 中的 descendants；对于显式创建新 session 或通过平台机制逃逸
+tree boundary 的获批 `host_shared` code，它不是 hardened sandbox。
+
+Stdout/stderr 会持续 drain。Foreground 每个 stream 最多保留 12,000 个字符的 tail，并记录
+总 byte/character 数与 truncation metadata；不会先把完整输出物化到内存。Background terminal
+output 以有界 chunk 写入 `task_logs`，相同 bounded-tail statistics 会进入 operator/debug task
+metadata。同时，完整 stream 会增量写入 private durable terminal artifact，并注册到 runtime
+artifact projection；background task 的 `result_ref` 会指向该 artifact。Exact bound secret 会在
+artifact persistence 前 redaction。Artifact descriptor 包含 opaque `root` 与 stream-relative
+path；Host 从 session identity 派生该 root，并强制它位于 `runtime/artifacts` 下。Artifact
+open/write/flush/sync 失败时，pipe 会继续 drain，但 operation 最终失败。Durable log retention
+仍是独立 runtime-store policy。
 
 该 filtering/redaction 不是 OS isolation。获批 command 仍由 Host shell 执行；经过转换或
 编码的 secret output 不在 exact-value redactor 的保证范围内。
@@ -387,6 +411,10 @@ turn session。`/subagents` 使用相同 owner check。
 completion notification，因此相同结果不会再触发独立 background-completion turn。如果
 `yield_until` 到达 timeout 时 task 仍在运行，它会返回带 `timed_out=true` 的当前 task
 status；timeout 不表示 task failed。`task_list` 限制在 current session。
+
+取消 background terminal task 时，会先把内存状态封为 cancelled，终止 owned process tree，
+把 return code 与 exit reason 写入 durable terminal event，再发布 completion-ready。关闭 Host
+会对 active runtime tasks 使用同一 cancellation path。
 
 ## Session History Search
 

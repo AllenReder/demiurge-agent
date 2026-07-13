@@ -41,7 +41,27 @@ instead of inheriting the full process environment, use a dedicated runtime
 `HOME`, and omit provider, channel, MCP, cloud, and desktop credentials by
 default. Commands that execute workspace/project code, plus any explicit
 environment overlay, require approval even when their outer command is a known
-development command. Process-tree control remains a separate boundary.
+development command. Terminal timeout, foreground turn cancellation,
+background task cancellation, and Host shutdown own the inherited OS process
+tree: POSIX uses a new process group with a TERM grace deadline followed by
+forced cleanup. Windows creates the process suspended, assigns a kill-on-close
+Job Object, then resumes it. PID, a Host-issued `spawn_id`, and an OS
+process-start marker bind cleanup to the live handle rather than stale task
+metadata. Foreground calls are registered with Host shutdown, while concurrent
+background cancellation shares one cleanup result.
+
+This process ownership is still containment, not OS isolation. Approved
+`host_shared` code can deliberately create a new session or use other platform
+mechanisms to escape the inherited tree; optional subprocess/per-core isolation
+remains the later hardened boundary.
+
+Terminal stdout/stderr use separate views: bounded model/operator tails and a
+private durable artifact. Artifact writes are streaming and 0600 on POSIX;
+their session root is an opaque Host-derived component contained below
+`runtime/artifacts`, rather than a raw session identifier. Exact foreground
+secret bindings are redacted before persistence, with the same documented
+limitation for transformed or encoded secret output. Artifact persistence
+failure fails the terminal operation instead of silently returning success.
 
 ## Capabilities
 
@@ -61,12 +81,13 @@ Builtin file, terminal, network, schedule, and skill handlers resolve their
 applicable capability/approval checks before guarded operations, and MCP tool
 calls do so before the call. Authored tool dispatch now requires the resolved
 singular capability and approval policy before module import/invocation. Alpha
-gaps remain: MCP spawn/connect/discovery can occur before call approval, while
-builtin/authored/MCP dispatch still uses separate implementation branches.
+runtime catalogs require MCP connect authority before spawn/connect/discovery,
+and builtin/authored/MCP calls share the resolved-entry dispatcher. Remaining
+effect-security gaps include shared URL/redirect policy and general structured
+cross-effect redaction.
 `evolve_core` / `rollback_core` now use the same resolved registry entry for
 capability and monotonic approval policy before adapter calls or background
-task creation. The target `EffectRuntime` removes the remaining branch
-duplication with one ordering; see
+task creation. The `EffectRuntime` contract retains one ordering; see
 [Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime).
 
 Background completion turns use the originating session's normal capabilities
@@ -92,8 +113,7 @@ sandbox or a guarantee against transformed/encoded disclosure.
 The capability must be exact (`secret.bind:*` does not match), and a binding
 cannot override `PATH`, `HOME`, shell/loader controls, or language runtime
 search paths after approval. The earliest binding expiry shortens the
-foreground subprocess timeout; descendant process-tree cleanup remains a
-separate lifecycle boundary.
+foreground process-owner deadline and terminates the same owned process tree.
 
 Package component options of type `secret` can write component-local config, but
 `packages.yaml` stores only redacted option values. Package provenance hashes in

@@ -1,4 +1,9 @@
+import asyncio
 import json
+import os
+import shlex
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +17,7 @@ from demiurge.security.capabilities import CapabilityFacade
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
 from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.tools import runtime as tool_runtime
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
@@ -114,6 +120,91 @@ class FakeTaskWorker:
 def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+
+
+def _descendant_tree_command(
+    *,
+    sentinel: Path,
+    started_marker: Path | None = None,
+    release_marker: Path | None = None,
+    ignore_term: bool = False,
+    detach_stdio: bool = True,
+    emit_output: bool = False,
+) -> str:
+    grandchild_parts = [
+        "import signal, time" if ignore_term else "import time",
+        "from pathlib import Path",
+    ]
+    if ignore_term:
+        grandchild_parts.append("signal.signal(signal.SIGTERM, signal.SIG_IGN)")
+    grandchild_parts.extend(
+        (
+            [
+                f"release = Path({str(release_marker)!r})",
+                'exec("while not release.exists():\\n    time.sleep(0.01)")',
+            ]
+            if release_marker is not None
+            else ["time.sleep(1.5)"]
+        )
+    )
+    grandchild_parts.append(
+        f"Path({str(sentinel)!r}).write_text('survived', encoding='utf-8')"
+    )
+    grandchild_code = "; ".join(grandchild_parts)
+    child_parts = [
+        "import signal, subprocess, sys, time"
+        if ignore_term
+        else "import subprocess, sys, time",
+    ]
+    if started_marker is not None:
+        child_parts.extend(
+            [
+                "from pathlib import Path",
+                f"Path({str(started_marker)!r}).write_text('started', encoding='utf-8')",
+            ]
+        )
+    if ignore_term:
+        child_parts.append("signal.signal(signal.SIGTERM, signal.SIG_IGN)")
+    popen_options = (
+        ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+        if detach_stdio
+        else ""
+    )
+    child_parts.append(
+        f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]{popen_options})"
+    )
+    if emit_output:
+        child_parts.append("print('trigger', flush=True)")
+    child_parts.append(
+        "time.sleep(10)" if release_marker is not None else "time.sleep(3)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote('; '.join(child_parts))}"
+    if detach_stdio:
+        command += " >/dev/null 2>&1"
+    return command
+
+
+def _exited_leader_with_inherited_pipe_command(
+    *,
+    sentinel: Path,
+    started_marker: Path | None = None,
+) -> str:
+    started_write = (
+        f"Path({str(started_marker)!r}).write_text('started', encoding='utf-8'); "
+        if started_marker is not None
+        else ""
+    )
+    descendant_code = (
+        "import time; from pathlib import Path; "
+        f"{started_write}"
+        "time.sleep(1.5); "
+        f"Path({str(sentinel)!r}).write_text('survived', encoding='utf-8')"
+    )
+    leader_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}])"
+    )
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(leader_code)}"
 
 
 def _load_core_with(
@@ -1113,6 +1204,484 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert (workspace / "denied.txt").exists()
 
 
+@pytest.mark.asyncio
+async def test_terminal_records_process_start_identity(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "printf identity", "cwd": "."})
+
+    assert result.is_error is False
+    process = result.data["process"]
+    assert process["pid"] > 0
+    assert process["spawn_id"].startswith("proc_")
+    assert process["start_identity"]
+    assert process["platform"] in {"posix", "windows", "other"}
+    if os.name == "posix":
+        assert process["process_group_id"] == process["pid"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_timeout_records_bounded_output_stats(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    payload_bytes = 200_000
+    code = (
+        "import sys, time; "
+        f"sys.stdout.write(chr(120) * {payload_bytes}); "
+        "sys.stdout.flush(); "
+        "time.sleep(3)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert result.data["output"]["stdout"]["total_bytes"] == payload_bytes
+    assert result.data["output"]["stdout"]["truncated"] is True
+    assert len(result.content) <= 12_100
+
+
+@pytest.mark.asyncio
+async def test_terminal_foreground_high_output_has_durable_artifact(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    payload_bytes = 50_000
+    code = f"import sys; sys.stdout.write(chr(120) * {payload_bytes})"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 5},
+    )
+
+    assert result.is_error is False
+    assert result.data["output"]["stdout"]["truncated"] is True
+    artifact = result.data["output_artifact"]
+    rows = app.runtime_store.query(
+        RuntimeQuery(table="artifacts", where={"artifact_id": artifact["artifact_id"]}, limit=1)
+    ).rows
+    assert len(rows) == 1
+    artifact_root = app.home / "runtime" / "artifacts" / artifact["root"]
+    stdout_path = artifact_root / artifact["streams"]["stdout"]
+    assert stdout_path.stat().st_mode & 0o777 == 0o600
+    assert stdout_path.read_text(encoding="utf-8") == "x" * payload_bytes
+    assert len(result.content) <= 12_100
+
+
+@pytest.mark.asyncio
+async def test_terminal_output_artifact_path_cannot_escape_runtime_home(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+
+    artifact_id, paths = app.tool_runtime._terminal_output_artifact_paths(
+        session_id="../../escaped",
+    )
+    artifacts_root = (app.home / "runtime" / "artifacts").resolve()
+
+    for path in paths.values():
+        assert path.resolve().is_relative_to(artifacts_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("artifact", encoding="utf-8")
+
+    descriptor = app.tool_runtime._register_terminal_output_artifact(
+        artifact_id=artifact_id,
+        session_id="../../escaped",
+        turn_id="turn_test",
+        paths={label: str(path) for label, path in paths.items()},
+        stats={
+            label: {"total_bytes": 8}
+            for label in paths
+        },
+    )
+
+    assert descriptor is not None
+    assert descriptor["root"].startswith("session-")
+    assert "escaped" not in descriptor["root"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        release_marker=release_marker,
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+
+    assert result.is_error is True
+    assert result.data.get("timed_out") is True, (result.content, result.data)
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(20):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.1)
+    assert not sentinel.exists(), "terminal timeout left a descendant process running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_foreground_cancellation_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    terminal_task = asyncio.create_task(
+        _execute(
+            app,
+            core,
+            "terminal",
+            {"command": command, "cwd": ".", "timeout_seconds": 10},
+        )
+    )
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "foreground child did not start"
+
+    terminal_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await terminal_task
+
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "foreground cancellation left a descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_escalates_and_closes_orphaned_pipes(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        ignore_term=True,
+        detach_stdio=False,
+    )
+
+    started_at = time.monotonic()
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert elapsed < 2.5
+    for _ in range(20):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "KILL escalation left a TERM-resistant descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_remains_active_after_leader_exits_with_pipe_open(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _exited_leader_with_inherited_pipe_command(sentinel=sentinel)
+
+    started_at = time.monotonic()
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert elapsed < 1.4
+    await asyncio.sleep(0.8)
+    assert not sentinel.exists(), "timeout left an inherited-pipe descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_cancel_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background child did not start"
+
+    cancelled = await app.task_worker.cancel(task_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata["exit_reason"] == "cancelled"
+    assert cancelled.metadata["returncode"] is not None
+    debug_task = app.control_plane.read(task_id, view="debug")
+    assert debug_task["status"] == "cancelled"
+    cancelled_event = next(
+        event for event in debug_task["events"] if event["type"] == "task.cancelled"
+    )
+    assert cancelled_event["payload"]["metadata"]["exit_reason"] == "cancelled"
+    assert cancelled_event["payload"]["metadata"]["returncode"] is not None
+    runtime_events = app.runtime_store.query(
+        RuntimeQuery(table="runtime_events", order_by="seq", limit=1_000)
+    ).rows
+    cancelled_seq = next(
+        event["seq"]
+        for event in runtime_events
+        if event["type"] == "task.cancelled" and event["aggregate_id"] == task_id
+    )
+    completion_seq = next(
+        event["seq"]
+        for event in runtime_events
+        if event["type"] == "task.completion_ready"
+        and event["payload"]["task_id"] == task_id
+    )
+    assert cancelled_seq < completion_seq
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "terminal cancellation left a descendant process running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_cancel_stops_descendant_after_leader_exits(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "descendant-started.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _exited_leader_with_inherited_pipe_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background descendant did not start"
+    await asyncio.sleep(0.05)
+
+    cancelled = await app.task_worker.cancel(task_id)
+
+    assert cancelled.status == "cancelled"
+    await asyncio.sleep(1.5)
+    assert not sentinel.exists(), "background cancel trusted an exited leader and left its descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_app_shutdown_cancels_background_terminal_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background child did not start"
+
+    await app.close()
+
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "app shutdown left a terminal descendant running"
+    assert app.task_worker.get(task_id).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_rejected_after_task_worker_shutdown_is_not_started(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    await app.task_worker.shutdown()
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "printf not-started", "cwd": ".", "background": True},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "task_id" not in result.data
+    assert app.task_worker.active_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_app_shutdown_cancels_foreground_terminal_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+    terminal_task = asyncio.create_task(
+        _execute(
+            app,
+            core,
+            "terminal",
+            {"command": command, "cwd": ".", "timeout_seconds": 10},
+        )
+    )
+    try:
+        for _ in range(20):
+            if started_marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started_marker.exists(), "foreground child did not start"
+
+        await app.close()
+
+        release_marker.write_text("release", encoding="utf-8")
+        for _ in range(20):
+            if sentinel.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert not sentinel.exists(), "app shutdown left a foreground descendant running"
+        with pytest.raises(asyncio.CancelledError):
+            await terminal_task
+    finally:
+        if not terminal_task.done():
+            terminal_task.cancel()
+            await asyncio.gather(terminal_task, return_exceptions=True)
+
+
 @pytest.mark.cross_platform
 def test_windows_terminal_printf_compat_formats_common_smoke_command():
     assert tool_runtime._format_windows_printf("%s\\n", ["hello"]) == "hello\n"
@@ -1141,7 +1710,16 @@ async def test_windows_terminal_executes_compat_command_but_approves_original(mo
         stdout = ""
         stderr = ""
 
-    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
         captured["command"] = command
         return Completed()
 
@@ -1149,7 +1727,7 @@ async def test_windows_terminal_executes_compat_command_but_approves_original(mo
         "demiurge.tools.runtime._terminal_execution_command",
         lambda command: tool_runtime._windows_posix_compat_command(command) or command,
     )
-    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
 
     result = await _execute(app, core, "terminal", {"command": "rm target.txt", "cwd": "."})
 
@@ -1174,11 +1752,20 @@ async def test_terminal_injects_runtime_timezone_env(monkeypatch, tmp_path):
         stdout = "ok"
         stderr = ""
 
-    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
         captured["env"] = env
         return Completed()
 
-    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
 
     result = await _execute(app, core, "terminal", {"command": "printf ok", "cwd": "."})
 
@@ -1361,12 +1948,21 @@ async def test_terminal_secret_binding_is_one_shot_redacted_and_auditable(monkey
         stdout = sentinel
         stderr = ""
 
-    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
         captured["bound_secret"] = env["BOUND_SECRET"]
-        captured["timeout"] = timeout
+        captured["timeout"] = timeout_seconds
         return Completed()
 
-    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
     core = _load_core_with(
         app,
         capabilities={
@@ -1435,6 +2031,55 @@ async def test_terminal_secret_binding_is_one_shot_redacted_and_auditable(monkey
     assert denied_reuse.is_error is True
     assert denied_reuse.data["executionStarted"] is False
     assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_is_redacted_from_durable_output_artifact(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_SYNTHETIC_ARTIFACT_SECRET"
+    sentinel = "artifact-secret-sentinel"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+    code = "import os, sys; sys.stdout.write(os.environ['BOUND_SECRET'])"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": command,
+            "cwd": ".",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is False
+    artifact = result.data["output_artifact"]
+    stdout_path = (
+        app.home
+        / "runtime"
+        / "artifacts"
+        / artifact["root"]
+        / artifact["streams"]["stdout"]
+    )
+    persisted = stdout_path.read_text(encoding="utf-8")
+    assert sentinel not in persisted
+    assert persisted == "<redacted:BOUND_SECRET>"
 
 
 @pytest.mark.asyncio
@@ -1802,6 +2447,107 @@ async def test_terminal_background_task_can_be_listed_and_waited(tmp_path):
     assert task["status"] == "succeeded"
     assert task["notify_policy"] == "completion_event"
     assert any("ready" in line["text"] for line in task["logs"])
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_drains_large_unbroken_output_in_bounded_chunks(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    payload_bytes = 200_000
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote(f'import sys; sys.stdout.write(chr(120) * {payload_bytes})')}"
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    record = await app.task_worker.wait(started.data["task_id"], timeout_seconds=5)
+    logs = app.task_worker.log(record.task_id)
+
+    assert record.status == "succeeded", (record.summary, logs[-3:], record.metadata)
+    assert logs
+    assert max(len(line) for line in logs) <= 8_200
+    assert record.metadata["output"]["stdout"]["total_bytes"] == payload_bytes
+    assert record.metadata["output"]["stdout"]["truncated"] is True
+    artifact = record.metadata["output_artifact"]
+    assert record.result_ref == f"artifact:{artifact['artifact_id']}"
+    rows = app.runtime_store.query(
+        RuntimeQuery(table="artifacts", where={"artifact_id": artifact["artifact_id"]}, limit=1)
+    ).rows
+    assert len(rows) == 1
+    stdout_path = (
+        app.home
+        / "runtime"
+        / "artifacts"
+        / artifact["root"]
+        / artifact["streams"]["stdout"]
+    )
+    assert stdout_path.stat().st_mode & 0o777 == 0o600
+    assert stdout_path.stat().st_size == payload_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_output_persistence_failure_stops_process_tree(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        release_marker=release_marker,
+        detach_stdio=False,
+        emit_output=True,
+    )
+    original_append_log = app.task_worker.append_log
+    append_calls = 0
+
+    def fail_first_output_log(task_id, text):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 1:
+            raise RuntimeError("synthetic task-log persistence failure")
+        return original_append_log(task_id, text)
+
+    monkeypatch.setattr(app.task_worker, "append_log", fail_first_output_log)
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    record = await app.task_worker.wait(started.data["task_id"], timeout_seconds=5)
+
+    assert record.status == "failed"
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(30):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "task-log failure left the terminal process tree running"
 
 
 @pytest.mark.asyncio

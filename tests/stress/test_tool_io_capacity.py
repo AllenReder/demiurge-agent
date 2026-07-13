@@ -232,11 +232,6 @@ async def _terminal_peak(tmp_path, baseline_recorder, size_bytes: int) -> int:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=BaselineContractFailure,
-    reason="IO-01: foreground terminal captures complete output before truncation",
-)
 async def test_io_01_terminal_memory_is_bounded_while_draining_high_output(tmp_path, baseline_recorder):
     small_peak = await _terminal_peak(tmp_path, baseline_recorder, SMALL_INPUT_BYTES)
     large_peak = await _terminal_peak(tmp_path, baseline_recorder, LARGE_INPUT_BYTES)

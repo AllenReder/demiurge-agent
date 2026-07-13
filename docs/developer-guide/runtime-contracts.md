@@ -368,8 +368,8 @@ authority and release connections at child completion. Evolution gates attach
 a secret-safe MCP declaration security diff and content-bound
 `mcp-review:<sha256>` token; promotion requires that exact token and leaves Git
 refs unchanged for missing or stale confirmation. Indeterminate outcomes, URL
-policy, streaming limits, and general cross-effect redaction remain later
-EffectRuntime work. Terminal execution
+policy, and general cross-effect redaction remain later EffectRuntime work.
+Terminal execution
 already uses an allowlisted environment, separates project-code execution from
 literal reads, and supports foreground-only `secret.bind:<ENV_NAME>` injection
 after one-shot approval. Its audit view binds actual cwd/environment
@@ -377,9 +377,27 @@ keys/resolved process and command executables, and exact bound values are redact
 output. MCP stdio children reuse the same allowlist and add only
 manifest-declared env entries after connect approval.
 Terminal secret capabilities require exact grants, reject execution-control
-targets, and clamp the foreground subprocess deadline to the earliest binding
-expiry. Descendant process-tree termination remains owned by the later process
-lifecycle slice.
+targets, and clamp the foreground process-owner deadline to the earliest
+binding expiry.
+
+Foreground and background terminal execution share a Host process-lifecycle
+module and both register with Host shutdown. POSIX uses a new session/process
+group with TERM-to-KILL escalation. Windows creates the process suspended,
+assigns a kill-on-close Job Object, then resumes it. The owner records PID,
+process-group id, platform, a unique `spawn_id`, and a real OS process-start
+marker, then revalidates the marker before PID/PGID fallback termination. Foreground
+stdout/stderr are continuously drained into
+12,000-character per-stream tails with total-size/truncation metadata;
+background streams use bounded chunks and persist the same statistics. Full
+stdout/stderr are streamed to private durable artifacts while model/operator
+views remain bounded. The Host derives an opaque, contained session artifact
+root and returns it in the artifact descriptor; raw session identifiers never
+become path components. Artifact persistence failure remains a terminal error,
+while pipe drain continues so the child cannot block on a full pipe. Terminal
+cancellation is single-flight: cleanup and
+return-code/exit-reason persistence finish before one terminal event and
+completion-ready. Drain or task-log persistence failure also terminates the
+owned tree before the task is reported failed.
 
 ### Internal Catalog Seam
 

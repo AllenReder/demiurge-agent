@@ -35,7 +35,22 @@ sandbox。显式获批的 command 仍由 Host terminal runtime 执行。Terminal
 现在从 Host allowlist 构建环境，而不是继承完整 process environment；它使用专用 runtime
 `HOME`，并默认剥离 provider、channel、MCP、cloud 与 desktop credentials。执行
 workspace/project code 的 command，以及任何显式 environment overlay，即使外层是已知
-development command，也必须 approval。Process-tree control 仍是独立边界。
+development command，也必须 approval。Terminal timeout、foreground turn cancellation、
+background task cancellation 与 Host shutdown 会拥有继承的 OS process tree：POSIX 使用新
+process group，并在 TERM grace deadline 后强制 cleanup；Windows 先 suspended spawn、分配
+kill-on-close Job Object，再 resume。PID、Host-issued `spawn_id` 与 OS process-start marker
+会把 cleanup 绑定到 live handle，而不是陈旧 task metadata。Foreground call 会注册到 Host
+shutdown，并发 background cancellation 会共享同一个 cleanup result。
+
+该 process ownership 仍是 containment，不是 OS isolation。获批 `host_shared` code 可以显式
+创建新 session 或使用其他平台机制逃逸 inherited tree；可选 subprocess/per-core isolation
+仍是后续 hardened boundary。
+
+Terminal stdout/stderr 使用分离 view：model/operator 只接收 bounded tail，完整 stream 写入
+private durable artifact。Artifact 在 POSIX 上以 0600 增量写入；exact foreground secret binding
+会在持久化前 redaction。Session artifact root 是限制在 `runtime/artifacts` 下的 Host-derived
+opaque component，不直接使用 raw session id。Artifact persistence failure 会使 terminal
+operation 失败；transformed/encoded secret output 仍受同一已记录限制。
 
 ## Capabilities
 
@@ -54,11 +69,11 @@ Capabilities 描述以下 effect class：
 Builtin file、terminal、network、schedule 与 skill handlers 会在受保护操作前解析适用的
 capability/approval checks，MCP tool call 也会在 call 前执行。Authored tool dispatch
 现在会在 module import/invocation 前要求 resolved singular capability 并解析 approval
-policy。剩余 alpha 缺口包括：MCP spawn/connect/discovery 可能发生在 call approval 之前；
-而 builtin/authored/MCP dispatch 仍使用不同实现分支。`evolve_core` / `rollback_core`
+policy。当前 alpha catalog 会在 MCP spawn/connect/discovery 前要求 connect authority，且
+builtin/authored/MCP call 共用 resolved-entry dispatcher。剩余 effect-security 缺口包括
+shared URL/redirect policy 与通用 structured cross-effect redaction。`evolve_core` / `rollback_core`
 现在会使用同一个 resolved registry entry，在 adapter call 或 background task 创建前执行
-capability 与单调收紧的 approval policy。目标 `EffectRuntime` 会用同一套顺序删除剩余
-分支 duplication；参见
+capability 与单调收紧的 approval policy。`EffectRuntime` contract 保持同一套顺序；参见
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)。
 
 Background completion turn 使用原 session 的正常 capabilities，不会仅仅因为在后台运行
@@ -79,8 +94,7 @@ background 使用，只记录 source/target/capability/expiry metadata，并把 
 
 Capability 必须精确（`secret.bind:*` 不匹配），binding 也不能在 approval 后覆盖
 `PATH`、`HOME`、shell/loader control 或 language runtime search path。最早 binding
-expiry 会缩短 foreground subprocess timeout；descendant process-tree cleanup 仍是独立
-lifecycle boundary。
+expiry 会缩短 foreground process-owner deadline，并终止同一个 owned process tree。
 
 类型为 `secret` 的 package component option 可以写入 component-local config，但
 `packages.yaml` 只保存脱敏后的 option value。该文件中的 package provenance hash 用于

@@ -356,8 +356,13 @@ class DemiurgeApp:
         return self.core_loader.load(self.version_store.active_core_path(self.runner.core_id))
 
     async def close(self) -> None:
+        if self._closed:
+            return
         try:
-            await self.tool_runtime.close()
+            try:
+                await self.task_worker.shutdown()
+            finally:
+                await self.tool_runtime.close()
         finally:
             self.approval_runtime.close()
             _deactivate_operator_authority(
