@@ -6,6 +6,12 @@ from typing import Any, Literal, Mapping
 
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolResult
+from demiurge.security.redaction import (
+    REDACTION_FAILED,
+    RedactionView,
+    SecretRedactor,
+    redact_tool_result,
+)
 from demiurge.security.workspace import DEFAULT_READ_LIMIT_CHARS, DEFAULT_TOOL_OUTPUT_LIMIT_CHARS
 
 
@@ -412,11 +418,24 @@ class EffectError:
 
 
 @dataclass(frozen=True, slots=True)
+class EffectResultViews:
+    model: ToolResult
+    operator: ToolResult
+    event: ToolResult
+    durable: ToolResult
+    debug: ToolResult
+
+    def for_view(self, view: RedactionView | str) -> ToolResult:
+        return getattr(self, RedactionView(view).value)
+
+
+@dataclass(frozen=True, slots=True)
 class EffectResult:
     entry: ResolvedEffectEntry | None
     status: EffectStatus
     result: ToolResult
     error: EffectError | None = None
+    views: EffectResultViews | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.entry is None and self.status != "not_found":
@@ -433,9 +452,50 @@ class EffectResult:
         cls,
         entry: ResolvedEffectEntry,
         result: ToolResult,
+        *,
+        redactor: SecretRedactor | None = None,
     ) -> EffectResult:
+        views = None
+        if redactor is not None:
+            rendered: dict[RedactionView, ToolResult] = {}
+            redaction_failed = False
+            for view in RedactionView:
+                rendered[view], failed = redact_tool_result(
+                    result,
+                    redactor=redactor,
+                    view=view,
+                )
+                redaction_failed = redaction_failed or failed
+            if redaction_failed:
+                safe_result = ToolResult(
+                    content=REDACTION_FAILED,
+                    data={
+                        "executionStarted": bool(
+                            isinstance(result.data, Mapping)
+                            and result.data.get("executionStarted", False)
+                        ),
+                        "redactionFailed": True,
+                    },
+                    is_error=True,
+                    model_output=REDACTION_FAILED,
+                    display_output=REDACTION_FAILED,
+                )
+                rendered = {view: safe_result for view in RedactionView}
+            views = EffectResultViews(
+                model=rendered[RedactionView.MODEL],
+                operator=rendered[RedactionView.OPERATOR],
+                event=rendered[RedactionView.EVENT],
+                durable=rendered[RedactionView.DURABLE],
+                debug=rendered[RedactionView.DEBUG],
+            )
+            result = views.model
         if not result.is_error:
-            return cls(entry=entry, status="succeeded", result=result)
+            return cls(
+                entry=entry,
+                status="succeeded",
+                result=result,
+                views=views,
+            )
         data = result.data if isinstance(result.data, Mapping) else {}
         execution_started = bool(data.get("executionStarted", False))
         approval = data.get("approval")
@@ -464,6 +524,7 @@ class EffectResult:
                 execution_started=execution_started,
                 provenance=entry.provenance,
             ),
+            views=views,
         )
 
     @classmethod
@@ -491,8 +552,13 @@ class EffectResult:
             ),
         )
 
-    def to_tool_result(self) -> ToolResult:
-        return self.result
+    def to_tool_result(
+        self,
+        view: RedactionView | str = RedactionView.MODEL,
+    ) -> ToolResult:
+        if self.views is None:
+            return self.result
+        return self.views.for_view(view)
 
 
 def _freeze_value(value: Any) -> Any:

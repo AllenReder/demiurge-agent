@@ -63,7 +63,17 @@ attempted target.
 ## Result Conversion
 
 MCP results are converted into Demiurge tool results before model replay and
-display.
+display. The shared effect redactor receives the raw call arguments only for
+adapter execution and returns separate model, operator, event, durable, and
+debug views. MCP call and discovery exceptions are redacted with the same
+argument/environment/header context before they become tool errors or cached
+diagnostics.
+
+Stdio stderr is captured in an anonymous temporary file, read through a bounded
+12,000-character window when the connection closes, structurally redacted, and
+then appended to `~/.demiurge/logs/mcp-stderr.log`. On POSIX the log directory
+is `0700` and the file is `0600`. A redaction failure writes only the fixed
+`<redaction-failed>` marker; it never copies raw stderr into the durable log.
 
 ## Boundary
 

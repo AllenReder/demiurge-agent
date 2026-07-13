@@ -39,6 +39,7 @@ from demiurge.provider_presets import BUILTIN_PROVIDER_PRESETS, ProviderPreset, 
 from demiurge.providers import LLMMessage, LLMRequest
 from demiurge.providers.profiles import get_builtin_provider_profile, is_builtin_provider
 from demiurge.runtime_timezone import resolve_runtime_timezone, validate_timezone_name
+from demiurge.security.private_files import require_private_runtime_permissions
 from demiurge.storage import VersionStore
 from demiurge.util import default_home
 
@@ -86,7 +87,7 @@ def handle_setup_command(args: argparse.Namespace) -> None:
 
 def load_setup_context(home: Path | None, *, agents_root: Path | None = None) -> SetupContext:
     resolved_home = (home or default_home()).expanduser().resolve()
-    resolved_home.mkdir(parents=True, exist_ok=True)
+    require_private_runtime_permissions(resolved_home)
     load_runtime_env(resolved_home)
     host_config_path = resolved_home / "config.yaml"
     write_default_host_config_if_missing(host_config_path)
@@ -98,6 +99,7 @@ def load_setup_context(home: Path | None, *, agents_root: Path | None = None) ->
         source_agents,
         requested_core_id=host_config.runtime.default_core or "assistant",
     )
+    require_private_runtime_permissions(resolved_home)
     return SetupContext(
         home=resolved_home,
         host_config_path=host_config_path,

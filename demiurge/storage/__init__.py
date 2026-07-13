@@ -16,11 +16,11 @@ import yaml
 
 from demiurge.core_repository import CommitResult, CorePointer, CoreRepository
 from demiurge.runtime.delivery import ArtifactRef
+from demiurge.security.private_files import ensure_private_directory
 from demiurge.util import (
     append_jsonl,
     atomic_write_private_json,
     atomic_write_private_text,
-    ensure_dir,
     read_json,
     utc_id,
     write_json,
@@ -202,12 +202,12 @@ class ArtifactStore:
         path = attachment.get("path")
         content = attachment.get("content")
         if content is not None:
-            artifact_dir = ensure_dir(self.root / artifact_id)
+            artifact_dir = ensure_private_directory(self.root / artifact_id)
             filename = self._safe_filename(str(attachment.get("filename") or "payload.txt"))
             artifact_path = artifact_dir / filename
-            artifact_path.write_text(str(content), encoding="utf-8")
+            atomic_write_private_text(artifact_path, str(content))
             path = artifact_path.relative_to(self.home / "runtime" / "artifacts" / self.session_id).as_posix()
-        ensure_dir(self.root)
+        ensure_private_directory(self.root)
         record = ArtifactRecord(
             artifact_id=artifact_id,
             session_id=self.session_id,

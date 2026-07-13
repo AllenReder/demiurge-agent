@@ -10,6 +10,7 @@ from demiurge.runtime.interactions import InteractionItem, ToolInteractionRecord
 from demiurge.runtime.store import RuntimeEvent
 from demiurge.runtime.turn import TurnEngine, TurnEngineRequest
 from demiurge.sdk import AgentInput, ContextContribution, ToolResult, TurnContext
+from demiurge.security.redaction import SecretRedactor
 from demiurge.tools.registry import (
     EffectRequest,
     EffectResult,
@@ -48,6 +49,10 @@ class _FakeTurnHost:
         self.provider_requests: list[LLMRequest] = []
         self.effect_requests: list[EffectRequest] = []
         self.debug_messages: list[list[LLMMessage]] = []
+        self.assistant_step_calls: list[list[ToolCall]] = []
+        self.started_calls: list[ToolCall] = []
+        self.finished_records: list[ToolExecutionRecord] = []
+        self.finished_model_results: list[ToolResult] = []
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         event = {"type": event_type, **payload}
@@ -95,6 +100,7 @@ class _FakeTurnHost:
         tool_calls: list[ToolCall],
         interaction_metadata: dict[str, Any],
     ):
+        self.assistant_step_calls.append(tool_calls)
         return None, [InteractionItem(kind="assistant_step", metadata={"step_id": step_id, "content": content})]
 
     async def send_tool_call_started(
@@ -105,6 +111,7 @@ class _FakeTurnHost:
         call: ToolCall,
         interaction_metadata: dict[str, Any],
     ) -> InteractionItem:
+        self.started_calls.append(call)
         return InteractionItem.tool_call_item(ToolInteractionRecord.started(call), metadata={"step_id": step_id})
 
     async def execute_tool(
@@ -121,6 +128,9 @@ class _FakeTurnHost:
         return EffectResult.normalize(
             request.entry,
             self.tool_results[request.name],
+            redactor=SecretRedactor.from_value(
+                {"arguments": dict(request.arguments)}
+            ),
         )
 
     def output_client(
@@ -140,8 +150,11 @@ class _FakeTurnHost:
         turn: TurnContext,
         step_id: str,
         record: ToolExecutionRecord,
+        model_result: ToolResult,
         interaction_metadata: dict[str, Any],
     ) -> InteractionItem:
+        self.finished_records.append(record)
+        self.finished_model_results.append(model_result)
         return InteractionItem.tool_result_item(record, metadata={"step_id": step_id})
 
     def append_runtime_event(self, event: RuntimeEvent) -> None:
@@ -173,6 +186,9 @@ class _ResolvedRequestHost(_FakeTurnHost):
         return EffectResult.normalize(
             request.entry,
             self.tool_results[request.name],
+            redactor=SecretRedactor.from_value(
+                {"arguments": dict(request.arguments)}
+            ),
         )
 
 
@@ -251,6 +267,110 @@ async def test_turn_engine_feeds_tool_result_back_to_provider():
     assert [event.payload["step_id"] for event in host.runtime_events] == ["turn_1_step_1", "turn_1_step_1"]
     assert host.runtime_events[-1].payload["effect_status"] == "succeeded"
     assert host.runtime_events[-1].payload["effect_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_turn_engine_uses_safe_views_for_observable_tool_surfaces():
+    secret = "SYNTHETIC_TURN_EFFECT_SECRET"
+    call = ToolCall(
+        id="call_secret",
+        name="lookup",
+        arguments={
+            "token": secret,
+            "query": "public query",
+        },
+    )
+    host = _FakeTurnHost(
+        [
+            LLMResponse(content="checking", tool_calls=[call]),
+            LLMResponse(content="done"),
+        ],
+        tool_results={
+            "lookup": ToolResult(
+                content=f"lookup result {secret}",
+                data={"token": secret, "public": "visible"},
+                model_output=f"model result {secret}",
+                display_output=f"operator result {secret}",
+            )
+        },
+    )
+
+    result = await TurnEngine(host).run(_request())
+
+    assert dict(host.effect_requests[0].arguments)["token"] == secret
+    assert host.assistant_step_calls[0][0].arguments == {
+        "token": "<redacted>",
+        "query": "public query",
+    }
+    assert host.started_calls[0].arguments == {
+        "token": "<redacted:TOKEN>",
+        "query": "public query",
+    }
+    assert host.finished_records[0].result.content == (
+        "lookup result <redacted:TOKEN>"
+    )
+    assert host.finished_model_results[0].content == (
+        "lookup result <redacted>"
+    )
+    assert result.tool_records[0].result.content == (
+        "lookup result <redacted:TOKEN>"
+    )
+    assert any(
+        message.role == "tool"
+        and message.content == "model result <redacted>"
+        for message in host.provider_requests[1].messages
+    )
+    assert host.runtime_events[0].payload["args"]["token"] == {
+        "redacted": True,
+        "name": "TOKEN",
+        "source": "field:arguments.token",
+    }
+    assert host.runtime_events[-1].payload["result"]["content"] == (
+        "lookup result <redacted:TOKEN>"
+    )
+    assert secret not in repr(host.events)
+    assert secret not in repr(host.runtime_events)
+    assert secret not in repr(result.tool_records)
+
+
+@pytest.mark.asyncio
+async def test_turn_engine_shares_known_secrets_across_calls_in_one_response():
+    secret = "SYNTHETIC_CROSS_CALL_SECRET"
+    content_secret = "SYNTHETIC_CONTENT_ONLY_SECRET"
+    calls = [
+        ToolCall(
+            id="call_secret_source",
+            name="lookup",
+            arguments={"api_key": secret},
+        ),
+        ToolCall(
+            id="call_secret_echo",
+            name="lookup",
+            arguments={"note": secret},
+        ),
+    ]
+    host = _FakeTurnHost(
+        [
+            LLMResponse(
+                content=f"Authorization: Bearer {content_secret}",
+                tool_calls=calls,
+            ),
+            LLMResponse(content=f"done with {secret}"),
+        ],
+        tool_results={"lookup": ToolResult(content="ok")},
+    )
+
+    result = await TurnEngine(host).run(_request())
+
+    assert host.started_calls[1].arguments["note"] == "<redacted:API_KEY>"
+    assert secret not in repr(host.provider_requests[1].messages)
+    assert content_secret not in repr(host.provider_requests[1].messages)
+    assert secret not in repr(host.runtime_events)
+    assert content_secret not in repr(host.events)
+    assert secret not in repr(result.items)
+    assert content_secret not in repr(result.items)
+    assert secret not in result.final_output
+    assert result.final_output == "done with <redacted>"
 
 
 @pytest.mark.asyncio

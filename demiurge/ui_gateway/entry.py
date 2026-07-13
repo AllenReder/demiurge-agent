@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from demiurge.app import create_app
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception_message,
+)
 from demiurge.ui_gateway.bridge import OperatorGatewayRuntime
 from demiurge.ui_gateway.protocol import NdjsonRpcEndpoint, TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
 from demiurge.util import default_home
@@ -23,6 +28,33 @@ class TuiIdentityMismatch(ValueError):
 
 class TuiStartupError(RuntimeError):
     pass
+
+
+def _safe_exception_message(
+    exc: BaseException,
+    *,
+    gateway: OperatorGatewayRuntime | None = None,
+    app: Any | None = None,
+) -> str:
+    owner = app or getattr(gateway, "app", None)
+    provider = getattr(getattr(owner, "runner", None), "provider", None)
+    api_key = getattr(provider, "api_key", None)
+    secrets = (
+        (
+            SecretValue(
+                value=api_key,
+                name="API_KEY",
+                source="provider.api_key",
+            ),
+        )
+        if isinstance(api_key, str) and api_key
+        else ()
+    )
+    return redact_exception_message(
+        exc,
+        view=RedactionView.OPERATOR,
+        secrets=secrets,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,7 +107,13 @@ async def async_main(argv: list[str] | None = None) -> int:
         )
         gateway = OperatorGatewayRuntime(app, emit=emit, tool_display=config.get("tool_display"), busy_mode=config.get("busy_mode"))
     except Exception as exc:
-        await endpoint.write_event("operator.error", {"message": str(exc), "source": "gateway_startup"})
+        await endpoint.write_event(
+            "operator.error",
+            {
+                "message": _safe_exception_message(exc, app=app),
+                "source": "gateway_startup",
+            },
+        )
         if app is not None:
             await app.close()
         return 1
@@ -118,14 +156,15 @@ async def _handle_request(
     try:
         result = await _dispatch(gateway, method, params)
     except TuiIdentityMismatch as exc:
-        print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        safe_error = _safe_exception_message(exc, gateway=gateway)
+        print(f"[demiurge.ui_gateway] {method} failed: {safe_error}", file=sys.stderr)
         if message_id is not None:
-            await endpoint.write_error(message_id, str(exc), code="protocol_mismatch")
+            await endpoint.write_error(message_id, safe_error, code="protocol_mismatch")
         else:
             await endpoint.write_event(
                 "operator.error",
                 {
-                    "message": str(exc),
+                    "message": safe_error,
                     "source": "gateway_protocol",
                     "method": method,
                     "code": "protocol_mismatch",
@@ -133,21 +172,22 @@ async def _handle_request(
             )
         raise
     except Exception as exc:
-        print(f"[demiurge.ui_gateway] {method} failed: {exc}", file=sys.stderr)
+        safe_error = _safe_exception_message(exc, gateway=gateway)
+        print(f"[demiurge.ui_gateway] {method} failed: {safe_error}", file=sys.stderr)
         if method == "operator.initialize" and not getattr(gateway, "_tui_identity_verified", False):
             await endpoint.write_event(
                 "operator.error",
                 {
-                    "message": str(exc),
+                    "message": safe_error,
                     "method": method,
                     "source": "gateway_startup",
                 },
             )
-            raise TuiStartupError(str(exc)) from exc
+            raise TuiStartupError(safe_error) from exc
         if message_id is not None:
-            await endpoint.write_error(message_id, str(exc))
+            await endpoint.write_error(message_id, safe_error)
         else:
-            payload = {"message": str(exc), "source": "gateway_dispatch", "method": method}
+            payload = {"message": safe_error, "source": "gateway_dispatch", "method": method}
             await endpoint.write_event("operator.error", payload)
         return
     if message_id is not None:

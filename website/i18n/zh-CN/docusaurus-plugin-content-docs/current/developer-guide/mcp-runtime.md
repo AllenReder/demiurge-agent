@@ -54,7 +54,15 @@ SNI，因此后续 resolver answer 不能重定向 socket。Approval/runtime aud
 
 ## 结果转换
 
-MCP result 会在 model replay 与 display 前转换成 Demiurge tool result。
+MCP result 会在 model replay 与 display 前转换成 Demiurge tool result。Shared effect redactor
+只把 raw call argument 用于 adapter execution，并返回独立的 model、operator、event、durable
+与 debug view。MCP call/discovery exception 会带上已知 argument/environment/header context
+完成 redaction，再成为 tool error 或 cached diagnostic。
+
+Stdio stderr 先写入匿名 temporary file；connection close 时只读取有界的 12,000-character
+window，完成 structured redaction 后再 append 到 `~/.demiurge/logs/mcp-stderr.log`。在 POSIX
+上 log directory 为 `0700`、file 为 `0600`。Redaction 失败时只写固定
+`<redaction-failed>` marker，不会把 raw stderr 复制到 durable log。
 
 ## 边界
 

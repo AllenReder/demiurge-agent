@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -768,6 +769,30 @@ async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     received = next(event for event in app.runner.event_log.tail(30) if event["type"] == "message.received")
     assert received["channel"] == "tui"
     assert received["source"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_turn_exception_redacts_known_provider_secret(tmp_path):
+    secret = "SYNTHETIC_TUI_PROVIDER_SECRET"
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = SimpleNamespace(api_key=secret)
+    bridge = OperatorGatewayRuntime(app, emit=sink)
+
+    class FailingRuntime:
+        async def handle(self, _inbound, *, route_binding):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    bridge.runtime = FailingRuntime()
+    inbound = bridge._user_inbound("hello")
+
+    await bridge._run_inbound(bridge._ingress_state, inbound)
+
+    error = sink.payloads("operator.error")[-1]
+    assert secret not in repr(error)
+    assert "<redacted:API_KEY>" in error["message"]
+    assert secret not in bridge._last_error
+    await app.close()
 
 
 @pytest.mark.asyncio

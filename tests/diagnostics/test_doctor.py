@@ -1,4 +1,6 @@
 import shutil
+import os
+import stat
 
 import pytest
 import yaml
@@ -85,6 +87,29 @@ def test_doctor_reports_core_repository_consistency_errors(tmp_path):
     assert finding.severity == "error"
     assert "core.live_ref.missing" in finding.details["issues"]
     assert "demiurge core status" in finding.remediation
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses platform ACL semantics")
+def test_doctor_reports_insecure_runtime_permissions_without_changing_them(tmp_path):
+    home = tmp_path / "home"
+    init_runtime(home=home, core_id="assistant", agents_root=source_agents_root())
+    config_path = home / "config.yaml"
+    os.chmod(config_path, 0o644)
+
+    report = DoctorRuntime(
+        home=home,
+        source_agents_root=source_agents_root(),
+        core_id="assistant",
+    ).run()
+
+    finding = next(
+        item
+        for item in report.findings
+        if item.code == "runtime.permissions.insecure"
+    )
+    assert finding.severity == "error"
+    assert str(config_path) in finding.details["paths"]
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o644
 
 
 def test_cli_init_refresh_refuses_dirty_runtime_core(tmp_path, capsys):

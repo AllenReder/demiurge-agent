@@ -19,8 +19,12 @@ from demiurge.runtime.scope import (
     _active_operator_authority,
     _scope_from_record,
 )
-from demiurge.util import ensure_dir, utc_id
+from demiurge.security.private_files import (
+    ensure_private_directory,
+    ensure_private_file,
+)
 from demiurge.storage import utc_now
+from demiurge.util import utc_id
 
 if os.name == "nt":
     import msvcrt
@@ -91,8 +95,9 @@ class RuntimeStore:
     def __init__(self, path: Path):
         self.path = path.expanduser().resolve()
         self._principal_scope_issuer = object()
-        ensure_dir(self.path.parent)
+        ensure_private_directory(self.path.parent)
         self._initialize()
+        self._secure_database_files()
 
     @classmethod
     def default(cls, home: Path) -> "RuntimeStore":
@@ -680,10 +685,20 @@ class RuntimeStore:
                         raise
                     time.sleep(0.025 * (2**attempt) + random.uniform(0, 0.01))
             connection.execute("PRAGMA foreign_keys=ON")
+            self._secure_database_files()
             return connection
         except Exception:
             connection.close()
             raise
+
+    def _secure_database_files(self) -> None:
+        for path in (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        ):
+            if path.exists():
+                ensure_private_file(path)
 
     def _write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         attempts = 6

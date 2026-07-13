@@ -11,6 +11,11 @@ from typing import Any, Callable, Mapping, Protocol
 
 from demiurge.runtime.scope import PrincipalScope
 from demiurge.security.capabilities import CapabilitySnapshot
+from demiurge.security.redaction import (
+    REDACTION_FAILED,
+    RedactionView,
+    SecretRedactor,
+)
 
 
 ApprovalEventEmitter = Callable[..., dict[str, Any]]
@@ -167,6 +172,19 @@ def _redact_approval_value(value: Any, *, key: str = "", depth: int = 0) -> Any:
     return repr(value)[:_APPROVAL_PREVIEW_MAX_STRING]
 
 
+def _structured_approval_redaction(value: Any) -> Any:
+    result = SecretRedactor(
+        max_depth=_APPROVAL_PREVIEW_MAX_DEPTH,
+        max_items=_APPROVAL_PREVIEW_MAX_ITEMS,
+        max_string_chars=max(
+            _APPROVAL_COMMAND_MAX_STRING,
+            _APPROVAL_TARGET_MAX_STRING,
+            _APPROVAL_SUMMARY_MAX_STRING,
+        ),
+    ).redact_with_value(value, view=RedactionView.MODEL)
+    return result.value if not result.failed else REDACTION_FAILED
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     value: str
@@ -251,33 +269,71 @@ class ApprovalRequest:
     session_cacheable: bool = True
 
     def __post_init__(self) -> None:
+        structured = _structured_approval_redaction(
+            {
+                "arguments_preview": self.arguments_preview,
+                "command": self.command,
+                "summary": self.summary,
+                "target": self.target,
+            }
+        )
+        if not isinstance(structured, Mapping):
+            structured = {
+                "arguments_preview": REDACTION_FAILED,
+                "command": REDACTION_FAILED,
+                "summary": REDACTION_FAILED,
+                "target": REDACTION_FAILED,
+            }
+        structured_preview = structured.get("arguments_preview")
+        preview = (
+            _redact_approval_value(structured_preview)
+            if structured_preview != REDACTION_FAILED
+            else {"redaction": REDACTION_FAILED}
+        )
+        if not isinstance(preview, dict):
+            preview = {"redaction": REDACTION_FAILED}
         object.__setattr__(
             self,
             "arguments_preview",
-            _redact_approval_value(self.arguments_preview),
+            preview,
         )
+        structured_command = structured.get("command")
         object.__setattr__(
             self,
             "command",
-            _truncate_approval_text(
-                _redact_approval_command(self.command),
-                limit=_APPROVAL_COMMAND_MAX_STRING,
+            (
+                REDACTION_FAILED
+                if structured_command == REDACTION_FAILED
+                else _truncate_approval_text(
+                    _redact_approval_command(structured_command),
+                    limit=_APPROVAL_COMMAND_MAX_STRING,
+                )
             ),
         )
+        structured_summary = structured.get("summary")
         object.__setattr__(
             self,
             "summary",
-            _truncate_approval_text(
-                _redact_approval_text(self.summary),
-                limit=_APPROVAL_SUMMARY_MAX_STRING,
+            (
+                REDACTION_FAILED
+                if structured_summary == REDACTION_FAILED
+                else _truncate_approval_text(
+                    _redact_approval_text(structured_summary),
+                    limit=_APPROVAL_SUMMARY_MAX_STRING,
+                )
             ),
         )
+        structured_target = structured.get("target")
         object.__setattr__(
             self,
             "target",
-            _truncate_approval_text(
-                _redact_approval_text(self.target),
-                limit=_APPROVAL_TARGET_MAX_STRING,
+            (
+                REDACTION_FAILED
+                if structured_target == REDACTION_FAILED
+                else _truncate_approval_text(
+                    _redact_approval_text(structured_target),
+                    limit=_APPROVAL_TARGET_MAX_STRING,
+                )
             ),
         )
 

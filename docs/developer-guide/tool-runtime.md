@@ -13,7 +13,8 @@ the legacy model-facing `ToolResult`; runtime events retain typed status/error.
 Connect policy, terminal process-tree ownership, and bounded terminal draining
 are implemented slices. Host-owned URL/network policy is also implemented for
 `web_extract`, MCP HTTP, and the shared callback validator. Extended lifecycle
-outcomes and cross-effect redaction continue through later EffectRuntime work. See
+outcomes continue through later EffectRuntime work; structured cross-effect
+redaction is implemented for the current builtin/authored/MCP hot path. See
 [Host Runtime Contracts](runtime-contracts.md#effectruntime).
 
 ## Registry Sources
@@ -42,8 +43,13 @@ builtin checks such as workspace sensitivity and command review still refine
 the resolved policy, while authored and MCP calls retain their adapter-specific
 approval summaries. Core/global approval is folded into the catalog and can
 only make policy stricter. Approval requests carry a bounded,
-field-name-redacted argument preview. This containment is not the final
-cross-effect `SecretRedactor` owned by the later `EffectRuntime`/SEC-02 work.
+field-name-redacted argument preview. Raw arguments remain internal to adapter
+execution. The dispatcher discovers known secrets from arguments and results,
+then materializes model, operator, event, durable, and debug `ToolResult` views.
+Turn history/provider replay uses the model view, tool cards use the operator
+view, EventLog uses the event view, and SQLite runtime events use the durable
+view. If redaction itself fails, every view becomes a fixed failed result; raw
+adapter output is never used as a fallback.
 
 `ToolRuntime.execute()` accepts only an `EffectRequest` owned by its catalog and
 returns a typed `EffectResult`. Direct Host callers use

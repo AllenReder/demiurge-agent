@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, 
 from demiurge.env_file import load_runtime_env
 from demiurge.security.approval import ApprovalRuntime
 from demiurge.security.url_policy import UrlPolicy
+from demiurge.security.private_files import require_private_runtime_permissions
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
@@ -39,7 +40,12 @@ from demiurge.providers.profiles import (
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
-from demiurge.util import default_home, ensure_dir, utc_id
+from demiurge.util import (
+    atomic_write_private_text,
+    default_home,
+    ensure_dir,
+    utc_id,
+)
 from demiurge.security.workspace import WorkspaceScope
 
 
@@ -639,7 +645,8 @@ def create_app(
     resume_required: bool = False,
 ) -> DemiurgeApp:
     project_root = project_root or Path.cwd().resolve()
-    home = ensure_dir((home or default_home()).resolve())
+    home = (home or default_home()).resolve()
+    require_private_runtime_permissions(home)
     load_runtime_env(home)
     host_config_path = home / "config.yaml"
     host_config, host_sources = load_host_config(host_config_path)
@@ -811,6 +818,7 @@ def create_app(
         app._closed = True
         _ACTIVE_APP_LIFECYCLES.pop(id(app), None)
         raise
+    require_private_runtime_permissions(home)
     return app
 
 
@@ -821,7 +829,8 @@ def init_runtime(
     agents_root: Path | None = None,
     reason: str = "init",
 ) -> dict[str, object]:
-    resolved_home = ensure_dir((home or default_home()).resolve())
+    resolved_home = (home or default_home()).resolve()
+    require_private_runtime_permissions(resolved_home)
     load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     host_config_path = resolved_home / "config.yaml"
@@ -832,6 +841,7 @@ def init_runtime(
     version_store.ensure_initialized("evolver", source_agents / "evolver")
     core_pointer = version_store.active_pointer(core_id)
     evolver_pointer = version_store.active_pointer("evolver")
+    require_private_runtime_permissions(resolved_home)
     return {
         "home": str(resolved_home),
         "host_config": str(host_config_path),
@@ -855,7 +865,8 @@ def refresh_runtime(
     agents_root: Path | None = None,
     reason: str = "refresh",
 ) -> dict[str, object]:
-    resolved_home = ensure_dir((home or default_home()).resolve())
+    resolved_home = (home or default_home()).resolve()
+    require_private_runtime_permissions(resolved_home)
     load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     version_store = VersionStore(resolved_home)
@@ -893,6 +904,7 @@ def refresh_runtime(
                 "previous_revision": result.previous_revision,
             }
     refreshed["items"] = items
+    require_private_runtime_permissions(resolved_home)
     return refreshed
 
 
@@ -982,8 +994,10 @@ def default_host_config_dict() -> dict[str, object]:
 
 
 def write_host_config(path: Path, config: HostConfig) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(host_config_to_dict(config), sort_keys=False), encoding="utf-8")
+    atomic_write_private_text(
+        path,
+        yaml.safe_dump(host_config_to_dict(config), sort_keys=False),
+    )
 
 
 def host_config_to_dict(config: HostConfig) -> dict[str, object]:
@@ -994,8 +1008,10 @@ def write_default_host_config_if_missing(path: Path) -> bool:
     if path.exists():
         load_host_config(path)
         return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(default_host_config_dict(), sort_keys=False), encoding="utf-8")
+    atomic_write_private_text(
+        path,
+        yaml.safe_dump(default_host_config_dict(), sort_keys=False),
+    )
     return True
 
 

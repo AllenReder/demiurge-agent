@@ -42,6 +42,11 @@ from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.slash import SlashCommand, SlashCommandSpec, help_text_for_surface, parse_slash_command, specs_for_surface
 from demiurge.storage import EventLog, SessionRecord
 from demiurge.ui_gateway.protocol import JsonEventSink
@@ -336,8 +341,28 @@ class OperatorGatewayRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._last_error = str(exc)
-            await self.emit("operator.error", {"message": str(exc), "source": "operator_gateway"})
+            api_key = getattr(self.app.runner.provider, "api_key", None)
+            secrets = (
+                (
+                    SecretValue(
+                        value=api_key,
+                        name="API_KEY",
+                        source="provider.api_key",
+                    ),
+                )
+                if isinstance(api_key, str) and api_key
+                else ()
+            )
+            safe_error = redact_exception(
+                exc,
+                view=RedactionView.OPERATOR,
+                secrets=secrets,
+            )
+            self._last_error = safe_error
+            await self.emit(
+                "operator.error",
+                {"message": safe_error, "source": "operator_gateway"},
+            )
 
     async def _after_turn(self, state: ConversationIngressState, drained: bool) -> None:
         await self._emit_status()

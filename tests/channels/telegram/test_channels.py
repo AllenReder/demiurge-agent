@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -36,6 +37,7 @@ from demiurge.runtime.interactions import (
     InteractionItem,
     InteractionOutbound,
     InteractionRuntime,
+    SessionRouteBinding,
     SessionInteractionRouter,
     ToolInteractionRecord,
     UserPromptRequest,
@@ -735,6 +737,43 @@ def test_telegram_normalizes_private_group_command_mention_and_reply():
     assert reply.text == "continue"
     assert private.metadata["telegram_user_id"] == 42
     assert private.metadata["telegram_chat_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_turn_exception_redacts_known_provider_secret(caplog):
+    secret = "SYNTHETIC_TELEGRAM_PROVIDER_SECRET"
+    api = FakeApi()
+
+    class FailingRuntime:
+        runner = SimpleNamespace(
+            provider=SimpleNamespace(api_key=secret),
+        )
+
+        async def handle(self, _inbound, *, route_binding):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(FakeRunner()),
+        api=api,
+        bot_username="demiurge_bot",
+    )
+    state = SimpleNamespace(
+        runtime=FailingRuntime(),
+        route_binding=SessionRouteBinding(route=bridge),
+    )
+    inbound = InteractionInbound(
+        channel="telegram",
+        text="hello",
+        source="123",
+        conversation_key="telegram:dm:123",
+        reply_to="77",
+    )
+
+    await bridge._run_inbound(state, inbound)
+
+    assert secret not in caplog.text
+    assert secret not in api.sent[-1]["text"]
+    assert "redacted:API" in api.sent[-1]["text"]
 
 
 def _media_bridge(tmp_path):

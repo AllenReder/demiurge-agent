@@ -83,11 +83,17 @@ calls do so before the call. Authored tool dispatch now requires the resolved
 singular capability and approval policy before module import/invocation. Alpha
 runtime catalogs require MCP connect authority before spawn/connect/discovery,
 and builtin/authored/MCP calls share the resolved-entry dispatcher. Remaining
-effect-security gaps include general structured cross-effect redaction. Shared
-URL enforcement is implemented for `web_extract`, MCP HTTP, and callback URL
-validation. It normalizes hostnames, checks literal addresses and every DNS
-answer, fails closed on resolution errors, revalidates each redirect/request,
-and pins the socket to the validated address while preserving Host/TLS SNI.
+effect results now pass through one Host `SecretRedactor`: raw arguments reach
+only the selected adapter, while model, operator, event, durable, and debug
+surfaces receive separate safe views. Known values are discovered from
+structured secret fields and explicit bindings, plus URL credentials/query
+parameters, authorization headers, command options, and exception text. A
+redaction failure produces a fixed error result rather than falling back to raw
+content. Shared URL enforcement is implemented for `web_extract`, MCP HTTP,
+and callback URL validation. It normalizes hostnames, checks literal addresses
+and every DNS answer, fails closed on resolution errors, revalidates each
+redirect/request, and pins the socket to the validated address while
+preserving Host/TLS SNI.
 Private, loopback, link-local, CGNAT, metadata, multicast, reserved, and
 unspecified targets are blocked by default. Agent Core content cannot weaken
 this policy, and audit/approval views omit URL credentials, path, query, and
@@ -127,6 +133,17 @@ Package component options of type `secret` can write component-local config, but
 that file are used for drift reporting and uninstall safety; runtime truth is
 still the committed agents tree.
 
+On POSIX, the Host creates the runtime home and private runtime directories
+with mode `0700`, and `.env`, `config.yaml`, SQLite files and sidecars, event
+logs, state, MCP stderr logs, and artifacts with mode `0600`, independently of
+the process umask. Normal startup and init tighten an existing runtime tree
+without rewriting file contents; symbolic-link paths are rejected by private
+write helpers. POSIX mutations stay anchored to opened directory descriptors,
+including during directory creation and atomic replacement, so an ancestor
+swap cannot redirect the operation. Windows uses platform ACL semantics instead
+of numeric POSIX modes. `doctor` audits this policy without changing the
+filesystem and reports `runtime.permissions.insecure` when it finds drift.
+
 ## Channels
 
 External channels are disabled by default. Channel bridges must verify tokens,
@@ -146,8 +163,9 @@ core/capability policy fingerprint, bounded lifetime, and explicit revocation;
 tool arguments cannot declare another owner. Session browsing/resume/search and
 task detail/wait/cancel now enforce the same scope in store-owned queries;
 `session_search` additionally requires `session.read` plus approval. The later
-unified EffectRuntime still needs this seam across every effect adapter before
-the alpha runtime provides uniform enforcement. Runtime task records,
+EffectRuntime work still needs typed timeout/cancellation/indeterminate
+outcomes, system-wide retention, and the DG-P9 security audit; the current
+builtin/authored/MCP hot path already owns structured safe views. Runtime task records,
 logs, scheduler instances, and delivery outbox status are stored in the SQLite
 runtime database; in-process workers are still responsible for live execution
 and do not replay already started dangerous side effects after host process

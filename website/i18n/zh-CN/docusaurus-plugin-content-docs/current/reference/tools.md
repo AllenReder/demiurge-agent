@@ -214,6 +214,14 @@ effect status。
 output 会先显示执行的 command 与 cwd，再显示 exit code、stdout 与 stderr；model-visible
 result 保持现有 exit/output shape。
 
+Raw tool argument 与 raw adapter result 都是内部 execution data。任何 observable result
+返回前，Host 会从 structured field、显式 binding、URL userinfo/query、authorization header、
+command option 与 exception text 中发现已知 secret，并生成五种 view：model history/provider
+replay、operator tool card、EventLog event、durable SQLite record 与 Host debug。Event/durable
+view 会保留安全 source metadata 并移除 value；debug 可包含单向 value fingerprint。若
+redaction 失败，全部 view 都变成包含 `<redaction-failed>` 的固定 failed result，而不是 raw
+content。
+
 ## MCP Tools
 
 MCP server 位于配置的 MCP root 下，通常为：
@@ -255,6 +263,10 @@ connection 固定到已验证地址。DNS failure 与 malformed answer 会 fail 
 declaration 不能 opt into private target 或 ambient HTTP proxy。每个 MCP HTTP request
 都会发出带 `phase: request` 的 secret-safe `mcp.url_decision` event，因此 redirect hop 与
 final attempted origin/address 均可审计。
+
+MCP call/discovery exception 会结合已知 argument、environment 与 header source 做 redaction。
+Stdio stderr 会暂存，connection close 时只读取有界的 12,000-character window，完成 redaction
+后 append 到 private `logs/mcp-stderr.log`（POSIX 上 directory 为 `0700`、file 为 `0600`）。
 
 ## Tool Metadata Overrides
 

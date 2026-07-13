@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -8,6 +9,11 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, ToolResult, TurnContext
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.redaction import (
+    REDACTION_FAILED,
+    RedactionView,
+    SecretRedactor,
+)
 from demiurge.tools.registry import (
     EffectRequest,
     EffectResult,
@@ -104,6 +110,141 @@ def test_resolved_effect_entries_are_immutable():
 
     with pytest.raises(FrozenInstanceError):
         entry.approval_policy = "deny"
+
+
+def test_effect_result_exposes_distinct_redacted_views():
+    entry = ResolvedEffectEntry(
+        name="docs__lookup",
+        description="MCP lookup",
+        input_schema={"type": "object"},
+        source="mcp",
+        core_id="assistant",
+        core_revision="rev",
+        adapter_key="mcp:docs/lookup",
+        provenance="mcp:docs/lookup",
+        _adapter=object(),
+    )
+    secret = "SYNTHETIC_MCP_SECRET"
+    redactor = SecretRedactor.from_value(
+        {"arguments": {"token": secret}}
+    )
+
+    effect_result = EffectResult.normalize(
+        entry,
+        ToolResult(
+            content=f"MCP failed with {secret}",
+            data={
+                "executionStarted": True,
+                "nested": {"password": secret},
+            },
+            is_error=True,
+            model_output=f"model saw {secret}",
+            display_output=f"operator saw {secret}",
+        ),
+        redactor=redactor,
+    )
+
+    assert effect_result.status == "failed"
+    assert effect_result.error is not None
+    assert secret not in effect_result.error.message
+    assert effect_result.to_tool_result(RedactionView.MODEL).content == (
+        "MCP failed with <redacted>"
+    )
+    assert effect_result.to_tool_result(RedactionView.OPERATOR).content == (
+        "MCP failed with <redacted:TOKEN>"
+    )
+    assert effect_result.to_tool_result(RedactionView.EVENT).data == {
+        "executionStarted": True,
+        "nested": {
+            "password": {
+                "redacted": True,
+                "name": "PASSWORD",
+                "source": "field:result.data.nested.password",
+            }
+        },
+    }
+    for view in RedactionView:
+        assert secret not in repr(effect_result.to_tool_result(view))
+
+
+def test_effect_redaction_failure_never_falls_back_to_raw_result(monkeypatch):
+    entry = ResolvedEffectEntry(
+        name="docs__lookup",
+        description="MCP lookup",
+        input_schema={"type": "object"},
+        source="mcp",
+        core_id="assistant",
+        core_revision="rev",
+        adapter_key="mcp:docs/lookup",
+        provenance="mcp:docs/lookup",
+        _adapter=object(),
+    )
+    secret = "SYNTHETIC_EFFECT_FAIL_CLOSED_SECRET"
+    redactor = SecretRedactor.from_value({"token": secret})
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(f"redactor failed with {secret}")
+
+    monkeypatch.setattr(SecretRedactor, "_redact_value", fail)
+
+    effect_result = EffectResult.normalize(
+        entry,
+        ToolResult(
+            content=f"raw {secret}",
+            data={"executionStarted": True, "token": secret},
+        ),
+        redactor=redactor,
+    )
+
+    assert effect_result.status == "failed"
+    for view in RedactionView:
+        result = effect_result.to_tool_result(view)
+        assert result.content == REDACTION_FAILED
+        assert result.is_error is True
+        assert secret not in repr(result)
+
+
+def test_effect_discovery_failure_never_escapes_or_returns_raw_result():
+    entry = ResolvedEffectEntry(
+        name="docs__lookup",
+        description="MCP lookup",
+        input_schema={"type": "object"},
+        source="mcp",
+        core_id="assistant",
+        core_revision="rev",
+        adapter_key="mcp:docs/lookup",
+        provenance="mcp:docs/lookup",
+        _adapter=object(),
+    )
+    secret = "SYNTHETIC_DISCOVERY_FAILURE_SECRET"
+
+    class ExplodingMapping(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            raise RuntimeError(f"mapping failed with {secret}")
+
+    effect_result = EffectResult.normalize(
+        entry,
+        ToolResult(
+            content=f"raw {secret}",
+            data=ExplodingMapping(),
+        ),
+        redactor=SecretRedactor.from_value({"token": secret}),
+    )
+
+    assert effect_result.status == "invalid"
+    for view in RedactionView:
+        result = effect_result.to_tool_result(view)
+        assert result.content == REDACTION_FAILED
+        assert secret not in repr(result)
 
 
 def test_effect_request_rejects_an_entry_not_owned_by_its_catalog():
@@ -412,6 +553,68 @@ async def test_authored_error_result_records_that_adapter_execution_started(
     assert effect_result.error is not None
     assert effect_result.error.execution_started is True
     assert effect_result.to_tool_result().data == {"executionStarted": True}
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_authored_exception_is_redacted_from_every_effect_view(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    tool_root = (
+        app.version_store.active_core_path("assistant")
+        / "agent"
+        / "tools"
+        / "secret_error_probe"
+    )
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Secret error normalization probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties:\n"
+        "    token:\n"
+        "      type: string\n"
+        "capabilities: []\n"
+        "risk: low\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "def run(ctx, arguments):\n"
+        "    raise RuntimeError(f\"provider failed token={arguments['token']}\")\n",
+        encoding="utf-8",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(core, "authored_secret_error")
+    principal_scope = _operator_scope(app, core, turn)
+    catalog = app.tool_runtime.resolve_effects(core, turn=turn)
+    secret = "SYNTHETIC_AUTHORED_EXCEPTION_SECRET"
+    request = catalog.request_for(
+        ToolCall(
+            name="secret_error_probe",
+            arguments={"token": secret},
+            id="call_secret_error_probe",
+        )
+    )
+    assert request is not None
+
+    effect_result = await app.tool_runtime.execute(
+        request,
+        core=core,
+        turn=turn,
+        capability=CapabilityFacade(core),
+        principal_scope=principal_scope,
+    )
+
+    assert effect_result.status == "failed"
+    for view in RedactionView:
+        assert secret not in repr(effect_result.to_tool_result(view))
+    assert effect_result.to_tool_result(RedactionView.MODEL).content.endswith(
+        "token=<redacted>"
+    )
+    assert effect_result.to_tool_result(RedactionView.OPERATOR).content.endswith(
+        "token=<redacted:TOKEN>"
+    )
     await app.close()
 
 

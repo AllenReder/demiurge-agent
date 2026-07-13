@@ -7,6 +7,7 @@ import yaml
 from demiurge.app import create_app
 from demiurge.security.approval import StaticApprovalProvider
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.util import write_json
 
@@ -126,6 +127,85 @@ async def test_fake_provider_read_file_tool_result_reaches_next_step(tmp_path):
     assert approval["turn_id"] == result.turn_id
     assert approval["principal"]["session_id"] == result.session_id
     assert approval["core_revision"] == result.core_revision
+
+
+@pytest.mark.asyncio
+async def test_effect_secrets_do_not_reach_model_or_persistent_views(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    tool_root = (
+        app.version_store.active_core_path("assistant")
+        / "agent"
+        / "tools"
+        / "secret_echo"
+    )
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Echo a synthetic secret for redaction testing.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties:\n"
+        "    token:\n"
+        "      type: string\n"
+        "capabilities: []\n"
+        "risk: low\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "def run(ctx, arguments):\n"
+        "    token = arguments['token']\n"
+        "    return {\n"
+        "        'content': f'echo {token}',\n"
+        "        'data': {'token': token, 'public': 'visible'},\n"
+        "        'model_output': f'model {token}',\n"
+        "        'display_output': f'operator {token}',\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    secret = "SYNTHETIC_DURABLE_EFFECT_SECRET"
+
+    class SecretProvider:
+        def __init__(self):
+            self.requests = []
+
+        async def complete(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return LLMResponse(
+                    content=f"calling with {secret}",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_secret_echo",
+                            name="secret_echo",
+                            arguments={"token": secret},
+                        )
+                    ]
+                )
+            return LLMResponse(content="done")
+
+    provider = SecretProvider()
+    app.runner.provider = provider
+
+    result = await app.runner.run_turn("run secret probe")
+
+    assert len(provider.requests) == 2
+    assert secret not in repr(provider.requests[1].messages)
+    assert secret not in repr(result.tool_results)
+    assert secret not in repr(result.items)
+    assert secret not in repr(app.runner.event_log.read_all())
+    assert secret not in repr(
+        app.runtime_store.query(
+            RuntimeQuery(table="runtime_events", limit=500)
+        ).rows
+    )
+    assert secret not in repr(
+        app.session_runtime.read_messages(result.session_id)
+    )
+    assert result.tool_results[0].result.content == (
+        "echo <redacted:TOKEN>"
+    )
+    await app.close()
 
 
 @pytest.mark.asyncio

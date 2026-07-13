@@ -12,6 +12,7 @@ from demiurge.security.approval import (
     ApprovalScope,
     StaticApprovalProvider,
 )
+from demiurge.security.redaction import REDACTION_FAILED, SecretRedactor
 from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeStore
@@ -585,6 +586,46 @@ def test_approval_event_nested_command_and_url_fields_are_bounded(tmp_path):
     assert len(preview["url"]) <= 540
     assert "[truncated" in preview["command"]
     assert "[truncated" in preview["url"]
+
+
+def test_approval_redaction_failure_is_fail_closed(monkeypatch, tmp_path):
+    secret = "SYNTHETIC_APPROVAL_FAIL_CLOSED_SECRET"
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(f"redaction failed with {secret}")
+
+    monkeypatch.setattr(SecretRedactor, "_redact_value", fail)
+
+    request = _request(
+        scope=_scope(tmp_path),
+        arguments_preview={"token": secret},
+        command=f"curl --token {secret}",
+        summary=f"token={secret}",
+        target=f"https://example.test?token={secret}",
+    )
+
+    assert request.arguments_preview == {"redaction": REDACTION_FAILED}
+    assert request.command == REDACTION_FAILED
+    assert request.summary == REDACTION_FAILED
+    assert request.target == REDACTION_FAILED
+    assert secret not in json.dumps(request.redacted_view())
+
+
+def test_approval_known_secret_is_shared_across_all_preview_fields(tmp_path):
+    secret = "SYNTHETIC_SHARED_APPROVAL_SECRET"
+
+    request = _request(
+        scope=_scope(tmp_path),
+        arguments_preview={"token": secret},
+        command=f"send {secret}",
+        summary=f"send credential {secret}",
+        target=f"custom target {secret}",
+    )
+
+    assert secret not in json.dumps(request.redacted_view())
+    assert request.command == "send <redacted>"
+    assert request.summary == "send credential <redacted>"
+    assert request.target == "custom target <redacted>"
 
 
 def test_tool_caller_cannot_override_host_issued_owner_fields(tmp_path):

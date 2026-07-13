@@ -245,6 +245,16 @@ and channels show in tool cards. For `terminal`, display output includes the
 executed command and cwd before the exit code, stdout, and stderr; the
 model-visible result keeps the existing exit/output shape.
 
+Raw tool arguments and raw adapter results are internal execution data. Before
+any observable result is returned, the Host discovers known secret values from
+structured fields and explicit bindings, URL userinfo/query values,
+authorization headers, command options, and exception text. It produces five
+views: model history/provider replay, operator tool cards, EventLog events,
+durable SQLite records, and Host debug. Event/durable views preserve safe source
+metadata while removing values; debug may include a one-way value fingerprint.
+If redaction fails, every view becomes a fixed failed result containing
+`<redaction-failed>` instead of raw content.
+
 ## MCP Tools
 
 MCP servers live under the configured MCP root, usually:
@@ -293,6 +303,12 @@ Core declarations cannot opt into private targets or ambient HTTP proxies.
 Every MCP HTTP request emits a secret-safe `mcp.url_decision` event with
 `phase: request`, so redirect hops and the final attempted origin/address
 remain auditable.
+
+MCP call/discovery exceptions are redacted with their known arguments,
+environment, and header sources. Stdio stderr is captured temporarily, read
+through a bounded 12,000-character window on connection close, redacted, and
+appended to the private `logs/mcp-stderr.log` (`0700` directory and `0600` file
+on POSIX).
 
 ## Tool Metadata Overrides
 

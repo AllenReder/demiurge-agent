@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from demiurge.security.private_files import open_private_text
+
 
 _PROCESS_GROUP_GRACE_SECONDS = 0.25
 _IS_POSIX = os.name == "posix"
@@ -982,15 +984,11 @@ class _TextArtifactSink:
         self._redactor = _StreamingTextRedactor(redactions or {})
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if os.name == "posix":
-            os.chmod(path.parent, 0o700)
-        descriptor = os.open(
+        self._stream = open_private_text(
             path,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-            0o600,
+            "w",
+            encoding="utf-8",
         )
-        self._stream = os.fdopen(descriptor, "w", encoding="utf-8")
 
     def append(self, text: str) -> None:
         if self._stream is None or not text:

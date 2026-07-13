@@ -64,7 +64,7 @@ owner 前，请先查看其中的
 | `PrincipalScope` | 不可变 Host-derived authority 现已治理 session list/resume/search、task detail/wait/cancel、`/subagents`、durable session/message/task query，以及 approval cache ownership/invalidation。 | 一个不可变 owner predicate 覆盖每个 session、task、approval、history 与 effect 操作；后续 EffectRuntime 工作把同一 seam 应用到每个 effect adapter。 |
 | `TurnExecutionContext` | Frozen turn identity 已固定 principal、session、revision、capability declarations、route、cancellation、admission 与 trace；mutable lifecycle/state handle 仍是内部对象。 | 深度不可变的 principal、session、revision、capability、route、admission、cancellation 与 trace bindings。 |
 | `TurnExecution` | `run(TurnRequest)` 拥有 admission 到 completion；owner-checked `cancel(...)`、captured-route delivery、并发与 cleanup 已实现。 | Typed outcome、durable admission/restart recovery 与最终 immutable result projection 完整闭合 lifecycle。 |
-| `EffectRuntime` | `ToolRuntime`、`McpRuntime`、security helpers 与内联 file/process/network 代码分别拥有 dispatch 的不同部分。 | Builtin、authored 与 MCP effect 使用同一个 resolved effect entry 和同一套 policy/dispatch 顺序。 |
+| `EffectRuntime` | `ToolRuntime` 现在为 builtin、authored 与 MCP call 拥有同一个 resolved catalog/dispatcher，并统一 capability/approval 顺序、URL/process policy 与 structured result view；部分 lifecycle/output adapter 仍保持分离。 | Builtin、authored 与 MCP effect 使用同一个 resolved effect entry 和同一套 policy/dispatch 顺序。 |
 | `ContextManager` | Layer assembly 与 manual compaction 相互分离；没有自动 model-window budget。 | `prepare()` 与 `observe()` 拥有 budgeting、pruning、compaction、usage calibration 与 overflow semantics。 |
 | `ChannelInbox` | Platform adapter 把 inbound event 直接传给 runner；没有共享的 durable inbound owner。 | 一个接口后统一 durable accept、dedup、cursor、claim、complete/fail、retry 与 DLQ 语义。 |
 

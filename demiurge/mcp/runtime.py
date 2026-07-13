@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -23,6 +24,16 @@ from demiurge.security.subprocess_env import (
     build_sanitized_subprocess_env,
     ensure_subprocess_home,
 )
+from demiurge.security.private_files import (
+    ensure_private_directory,
+    open_private_text,
+)
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretRedactor,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.security.url_policy import (
     UrlDecision,
     UrlPolicy,
@@ -37,6 +48,53 @@ TOOL_NAME_MAX_TOTAL = 64
 TOOL_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 MCP_DISCOVERY_CONCURRENCY = 4
+MCP_STDERR_LOG_LIMIT_CHARS = 12_000
+
+
+def _mcp_redaction_secrets(
+    env: dict[str, str],
+    headers: dict[str, str],
+) -> tuple[SecretValue, ...]:
+    secrets: list[SecretValue] = []
+    for name, value in env.items():
+        if value:
+            safe_name = re.sub(
+                r"[^A-Za-z0-9]+",
+                "_",
+                name,
+            ).strip("_").upper() or "ENV"
+            secrets.append(
+                SecretValue(
+                    value=value,
+                    name=safe_name,
+                    source=f"mcp.env:{name}",
+                )
+            )
+    for name, value in headers.items():
+        if not value:
+            continue
+        safe_name = re.sub(
+            r"[^A-Za-z0-9]+",
+            "_",
+            name,
+        ).strip("_").upper() or "HEADER"
+        secrets.append(
+            SecretValue(
+                value=value,
+                name=safe_name,
+                source=f"mcp.header:{name}",
+            )
+        )
+        parts = value.rsplit(None, 1)
+        if len(parts) == 2 and parts[1]:
+            secrets.append(
+                SecretValue(
+                    value=parts[1],
+                    name=safe_name,
+                    source=f"mcp.header:{name}.credential",
+                )
+            )
+    return tuple(secrets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,7 +484,15 @@ class McpRuntime:
             )
         except Exception as exc:
             return ToolResult(
-                content=f"MCP tool failed: {exc}",
+                content=(
+                    "MCP tool failed: "
+                    + redact_exception(
+                        exc,
+                        view=RedactionView.MODEL,
+                        context={"arguments": arguments},
+                        secrets=getattr(connection, "redaction_secrets", ()),
+                    )
+                ),
                 is_error=True,
                 data={
                     "executionStarted": True,
@@ -791,7 +857,15 @@ class McpRuntime:
                 if connection is not None:
                     with contextlib.suppress(Exception):
                         await connection.close()
-                return _McpDiscovery(server=server, error=str(exc))
+                return _McpDiscovery(
+                    server=server,
+                    error=redact_exception(
+                        exc,
+                        view=RedactionView.EVENT,
+                        context={"env": env, "headers": headers},
+                        secrets=_mcp_redaction_secrets(env, headers),
+                    ),
+                )
             return _McpDiscovery(
                 server=server,
                 connection=connection,
@@ -884,7 +958,7 @@ class McpRuntime:
 
     def _stderr_log_path(self) -> Path:
         log_dir = self.home / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(log_dir)
         return log_dir / "mcp-stderr.log"
 
 
@@ -903,6 +977,7 @@ class DefaultMcpClientConnection:
         self.server = server
         self.env = env
         self.headers = headers
+        self.redaction_secrets = _mcp_redaction_secrets(env, headers)
         self.workspace = workspace
         self.stderr_log_path = stderr_log_path
         self.url_policy = url_policy or UrlPolicy()
@@ -910,7 +985,7 @@ class DefaultMcpClientConnection:
         self._url_decision_sink: Callable[[UrlDecision], None] | None = None
         self._stack: AsyncExitStack | None = None
         self._session: Any | None = None
-        self._stderr_fh: Any | None = None
+        self._stderr_capture: Any | None = None
 
     async def list_tools(self) -> list[Any]:
         session = await self._ensure_session()
@@ -928,10 +1003,7 @@ class DefaultMcpClientConnection:
         if stack is not None:
             with contextlib.suppress(Exception):
                 await stack.aclose()
-        if self._stderr_fh is not None:
-            with contextlib.suppress(Exception):
-                self._stderr_fh.close()
-            self._stderr_fh = None
+        self._persist_redacted_stderr()
 
     async def _ensure_session(self) -> Any:
         if self._session is not None:
@@ -953,9 +1025,14 @@ class DefaultMcpClientConnection:
                     env=self._stdio_env(),
                     cwd=self._cwd(),
                 )
-                self._stderr_fh = self.stderr_log_path.open("a", encoding="utf-8", errors="replace", buffering=1)
-                self._stderr_fh.write(f"\n===== starting MCP server '{self.server.server_id}' =====\n")
-                read_stream, write_stream = await stack.enter_async_context(stdio_client(params, errlog=self._stderr_fh))
+                self._stderr_capture = tempfile.TemporaryFile(
+                    mode="w+",
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                read_stream, write_stream = await stack.enter_async_context(
+                    stdio_client(params, errlog=self._stderr_capture)
+                )
             else:
                 import httpx
 
@@ -984,6 +1061,59 @@ class DefaultMcpClientConnection:
         except Exception:
             await self.close()
             raise
+
+    def _persist_redacted_stderr(self) -> None:
+        capture = self._stderr_capture
+        self._stderr_capture = None
+        if capture is None:
+            return
+        try:
+            capture.flush()
+            capture.seek(0)
+            raw = capture.read(MCP_STDERR_LOG_LIMIT_CHARS + 1)
+        except (OSError, ValueError):
+            raw = ""
+        finally:
+            with contextlib.suppress(Exception):
+                capture.close()
+        if not raw:
+            return
+        capture_truncated = len(raw) > MCP_STDERR_LOG_LIMIT_CHARS
+        raw = raw[:MCP_STDERR_LOG_LIMIT_CHARS]
+        payload = {
+            "env": self.env,
+            "headers": self.headers,
+            "stderr": raw,
+        }
+        result = SecretRedactor(
+            self.redaction_secrets,
+            max_string_chars=MCP_STDERR_LOG_LIMIT_CHARS,
+        ).redact_with_value(
+            payload,
+            view=RedactionView.DURABLE,
+        )
+        rendered = (
+            result.value.get("stderr")
+            if isinstance(result.value, dict)
+            else None
+        )
+        if not isinstance(rendered, str):
+            rendered = "<redaction-failed>"
+        with open_private_text(
+            self.stderr_log_path,
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            buffering=1,
+        ) as handle:
+            handle.write(
+                f"\n===== MCP server '{self.server.server_id}' stderr =====\n"
+            )
+            handle.write(rendered)
+            if not rendered.endswith("\n"):
+                handle.write("\n")
+            if capture_truncated:
+                handle.write("...[stderr capture truncated]\n")
 
     def set_url_decision_sink(
         self,

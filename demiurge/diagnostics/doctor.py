@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from demiurge.app import load_host_config, resolve_host_provider_profile
 from demiurge.core import AgentFallbackConfig, CoreLoadError, CoreLoader, LoadedCore
 from demiurge.env_file import load_runtime_env
+from demiurge.security.private_files import audit_runtime_permissions
 from demiurge.storage import VersionStore
 
 
@@ -76,6 +77,7 @@ class DoctorRuntime:
             core_id=self.core_id,
         )
         load_runtime_env(self.home)
+        self._check_runtime_permissions(report)
         self._check_source_root(report)
         self._check_core_repository_consistency(report)
         self._check_provider_envs(report)
@@ -91,6 +93,30 @@ class DoctorRuntime:
                 )
             )
         return report
+
+    def _check_runtime_permissions(self, report: DoctorReport) -> None:
+        issues = audit_runtime_permissions(self.home)
+        if not issues:
+            return
+        report.findings.append(
+            DoctorFinding(
+                severity="error",
+                code="runtime.permissions.insecure",
+                message=(
+                    "runtime secrets, logs, artifacts, or state do not satisfy "
+                    "the Host private permission policy"
+                ),
+                details={
+                    "paths": [item.path for item in issues],
+                    "issues": [item.to_dict() for item in issues],
+                },
+                remediation=(
+                    "Stop Demiurge, review the listed paths, then run a normal "
+                    "Demiurge startup or init command to tighten existing "
+                    "POSIX modes to 0700/0600."
+                ),
+            )
+        )
 
     def _check_source_root(self, report: DoctorReport) -> None:
         if not self.source_agents_root.exists():

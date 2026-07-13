@@ -370,8 +370,12 @@ a secret-safe MCP declaration security diff and content-bound
 refs unchanged for missing or stale confirmation. Shared URL policy and
 connection pinning are implemented for `web_extract`, MCP HTTP, and callback
 validation: every DNS answer and redirect hop is fail-closed, and audit views
-expose only the origin plus validated addresses. Indeterminate outcomes and
-general cross-effect redaction remain later EffectRuntime work.
+expose only the origin plus validated addresses. The effect hot path now
+derives one structured secret set from raw arguments and adapter output, then
+produces independent model, operator, event, durable, and debug results before
+provider replay, UI delivery, EventLog emission, or SQLite persistence. A
+redaction exception converts every view to a fixed failed result. Indeterminate
+outcomes and the system-wide DG-P9 redaction/retention audit remain later work.
 Terminal execution
 already uses an allowlisted environment, separates project-code execution from
 literal reads, and supports foreground-only `secret.bind:<ENV_NAME>` injection
@@ -434,8 +438,11 @@ redacted model, operator, event, and durable views. Raw adapter output remains
 internal.
 
 The current slice implements the first five statuses above. The remaining
-statuses and independently bounded/redacted views are completion requirements
-for later lifecycle and security work.
+statuses are completion requirements for later lifecycle work. The five safe
+views are implemented for builtin, authored, and MCP results; raw tool arguments
+are retained only for adapter execution. Output-specific streaming/retention
+limits remain owned by their runtime adapters and DG-P9 rather than by a
+post-persistence scrubber.
 
 ### Ordering and Invariants
 

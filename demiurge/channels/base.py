@@ -23,6 +23,11 @@ from demiurge.runtime.outbound_delivery import TextOutboundDeliveryRuntime, deli
 from demiurge.runtime.prompts import PromptDeliveryRuntime
 from demiurge.runtime.tool_display import normalize_tool_display, tool_call_markdown, tool_results_markdown
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.slash import command_names_for_surface
 
 
@@ -248,8 +253,44 @@ class TextChannelBridgeBase:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("%s turn failed", self.channel_name)
-            await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to, metadata=inbound.metadata)
+            context: dict[str, SecretValue] = {}
+            provider = getattr(
+                getattr(state.runtime, "runner", None),
+                "provider",
+                None,
+            )
+            provider_api_key = getattr(provider, "api_key", None)
+            if isinstance(provider_api_key, str) and provider_api_key:
+                context["api_key"] = SecretValue(
+                    value=provider_api_key,
+                    name="API_KEY",
+                    source="provider.api_key",
+                )
+            for field_name in (
+                "access_token",
+                "api_key",
+                "signing_secret",
+                "token",
+            ):
+                value = getattr(self, field_name, None)
+                if isinstance(value, str) and value:
+                    context[field_name] = SecretValue(
+                        value=value,
+                        name=field_name.upper(),
+                        source=f"channel.{field_name}",
+                    )
+            safe_error = redact_exception(
+                exc,
+                view=RedactionView.OPERATOR,
+                context=context or None,
+            )
+            logger.error("%s turn failed: %s", self.channel_name, safe_error)
+            await self._send_text(
+                inbound.source,
+                f"Turn failed: {safe_error}",
+                reply_to=inbound.reply_to,
+                metadata=inbound.metadata,
+            )
         finally:
             self._active_inbound.reset(token)
 

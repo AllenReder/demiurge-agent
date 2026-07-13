@@ -9,6 +9,11 @@ from demiurge.runtime.tasks import (
 )
 from demiurge.runtime.background import BackgroundWorkRuntime
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
@@ -599,7 +604,21 @@ class SessionTurnStepRunner:
             control_plane.record_events(events)
 
     def _sanitize_runtime_error(self, exc: Exception) -> str:
-        message = str(exc).replace("\n", " ").strip()
-        if len(message) > 500:
-            message = f"{message[:500]}... [truncated]"
-        return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
+        api_key = getattr(self.provider, "api_key", None)
+        context = (
+            {
+                "api_key": SecretValue(
+                    value=api_key,
+                    name="API_KEY",
+                    source="provider.api_key",
+                )
+            }
+            if isinstance(api_key, str) and api_key
+            else None
+        )
+        return redact_exception(
+            exc,
+            view=RedactionView.EVENT,
+            context=context,
+            limit=500,
+        )

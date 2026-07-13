@@ -14,6 +14,13 @@ import demiurge.storage as storage_module
 from demiurge.storage import StateConflictError, StateProposal, StateStore
 
 
+def _matches_at_path(value, directory_descriptor, expected: Path) -> bool:
+    path = Path(value)
+    if path.is_absolute() or directory_descriptor is None:
+        return path == expected
+    return path == Path(expected.name)
+
+
 def _crash_before_proposal_audit_replace(
     home: str,
     forced_proposal_id: str | None = None,
@@ -23,10 +30,21 @@ def _crash_before_proposal_audit_replace(
     store = StateStore.core(Path(home), "assistant")
     original_replace = os.replace
 
-    def crash_on_audit(source, destination):
-        if Path(destination) == store.proposal_log:
+    def crash_on_audit(
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+    ):
+        if _matches_at_path(destination, dst_dir_fd, store.proposal_log):
             os._exit(91)
-        return original_replace(source, destination)
+        return original_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
 
     os.replace = crash_on_audit
     store.submit(
@@ -87,12 +105,30 @@ def test_state_01_concurrent_accepted_proposals_preserve_both_fields(tmp_path, m
 
 def test_state_snapshot_uses_same_directory_atomic_replace_with_private_mode_on_posix(tmp_path, monkeypatch):
     store = StateStore.core(tmp_path, "assistant")
-    replace_calls: list[tuple[Path, Path]] = []
+    replace_calls: list[tuple[Path, Path, int | None, int | None]] = []
     original_replace = os.replace
 
-    def recording_replace(source, destination):
-        replace_calls.append((Path(source), Path(destination)))
-        return original_replace(source, destination)
+    def recording_replace(
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+    ):
+        replace_calls.append(
+            (
+                Path(source),
+                Path(destination),
+                src_dir_fd,
+                dst_dir_fd,
+            )
+        )
+        return original_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
 
     monkeypatch.setattr(os, "replace", recording_replace)
     previous_umask = os.umask(0)
@@ -105,12 +141,24 @@ def test_state_snapshot_uses_same_directory_atomic_replace_with_private_mode_on_
     finally:
         os.umask(previous_umask)
 
-    state_replaces = [call for call in replace_calls if call[1] == store.path]
+    state_replaces = [
+        call
+        for call in replace_calls
+        if _matches_at_path(call[1], call[3], store.path)
+    ]
     assert len(state_replaces) == 1
-    temporary_path, destination_path = state_replaces[0]
-    assert temporary_path.parent == destination_path.parent == store.path.parent
+    temporary_path, destination_path, src_dir_fd, dst_dir_fd = state_replaces[0]
+    assert src_dir_fd == dst_dir_fd
+    if dst_dir_fd is None:
+        assert temporary_path.parent == destination_path.parent == store.path.parent
+    else:
+        assert temporary_path.parent == destination_path.parent == Path(".")
+        assert destination_path == Path(store.path.name)
     assert temporary_path != destination_path
-    assert not temporary_path.exists()
+    assert not any(
+        candidate.name == temporary_path.name
+        for candidate in store.path.parent.iterdir()
+    )
     if os.name != "nt":
         assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
     assert store.snapshot()["private"] is True
@@ -153,10 +201,21 @@ def test_audit_write_failure_rolls_back_state_snapshot(tmp_path, monkeypatch):
     audit_before = store.proposal_log.read_bytes()
     original_replace = os.replace
 
-    def fail_proposal_audit(source, destination):
-        if Path(destination) == store.proposal_log:
+    def fail_proposal_audit(
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+    ):
+        if _matches_at_path(destination, dst_dir_fd, store.proposal_log):
             raise OSError("synthetic proposal audit failure")
-        return original_replace(source, destination)
+        return original_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
 
     monkeypatch.setattr(os, "replace", fail_proposal_audit)
 
@@ -174,12 +233,30 @@ def test_audit_write_failure_rolls_back_state_snapshot(tmp_path, monkeypatch):
 
 def test_proposal_audit_uses_atomic_replace_with_private_mode_on_posix(tmp_path, monkeypatch):
     store = StateStore.core(tmp_path, "assistant")
-    replace_calls: list[tuple[Path, Path]] = []
+    replace_calls: list[tuple[Path, Path, int | None, int | None]] = []
     original_replace = os.replace
 
-    def recording_replace(source, destination):
-        replace_calls.append((Path(source), Path(destination)))
-        return original_replace(source, destination)
+    def recording_replace(
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+    ):
+        replace_calls.append(
+            (
+                Path(source),
+                Path(destination),
+                src_dir_fd,
+                dst_dir_fd,
+            )
+        )
+        return original_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
 
     monkeypatch.setattr(os, "replace", recording_replace)
     previous_umask = os.umask(0)
@@ -192,12 +269,24 @@ def test_proposal_audit_uses_atomic_replace_with_private_mode_on_posix(tmp_path,
     finally:
         os.umask(previous_umask)
 
-    audit_replaces = [call for call in replace_calls if call[1] == store.proposal_log]
+    audit_replaces = [
+        call
+        for call in replace_calls
+        if _matches_at_path(call[1], call[3], store.proposal_log)
+    ]
     assert len(audit_replaces) == 1
-    temporary_path, destination_path = audit_replaces[0]
-    assert temporary_path.parent == destination_path.parent == store.proposal_log.parent
+    temporary_path, destination_path, src_dir_fd, dst_dir_fd = audit_replaces[0]
+    assert src_dir_fd == dst_dir_fd
+    if dst_dir_fd is None:
+        assert temporary_path.parent == destination_path.parent == store.proposal_log.parent
+    else:
+        assert temporary_path.parent == destination_path.parent == Path(".")
+        assert destination_path == Path(store.proposal_log.name)
     assert temporary_path != destination_path
-    assert not temporary_path.exists()
+    assert not any(
+        candidate.name == temporary_path.name
+        for candidate in store.proposal_log.parent.iterdir()
+    )
     if os.name != "nt":
         assert stat.S_IMODE(store.proposal_log.stat().st_mode) == 0o600
 

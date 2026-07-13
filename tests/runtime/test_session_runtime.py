@@ -296,6 +296,39 @@ async def test_runner_marks_turn_failed_when_provider_raises(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runner_redacts_known_provider_secret_from_persisted_failure(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    secret = "SYNTHETIC_PERSISTED_PROVIDER_SECRET"
+
+    class SecretRaisingProvider:
+        api_key = secret
+
+        async def complete(self, _request):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    app.runner.provider = SecretRaisingProvider()
+
+    with pytest.raises(RuntimeError, match=secret):
+        await app.runner.run_turn("hello")
+
+    turns = app.runtime_store.query(
+        RuntimeQuery(table="turns", order_by="created_at", limit=10)
+    ).rows
+    failed_turn = turns[-1]
+
+    assert failed_turn["status"] == "failed"
+    assert secret not in repr(failed_turn)
+    failed_event = next(
+        event
+        for event in reversed(app.runner.event_log.read_all())
+        if event["type"] == "turn.failed"
+    )
+    assert secret not in repr(failed_event)
+    assert "<redacted:API_KEY>" in failed_event["error"]
+    await app.close()
+
+
+@pytest.mark.asyncio
 async def test_runner_marks_turn_cancelled_when_provider_turn_is_cancelled(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     provider = BlockingProvider()

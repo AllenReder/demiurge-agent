@@ -22,6 +22,12 @@ from typing import Any, Callable
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+    redact_exception_message,
+)
 from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
@@ -494,17 +500,42 @@ class TelegramInteractionBridge:
 
         attachments = list(inbound.attachments)
         errors: list[str] = []
+        bot_token = getattr(self.api, "token", None)
+        media_secrets = (
+            (
+                SecretValue(
+                    value=bot_token,
+                    name="TELEGRAM_TOKEN",
+                    source="channel.telegram.token",
+                ),
+            )
+            if isinstance(bot_token, str) and bot_token
+            else ()
+        )
         for item in pending:
             if not isinstance(item, dict):
                 continue
             try:
                 attachment = await asyncio.to_thread(self._download_inbound_media, inbound, item)
             except TelegramInboundMediaError as exc:
-                logger.warning("telegram inbound media skipped: %s", exc)
-                errors.append(str(exc))
+                safe_error = redact_exception_message(
+                    exc,
+                    view=RedactionView.OPERATOR,
+                    secrets=media_secrets,
+                )
+                logger.warning("telegram inbound media skipped: %s", safe_error)
+                errors.append(safe_error)
             except Exception as exc:
-                logger.warning("telegram inbound media download failed: %s", exc)
-                errors.append(str(exc))
+                safe_error = redact_exception_message(
+                    exc,
+                    view=RedactionView.OPERATOR,
+                    secrets=media_secrets,
+                )
+                logger.warning(
+                    "telegram inbound media download failed: %s",
+                    safe_error,
+                )
+                errors.append(safe_error)
             else:
                 attachments.append(attachment)
 
@@ -974,8 +1005,44 @@ class TelegramInteractionBridge:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("telegram turn failed")
-            await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to)
+            secrets: list[SecretValue] = []
+            provider_api_key = getattr(
+                getattr(
+                    getattr(state.runtime, "runner", None),
+                    "provider",
+                    None,
+                ),
+                "api_key",
+                None,
+            )
+            if isinstance(provider_api_key, str) and provider_api_key:
+                secrets.append(
+                    SecretValue(
+                        value=provider_api_key,
+                        name="API_KEY",
+                        source="provider.api_key",
+                    )
+                )
+            bot_token = getattr(self.api, "token", None)
+            if isinstance(bot_token, str) and bot_token:
+                secrets.append(
+                    SecretValue(
+                        value=bot_token,
+                        name="TELEGRAM_TOKEN",
+                        source="channel.telegram.token",
+                    )
+                )
+            safe_error = redact_exception(
+                exc,
+                view=RedactionView.OPERATOR,
+                secrets=secrets,
+            )
+            logger.error("telegram turn failed: %s", safe_error)
+            await self._send_text(
+                inbound.source,
+                f"Turn failed: {safe_error}",
+                reply_to=inbound.reply_to,
+            )
         finally:
             self._active_inbound.reset(token)
 

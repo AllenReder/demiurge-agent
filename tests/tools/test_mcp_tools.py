@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
+import stat
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -234,6 +237,86 @@ def test_mcp_stdio_environment_uses_shared_allowlist(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mcp_stderr_is_redacted_before_private_persistence(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\ncommand: fake-mcp\napproval_policy: auto\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    env_secret = "SYNTHETIC_MCP_ENV_SECRET"
+    custom_env_secret = "SYNTHETIC_MCP_CUSTOM_ENV_SECRET"
+    header_secret = "SYNTHETIC_MCP_HEADER_SECRET"
+    log_path = tmp_path / "home" / "logs" / "mcp-stderr.log"
+    connection = DefaultMcpClientConnection(
+        core.mcp_servers[0],
+        {
+            "DEMIURGE_MCP_SECRET": env_secret,
+            "GH_PAT": custom_env_secret,
+        },
+        {"Authorization": f"Bearer {header_secret}"},
+        tmp_path,
+        log_path,
+    )
+    connection._stderr_capture = io.StringIO(
+        f"env={env_secret}\ncustom={custom_env_secret}\n"
+        f"Authorization: Bearer {header_secret}\n"
+    )
+
+    await connection.close()
+
+    persisted = log_path.read_text(encoding="utf-8")
+    assert env_secret not in persisted
+    assert custom_env_secret not in persisted
+    assert header_secret not in persisted
+    assert "<redacted:DEMIURGE_MCP_SECRET>" in persisted
+    assert "<redacted:GH_PAT>" in persisted
+    assert "<redacted:AUTHORIZATION>" in persisted
+    if os.name != "nt":
+        assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_stderr_persistence_reads_a_bounded_capture(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\ncommand: fake-mcp\napproval_policy: auto\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    log_path = tmp_path / "home" / "logs" / "mcp-stderr.log"
+    connection = DefaultMcpClientConnection(
+        core.mcp_servers[0],
+        {},
+        {},
+        tmp_path,
+        log_path,
+    )
+
+    class TrackingCapture(io.StringIO):
+        def __init__(self, value):
+            super().__init__(value)
+            self.read_sizes = []
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    capture = TrackingCapture("x" * 20_000)
+    connection._stderr_capture = capture
+
+    await connection.close()
+
+    assert capture.read_sizes == [12_001]
+    assert len(log_path.read_text(encoding="utf-8")) < 13_000
+    await app.close()
+
+
+@pytest.mark.asyncio
 async def test_mcp_discovery_adds_sanitized_filtered_tool(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
     _write_mcp_server(
@@ -440,6 +523,35 @@ async def test_mcp_approval_denial_prevents_server_call(tmp_path):
     )
     assert approval["capability"] == "mcp.call:docs"
     assert approval["decision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_exception_cannot_echo_secret_arguments(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _set_capabilities(app, {"mcp.call:docs": {}})
+    _write_mcp_server(
+        app,
+        "docs",
+        "transport: stdio\n"
+        "command: fake-mcp\n"
+        "approval_policy: auto\n",
+    )
+    secret = "SYNTHETIC_MCP_CALL_SECRET"
+
+    class FailingConnection(FakeMcpConnection):
+        async def call_tool(self, name, arguments, *, timeout_seconds):
+            raise RuntimeError(f"remote failed token={arguments['token']}")
+
+    connection = FailingConnection([FakeListedTool(name="lookup")])
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    core = await _prepare(app)
+
+    result = await _execute(app, core, "docs__lookup", {"token": secret})
+
+    assert result.is_error is True
+    assert secret not in repr(result)
+    assert "token=<redacted>" in result.content
+    await app.close()
 
 
 @pytest.mark.asyncio

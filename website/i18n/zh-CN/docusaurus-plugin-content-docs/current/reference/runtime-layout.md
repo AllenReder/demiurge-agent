@@ -67,6 +67,16 @@ demiurge-agent/
 | `workspace/` | 未选择 CLI/env/core workspace 时使用的默认 workspace。 |
 | `logs/` | Runtime logs，例如 `mcp-stderr.log`。 |
 
+在 POSIX 上，Host 会对 runtime home 以及 `runtime/`、`logs/`、`state/` 下的 private
+directory 强制 `0700`，并对 `.env`、`config.yaml`、SQLite database/WAL/SHM、event log、
+state file、MCP stderr log 与 artifact 强制 `0600`。这些 mode 不依赖启动 shell 的 umask。
+Startup 与会写入的 init/setup path 只收紧既有 file，不改变其 content 或 mtime。Private
+write helper 拒绝 symbolic link。在 POSIX 上，directory creation、final file open、
+permission tightening 与 atomic replace 都锚定到 directory descriptor，因此并发换入的
+ancestor 无法把 private write 重定向到外部 tree。Windows 使用平台 ACL semantics，而不是
+数字 POSIX mode。
+`demiurge doctor` 只审计该 tree 并报告 `runtime.permissions.insecure`，不会自行修复权限。
+
 Runtime schema 5 新增 immutable `session_owners` projection，供 Host-owned
 `PrincipalScope` resolution 使用。新 session 会在创建时记录 conversation、operator、
 system 或 delegated-agent ownership。schema 4 migration 只会安全回填唯一匹配的

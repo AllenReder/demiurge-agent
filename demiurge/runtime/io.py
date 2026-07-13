@@ -237,12 +237,14 @@ class TurnIO:
         turn: TurnContext,
         step_id: str,
         record: ToolExecutionRecord,
+        model_result: ToolResult | None = None,
         interaction_metadata: dict[str, Any],
     ) -> InteractionItem:
         message = self._persist_tool_result_message(
             turn=turn,
             step_id=step_id,
             record=record,
+            model_result=model_result,
             interaction_metadata=interaction_metadata,
         )
         tool_record = ToolInteractionRecord.finished(
@@ -271,9 +273,12 @@ class TurnIO:
         turn: TurnContext,
         step_id: str,
         record: ToolExecutionRecord,
+        model_result: ToolResult | None = None,
         interaction_metadata: dict[str, Any],
     ) -> SessionMessage:
-        content = self.host.truncate_model_content(self.host.tool_result_model_content(record.result))
+        content = self.host.truncate_model_content(
+            self.host.tool_result_model_content(model_result or record.result)
+        )
         message = self.host.session_runtime.append_message(
             turn.session_id,
             role="tool",

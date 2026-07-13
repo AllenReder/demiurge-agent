@@ -68,6 +68,19 @@ Common children:
 | `workspace/` | Default workspace when no CLI/env/core workspace is selected. |
 | `logs/` | Runtime logs such as `mcp-stderr.log`. |
 
+On POSIX, the Host enforces `0700` for the runtime home and private directories
+under `runtime/`, `logs/`, and `state/`. It enforces `0600` for `.env`,
+`config.yaml`, SQLite database/WAL/SHM files, event logs, state files, MCP stderr
+logs, and artifacts. These modes do not depend on the launching shell's umask.
+Startup and mutating init/setup paths tighten existing files without changing
+their contents or modification times. Private write helpers reject symbolic
+links. On POSIX they anchor directory creation, final file opens, permission
+tightening, and atomic replacement to directory descriptors, so a concurrently
+substituted ancestor cannot redirect a private write. Windows uses platform ACL
+semantics instead of numeric POSIX modes.
+`demiurge doctor` only audits the tree and reports
+`runtime.permissions.insecure`; it does not repair permissions itself.
+
 Runtime schema 5 adds the immutable `session_owners` projection used by
 Host-owned `PrincipalScope` resolution. New sessions record conversation,
 operator, system, or delegated-agent ownership at creation. The schema 4

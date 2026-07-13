@@ -45,6 +45,7 @@ from demiurge.security.capabilities import (
     CapabilitySnapshot,
 )
 from demiurge.security.command_guard import CommandGuardDecision, review_command
+from demiurge.security.redaction import REDACTION_FAILED, SecretRedactor
 from demiurge.security.subprocess_env import (
     ENV_NAME_RE,
     RESERVED_SUBPROCESS_ENV_TARGETS,
@@ -1061,6 +1062,32 @@ class ToolRuntime:
             )
         entry = request.entry
         try:
+            redactor = SecretRedactor.from_value(
+                {"arguments": dict(request.arguments)}
+            )
+        except Exception:
+            return EffectResult.normalize(
+                entry,
+                ToolResult(
+                    content=REDACTION_FAILED,
+                    data={
+                        "executionStarted": False,
+                        "redactionFailed": True,
+                    },
+                    is_error=True,
+                    model_output=REDACTION_FAILED,
+                    display_output=REDACTION_FAILED,
+                ),
+            )
+
+        def normalize(result: ToolResult) -> EffectResult:
+            return EffectResult.normalize(
+                entry,
+                result,
+                redactor=redactor,
+            )
+
+        try:
             approval_scope = self.resolve_approval_scope(
                 core=core,
                 turn=turn,
@@ -1069,8 +1096,7 @@ class ToolRuntime:
                 principal_scope=principal_scope,
             )
         except (PermissionError, TypeError, ValueError) as exc:
-            return EffectResult.normalize(
-                entry,
+            return normalize(
                 ToolResult(
                     content=str(exc),
                     is_error=True,
@@ -1084,8 +1110,7 @@ class ToolRuntime:
             call = request.to_tool_call()
             catalog = request.catalog
             if entry.core_id != core.core_id or entry.core_revision != turn.core_revision:
-                return EffectResult.normalize(
-                    entry,
+                return normalize(
                     ToolResult(
                         content="resolved effect entry does not match the active core snapshot",
                         is_error=True,
@@ -1098,8 +1123,7 @@ class ToolRuntime:
                 turn=turn,
                 approval_scope=approval_scope,
             ):
-                return EffectResult.normalize(
-                    entry,
+                return normalize(
                     ToolResult(
                         content=(
                             "resolved MCP effect entry does not match the "
@@ -1122,7 +1146,7 @@ class ToolRuntime:
                 emit_event=emit_event,
             )
             if preflight_denial is not None:
-                return EffectResult.normalize(entry, preflight_denial)
+                return normalize(preflight_denial)
 
             try:
                 result = await self._execute_resolved_adapter(
@@ -1141,10 +1165,9 @@ class ToolRuntime:
                     is_error=True,
                     data={"executionStarted": True},
                 )
-            return EffectResult.normalize(entry, result)
+            return normalize(result)
         except CapabilityDenied as exc:
-            return EffectResult.normalize(
-                entry,
+            return normalize(
                 ToolResult(
                     content=str(exc),
                     is_error=True,
@@ -1155,8 +1178,7 @@ class ToolRuntime:
                 ),
             )
         except (WorkspaceScopeError, ValueError, OSError) as exc:
-            return EffectResult.normalize(
-                entry,
+            return normalize(
                 ToolResult(
                     content=str(exc),
                     is_error=True,
