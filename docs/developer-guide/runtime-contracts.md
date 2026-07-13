@@ -367,8 +367,11 @@ the prior session resources. Delegated children use their own Host-issued
 authority and release connections at child completion. Evolution gates attach
 a secret-safe MCP declaration security diff and content-bound
 `mcp-review:<sha256>` token; promotion requires that exact token and leaves Git
-refs unchanged for missing or stale confirmation. Indeterminate outcomes, URL
-policy, and general cross-effect redaction remain later EffectRuntime work.
+refs unchanged for missing or stale confirmation. Shared URL policy and
+connection pinning are implemented for `web_extract`, MCP HTTP, and callback
+validation: every DNS answer and redirect hop is fail-closed, and audit views
+expose only the origin plus validated addresses. Indeterminate outcomes and
+general cross-effect redaction remain later EffectRuntime work.
 Terminal execution
 already uses an allowlisted environment, separates project-code execution from
 literal reads, and supports foreground-only `secret.bind:<ENV_NAME>` injection

@@ -14,6 +14,7 @@ from demiurge.app import create_app
 from demiurge.evolution import EvolverRunResult
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.url_policy import UrlPolicy, UrlPolicyRedirectHandler
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
 from demiurge.runtime.scope import PrincipalScopeResolver
@@ -3623,19 +3624,29 @@ async def test_web_extract_requires_approval_and_truncates(tmp_path, monkeypatch
         def read(self, size):
             return ("x" * 100).encode("utf-8")[:size]
 
-    def fake_urlopen(request, timeout):
-        return Response()
+        def geturl(self):
+            return "https://example.com/final"
+
+    class Opener:
+        def open(self, request, timeout):
+            return Response()
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
 
     app.approval_runtime.provider = StaticApprovalProvider("deny")
     denied = await _execute(app, core, "web_extract", {"url": "https://example.com"})
 
     app.approval_runtime.provider = StaticApprovalProvider("allow")
-    monkeypatch.setattr("demiurge.tools.runtime.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
     fetched = await _execute(app, core, "web_extract", {"url": "https://example.com", "max_chars": 20})
 
     assert denied.is_error is True
@@ -3644,6 +3655,155 @@ async def test_web_extract_requires_approval_and_truncates(tmp_path, monkeypatch
     assert fetched.content == "x" * 20
     assert fetched.model_output == "x" * 20
     assert fetched.data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_extract_rejects_metadata_target_before_approval_or_socket(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+    socket_calls = 0
+
+    def forbidden_build_opener(*args, **kwargs):
+        nonlocal socket_calls
+        socket_calls += 1
+        raise AssertionError("unsafe URL reached urllib")
+
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        forbidden_build_opener,
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {"url": "http://169.254.169.254/latest/meta-data"},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["url_policy"]["reason"] == "metadata_address"
+    assert provider.requests == []
+    assert socket_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_web_extract_revalidates_redirect_before_following_private_target(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    resolver_calls = 0
+
+    def resolver(hostname: str, port: int) -> tuple[str, ...]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls <= 2:
+            return ("93.184.216.34",)
+        return ("10.0.0.8",)
+
+    app.tool_runtime.url_policy = UrlPolicy(resolver=resolver)
+    followed = False
+
+    class RedirectingOpener:
+        def __init__(self, handler):
+            self.handler = handler
+
+        def open(self, request, timeout):
+            nonlocal followed
+            self.handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {"location": "/private"},
+                "https://public.example/private?token=SENSITIVE_REDIRECT_SECRET",
+            )
+            followed = True
+            raise AssertionError("unsafe redirect was followed")
+
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        lambda *handlers: RedirectingOpener(
+            next(
+                handler
+                for handler in handlers
+                if isinstance(handler, UrlPolicyRedirectHandler)
+            )
+        ),
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {"url": "https://public.example/start"},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is True
+    assert result.data["url_policy"]["reason"] == "private_address"
+    assert followed is False
+    assert resolver_calls == 3
+    assert len(provider.requests) == 1
+    assert "SENSITIVE_REDIRECT_SECRET" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_web_extract_approval_uses_secret_safe_url_policy_summary(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {
+            "url": (
+                "https://user:SENSITIVE_PASSWORD@public.example/"
+                "SENSITIVE_PATH?token=SENSITIVE_QUERY"
+            )
+        },
+    )
+
+    request = provider.requests[0]
+    serialized = json.dumps(
+        {
+            "summary": request.summary,
+            "target": request.target,
+            "arguments_preview": request.arguments_preview,
+            "cache_key": request.cache_key,
+            "result": result.content,
+        },
+        sort_keys=True,
+    )
+    assert request.target == "https://public.example"
+    assert request.arguments_preview == {"url": "https://public.example"}
+    assert request.cache_key.startswith("web_extract:network.fetch:")
+    assert "user" not in serialized
+    assert "SENSITIVE" not in serialized
+
+
+def test_host_shares_one_url_policy_between_web_and_mcp_adapters(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+
+    assert app.tool_runtime.url_policy is app.tool_runtime.mcp_runtime.url_policy
 
 
 @pytest.mark.asyncio

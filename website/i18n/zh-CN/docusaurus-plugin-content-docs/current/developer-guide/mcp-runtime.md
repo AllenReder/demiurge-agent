@@ -42,8 +42,15 @@ construction 前解析到 Host workspace 内。Approval preview 会显示 comman
 形状、environment/header 名称以及移除 credential 的 URL；positional value 只显示
 hash/length 摘要，secret-bearing option value 会被脱敏。Sanitized environment/secret binding
 现在会让 stdio subprocess 始终使用共享 Host environment allowlist 与专用 runtime `HOME`；
-connect approval 后只添加 declaration 列出的 `env` entry。共享 URL policy 仍属于后续
-security 工作。
+connect approval 后只添加 declaration 列出的 `env` entry。Streamable HTTP 会在
+approval/client construction 前及每次 request（包括 redirect）使用共享 Host `UrlPolicy`。
+该 policy 会规范化 IDNA 以及 legacy numeric/hex/octal IPv4 hostname、校验全部 DNS answer，默认阻止
+metadata/private/loopback/link-local/CGNAT 与其他 non-routable target，并在 DNS error 或
+malformed answer 时 fail closed。Transport 会连接已验证地址，同时保留原 HTTP Host 与 TLS
+SNI，因此后续 resolver answer 不能重定向 socket。Approval/runtime audit view 只包含 origin
+与已验证地址，不包含 URL userinfo、path、query 或 fragment value。每个 MCP HTTP request
+都会发出带 `phase: request` 与安全 policy view 的 `mcp.url_decision` event；redirect hop
+因此形成有序记录，最后一项就是 final attempted target。
 
 ## 结果转换
 
@@ -67,5 +74,8 @@ session；显式 eviction 仍只关闭选定 session 的 catalogs。Delegated ch
 scope 准备 catalog，并在 child run 结束时释放 MCP connections。Evolution review 会为
 MCP declaration 变化生成 secret-safe before/after security diff 和内容绑定的
 `mcp-review:<sha256>` token；除普通 promote approval 外，promotion 还要求原样返回该
-token。token 缺失或已过期时 Git refs 保持不变。Stdio env sanitization 与
-declaration-bound secret injection 已实现；URL validation 仍属于后续 security layer。
+token。token 缺失或已过期时 Git refs 保持不变。Stdio env sanitization、
+declaration-bound secret injection 与共享 HTTP URL enforcement 已实现。Agent Core manifest
+不能关闭 URL policy。自定义 Host integration 可以为明确可信网络注入 private-address
+policy，但 cloud metadata、link-local、multicast、reserved、unspecified 与其他
+non-routable target 仍不可放行。Pinned transport 不继承 ambient HTTP proxy variables。

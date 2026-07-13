@@ -20,6 +20,7 @@ and MCP calls no longer perform a second source lookup by global tool name.
 MCP connect/discovery now has its own `mcp.connect:<server>` capability and
 approval gate before client construction; a later call uses the separate
 connection-bound `mcp.call:<server>` path.
+`web_extract`, MCP HTTP, and callback URL validation share one Host URL policy.
 
 ## Built-In Toolsets
 
@@ -284,8 +285,14 @@ catalogs. Delegated children use their Host-issued authority and close MCP
 connections when the child run ends. Connect approval previews expose safe
 launch metadata without environment, header, URL credential/query, or argument
 secret values. Stdio children use the shared allowlisted environment plus only
-manifest-declared env entries after connect approval. URL policy remains
-separate later security work.
+manifest-declared env entries after connect approval. Streamable HTTP validates
+the initial URL and every request/redirect, requires every DNS answer to be
+safe, and pins the connection to a validated address while preserving the
+original Host/TLS SNI. DNS failures and malformed answers fail closed. Agent
+Core declarations cannot opt into private targets or ambient HTTP proxies.
+Every MCP HTTP request emits a secret-safe `mcp.url_decision` event with
+`phase: request`, so redirect hops and the final attempted origin/address
+remain auditable.
 
 ## Tool Metadata Overrides
 
@@ -496,7 +503,15 @@ Both packages expose the model-facing tool name `web_search`. Because both
 packages target `agent/tools/web_search`, install only one web search provider
 package in a core at a time.
 
-`web_extract` remains the built-in tool for fetching a known URL.
+`web_extract` remains the built-in tool for fetching a known URL. Before
+approval it reduces the URL to a credential-free origin summary; after approval
+it revalidates the URL and each redirect, then connects only to the validated
+address. The returned metadata records the final safe origin and resolved
+addresses, not userinfo, path, query, or fragment values. Private, loopback,
+link-local, CGNAT, metadata, multicast, reserved, unspecified, DNS-failure, and
+mixed-answer targets fail closed. Legacy numeric, hexadecimal, octal, and short
+IPv4 host forms are normalized before policy evaluation rather than delegated
+to platform-specific resolver interpretation.
 
 ## Inspect Visible Tools
 

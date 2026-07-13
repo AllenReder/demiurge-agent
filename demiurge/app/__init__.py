@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, 
 
 from demiurge.env_file import load_runtime_env
 from demiurge.security.approval import ApprovalRuntime
+from demiurge.security.url_policy import UrlPolicy
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
@@ -688,7 +689,12 @@ def create_app(
         fake_script=fake_script,
     )
     gate_runner = GateRunner(project_root=project_root)
-    mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
+    url_policy = UrlPolicy()
+    mcp_runtime = McpRuntime(
+        home=home,
+        workspace=workspace_scope.root,
+        url_policy=url_policy,
+    )
     task_worker = RuntimeTaskWorker(control_plane=control_plane, host_work=host_work)
     tool_runtime = ToolRuntime(
         version_store,
@@ -699,6 +705,7 @@ def create_app(
         runtime_timezone=runtime_timezone,
         task_worker=task_worker,
         session_runtime=session_runtime,
+        url_policy=url_policy,
     )
     evolution_runtime = EvolutionRuntime(
         core_repository=version_store.core_repository,

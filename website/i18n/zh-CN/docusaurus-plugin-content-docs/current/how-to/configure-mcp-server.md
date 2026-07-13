@@ -13,7 +13,8 @@ risk/approval policy。Authority 缺失或被拒绝时，会在 client construct
 startup 与 `list_tools()` 前停止。后续 tool invocation 还会独立要求 server call capability
 和 approval。启用前仍应审查 declaration 的 command、package runner、URL、environment 与
 headers；sanitized secret binding 现在把 stdio child 限制为 allowlisted environment 加
-获批 declaration 的 `env` entry，完整 URL safety 仍属于后续 security layer。
+获批 declaration 的 `env` entry。Streamable HTTP URL 会在 approval/client construction 前
+以及每次 request/redirect 时由 Host 检查；unsafe 或无法解析的 target 会在打开 socket 前跳过。
 
 默认情况下，loader 会查找：
 
@@ -77,7 +78,12 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: streamable_http` 必须使用 `http://` 或 `https://` URL。
+`transport: streamable_http` 必须使用 `http://` 或 `https://` URL。Host 会校验规范化后的
+hostname、literal IP 与全部 DNS answer。默认阻止 private、loopback、link-local、CGNAT、
+cloud metadata、multicast、reserved 与 unspecified target。Connection 使用已验证 IP，
+同时保留 URL hostname 作为 HTTP Host 与 TLS SNI，防止 validation/connect 之间的 DNS
+rebinding。URL credential、path、query 与 fragment 不进入 approval/audit summary。Agent
+Core declaration 不能启用 private URL 或 ambient HTTP proxy routing。
 
 ## 授予 MCP Capability
 
@@ -153,4 +159,5 @@ Agent Core 声明 MCP servers。Host 拥有 process startup、HTTP transport ses
 environment interpolation、catalog caching、approval prompts、capability enforcement、
 result conversion 与 runtime cleanup。MCP 仍不是 sandbox：stdio command 与 remote URL
 仍是 trusted effect；stdio process 在 approval 后只接收 allowlisted environment 与
-declaration-bound value。共享 URL validation 仍属于后续 security 工作。
+declaration-bound value。Streamable HTTP 的每次 request（包括 redirect）仍受共享
+fail-closed URL policy 与 pinned transport 约束。

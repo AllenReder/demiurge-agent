@@ -46,7 +46,19 @@ environment/header names, and a credential-free URL; positional values are
 represented by hash/length summaries and secret-bearing option values are
 redacted. Stdio subprocesses always use the shared Host environment allowlist
 and a dedicated runtime `HOME`; only declaration-listed `env` entries are added
-after connect approval. Shared URL policy remains later security work.
+after connect approval. Streamable HTTP uses the shared Host `UrlPolicy` before
+approval/client construction and again for every request, including redirects.
+The policy normalizes IDNA and legacy numeric/hex/octal IPv4 host forms,
+validates every DNS answer, blocks
+metadata/private/loopback/link-local/CGNAT and other non-routable targets by
+default, and fails closed on DNS errors or malformed answers. The transport
+connects to the validated address while preserving the original HTTP Host and
+TLS SNI, so a later resolver answer cannot retarget the socket. Approval and
+runtime audit views contain only the origin and validated addresses, never URL
+userinfo, path, query, or fragment values. Each HTTP request emits an
+`mcp.url_decision` event with `phase: request` and the safe policy view;
+redirect hops therefore leave an ordered record whose last entry is the final
+attempted target.
 
 ## Result Conversion
 
@@ -78,6 +90,10 @@ with their Host-issued scope and release their MCP connections when the child
 run ends. Evolution review emits a secret-safe before/after security diff for
 changed MCP declarations and a content-bound `mcp-review:<sha256>` token.
 Promotion requires that exact token in addition to the normal promote approval;
-missing or stale tokens leave Git refs unchanged. Stdio env sanitization and
-declaration-bound secret injection are implemented; URL validation remains a
-later security layer.
+missing or stale tokens leave Git refs unchanged. Stdio env sanitization,
+declaration-bound secret injection, and shared HTTP URL enforcement are
+implemented. Agent Core manifests cannot opt out of the URL policy. A custom
+Host integration may inject a private-address policy for an explicitly trusted
+network, but cloud metadata, link-local, multicast, reserved, unspecified, and
+other non-routable targets remain blocked. Ambient HTTP proxy variables are not
+inherited by the pinned transport.

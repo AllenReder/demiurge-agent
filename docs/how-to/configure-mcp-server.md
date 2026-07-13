@@ -16,8 +16,9 @@ Denied authority stops before client construction, process/network startup, and
 capability and approval. Continue to review a declaration's command, package
 runner, URL, environment, and headers before enabling it: sanitized secret
 binding now limits stdio children to an allowlisted environment plus the
-declaration's approved `env` entries, while full URL safety remains a later
-security layer.
+declaration's approved `env` entries. Streamable HTTP URLs are checked by the
+Host before approval/client construction and on every request or redirect;
+unsafe or unresolvable targets are skipped before a socket is opened.
 
 By default, the loader looks under:
 
@@ -82,7 +83,14 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: streamable_http` requires an `http://` or `https://` URL.
+`transport: streamable_http` requires an `http://` or `https://` URL. The Host
+validates the normalized hostname, literal IPs, and every DNS answer. Private,
+loopback, link-local, CGNAT, cloud metadata, multicast, reserved, and
+unspecified targets are blocked by default. Connections use the validated IP
+while retaining the URL hostname for HTTP Host and TLS SNI, preventing DNS
+rebinding between validation and connect. URL credentials, paths, queries, and
+fragments are omitted from approval/audit summaries. Agent Core declarations
+cannot enable private URLs or ambient HTTP proxy routing.
 
 ## Grant the MCP Capability
 
@@ -164,4 +172,5 @@ transport sessions, environment interpolation, catalog caching, approval
 prompts, capability enforcement, result conversion, and runtime cleanup. MCP is
 still not a sandbox: stdio commands and remote URLs remain trusted effects, and
 stdio processes receive an allowlisted environment plus only declaration-bound
-values after approval. Shared URL validation remains later security work.
+values after approval. Streamable HTTP remains subject to the shared fail-closed
+URL policy and pinned transport on every request, including redirects.

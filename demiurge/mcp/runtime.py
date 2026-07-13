@@ -23,6 +23,12 @@ from demiurge.security.subprocess_env import (
     build_sanitized_subprocess_env,
     ensure_subprocess_home,
 )
+from demiurge.security.url_policy import (
+    UrlDecision,
+    UrlPolicy,
+    UrlPolicyAsyncTransport,
+)
+from demiurge.storage import EventLog
 
 
 TOOL_NAME_SEPARATOR = "__"
@@ -165,6 +171,15 @@ McpConnectAuthorizer = Callable[[McpServerDefinition], Awaitable[bool]]
 EventEmitter = Callable[..., dict[str, Any]]
 
 
+def _set_url_decision_sink(
+    connection: McpClientConnection,
+    sink: Callable[[UrlDecision], None],
+) -> None:
+    setter = getattr(connection, "set_url_decision_sink", None)
+    if callable(setter):
+        setter(sink)
+
+
 class McpRuntime:
     def __init__(
         self,
@@ -172,6 +187,7 @@ class McpRuntime:
         home: Path,
         workspace: Path,
         client_factory: McpClientFactory | None = None,
+        url_policy: UrlPolicy | None = None,
         failure_cache_ttl_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -179,7 +195,19 @@ class McpRuntime:
             raise ValueError("MCP failure cache TTL must be positive")
         self.home = home
         self.workspace = workspace
-        self.client_factory = client_factory or DefaultMcpClientConnection
+        self.url_policy = url_policy or UrlPolicy()
+        self.client_factory = client_factory or (
+            lambda server, env, headers, workspace, stderr_log_path: (
+                DefaultMcpClientConnection(
+                    server,
+                    env,
+                    headers,
+                    workspace,
+                    stderr_log_path,
+                    url_policy=self.url_policy,
+                )
+            )
+        )
         self.failure_cache_ttl_seconds = float(failure_cache_ttl_seconds)
         self._clock = clock
         self._catalogs: dict[McpCatalogKey, McpCatalog] = {}
@@ -378,7 +406,11 @@ class McpRuntime:
                 tools.append(tool)
         return sorted(tools, key=lambda tool: tool.name)
 
-    async def call_tool(self, tool: McpToolInfo, arguments: dict[str, Any]) -> ToolResult:
+    async def call_tool(
+        self,
+        tool: McpToolInfo,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
         connection = self._connection_for_tool(tool)
         if connection is None:
             return ToolResult(
@@ -557,6 +589,7 @@ class McpRuntime:
                 self._discover_server(
                     server,
                     semaphore=self._discovery_semaphore,
+                    session_id=catalog_key.session_id,
                 )
             )
             for server in authorized_servers
@@ -709,6 +742,7 @@ class McpRuntime:
         server: McpServerDefinition,
         *,
         semaphore: asyncio.Semaphore,
+        session_id: str,
     ) -> _McpDiscovery:
         async with semaphore:
             try:
@@ -727,6 +761,16 @@ class McpRuntime:
                     headers,
                     self.workspace,
                     self._stderr_log_path(),
+                )
+                event_log = EventLog(self.home, session_id)
+                _set_url_decision_sink(
+                    connection,
+                    lambda decision: event_log.emit(
+                        "mcp.url_decision",
+                        server_id=server.server_id,
+                        phase="request",
+                        url_policy=decision.audit_view(),
+                    ),
                 )
                 try:
                     tools = await asyncio.wait_for(
@@ -852,12 +896,18 @@ class DefaultMcpClientConnection:
         headers: dict[str, str],
         workspace: Path,
         stderr_log_path: Path,
+        *,
+        url_policy: UrlPolicy | None = None,
+        httpx_transport_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.server = server
         self.env = env
         self.headers = headers
         self.workspace = workspace
         self.stderr_log_path = stderr_log_path
+        self.url_policy = url_policy or UrlPolicy()
+        self._httpx_transport_factory = httpx_transport_factory
+        self._url_decision_sink: Callable[[UrlDecision], None] | None = None
         self._stack: AsyncExitStack | None = None
         self._session: Any | None = None
         self._stderr_fh: Any | None = None
@@ -889,7 +939,7 @@ class DefaultMcpClientConnection:
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from mcp.client.streamable_http import streamablehttp_client
+            from mcp.client.streamable_http import streamable_http_client
         except ImportError as exc:
             raise McpRuntimeError("mcp package is not installed") from exc
 
@@ -907,12 +957,24 @@ class DefaultMcpClientConnection:
                 self._stderr_fh.write(f"\n===== starting MCP server '{self.server.server_id}' =====\n")
                 read_stream, write_stream = await stack.enter_async_context(stdio_client(params, errlog=self._stderr_fh))
             else:
+                import httpx
+
+                http_client = self._httpx_client_factory(
+                    headers=self.headers or None,
+                    timeout=httpx.Timeout(
+                        self.server.manifest.connect_timeout_seconds,
+                        read=max(
+                            self.server.manifest.timeout_seconds,
+                            60,
+                        ),
+                    ),
+                    auth=None,
+                )
+                await stack.enter_async_context(http_client)
                 read_stream, write_stream, _get_session_id = await stack.enter_async_context(
-                    streamablehttp_client(
+                    streamable_http_client(
                         str(self.server.manifest.url),
-                        headers=self.headers or None,
-                        timeout=self.server.manifest.connect_timeout_seconds,
-                        sse_read_timeout=max(self.server.manifest.timeout_seconds, 60),
+                        http_client=http_client,
                     )
                 )
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
@@ -922,6 +984,41 @@ class DefaultMcpClientConnection:
         except Exception:
             await self.close()
             raise
+
+    def set_url_decision_sink(
+        self,
+        sink: Callable[[UrlDecision], None],
+    ) -> None:
+        self._url_decision_sink = sink
+
+    def _httpx_client_factory(
+        self,
+        headers: dict[str, str] | None = None,
+        timeout: Any | None = None,
+        auth: Any | None = None,
+    ) -> Any:
+        import httpx
+
+        kwargs: dict[str, Any] = {
+            "follow_redirects": True,
+            "transport": UrlPolicyAsyncTransport(
+                self.url_policy,
+                transport_factory=self._httpx_transport_factory,
+                decision_sink=self._record_url_decision,
+            ),
+        }
+        if headers is not None:
+            kwargs["headers"] = headers
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if auth is not None:
+            kwargs["auth"] = auth
+        return httpx.AsyncClient(**kwargs)
+
+    def _record_url_decision(self, decision: UrlDecision) -> None:
+        sink = self._url_decision_sink
+        if sink is not None:
+            sink(decision)
 
     def _cwd(self) -> Path:
         cwd = self.server.manifest.cwd

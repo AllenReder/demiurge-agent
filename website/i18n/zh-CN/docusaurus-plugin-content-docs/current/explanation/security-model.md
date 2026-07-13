@@ -71,7 +71,12 @@ capability/approval checks，MCP tool call 也会在 call 前执行。Authored t
 现在会在 module import/invocation 前要求 resolved singular capability 并解析 approval
 policy。当前 alpha catalog 会在 MCP spawn/connect/discovery 前要求 connect authority，且
 builtin/authored/MCP call 共用 resolved-entry dispatcher。剩余 effect-security 缺口包括
-shared URL/redirect policy 与通用 structured cross-effect redaction。`evolve_core` / `rollback_core`
+通用 structured cross-effect redaction。共享 URL enforcement 已覆盖 `web_extract`、MCP HTTP
+与 callback URL validation：它会规范化 hostname、检查 literal address 与全部 DNS answer、
+在 resolution error 时 fail closed、重新校验每个 redirect/request，并在保留 Host/TLS SNI
+的同时把 socket 固定到已验证地址。默认阻止 private、loopback、link-local、CGNAT、
+metadata、multicast、reserved 与 unspecified target。Agent Core 内容不能削弱该 policy，
+audit/approval view 不含 URL credential、path、query 与 fragment value。`evolve_core` / `rollback_core`
 现在会使用同一个 resolved registry entry，在 adapter call 或 background task 创建前执行
 capability 与单调收紧的 approval policy。`EffectRuntime` contract 保持同一套顺序；参见
 [Host 运行时契约](../developer-guide/runtime-contracts.md#effectruntime)。

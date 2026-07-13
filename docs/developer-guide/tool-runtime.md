@@ -11,8 +11,9 @@ builtin, authored, and MCP model calls. Adapter results are normalized into a
 minimal typed `EffectResult`/`EffectError` before the turn loop converts them to
 the legacy model-facing `ToolResult`; runtime events retain typed status/error.
 Connect policy, terminal process-tree ownership, and bounded terminal draining
-are implemented slices. Extended lifecycle outcomes, URL/network policy, and
-cross-effect redaction continue through later EffectRuntime work. See
+are implemented slices. Host-owned URL/network policy is also implemented for
+`web_extract`, MCP HTTP, and the shared callback validator. Extended lifecycle
+outcomes and cross-effect redaction continue through later EffectRuntime work. See
 [Host Runtime Contracts](runtime-contracts.md#effectruntime).
 
 ## Registry Sources
@@ -78,8 +79,12 @@ session eviction closes only the selected session's catalogs;
 delegated children use their Host-issued scope and release connections at child
 completion. Terminal subprocesses now use an allowlisted environment and
 one-shot capability/approval/expiry-bound secret injection; MCP stdio children
-reuse that allowlist and add only approved manifest env entries. URL validation
-remains later security work. The legacy global
+reuse that allowlist and add only approved manifest env entries. MCP HTTP and
+`web_extract` share one Host URL policy. It rejects unsafe schemes, hostnames,
+literal addresses, any unsafe DNS answer, DNS failure, and public-to-private
+redirect/rebinding attempts. Each actual connection is pinned to the validated
+address while retaining the original Host/TLS authority; safe audit views omit
+userinfo, path, query, and fragment. The legacy global
 MCP tool-name index has been removed;
 call dispatch accepts only the connection-bound resolved entry.
 

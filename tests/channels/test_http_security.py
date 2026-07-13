@@ -9,6 +9,18 @@ def test_callback_url_must_be_https():
         require_public_http_url("http://example.com/callback")
 
 
+def test_callback_url_rejects_cgnat_through_shared_url_policy(monkeypatch):
+    monkeypatch.setattr(
+        "demiurge.security.url_policy.socket.getaddrinfo",
+        lambda hostname, port, *args, **kwargs: [
+            (2, 1, 6, "", ("100.64.0.8", port)),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="private_address"):
+        require_public_http_url("https://callback.example/hook")
+
+
 def test_webhook_server_rejects_oversized_body(monkeypatch):
     server = WebhookHttpServer(host="127.0.0.1", port=0, path="/hook", handler=lambda request: None, max_body_bytes=4)
     httpd = server._make_server(None)  # type: ignore[arg-type]

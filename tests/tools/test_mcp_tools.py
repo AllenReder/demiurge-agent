@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 
@@ -16,6 +17,13 @@ from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.url_policy import (
+    UnsafeUrlError,
+    UrlDecision,
+    UrlPolicy,
+    UrlPolicyAsyncTransport,
+)
+from demiurge.storage import EventLog
 from demiurge.tools.registry import ToolRegistryCollisionError
 
 
@@ -124,6 +132,11 @@ def _turn(core):
 
 
 def _write_mcp_server(app, server_id: str, content: str) -> None:
+    policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+    app.tool_runtime.url_policy = policy
+    app.tool_runtime.mcp_runtime.url_policy = policy
     mcp_dir = app.version_store.active_core_path("assistant") / "agent" / "mcp"
     mcp_dir.mkdir(parents=True, exist_ok=True)
     (mcp_dir / f"{server_id}.yaml").write_text(content, encoding="utf-8")
@@ -596,6 +609,273 @@ async def test_mcp_http_connect_denial_prevents_client_and_socket_setup(
 
 
 @pytest.mark.asyncio
+async def test_mcp_http_metadata_target_is_denied_before_approval_and_factory(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "remote",
+        "transport: streamable_http\n"
+        "url: http://169.254.169.254/latest/meta-data\n"
+        "approval_policy: prompt\n",
+    )
+    provider = SequenceApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+    factory_calls = 0
+
+    def factory(*_args):
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeMcpConnection([FakeListedTool(name="lookup")])
+
+    app.tool_runtime.mcp_runtime.client_factory = factory
+
+    await app.runner.run_turn("hello")
+
+    assert provider.requests == []
+    assert factory_calls == 0
+    denial = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "mcp.server_denied"
+    )
+    assert denial["reason"] == "URL blocked by Host policy: metadata_address"
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_transport_reresolves_and_pins_every_request_before_redirect_follow(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "remote",
+        "transport: streamable_http\n"
+        "url: https://public.example/mcp\n"
+        "approval_policy: prompt\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    resolver_calls = 0
+    transport_requests: list[str] = []
+    decisions = []
+
+    def resolver(hostname: str, port: int) -> tuple[str, ...]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 1:
+            return ("93.184.216.34",)
+        return ("10.0.0.8",)
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        transport_requests.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={
+                "location": (
+                    "https://public.example/private"
+                    "?token=SENSITIVE_REDIRECT_SECRET"
+                )
+            },
+        )
+
+    policy = UrlPolicy(resolver=resolver)
+    inner = httpx.MockTransport(handle)
+    connection = DefaultMcpClientConnection(
+        core.mcp_servers[0],
+        {},
+        {},
+        tmp_path,
+        tmp_path / "mcp.log",
+        url_policy=policy,
+        httpx_transport_factory=lambda: inner,
+    )
+    client = connection._httpx_client_factory(
+        headers=None,
+        timeout=None,
+        auth=None,
+    )
+
+    assert client.follow_redirects is True
+    assert isinstance(client._transport, UrlPolicyAsyncTransport)
+    connection.set_url_decision_sink(decisions.append)
+    with pytest.raises(UnsafeUrlError) as caught:
+        await client.get("https://public.example/start")
+
+    assert caught.value.decision.reason == "private_address"
+    assert "SENSITIVE_REDIRECT_SECRET" not in str(caught.value)
+    assert resolver_calls == 2
+    assert transport_requests == ["https://93.184.216.34/start"]
+    assert [decision.allowed for decision in decisions] == [True, False]
+    assert decisions[-1].audit_view() == {
+        "allowed": False,
+        "reason": "private_address",
+        "target": "https://public.example",
+        "scheme": "https",
+        "hostname": "public.example",
+        "port": 443,
+        "resolved_addresses": ["10.0.0.8"],
+    }
+    assert "SENSITIVE_REDIRECT_SECRET" not in json.dumps(
+        [decision.audit_view() for decision in decisions],
+        sort_keys=True,
+    )
+    await client.aclose()
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_default_mcp_http_background_writer_uses_the_stable_connection_audit_sink(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "remote",
+        "transport: streamable_http\n"
+        "url: https://public.example/mcp\n"
+        "approval_policy: prompt\n",
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    methods: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        method = str(body.get("method") or "")
+        methods.append(method)
+        if "id" not in body:
+            return httpx.Response(202)
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": {"name": "fake", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "description": "",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    }
+                ]
+            }
+        elif method == "tools/call":
+            result = {
+                "content": [{"type": "text", "text": "ok"}],
+                "isError": False,
+            }
+        else:
+            result = {}
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+        )
+
+    connection = DefaultMcpClientConnection(
+        core.mcp_servers[0],
+        {},
+        {},
+        tmp_path,
+        tmp_path / "mcp.log",
+        url_policy=UrlPolicy(
+            resolver=lambda hostname, port: ("93.184.216.34",),
+        ),
+        httpx_transport_factory=lambda: httpx.MockTransport(handle),
+    )
+    discovery_decisions = []
+    call_decisions = []
+    connection.set_url_decision_sink(discovery_decisions.append)
+
+    tools = await connection.list_tools()
+    discovery_count = len(discovery_decisions)
+    connection.set_url_decision_sink(call_decisions.append)
+    result = await connection.call_tool("lookup", {}, timeout_seconds=2)
+
+    assert [tool.name for tool in tools] == ["lookup"]
+    assert result.isError is False
+    assert methods == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ]
+    assert len(discovery_decisions) == discovery_count == 3
+    assert len(call_decisions) == 1
+    assert call_decisions[0].audit_view()["target"] == "https://public.example"
+    await connection.close()
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_records_the_request_scoped_final_url_decision(tmp_path):
+    class AuditedConnection(FakeMcpConnection):
+        def __init__(self) -> None:
+            super().__init__([FakeListedTool(name="lookup")])
+            self._decision_sink = None
+
+        def set_url_decision_sink(self, sink):
+            self._decision_sink = sink
+
+        async def call_tool(self, name, arguments, *, timeout_seconds):
+            assert self._decision_sink is not None
+            self._decision_sink(
+                UrlDecision(
+                    allowed=True,
+                    reason="allowed",
+                    scheme="https",
+                    hostname="final.example",
+                    port=443,
+                    resolved_addresses=("93.184.216.35",),
+                )
+            )
+            return await super().call_tool(
+                name,
+                arguments,
+                timeout_seconds=timeout_seconds,
+            )
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _write_mcp_server(
+        app,
+        "remote",
+        "transport: streamable_http\n"
+        "url: https://public.example/mcp\n"
+        "approval_policy: prompt\n",
+    )
+    _set_capabilities(app, {"mcp.call:remote": {}})
+    connection = AuditedConnection()
+    app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    core = await _prepare(app)
+
+    result = await _execute(app, core, "remote__lookup", {})
+
+    assert result.is_error is False
+    event = next(
+        item
+        for item in reversed(EventLog(app.home, "session_test").tail(20))
+        if item["type"] == "mcp.url_decision"
+    )
+    assert event["phase"] == "request"
+    assert event["server_id"] == "remote"
+    assert event["url_policy"] == {
+        "allowed": True,
+        "reason": "allowed",
+        "target": "https://final.example",
+        "scheme": "https",
+        "hostname": "final.example",
+        "port": 443,
+        "resolved_addresses": ["93.184.216.35"],
+    }
+    await app.close()
+
+
+@pytest.mark.asyncio
 async def test_mcp_connect_approval_preview_is_auditable_without_secret_values(
     tmp_path,
 ):
@@ -645,12 +925,16 @@ async def test_mcp_connect_approval_preview_is_auditable_without_secret_values(
     assert local["env_names"] == ["MCP_TOKEN"]
     assert local["args"][0] == "--yes"
     assert local["args"][2] == "--token=<redacted>"
-    assert remote["url"].startswith(
-        "https://example.test/<value sha256:"
-    )
-    assert remote["url"].endswith(
-        "?mode=<redacted>&token=<redacted>"
-    )
+    assert remote["url"] == "https://example.test"
+    assert remote["url_policy"] == {
+        "allowed": True,
+        "reason": "allowed",
+        "target": "https://example.test",
+        "scheme": "https",
+        "hostname": "example.test",
+        "port": 443,
+        "resolved_addresses": ["93.184.216.34"],
+    }
     assert remote["header_names"] == ["Authorization", "X-Tenant"]
     for secret in (
         "SYNTHETIC_ARG_SECRET",

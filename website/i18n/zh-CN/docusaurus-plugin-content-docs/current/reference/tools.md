@@ -18,6 +18,7 @@ metadata，以及 dispatch 使用的 adapter-bound `EffectRequest`。Builtin、a
 不再按全局 tool name 做第二次 source lookup。MCP connect/discovery 现在拥有独立的
 `mcp.connect:<server>` capability/approval gate，并在 client construction 前执行；后续 call
 使用独立且 connection-bound 的 `mcp.call:<server>` path。
+`web_extract`、MCP HTTP 与 callback URL validation 共用一个 Host URL policy。
 
 ## Built-In Toolsets
 
@@ -248,8 +249,12 @@ session 时会跟踪驱逐旧 session；显式 session eviction 只关闭选定 
 Delegated child 使用 Host-issued authority，并在 child run 结束时关闭 MCP connection。
 Connect approval preview 会显示安全 launch metadata，而不会包含 environment、header、URL
 credential/query 或 argument secret value。Stdio child 使用共享 allowlisted environment，
-并只在 connect approval 后添加 manifest-declared env entry。URL policy 仍属于后续独立
-security 工作。
+并只在 connect approval 后添加 manifest-declared env entry。Streamable HTTP 会校验初始
+URL 与每次 request/redirect，要求全部 DNS answer 安全，并在保留原 Host/TLS SNI 的同时把
+connection 固定到已验证地址。DNS failure 与 malformed answer 会 fail closed。Agent Core
+declaration 不能 opt into private target 或 ambient HTTP proxy。每个 MCP HTTP request
+都会发出带 `phase: request` 的 secret-safe `mcp.url_decision` event，因此 redirect hop 与
+final attempted origin/address 均可审计。
 
 ## Tool Metadata Overrides
 
@@ -440,7 +445,13 @@ Foreground `/stop` 只取消 foreground turn，不会取消 background tasks。
 两个 package 都暴露 model-facing tool name `web_search`。因为两者都指向
 `agent/tools/web_search`，一个 core 同时只能安装一个 web search provider package。
 
-`web_extract` 仍是获取已知 URL 的 built-in tool。
+`web_extract` 仍是获取已知 URL 的 built-in tool。Approval 前它会把 URL 缩减为不含
+credential 的 origin summary；approval 后重新校验 URL 与每个 redirect，并只连接已验证
+地址。返回 metadata 记录 final safe origin 与 resolved addresses，不包含 userinfo、path、
+query 或 fragment value。Private、loopback、link-local、CGNAT、metadata、multicast、
+reserved、unspecified、DNS-failure 与 mixed-answer target 都会 fail closed。
+Legacy numeric、hexadecimal、octal 与 short IPv4 hostname 会先规范化，再进入 policy，
+不会交给 platform-specific resolver 自行解释。
 
 ## 检查可见 Tools
 

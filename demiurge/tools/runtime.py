@@ -51,6 +51,13 @@ from demiurge.security.subprocess_env import (
     build_sanitized_subprocess_env,
     ensure_subprocess_home,
 )
+from demiurge.security.url_policy import (
+    UnsafeUrlError,
+    UrlDecision,
+    UrlPolicy,
+    UrlPolicyConnectionHandler,
+    UrlPolicyRedirectHandler,
+)
 from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, McpServerDefinition, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.core_repository import CoreRepositoryError
 from demiurge.providers import ToolCall, ToolDefinition
@@ -473,6 +480,7 @@ class ToolRuntime:
         runtime_timezone: RuntimeTimezone | None = None,
         task_worker: RuntimeTaskWorker | None = None,
         session_runtime: SessionRuntime | None = None,
+        url_policy: UrlPolicy | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
@@ -485,6 +493,7 @@ class ToolRuntime:
             raise ValueError("ToolRuntime requires a RuntimeControlPlane-backed RuntimeTaskWorker")
         self.task_worker = task_worker
         self.session_runtime = session_runtime
+        self.url_policy = url_policy or UrlPolicy()
         self.process_lifecycle = ProcessLifecycleOwner()
         self._approval_scope: ContextVar[ApprovalScope | None] = ContextVar(
             f"demiurge_tool_approval_scope_{id(self)}",
@@ -664,11 +673,12 @@ class ToolRuntime:
             core=core,
             turn=turn,
         )
+        connect_summary = _safe_authored_arguments_preview(
+            mcp_connect_security_summary(server)
+        )
         call = ToolCall(
             name=entry.name,
-            arguments=_safe_authored_arguments_preview(
-                mcp_connect_security_summary(server)
-            ),
+            arguments=connect_summary,
             id=f"{turn.turn_id}:{entry.name}",
         )
         try:
@@ -699,6 +709,33 @@ class ToolRuntime:
                         reason=str(exc),
                     )
                 return False
+        if server.manifest.transport == "streamable_http":
+            url_decision = await asyncio.to_thread(
+                self.url_policy.evaluate,
+                str(server.manifest.url),
+            )
+            if not url_decision.allowed:
+                if emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=capability_name,
+                        reason=(
+                            "URL blocked by Host policy: "
+                            f"{url_decision.reason}"
+                        ),
+                        url_policy=url_decision.audit_view(),
+                    )
+                return False
+            safe_url_audit = url_decision.audit_view()
+            connect_summary["url"] = safe_url_audit["target"]
+            connect_summary["url_policy"] = safe_url_audit
+            call = ToolCall(
+                name=entry.name,
+                arguments=connect_summary,
+                id=f"{turn.turn_id}:{entry.name}",
+            )
         denied = await self._approval_for_resolved_entry(
             entry,
             call,
@@ -3105,9 +3142,42 @@ class ToolRuntime:
             return ToolResult(content="url is required", is_error=True)
         if not url.startswith(("http://", "https://")):
             return ToolResult(content="only http and https URLs are supported", is_error=True)
-        denied = await self._approval_for_url(call, core=core, turn=turn, url=url, emit_event=emit_event)
+        url_decision = await asyncio.to_thread(self.url_policy.evaluate, url)
+        if not url_decision.allowed:
+            return ToolResult(
+                content=f"URL blocked by Host policy: {url_decision.reason}",
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "url_policy": url_decision.audit_view(),
+                },
+            )
+        denied = await self._approval_for_url(
+            call,
+            core=core,
+            turn=turn,
+            url=url,
+            url_decision=url_decision,
+            emit_event=emit_event,
+        )
         if denied:
             return denied
+        execution_url_decision = await asyncio.to_thread(
+            self.url_policy.evaluate,
+            url,
+        )
+        if not execution_url_decision.allowed:
+            return ToolResult(
+                content=(
+                    "URL blocked by Host policy before request: "
+                    f"{execution_url_decision.reason}"
+                ),
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "url_policy": execution_url_decision.audit_view(),
+                },
+            )
         timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=20, maximum=60)
         max_chars = self._positive_int(
             call.arguments.get("max_chars"),
@@ -3115,15 +3185,39 @@ class ToolRuntime:
             maximum=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
         )
 
-        def fetch() -> tuple[int, str | None, str]:
+        def fetch() -> tuple[int, str | None, str, dict[str, object]]:
             request = urllib.request.Request(url, method="GET", headers={"User-Agent": "demiurge/0.1"})
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            connection_handler = UrlPolicyConnectionHandler(self.url_policy)
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                connection_handler,
+                UrlPolicyRedirectHandler(self.url_policy)
+            )
+            with opener.open(request, timeout=timeout) as response:
+                final_decision = (
+                    connection_handler.last_decision
+                    or self.url_policy.require(response.geturl())
+                )
                 charset = response.headers.get_content_charset() or "utf-8"
                 body = response.read(max_chars + 1).decode(charset, errors="replace")
-                return response.status, response.headers.get("content-type"), body
+                return (
+                    response.status,
+                    response.headers.get("content-type"),
+                    body,
+                    final_decision.audit_view(),
+                )
 
         try:
-            status, content_type, body = await asyncio.to_thread(fetch)
+            status, content_type, body, final_url_policy = await asyncio.to_thread(fetch)
+        except UnsafeUrlError as exc:
+            return ToolResult(
+                content=f"URL blocked by Host policy: {exc.decision.reason}",
+                is_error=True,
+                data={
+                    "executionStarted": True,
+                    "url_policy": exc.decision.audit_view(),
+                },
+            )
         except urllib.error.URLError as exc:
             return ToolResult(content=f"web_extract failed: {exc}", is_error=True, data={"executionStarted": True})
         truncated = len(body) > max_chars
@@ -3134,7 +3228,8 @@ class ToolRuntime:
             content=content,
             data={
                 "executionStarted": True,
-                "url": url,
+                "url": final_url_policy["target"],
+                "url_policy": final_url_policy,
                 "status": status,
                 "content_type": content_type,
                 "truncated": truncated,
@@ -3455,8 +3550,10 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         url: str,
+        url_decision: UrlDecision,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
+        safe_target = str(url_decision.audit_view()["target"])
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
@@ -3471,10 +3568,13 @@ class ToolRuntime:
             capability=self._resolved_effect_capability("network.fetch"),
             action="fetch",
             risk="high",
-            summary=f"Extract URL {url}",
-            target=url,
-            arguments_preview={"url": url},
-            cache_key=f"web_extract:network.fetch:{url}",
+            summary=f"Extract URL from {safe_target}",
+            target=safe_target,
+            arguments_preview={"url": safe_target},
+            cache_key=(
+                "web_extract:network.fetch:"
+                + hashlib.sha256(url.encode("utf-8")).hexdigest()
+            ),
             auto_approve=policy == "auto",
             policy=policy,
         )
@@ -3482,7 +3582,7 @@ class ToolRuntime:
         if decision.allowed:
             return None
         return ToolResult(
-            content=f"approval denied: extract URL {url}",
+            content=f"approval denied: extract URL from {safe_target}",
             data={"executionStarted": False, "approval": asdict(decision)},
             is_error=True,
         )

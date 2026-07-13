@@ -83,8 +83,15 @@ calls do so before the call. Authored tool dispatch now requires the resolved
 singular capability and approval policy before module import/invocation. Alpha
 runtime catalogs require MCP connect authority before spawn/connect/discovery,
 and builtin/authored/MCP calls share the resolved-entry dispatcher. Remaining
-effect-security gaps include shared URL/redirect policy and general structured
-cross-effect redaction.
+effect-security gaps include general structured cross-effect redaction. Shared
+URL enforcement is implemented for `web_extract`, MCP HTTP, and callback URL
+validation. It normalizes hostnames, checks literal addresses and every DNS
+answer, fails closed on resolution errors, revalidates each redirect/request,
+and pins the socket to the validated address while preserving Host/TLS SNI.
+Private, loopback, link-local, CGNAT, metadata, multicast, reserved, and
+unspecified targets are blocked by default. Agent Core content cannot weaken
+this policy, and audit/approval views omit URL credentials, path, query, and
+fragment values.
 `evolve_core` / `rollback_core` now use the same resolved registry entry for
 capability and monotonic approval policy before adapter calls or background
 task creation. The `EffectRuntime` contract retains one ordering; see
