@@ -2396,9 +2396,24 @@ async def test_sec_01_expansion_approval_fingerprint_includes_execution_options(
     core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
     command = 'printf "%s" "$VALUE"'
     env = {"VALUE": "OPTIONS_SENTINEL"}
+    # The values only need to differ for the approval fingerprint. Use normal
+    # operator-scale budgets so Windows can start the printf compatibility
+    # process and drain its output even on a loaded hosted runner.
+    first_timeout_seconds = 30
+    second_timeout_seconds = 60
 
-    first = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 1})
-    second = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 2})
+    first = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "env": env, "timeout_seconds": first_timeout_seconds},
+    )
+    second = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "env": env, "timeout_seconds": second_timeout_seconds},
+    )
 
     assert first.is_error is False
     assert first.data["executionStarted"] is True
