@@ -1282,7 +1282,8 @@ async def test_terminal_foreground_high_output_has_durable_artifact(tmp_path):
     assert len(rows) == 1
     artifact_root = app.home / "runtime" / "artifacts" / artifact["root"]
     stdout_path = artifact_root / artifact["streams"]["stdout"]
-    assert stdout_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert stdout_path.stat().st_mode & 0o777 == 0o600
     assert stdout_path.read_text(encoding="utf-8") == "x" * payload_bytes
     assert len(result.content) <= 12_100
 
@@ -2532,7 +2533,8 @@ async def test_terminal_background_drains_large_unbroken_output_in_bounded_chunk
         / artifact["root"]
         / artifact["streams"]["stdout"]
     )
-    assert stdout_path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert stdout_path.stat().st_mode & 0o777 == 0o600
     assert stdout_path.stat().st_size == payload_bytes
 
 

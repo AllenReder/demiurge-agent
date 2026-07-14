@@ -195,6 +195,19 @@ def _prepare_turn(app, core, turn):
     )
 
 
+def _prepare_mcp_discovery(app, core, turn):
+    async def authorize_server(_server):
+        return True
+
+    return app.tool_runtime.mcp_runtime.prepare_for_turn(
+        core,
+        turn,
+        authority_key="test-discovery-authority",
+        authorize_server=authorize_server,
+        emit_event=app.runner.event_log.emit,
+    )
+
+
 def _execute(app, core, name, arguments):
     turn = _turn(core)
     return app.runner.execute_call(
@@ -1446,7 +1459,7 @@ async def test_mcp_03_discovery_starts_servers_with_bounded_concurrency(tmp_path
     app.tool_runtime.mcp_runtime.client_factory = factory
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     turn = _turn(core)
-    prepare = asyncio.create_task(_prepare_turn(app, core, turn))
+    prepare = asyncio.create_task(_prepare_mcp_discovery(app, core, turn))
     try:
         await asyncio.wait_for(alpha.started.wait(), timeout=0.2)
         await asyncio.wait_for(beta.started.wait(), timeout=0.2)
@@ -1491,7 +1504,7 @@ async def test_mcp_03_hung_discovery_does_not_block_another_session_turn(
 
     app.tool_runtime.mcp_runtime.client_factory = factory
     prepare_alpha = asyncio.create_task(
-        _prepare_turn(app, core_alpha, turn_alpha)
+        _prepare_mcp_discovery(app, core_alpha, turn_alpha)
     )
     await asyncio.wait_for(alpha.started.wait(), timeout=0.2)
 
@@ -1513,7 +1526,7 @@ async def test_mcp_03_hung_discovery_does_not_block_another_session_turn(
         user_input=AgentInput(content="beta"),
     )
     prepare_beta = asyncio.create_task(
-        _prepare_turn(app, core_beta, turn_beta)
+        _prepare_mcp_discovery(app, core_beta, turn_beta)
     )
     try:
         await asyncio.wait_for(beta.started.wait(), timeout=0.2)
@@ -1550,7 +1563,7 @@ async def test_mcp_discovery_concurrency_is_bounded_to_four_servers(tmp_path):
         app.version_store.active_core_path("assistant")
     )
     turn = _turn(core)
-    prepare = asyncio.create_task(_prepare_turn(app, core, turn))
+    prepare = asyncio.create_task(_prepare_mcp_discovery(app, core, turn))
     try:
         await asyncio.gather(
             *(
@@ -1627,14 +1640,18 @@ async def test_mcp_discovery_concurrency_bound_is_shared_across_sessions(
         core_revision=core.revision,
         user_input=AgentInput(content="B"),
     )
-    prepare_a = asyncio.create_task(_prepare_turn(app, core, turn_a))
+    prepare_a = asyncio.create_task(
+        _prepare_mcp_discovery(app, core, turn_a)
+    )
     await asyncio.gather(
         *(
             asyncio.wait_for(connection.started.wait(), timeout=0.2)
             for connection in first_connections.values()
         )
     )
-    prepare_b = asyncio.create_task(_prepare_turn(app, core, turn_b))
+    prepare_b = asyncio.create_task(
+        _prepare_mcp_discovery(app, core, turn_b)
+    )
     try:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(
@@ -1685,7 +1702,9 @@ async def test_cancelled_mcp_discovery_closes_completed_and_active_connections(
     core = app.core_loader.load(
         app.version_store.active_core_path("assistant")
     )
-    prepare = asyncio.create_task(_prepare_turn(app, core, _turn(core)))
+    prepare = asyncio.create_task(
+        _prepare_mcp_discovery(app, core, _turn(core))
+    )
     await asyncio.wait_for(alpha.started.wait(), timeout=0.2)
     await asyncio.wait_for(beta.started.wait(), timeout=0.2)
 
@@ -1716,7 +1735,9 @@ async def test_app_close_cancels_active_mcp_discovery_and_closes_connection(
     core = app.core_loader.load(
         app.version_store.active_core_path("assistant")
     )
-    prepare = asyncio.create_task(_prepare_turn(app, core, _turn(core)))
+    prepare = asyncio.create_task(
+        _prepare_mcp_discovery(app, core, _turn(core))
+    )
     await asyncio.wait_for(connection.started.wait(), timeout=0.2)
     try:
         await asyncio.wait_for(app.close(), timeout=0.2)
