@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import tempfile
+import threading
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -2133,6 +2134,75 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     assert edited["reply_markup"] is None
     assert ("Denied" if expected == "deny" else "Approved") in edited["text"]
     assert api.reply_markup_edits[-1] == {"chat_id": "123", "message_id": 1000, "reply_markup": None}
+
+
+@pytest.mark.asyncio
+async def test_telegram_approval_callback_waits_for_sent_message_registration():
+    class DelayedSendApi(FakeApi):
+        def __init__(self):
+            super().__init__()
+            self.release_send = threading.Event()
+
+        def send_message(self, **kwargs):
+            sent = super().send_message(**kwargs)
+            self.release_send.wait(timeout=5)
+            return sent
+
+    runner = ApprovalRunner()
+    api = DelayedSendApi()
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+    )
+
+    await bridge.handle_inbound(
+        InteractionInbound(
+            channel="telegram",
+            text="run",
+            source="123",
+            reply_to="456",
+            conversation_key="telegram:dm:123",
+            metadata={"telegram_chat_type": "private"},
+        )
+    )
+    await asyncio.wait_for(runner.request_started.wait(), timeout=1)
+    await _wait_until(lambda: bool(api.sent))
+    await _wait_until(lambda: bridge._pending_approvals.count > 0)
+    approval_id = bridge._pending_approvals.pending_ids()[0]
+    state = bridge._conversations["telegram:dm:123"]
+    callback_task = asyncio.create_task(
+        bridge.handle_update(
+            _callback(
+                approval_callback_data(approval_id, "allow"),
+                chat_id=123,
+                message_id=1000,
+                callback_id="cb_approval",
+            )
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        assert callback_task.done() is False
+
+        api.release_send.set()
+        await asyncio.wait_for(callback_task, timeout=1)
+        assert state.active_task is not None
+        await asyncio.wait_for(state.active_task, timeout=1)
+    finally:
+        api.release_send.set()
+        if not callback_task.done():
+            callback_task.cancel()
+            await asyncio.gather(callback_task, return_exceptions=True)
+
+    assert api.edits[-1]["message_id"] == 1000
+    assert "Approved" in api.edits[-1]["text"]
+    assert api.reply_markup_edits[-1] == {
+        "chat_id": "123",
+        "message_id": 1000,
+        "reply_markup": None,
+    }
 
 
 @pytest.mark.asyncio

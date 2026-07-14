@@ -128,6 +128,9 @@ uv run demiurge setup timezone set Asia/Shanghai
 uv run demiurge setup timezone clear
 ```
 
+`setup status` is read-only. It reports a missing runtime home or core without
+creating `config.yaml`, the Agent Core repository, or runtime templates.
+
 Provider presets currently include:
 
 ```text

@@ -184,12 +184,13 @@ async def _prepare(app):
     return core
 
 
-async def _prepare_turn(app, core, turn):
-    await app.tool_runtime.prepare_for_turn(
+def _prepare_turn(app, core, turn):
+    principal_scope = _principal_scope(app, core, turn)
+    return app.tool_runtime.prepare_for_turn(
         core,
         turn,
         capability=CapabilityFacade(core),
-        principal_scope=_principal_scope(app, core, turn),
+        principal_scope=principal_scope,
         emit_event=app.runner.event_log.emit,
     )
 

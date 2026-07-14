@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -1692,6 +1693,41 @@ def test_windows_terminal_printf_compat_formats_common_smoke_command():
     assert translated is not None
     assert "_format_windows_printf" in translated
     assert "printf" not in translated.split(" -c ", 1)[0]
+
+
+@pytest.mark.cross_platform
+def test_windows_terminal_compat_normalizes_posix_quoted_argv_command():
+    code = "import sys; sys.stdout.write('WINDOWS_ARGV_SENTINEL')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    translated = tool_runtime._windows_posix_compat_command(command)
+
+    assert translated is not None
+    completed = subprocess.run(
+        translated,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "WINDOWS_ARGV_SENTINEL"
+
+
+@pytest.mark.cross_platform
+def test_windows_terminal_printf_compat_expands_overlay_environment():
+    assert tool_runtime._format_windows_printf(
+        "%s",
+        ["$VALUE"],
+        env={"VALUE": "WINDOWS_ENV_SENTINEL"},
+    ) == "WINDOWS_ENV_SENTINEL"
+
+    translated = tool_runtime._windows_posix_compat_command(
+        'printf "%s" "$VALUE"'
+    )
+
+    assert translated is not None
+    assert "os.environ" in translated
 
 
 @pytest.mark.asyncio

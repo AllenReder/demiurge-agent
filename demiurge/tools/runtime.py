@@ -397,13 +397,23 @@ def _redact_terminal_bound_secrets(
 
 
 def _windows_posix_compat_command(command: str) -> str | None:
-    if any(token in command for token in ("\n", "\r", "|", "&&", ";", ">", "<")):
+    if "\n" in command or "\r" in command:
         return None
     try:
-        parts = shlex.split(command, posix=True)
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars="|&;<>",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
     except ValueError:
         return None
-    if not parts:
+    if not parts or any(
+        part and all(character in "|&;<>" for character in part)
+        for part in parts
+    ):
         return None
     name = parts[0]
     args = parts[1:]
@@ -425,6 +435,8 @@ def _windows_posix_compat_command(command: str) -> str | None:
         return _python_shell_command("import sys; sys.exit(0)", [])
     if name == "false" and not args:
         return _python_shell_command("import sys; sys.exit(1)", [])
+    if "'" in command:
+        return subprocess.list2cmdline(parts)
     return None
 
 
@@ -452,16 +464,40 @@ def _windows_rm_command(args: list[str]) -> str | None:
 
 def _windows_printf_command(args: list[str]) -> str:
     code = (
-        "import sys; "
+        "import os, sys; "
         "from demiurge.tools.runtime import _format_windows_printf; "
-        "sys.stdout.write(_format_windows_printf(sys.argv[1], sys.argv[2:]))"
+        "sys.stdout.write(_format_windows_printf(sys.argv[1], sys.argv[2:], env=os.environ))"
     )
     return _python_shell_command(code, args)
 
 
-def _format_windows_printf(format_text: str, values: list[str]) -> str:
+def _format_windows_printf(
+    format_text: str,
+    values: list[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    if env is not None:
+        values = [
+            _expand_windows_posix_env_argument(value, env)
+            for value in values
+        ]
     decoded_format = codecs.decode(format_text, "unicode_escape")
     return decoded_format % tuple(values) if values else decoded_format
+
+
+def _expand_windows_posix_env_argument(
+    value: str,
+    env: Mapping[str, str],
+) -> str:
+    name = ""
+    if value.startswith("${") and value.endswith("}"):
+        name = value[2:-1]
+    elif value.startswith("$"):
+        name = value[1:]
+    if name and _TERMINAL_ENV_NAME_RE.fullmatch(name):
+        return str(env.get(name, ""))
+    return value
 
 
 def _python_shell_command(code: str, args: list[str]) -> str:

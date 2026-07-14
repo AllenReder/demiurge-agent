@@ -319,12 +319,18 @@ class SessionRuntime:
         return self._record_from_row(rows[0])
 
     def list_sessions(self, *, core_id: str | None = None, limit: int = 20) -> list[SessionRecord]:
-        rows = self.store.query(RuntimeQuery(table="sessions", order_by="updated_at", limit=max(limit * 5, limit))).rows
+        rows = self.store.query(
+            RuntimeQuery(
+                table="sessions",
+                where={"core_id": core_id} if core_id else None,
+                order_by="updated_at",
+                descending=True,
+                limit=limit,
+            )
+        ).rows
         records = [self._record_from_row(row) for row in rows]
-        if core_id:
-            records = [record for record in records if record.core_id == core_id]
         records.sort(key=lambda item: item.updated_at, reverse=True)
-        return records[:limit]
+        return records
 
     def list_owned_sessions(
         self,
@@ -341,12 +347,13 @@ class SessionRuntime:
                 table="sessions",
                 where=where,
                 order_by="updated_at",
-                limit=max(limit * 5, limit),
+                descending=True,
+                limit=limit,
             ),
         ).rows
         records = [self._record_from_row(row) for row in rows]
         records.sort(key=lambda item: item.updated_at, reverse=True)
-        return records[:limit]
+        return records
 
     def resolve_interaction_session(self, *, core_id: str, channel: str | None, conversation_key: str | None) -> str | None:
         if not channel or not conversation_key:

@@ -65,13 +65,21 @@ class SetupContext:
 
 
 def handle_setup_command(args: argparse.Namespace) -> None:
+    if args.setup_command == "status":
+        context = load_setup_status_context(
+            args.home,
+            agents_root=args.agents_root,
+        )
+        data = setup_status(
+            context,
+            core_id=args.core,
+            timezone_override=getattr(args, "timezone", None),
+        )
+        _print_result(data, as_json=args.json)
+        return
     context = load_setup_context(args.home, agents_root=args.agents_root)
     if args.setup_command is None:
         run_setup_wizard(context)
-        return
-    if args.setup_command == "status":
-        data = setup_status(context, core_id=args.core, timezone_override=getattr(args, "timezone", None))
-        _print_result(data, as_json=args.json)
         return
     if args.setup_command == "providers":
         _handle_provider_command(context, args)
@@ -106,6 +114,24 @@ def load_setup_context(home: Path | None, *, agents_root: Path | None = None) ->
         host_config=host_config,
         version_store=version_store,
         agents_root=source_agents,
+    )
+
+
+def load_setup_status_context(
+    home: Path | None,
+    *,
+    agents_root: Path | None = None,
+) -> SetupContext:
+    resolved_home = (home or default_home()).expanduser().resolve()
+    load_runtime_env(resolved_home)
+    host_config_path = resolved_home / "config.yaml"
+    host_config = load_host_config(host_config_path)[0]
+    return SetupContext(
+        home=resolved_home,
+        host_config_path=host_config_path,
+        host_config=host_config,
+        version_store=VersionStore(resolved_home),
+        agents_root=source_agents_root(agents_root),
     )
 
 

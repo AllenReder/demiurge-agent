@@ -276,7 +276,6 @@ class CoreRepository:
                     )
                 ],
             )
-        self.ensure_private_excludes()
         issues: list[CoreConsistencyIssue] = []
         live_revision = self._resolve_ref(LIVE_REF)
         if live_revision is None:

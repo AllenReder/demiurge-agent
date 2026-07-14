@@ -16,7 +16,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -89,6 +89,10 @@ class TelegramPendingApproval:
     reply_to: str | None
     conversation_key: str
     message_id: int | None = None
+    message_ready: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        repr=False,
+    )
 
 
 class TelegramInboundMediaError(RuntimeError):
@@ -775,6 +779,7 @@ class TelegramInteractionBridge:
                 sent = await send_task
             except BaseException:
                 self._pending_approvals.discard(pending.approval_id)
+                payload.message_ready.set()
             else:
                 self._record_pending_approval_message(pending, sent, conversation_key)
                 resolved = self._resolve_pending_approval(
@@ -790,6 +795,7 @@ class TelegramInteractionBridge:
             raise
         except BaseException:
             self._pending_approvals.discard(pending.approval_id)
+            payload.message_ready.set()
             raise
         self._record_pending_approval_message(pending, sent, conversation_key)
         try:
@@ -1219,6 +1225,7 @@ class TelegramInteractionBridge:
     ) -> None:
         payload: TelegramPendingApproval = pending.payload
         payload.message_id = _telegram_message_id(sent)
+        payload.message_ready.set()
         self._conversation_state(conversation_key).pending_approval_id = pending.approval_id
 
     async def _cancel_pending_approval(self, state: TelegramConversationState, *, reason: str) -> None:
@@ -1231,6 +1238,8 @@ class TelegramInteractionBridge:
 
     async def _edit_approval_message(self, pending: PendingApproval, title: str, detail: str) -> None:
         payload: TelegramPendingApproval = pending.payload
+        if payload.message_id is None:
+            await payload.message_ready.wait()
         if payload.message_id is None or not hasattr(self.api, "edit_message_text"):
             return
         text = format_resolved_approval_text(pending.request, title=title, detail=detail)

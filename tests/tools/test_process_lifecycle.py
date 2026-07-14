@@ -148,7 +148,7 @@ async def test_process_tree_adapter_rejects_changed_os_process_start_identity(mo
         platform="windows",
         start_identity="windows:100",
     )
-    process_lifecycle.bind_process_identity(process, identity)
+    process._demiurge_process_identity = identity
     calls = []
 
     monkeypatch.setattr(process_lifecycle, "_IS_POSIX", False)

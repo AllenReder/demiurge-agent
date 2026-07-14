@@ -77,6 +77,7 @@ class RuntimeQuery:
     order_by: str | None = None
     limit: int = 100
     offset: int = 0
+    descending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +407,10 @@ class RuntimeStore:
             if query.order_by not in _QUERY_ORDER_FIELDS:
                 raise ValueError(f"invalid runtime query order_by: {query.order_by}")
             sql += f" ORDER BY {query.order_by}"
+            if query.descending:
+                sql += " DESC"
+        elif query.descending:
+            raise ValueError("runtime query descending requires order_by")
         sql += " LIMIT ? OFFSET ?"
         values.extend([query.limit, query.offset])
         with self._connection() as connection:
@@ -497,7 +502,7 @@ class RuntimeStore:
                 0o600,
             )
             os.close(descriptor)
-            with sqlite3.connect(temporary_path) as backup:
+            with closing(sqlite3.connect(temporary_path)) as backup:
                 connection.backup(backup)
                 backup.commit()
             if os.name != "nt":
@@ -519,7 +524,12 @@ class RuntimeStore:
         source_connection: sqlite3.Connection | None = None,
     ) -> None:
         try:
-            with sqlite3.connect(f"{backup_path.resolve().as_uri()}?mode=ro", uri=True) as backup:
+            with closing(
+                sqlite3.connect(
+                    f"{backup_path.resolve().as_uri()}?mode=ro",
+                    uri=True,
+                )
+            ) as backup:
                 backup_version = int(backup.execute("PRAGMA user_version").fetchone()[0])
                 integrity = str(backup.execute("PRAGMA integrity_check").fetchone()[0])
         except sqlite3.DatabaseError as exc:
@@ -530,7 +540,12 @@ class RuntimeStore:
                 f"(version={backup_version}, integrity={integrity})"
             )
         if source_connection is not None:
-            with sqlite3.connect(f"{backup_path.resolve().as_uri()}?mode=ro", uri=True) as backup:
+            with closing(
+                sqlite3.connect(
+                    f"{backup_path.resolve().as_uri()}?mode=ro",
+                    uri=True,
+                )
+            ) as backup:
                 if RuntimeStore._database_fingerprint(backup) != RuntimeStore._database_fingerprint(
                     source_connection
                 ):

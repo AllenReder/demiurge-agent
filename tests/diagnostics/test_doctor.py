@@ -68,7 +68,8 @@ def test_doctor_ignores_runtime_core_channel_slot_declaration(tmp_path):
 def test_cli_init_check_is_read_only(tmp_path, capsys):
     home = tmp_path / "home"
 
-    main(["init", "--check", "--home", str(home), "--json"])
+    with pytest.raises(SystemExit, match="1"):
+        main(["init", "--check", "--home", str(home), "--json"])
 
     output = capsys.readouterr().out
     assert '"findings"' in output
