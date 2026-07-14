@@ -242,6 +242,58 @@ def test_process_identity_binding_requires_os_start_marker(monkeypatch):
 
 
 @pytest.mark.cross_platform
+def test_process_identity_capture_marks_fast_exited_posix_process(monkeypatch):
+    process = _FakeAsyncProcess(pid=4312)
+    process.returncode = 0
+
+    monkeypatch.setattr(process_lifecycle, "_IS_POSIX", True)
+    monkeypatch.setattr(process_lifecycle, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        process_lifecycle,
+        "_read_process_start_identity",
+        lambda pid: None,
+    )
+
+    identity = process_lifecycle.capture_process_identity(
+        process.pid,
+        process=process,
+    )
+    process_lifecycle.bind_process_identity(process, identity)
+
+    assert identity.start_identity == (
+        f"posix:exited-before-observation:{identity.spawn_id}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.cross_platform
+async def test_async_process_identity_capture_retries_until_fast_process_exit(
+    monkeypatch,
+):
+    process = _FakeAsyncProcess(pid=4312)
+
+    monkeypatch.setattr(process_lifecycle, "_IS_POSIX", True)
+    monkeypatch.setattr(process_lifecycle, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        process_lifecycle,
+        "_read_process_start_identity",
+        lambda pid: None,
+    )
+
+    async def mark_exited():
+        await asyncio.sleep(0)
+        process.returncode = 0
+
+    marker = asyncio.create_task(mark_exited())
+    identity = await process_lifecycle.capture_async_process_identity(process)
+    await marker
+
+    assert identity.start_identity == (
+        f"posix:exited-before-observation:{identity.spawn_id}"
+    )
+
+
+@pytest.mark.cross_platform
 def test_windows_spawn_is_suspended_until_job_assignment(monkeypatch):
     monkeypatch.setattr(process_lifecycle, "_IS_POSIX", False)
     monkeypatch.setattr(process_lifecycle, "_IS_WINDOWS", True)

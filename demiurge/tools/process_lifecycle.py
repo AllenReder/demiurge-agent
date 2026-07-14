@@ -18,6 +18,8 @@ from demiurge.security.private_files import open_private_text
 
 
 _PROCESS_GROUP_GRACE_SECONDS = 0.25
+_PROCESS_IDENTITY_CAPTURE_ATTEMPTS = 5
+_PROCESS_IDENTITY_CAPTURE_RETRY_SECONDS = 0.01
 _IS_POSIX = os.name == "posix"
 _IS_WINDOWS = os.name == "nt"
 
@@ -144,15 +146,52 @@ class ProcessLifecycleOwner:
             self._foreground.pop(registration_id, None)
 
 
-def capture_process_identity(pid: int) -> ProcessIdentity:
+def capture_process_identity(
+    pid: int,
+    *,
+    process: object | None = None,
+) -> ProcessIdentity:
     platform = "windows" if _IS_WINDOWS else "posix" if _IS_POSIX else "other"
+    spawn_id = f"proc_{time.time_ns()}_{uuid.uuid4().hex}"
+    start_identity = _read_process_start_identity(pid)
+    if (
+        start_identity is None
+        and _IS_POSIX
+        and process is not None
+        and _process_has_exited(process)
+    ):
+        start_identity = f"posix:exited-before-observation:{spawn_id}"
     return ProcessIdentity(
         pid=pid,
-        spawn_id=f"proc_{time.time_ns()}_{uuid.uuid4().hex}",
+        spawn_id=spawn_id,
         process_group_id=pid if _IS_POSIX or _IS_WINDOWS else None,
         platform=platform,
-        start_identity=_read_process_start_identity(pid),
+        start_identity=start_identity,
     )
+
+
+async def capture_async_process_identity(
+    process: asyncio.subprocess.Process,
+) -> ProcessIdentity:
+    identity = capture_process_identity(process.pid, process=process)
+    for _ in range(_PROCESS_IDENTITY_CAPTURE_ATTEMPTS - 1):
+        if identity.start_identity is not None:
+            return identity
+        await asyncio.sleep(_PROCESS_IDENTITY_CAPTURE_RETRY_SECONDS)
+        identity = capture_process_identity(process.pid, process=process)
+    return identity
+
+
+def _capture_foreground_process_identity(
+    process: subprocess.Popen[bytes],
+) -> ProcessIdentity:
+    identity = capture_process_identity(process.pid, process=process)
+    for _ in range(_PROCESS_IDENTITY_CAPTURE_ATTEMPTS - 1):
+        if identity.start_identity is not None:
+            return identity
+        time.sleep(_PROCESS_IDENTITY_CAPTURE_RETRY_SECONDS)
+        identity = capture_process_identity(process.pid, process=process)
+    return identity
 
 
 def bind_process_identity(
@@ -220,7 +259,7 @@ def run_foreground_process(
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    identity = capture_process_identity(process.pid)
+    identity = _capture_foreground_process_identity(process)
     try:
         bind_process_identity(process, identity)
     except Exception:
@@ -508,6 +547,18 @@ def _process_identity_matches(
         and identity.process_group_id is not None
         and _process_group_exists(identity.process_group_id)
     )
+
+
+def _process_has_exited(process: object) -> bool:
+    if getattr(process, "returncode", None) is not None:
+        return True
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return False
+    try:
+        return poll() is not None
+    except (OSError, ValueError):
+        return False
 
 
 def _read_process_start_identity(pid: int) -> str | None:

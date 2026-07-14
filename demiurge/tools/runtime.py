@@ -82,7 +82,7 @@ from demiurge.tools.process_lifecycle import (
     ProcessExecutionCancelled,
     ProcessLifecycleOwner,
     bind_process_identity,
-    capture_process_identity,
+    capture_async_process_identity,
     drain_async_process_output,
     process_group_spawn_kwargs,
     release_process_resources,
@@ -2411,7 +2411,7 @@ class ToolRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 **process_group_spawn_kwargs(),
             )
-            process_identity = capture_process_identity(process.pid)
+            process_identity = await capture_async_process_identity(process)
             try:
                 bind_process_identity(process, process_identity)
             except Exception:
