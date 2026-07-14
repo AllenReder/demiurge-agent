@@ -18,6 +18,7 @@ from demiurge.sdk import ContextContribution, TurnContext
 
 @dataclass(frozen=True, slots=True)
 class PromptBuildRequest:
+    session_id: str
     core: LoadedCore
     context: list[ContextContribution]
     turn_messages: list[LLMMessage]
@@ -43,19 +44,17 @@ class PromptContextRuntime:
         assembler: ContextAssembler,
         sessions: SessionRuntime,
         interaction_router: SessionInteractionRouter,
-        session_id: Callable[[], str],
         show_system_prompt: Callable[[], bool],
         emit_event: Callable[..., dict[str, Any]],
     ) -> None:
         self.assembler = assembler
         self.sessions = sessions
         self.interaction_router = interaction_router
-        self.session_id = session_id
         self.show_system_prompt = show_system_prompt
         self.emit_event = emit_event
 
     def build_messages(self, request: PromptBuildRequest) -> list[LLMMessage]:
-        current_session_id = self.session_id()
+        current_session_id = request.session_id
         assembled = self.assembler.assemble(
             core=request.core,
             context=request.context,
@@ -142,7 +141,7 @@ class PromptContextRuntime:
         outbound = InteractionOutbound(
             channel=str(channel),
             items=[item],
-            session_id=self.session_id(),
+            session_id=request.turn.session_id,
             turn_id=request.turn.turn_id,
             metadata=dict(request.interaction_metadata),
         )

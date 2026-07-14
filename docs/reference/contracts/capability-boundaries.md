@@ -42,8 +42,8 @@ The capability must be declared in one of these places:
 - `agent.yaml` under `capabilities.slots.<slot_path>`
 - the component manifest's `capabilities` list
 
-Prefix grants such as `mcp.call:*` may grant scoped capabilities such as
-`mcp.call:docs`.
+Prefix grants such as `mcp.connect:*` and `mcp.call:*` may grant scoped
+capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
 
 ## Approval Rule
 
@@ -59,6 +59,11 @@ Approval policy can come from:
 
 `deny` is always terminal. `prompt` requires an approval provider. `auto` can
 run without asking only after capability and workspace checks pass.
+For terminal execution, `auto` additionally requires an `allow/low` command
+guard decision. Global fallback policy cannot lower a `prompt/high` or unknown
+terminal decision, and hardline blocks never reach approval. Executing
+workspace/project code, applying an explicit environment overlay, or binding a
+Host secret requires explicit approval.
 
 ## Workspace Rule
 
@@ -73,6 +78,18 @@ not hard-code private local paths.
 Provider keys, bot tokens, webhook secrets, SMTP credentials, and MCP secrets
 belong in host config, environment variables, or `.env`. Authored slots and
 tools should report secret sources, not secret values.
+
+Terminal subprocesses receive an allowlisted environment and a dedicated
+runtime `HOME`; they do not inherit Host credentials. A secret can enter a
+foreground terminal effect only through `secret.bind:<ENV_NAME>` plus one-shot
+approval. The binding expires no later than the command timeout, is forbidden
+for background execution, is audited by source/name rather than value, and is
+exact-value-redacted from returned stdout/stderr.
+
+The grant must be exact; `secret.bind:*` is not accepted. A binding cannot
+target execution-control variables such as `PATH`, `HOME`, shell selectors,
+loader hooks, or language runtime search paths. Its earliest expiry clamps the
+foreground subprocess deadline.
 
 ## Channel Rule
 

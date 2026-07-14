@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
 
-from demiurge.providers import ToolDefinition
+from demiurge.providers import ToolCall, ToolDefinition
+from demiurge.sdk import ToolResult
+from demiurge.security.redaction import (
+    REDACTION_FAILED,
+    RedactionView,
+    SecretRedactor,
+    redact_tool_result,
+)
 from demiurge.security.workspace import DEFAULT_READ_LIMIT_CHARS, DEFAULT_TOOL_OUTPUT_LIMIT_CHARS
 
 
@@ -130,6 +138,20 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "background": {"type": "boolean", "default": False},
                 "notify_on_complete": {"type": "boolean", "default": True},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "secret_bindings": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string", "pattern": "^env:[A-Za-z_][A-Za-z0-9_]*$"},
+                            "target": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                            "expires_in_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                        },
+                        "required": ["source"],
+                        "additionalProperties": False,
+                    },
+                },
             },
             required=["command"],
         ),
@@ -187,10 +209,7 @@ BUILTIN_TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         name="task_status",
         description="Inspect a delegated task or runtime control-plane task.",
         input_schema=_schema(
-            {
-                "task_id": {"type": "string"},
-                "view": {"type": "string", "enum": ["model", "operator", "debug"], "default": "model"},
-            },
+            {"task_id": {"type": "string"}},
             required=["task_id"],
         ),
     ),
@@ -361,7 +380,12 @@ BUILTIN_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "todo": {"risk": "low", "approval_policy": "auto"},
     "clarify": {"risk": "low", "approval_policy": "auto"},
     "web_extract": {"risk": "medium", "capability": "network.fetch", "approval_policy": "prompt"},
-    "session_search": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
+    "session_search": {
+        "risk": "medium",
+        "capability": "session.read",
+        "approval_policy": "prompt",
+        "model_output_policy": "current_turn",
+    },
     "schedule_manage": {"risk": "high", "capability": "schedule.manage", "approval_policy": "prompt"},
     "tools_list": {"risk": "low", "approval_policy": "auto", "model_output_policy": "current_turn"},
 }
@@ -371,12 +395,201 @@ RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 APPROVAL_ORDER = {"auto": 0, "prompt": 1, "deny": 2}
 
 
-@dataclass(slots=True)
-class ToolRegistryEntry:
+class ToolRegistryCollisionError(ValueError):
+    """Raised when two effect sources expose the same model-visible name."""
+
+
+EffectStatus = Literal[
+    "succeeded",
+    "denied",
+    "invalid",
+    "not_found",
+    "failed",
+]
+EffectOrigin = Literal["model", "host", "authored"]
+
+
+@dataclass(frozen=True, slots=True)
+class EffectError:
+    code: EffectStatus
+    message: str
+    execution_started: bool
+    provenance: str
+
+
+@dataclass(frozen=True, slots=True)
+class EffectResultViews:
+    model: ToolResult
+    operator: ToolResult
+    event: ToolResult
+    durable: ToolResult
+    debug: ToolResult
+
+    def for_view(self, view: RedactionView | str) -> ToolResult:
+        return getattr(self, RedactionView(view).value)
+
+
+@dataclass(frozen=True, slots=True)
+class EffectResult:
+    entry: ResolvedEffectEntry | None
+    status: EffectStatus
+    result: ToolResult
+    error: EffectError | None = None
+    views: EffectResultViews | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.entry is None and self.status != "not_found":
+            raise ValueError("only not_found EffectResult may omit a resolved entry")
+        if self.status == "succeeded" and self.result.is_error:
+            raise ValueError("succeeded EffectResult cannot contain an error ToolResult")
+        if self.status != "succeeded" and not self.result.is_error:
+            raise ValueError("failed EffectResult must contain an error ToolResult")
+        if (self.status == "succeeded") != (self.error is None):
+            raise ValueError("EffectResult error must match its status")
+
+    @classmethod
+    def normalize(
+        cls,
+        entry: ResolvedEffectEntry,
+        result: ToolResult,
+        *,
+        redactor: SecretRedactor | None = None,
+    ) -> EffectResult:
+        views = None
+        if redactor is not None:
+            rendered: dict[RedactionView, ToolResult] = {}
+            redaction_failed = False
+            for view in RedactionView:
+                rendered[view], failed = redact_tool_result(
+                    result,
+                    redactor=redactor,
+                    view=view,
+                )
+                redaction_failed = redaction_failed or failed
+            if redaction_failed:
+                safe_result = ToolResult(
+                    content=REDACTION_FAILED,
+                    data={
+                        "executionStarted": bool(
+                            isinstance(result.data, Mapping)
+                            and result.data.get("executionStarted", False)
+                        ),
+                        "redactionFailed": True,
+                    },
+                    is_error=True,
+                    model_output=REDACTION_FAILED,
+                    display_output=REDACTION_FAILED,
+                )
+                rendered = {view: safe_result for view in RedactionView}
+            views = EffectResultViews(
+                model=rendered[RedactionView.MODEL],
+                operator=rendered[RedactionView.OPERATOR],
+                event=rendered[RedactionView.EVENT],
+                durable=rendered[RedactionView.DURABLE],
+                debug=rendered[RedactionView.DEBUG],
+            )
+            result = views.model
+        if not result.is_error:
+            return cls(
+                entry=entry,
+                status="succeeded",
+                result=result,
+                views=views,
+            )
+        data = result.data if isinstance(result.data, Mapping) else {}
+        execution_started = bool(data.get("executionStarted", False))
+        approval = data.get("approval")
+        denial = data.get("denial")
+        if (
+            denial in {"approval", "capability", "policy"}
+            or (
+                isinstance(approval, Mapping)
+                and approval.get("value") == "deny"
+            )
+        ):
+            status: EffectStatus = "denied"
+        elif result.content.startswith("tool not found or not allowed:"):
+            status = "not_found"
+        elif execution_started:
+            status = "failed"
+        else:
+            status = "invalid"
+        return cls(
+            entry=entry,
+            status=status,
+            result=result,
+            error=EffectError(
+                code=status,
+                message=result.content,
+                execution_started=execution_started,
+                provenance=entry.provenance,
+            ),
+            views=views,
+        )
+
+    @classmethod
+    def not_found(
+        cls,
+        *,
+        name: str,
+        core_id: str,
+        core_revision: str,
+    ) -> EffectResult:
+        result = ToolResult(
+            content=f"tool not found or not allowed: {name}",
+            is_error=True,
+            data={"executionStarted": False},
+        )
+        return cls(
+            entry=None,
+            status="not_found",
+            result=result,
+            error=EffectError(
+                code="not_found",
+                message=result.content,
+                execution_started=False,
+                provenance=f"unresolved:{core_id}@{core_revision}:{name}",
+            ),
+        )
+
+    def to_tool_result(
+        self,
+        view: RedactionView | str = RedactionView.MODEL,
+    ) -> ToolResult:
+        if self.views is None:
+            return self.result
+        return self.views.for_view(view)
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _thaw_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEffectEntry:
     name: str
     description: str
-    input_schema: dict[str, Any]
+    input_schema: Mapping[str, Any]
     source: str
+    core_id: str
+    core_revision: str
+    adapter_key: str
+    provenance: str
+    _adapter: Any = field(repr=False, compare=False)
     slot_path: str | None = None
     risk: str = "low"
     capability: str | None = None
@@ -385,11 +598,14 @@ class ToolRegistryEntry:
     display_policy: str = "summary"
     enabled: bool = True
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_schema", _freeze_value(self.input_schema))
+
     def to_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name=self.name,
             description=self.description,
-            input_schema=self.input_schema,
+            input_schema=_thaw_value(self.input_schema),
         )
 
     def to_model_metadata(self) -> dict[str, Any]:
@@ -397,6 +613,9 @@ class ToolRegistryEntry:
             "name": self.name,
             "description": self.description,
             "source": self.source,
+            "core_id": self.core_id,
+            "core_revision": self.core_revision,
+            "provenance": self.provenance,
             "slot_path": self.slot_path,
             "risk": self.risk,
             "capability": self.capability,
@@ -405,3 +624,110 @@ class ToolRegistryEntry:
             "display_policy": self.display_policy,
             "enabled": self.enabled,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class EffectRequest:
+    entry: ResolvedEffectEntry
+    name: str
+    arguments: Mapping[str, Any]
+    call_id: str
+    origin: EffectOrigin
+    catalog: ResolvedEffectCatalog
+
+    def __post_init__(self) -> None:
+        if self.entry.name != self.name:
+            raise ValueError(
+                "resolved effect entry does not match tool call: "
+                f"{self.entry.name} != {self.name}"
+            )
+        if self.origin not in {"model", "host", "authored"}:
+            raise ValueError(f"unsupported effect origin: {self.origin}")
+        if (
+            self.catalog.entry_for(self.name) is not self.entry
+        ):
+            raise ValueError(
+                "resolved effect entry is not owned by resolved effect catalog: "
+                f"{self.entry.provenance}"
+            )
+        object.__setattr__(self, "arguments", _freeze_value(self.arguments))
+
+    @classmethod
+    def from_call(
+        cls,
+        *,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        catalog: ResolvedEffectCatalog,
+        origin: EffectOrigin,
+    ) -> EffectRequest:
+        return cls(
+            entry=entry,
+            name=call.name,
+            arguments=call.arguments,
+            call_id=call.id,
+            origin=origin,
+            catalog=catalog,
+        )
+
+    def to_tool_call(self) -> ToolCall:
+        return ToolCall(
+            name=self.name,
+            arguments=_thaw_value(self.arguments),
+            id=self.call_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEffectCatalog:
+    core_id: str
+    core_revision: str
+    entries: tuple[ResolvedEffectEntry, ...]
+
+    def __post_init__(self) -> None:
+        seen: dict[str, ResolvedEffectEntry] = {}
+        for entry in self.entries:
+            if entry.core_id != self.core_id or entry.core_revision != self.core_revision:
+                raise ValueError(
+                    "resolved effect entry does not match catalog core snapshot: "
+                    f"{entry.provenance}"
+                )
+            prior = seen.get(entry.name)
+            if prior is not None:
+                raise ToolRegistryCollisionError(
+                    f"tool name collision: {entry.name}; "
+                    f"{prior.provenance} conflicts with {entry.provenance}; "
+                    "rename the authored or MCP tool"
+                )
+            seen[entry.name] = entry
+
+    def definitions(self) -> list[ToolDefinition]:
+        return [entry.to_definition() for entry in self.entries]
+
+    def entry_for(self, name: str) -> ResolvedEffectEntry | None:
+        return next((entry for entry in self.entries if entry.name == name), None)
+
+    def request_for(
+        self,
+        call: ToolCall,
+        *,
+        origin: EffectOrigin = "model",
+    ) -> EffectRequest | None:
+        entry = self.entry_for(call.name)
+        return (
+            EffectRequest.from_call(
+                entry=entry,
+                call=call,
+                catalog=self,
+                origin=origin,
+            )
+            if entry is not None
+            else None
+        )
+
+    def filtered(self, predicate: Any) -> ResolvedEffectCatalog:
+        return ResolvedEffectCatalog(
+            core_id=self.core_id,
+            core_revision=self.core_revision,
+            entries=tuple(entry for entry in self.entries if predicate(entry)),
+        )

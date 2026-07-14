@@ -111,6 +111,15 @@ node --check ui-tui/dist/entry.js
 node -e "const fs = require('fs'); const built = fs.readFileSync('ui-tui/dist/entry.js'); const packaged = fs.readFileSync('demiurge/ui/tui_dist/entry.js'); if (!built.equals(packaged)) process.exit(1);"
 ```
 
+Normal `demiurge` launches always use the tracked packaged asset. To exercise
+the local `ui-tui/dist/entry.js` (or `src/entry.tsx` with local `tsx`) while
+developing, set `DEMIURGE_TUI_DEV=1`; missing dev artifacts produce a command
+that rebuilds them instead of silently falling back. Protocol changes must keep
+`demiurge/ui_gateway/protocol.py` and `ui-tui/src/gateway/protocol.ts` in sync,
+then rebuild and copy the packaged asset. The initialize handshake rejects a
+version/build mismatch before starting gateway-owned session or scheduler
+state.
+
 ## Verification
 
 Use the narrowest useful checks for the change.
@@ -152,6 +161,22 @@ For OS-sensitive smoke coverage without running the full suite:
 ```bash
 uv run python scripts/run_python_ci_tests.py --profile cross-platform-smoke
 ```
+
+The default `uv run pytest` selection and the `full` and
+`cross-platform-smoke` profiles exclude explicit performance, capacity, and
+fault baselines. Run those separately and optionally persist the
+machine-readable summary:
+
+```bash
+DEMIURGE_BASELINE_OUTPUT=/tmp/demiurge-baseline.json \
+  uv run python scripts/run_python_ci_tests.py --profile stress
+```
+
+Known audit findings in the stress profile use strict `xfail` contracts. The
+profile exits successfully while those failures remain reproducible, and an
+unexpected pass fails the run until the finding marker and evidence are
+updated. To prove the underlying contracts are still red, run the focused
+node or suite with `-m stress --runxfail`.
 
 TUI changes:
 

@@ -27,7 +27,9 @@ Review 该 run：
 /evolve review <run_id>
 ```
 
-Review 会运行 host-owned gates，并创建或更新 `refs/demiurge/runs/<run_id>`。
+Review 会运行 host-owned gates，并创建或更新 `refs/demiurge/runs/<run_id>`。如果 MCP
+declaration 发生变化，输出还会包含 secret-safe before/after diff 和内容绑定的
+`mcp-review:<sha256>` token。
 
 Promote 已 review 的 run：
 
@@ -35,8 +37,22 @@ Promote 已 review 的 run：
 /evolve promote <run_id>
 ```
 
+如果该 run 的 review 输出了 MCP security token，必须原样带上：
+
+```text
+/evolve promote <run_id> <mcp-review:sha256>
+```
+
 Promote 会重新运行 gates，推进 `refs/demiurge/previous` 和
-`refs/demiurge/live`，并在下一 turn 生效。
+`refs/demiurge/live`，并在下一 turn 生效。缺少所需 token 或使用旧 token 时会 fail
+closed，不移动任何 ref。candidate 再次变化后应重新 review，并使用新 token。
+
+对应的 CLI 命令是：
+
+```bash
+uv run demiurge core evolve promote <run_id> \
+  --manual-review-token <mcp-review:sha256>
+```
 
 Promote 不会自动保存 local agent edits。如果 live agents tree 是 dirty 的，先用
 `uv run demiurge core save` 保存，或用 `uv run demiurge core discard --yes` 丢弃，

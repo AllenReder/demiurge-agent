@@ -1,11 +1,20 @@
 ---
 title: 配置 MCP Server
-description: 向 Agent Core 添加 MCP server declaration。
+description: 为 Agent Core 添加 MCP server declaration。
 ---
 
 # 配置 MCP Server
 
-Agent Cores 使用 YAML 文件声明 MCP servers。Host 拥有 transport startup、tool discovery、namespacing、approvals、capability checks 和 tool execution。
+Agent Core 使用 YAML 文件声明 MCP server。Host 拥有 transport startup、tool discovery、
+namespacing、approvals、capability checks 与 tool execution。
+
+Catalog cache miss 时，Host 会先要求 `mcp.connect:<server_id>`，并应用 declaration 的
+risk/approval policy。Authority 缺失或被拒绝时，会在 client construction、process/network
+startup 与 `list_tools()` 前停止。后续 tool invocation 还会独立要求 server call capability
+和 approval。启用前仍应审查 declaration 的 command、package runner、URL、environment 与
+headers；sanitized secret binding 现在把 stdio child 限制为 allowlisted environment 加
+获批 declaration 的 `env` entry。Streamable HTTP URL 会在 approval/client construction 前
+以及每次 request/redirect 时由 Host 检查；unsafe 或无法解析的 target 会在打开 socket 前跳过。
 
 默认情况下，loader 会查找：
 
@@ -41,9 +50,12 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: stdio` 需要 `command`。`args`、`env` 和 `cwd` 是可选的。相对 `cwd` 值会从 runtime workspace 解析。
+`transport: stdio` 必须包含 `command`。`args`、`env` 与 `cwd` 可选。相对 `cwd` 会从
+runtime workspace 解析。
 
-构建 MCP catalog 时会解析 `${DOCS_TOKEN}` 这样的环境引用。如果缺少环境变量，host 会记录 diagnostic，并在当前 turn 跳过该 server。
+`${DOCS_TOKEN}` 之类的 environment reference 只会在 connect authority 允许 server 后
+解析。如果缺少 environment variable，Host 会记录 diagnostic，并在该 turn 跳过对应
+server。Configured cwd 必须在 approval 或 client construction 前解析到 Host workspace 内。
 
 ## 添加 Streamable HTTP Server
 
@@ -66,17 +78,28 @@ timeout_seconds: 60
 supports_parallel_tool_calls: false
 ```
 
-`transport: streamable_http` 需要 `http://` 或 `https://` URL。
+`transport: streamable_http` 必须使用 `http://` 或 `https://` URL。Host 会校验规范化后的
+hostname、literal IP 与全部 DNS answer。默认阻止 private、loopback、link-local、CGNAT、
+cloud metadata、multicast、reserved 与 unspecified target。Connection 使用已验证 IP，
+同时保留 URL hostname 作为 HTTP Host 与 TLS SNI，防止 validation/connect 之间的 DNS
+rebinding。URL credential、path、query 与 fragment 不进入 approval/audit summary。Agent
+Core declaration 不能启用 private URL 或 ambient HTTP proxy routing。
 
 ## 授予 MCP Capability
 
-Server manifest 中的 `capability` 命名调用该 server 上 tools 所需的 capability。它本身不会授予该 capability。
+Server manifest 的 `capability` 指定调用该 server tools 所需的 capability。它本身不会
+授予 capability。
 
-把 capability 添加到具体 core manifest 中现有的 `capabilities.defaults` map 下：
+Host 使用独立的 `mcp.connect:<server_id>` capability 管理 spawn/connect/discovery；manifest
+中的 `capability` 仍是该 server tools 的 **call** capability。
+
+在具体 core manifest 现有的 `capabilities.defaults` map 下添加 capability：
 
 ```yaml
 capabilities:
   defaults:
+    mcp.connect:docs:
+      scope: core
     mcp.call:docs:
       scope: core
 ```
@@ -85,7 +108,7 @@ capabilities:
 
 ## 过滤 Tools
 
-使用 `tools.include` 和 `tools.exclude` 限制 tool catalog：
+使用 `tools.include` 与 `tools.exclude` 限制 tool catalog：
 
 ```yaml
 tools:
@@ -96,7 +119,8 @@ tools:
     - fetch_private
 ```
 
-Filters 会在 host 暴露 MCP server tools 之前匹配其 tool names。暴露出来的 tool names 是 host-safe 且带 namespace 的，例如 `docs__search_docs`。
+Filter 会在 Host 暴露 tool 前匹配 MCP server tool name。暴露的 tool name 是 Host-safe
+且 namespaced 的，例如 `docs__search_docs`。
 
 ## 验证
 
@@ -107,13 +131,23 @@ uv run demiurge init --check
 uv run demiurge --provider fake
 ```
 
-在 TUI 中：
+在 TUI 中运行：
 
 ```text
 /tools
 ```
 
-如果 server 启动了但 tool discovery 失败，请检查运行时 MCP stderr log：
+`list_tools()` 使用 `connect_timeout_seconds`。Discovery 在整个 runtime 内跨 session 最多
+并发四个 server；失败 server 不会阻塞或关闭健康 peer，其 diagnostic 会缓存 30 秒后只重试
+该 server。Connect denial 会在下一个 turn 按 server 重新检查。Declaration 或 authority
+变化会关闭旧的 session-bound catalog，并要求 connect reapproval。删除全部 declaration 会
+关闭剩余 connection；切换到新 session 或 resume 其他 session 时会跟踪清理旧 session。
+Delegated child session 使用自己的 Host-issued authority，并在 child run 结束时释放 MCP
+connection。Evolution review 会记录 secret-safe MCP security diff，并输出内容绑定的
+`mcp-review:<sha256>` token；promotion 必须原样返回该 token。token 缺失或已过期时 live
+与 previous Git refs 保持不变。
+
+如果 server 已启动但 tool discovery 失败，检查 runtime MCP stderr log：
 
 ```text
 ~/.demiurge/logs/mcp-stderr.log
@@ -121,4 +155,9 @@ uv run demiurge --provider fake
 
 ## 边界
 
-Agent Core 声明 MCP servers。Host 拥有 process startup、HTTP transport sessions、environment interpolation、catalog caching、approval prompts、capability enforcement、result conversion 和 runtime cleanup。
+Agent Core 声明 MCP servers。Host 拥有 process startup、HTTP transport sessions、
+environment interpolation、catalog caching、approval prompts、capability enforcement、
+result conversion 与 runtime cleanup。MCP 仍不是 sandbox：stdio command 与 remote URL
+仍是 trusted effect；stdio process 在 approval 后只接收 allowlisted environment 与
+declaration-bound value。Streamable HTTP 的每次 request（包括 redirect）仍受共享
+fail-closed URL policy 与 pinned transport 约束。

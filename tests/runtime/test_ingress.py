@@ -6,6 +6,8 @@ import pytest
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.ingress import ConversationIngressState, ConversationTurnController, InboundQueueRuntime
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.store import RuntimeStore
 from demiurge.runtime.tasks import RuntimeTaskWorker
 
@@ -30,6 +32,30 @@ def _completion(task_id: str, text: str | None = None) -> InteractionInbound:
 
 
 async def _complete_task(worker: RuntimeTaskWorker, *, session_id: str = "session_1", summary: str = "done"):
+    store = worker.control_plane.store
+    resolver = PrincipalScopeResolver(store)
+    sessions = SessionRuntime(control_plane=worker.control_plane)
+    if not store.session_owner_exists(session_id):
+        provisional = resolver.issue_conversation(
+            channel="test",
+            principal_key="principal_1",
+            conversation_key="conversation_1",
+            session_id=session_id,
+        )
+        sessions.create_session(
+            session_id=session_id,
+            core_id="assistant",
+            core_revision="rev",
+            principal_scope=provisional,
+        )
+    scope = resolver.conversation(
+        channel="test",
+        principal_key="principal_1",
+        conversation_key="conversation_1",
+        session_id=session_id,
+    )
+    worker.bind_turn_scope(session_id=session_id, turn_id="turn_1", scope=scope)
+
     async def task(ctx):
         ctx.append_log("line")
         return summary

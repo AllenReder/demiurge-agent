@@ -99,7 +99,6 @@ def _runtime(tmp_path: Path):
     module_delivery = ModuleDeliveryRuntime(host)
     runtime = SlotEffectRuntime(
         home=host.home,
-        session_id=lambda: host.session_id,
         workspace=str(tmp_path),
         module_delivery=module_delivery,
         dispatch=_Dispatch(host),
@@ -170,6 +169,20 @@ def test_module_io_client_send_text_commits_and_schedules_through_effect_runtime
     assert host.session_runtime.read_messages("session_1")[0].content == "from slot"
 
 
+def test_module_io_client_keeps_captured_turn_session_when_runner_session_changes(tmp_path):
+    host, runtime = _runtime(tmp_path)
+    host.session_id = "session_2"
+
+    io_client = runtime.module_io_client(
+        _slot(tmp_path),
+        turn=_turn(),
+        interaction_metadata={"channel": "tui"},
+    )
+
+    assert io_client.session_id == "session_1"
+    assert io_client.route.session_id == "session_1"
+
+
 @pytest.mark.asyncio
 async def test_slot_effect_runtime_can_use_real_interaction_dispatch(tmp_path):
     host, runtime = _runtime(tmp_path)
@@ -181,7 +194,6 @@ async def test_slot_effect_runtime_can_use_real_interaction_dispatch(tmp_path):
             item.set_dispatch_status("delivered")
 
     runtime.dispatch = InteractionDispatchRuntime(
-        session_id=lambda: host.session_id,
         delivery_runtime=DeliveryRuntime(),
         track_background_task=lambda task: None,
     )

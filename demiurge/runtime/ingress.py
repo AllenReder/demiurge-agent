@@ -95,6 +95,7 @@ class ConversationIngressState:
     route_binding: SessionRouteBinding
     conversation_key: str = ""
     source: str = ""
+    principal_key: str | None = None
     reply_to: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     active_task: asyncio.Task[None] | None = None
@@ -115,6 +116,7 @@ class ConversationIngressState:
 
     def remember_route(self, inbound: InteractionInbound) -> None:
         self.source = inbound.source
+        self.principal_key = inbound.principal_key
         self.reply_to = inbound.reply_to
         self.metadata = dict(inbound.metadata)
         self.conversation_key = inbound.conversation_key or self.conversation_key
@@ -123,6 +125,7 @@ class ConversationIngressState:
         return CompletionRoute(
             channel=channel,
             source=self.source or fallback_source,
+            principal_key=self.principal_key,
             reply_to=self.reply_to,
             conversation_key=self.conversation_key,
             metadata=self.metadata,

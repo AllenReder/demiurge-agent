@@ -51,6 +51,20 @@ uv run demiurge doctor --json
 
 检查 runtime/source template drift。
 
+`doctor` 与 `init --check` 使用同一套进程退出约定：
+
+| Exit code | 含义 |
+| --- | --- |
+| `0` | 报告健康（JSON 模式中为 `ok: true`）。 |
+| `1` | 检查已完成，但发现一个或多个错误（`ok: false`）。 |
+| `2` | 参数、配置或检查本身无法处理。 |
+
+无论健康与否，JSON 报告都保留在 stdout，并保持 machine-readable。JSON 模式下的执行
+失败也会输出带 `error.code: doctor.execution_error` 的 `ok: false` payload，不包含
+traceback 或原始配置值。调用方必须同时检查进程状态与 JSON payload。尤其是 managed
+`update` 的 health gate 现在会在
+`init --check` 报告不健康 runtime 时停止。
+
 ## `core`
 
 ```bash
@@ -62,7 +76,7 @@ uv run demiurge core diff
 uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
-uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve promote <run_id> --manual-review-token <token>
 uv run demiurge core evolve discard <run_id>
 uv run demiurge core rollback
 uv run demiurge core rollback <revision>
@@ -74,7 +88,10 @@ uv run demiurge core rollback <revision>
 `core check` 会对 live agents tree 运行 host-owned gates。`core evolve start`
 会在 `.evolve/runs/<run_id>/agents` 下创建隔离 worktree。Review 会记录
 `refs/demiurge/runs/<run_id>`，promote 会推进 `refs/demiurge/live`，rollback
-会创建新的 rollback commit。
+会创建新的 rollback commit。如果 review 报告 MCP declaration security diff，它还会输出
+内容绑定的 `mcp-review:<sha256>` token。调用 `core evolve promote` 时必须通过
+`--manual-review-token` 原样传回；token 缺失或已过期时 Git refs 保持不变。没有这项
+security diff 的 run 不需要该 option。
 
 `core diff` 会显示 `~/.demiurge/agents` 中的 local agent edits，不写入文件。
 `core save` 会验证这些 edits，并提交为新的 `core_revision`。`core discard --yes`
@@ -99,6 +116,9 @@ uv run demiurge setup model set --core assistant --provider openai --model <mode
 uv run demiurge setup timezone set Asia/Shanghai
 uv run demiurge setup timezone clear
 ```
+
+`setup status` 是只读命令。runtime home 或 core 缺失时，它只报告当前状态，
+不会创建 `config.yaml`、Agent Core repository 或 runtime templates。
 
 当前 provider presets 包括：
 

@@ -6,14 +6,40 @@ import hashlib
 import json
 import os
 import re
+import tempfile
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from demiurge.core import LoadedCore, McpServerDefinition
+from demiurge.mcp.security import (
+    mcp_server_fingerprint,
+    mcp_server_identity_payload,
+)
 from demiurge.providers import ToolDefinition
 from demiurge.sdk import ToolResult, TurnContext
+from demiurge.security.subprocess_env import (
+    build_sanitized_subprocess_env,
+    ensure_subprocess_home,
+)
+from demiurge.security.private_files import (
+    ensure_private_directory,
+    open_private_text,
+)
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretRedactor,
+    SecretValue,
+    redact_exception,
+)
+from demiurge.security.url_policy import (
+    UrlDecision,
+    UrlPolicy,
+    UrlPolicyAsyncTransport,
+)
+from demiurge.storage import EventLog
 
 
 TOOL_NAME_SEPARATOR = "__"
@@ -21,6 +47,111 @@ TOOL_NAME_MAX_PREFIX = 30
 TOOL_NAME_MAX_TOTAL = 64
 TOOL_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+MCP_DISCOVERY_CONCURRENCY = 4
+MCP_STDERR_LOG_LIMIT_CHARS = 12_000
+
+
+def _mcp_redaction_secrets(
+    env: dict[str, str],
+    headers: dict[str, str],
+) -> tuple[SecretValue, ...]:
+    secrets: list[SecretValue] = []
+    for name, value in env.items():
+        if value:
+            safe_name = re.sub(
+                r"[^A-Za-z0-9]+",
+                "_",
+                name,
+            ).strip("_").upper() or "ENV"
+            secrets.append(
+                SecretValue(
+                    value=value,
+                    name=safe_name,
+                    source=f"mcp.env:{name}",
+                )
+            )
+    for name, value in headers.items():
+        if not value:
+            continue
+        safe_name = re.sub(
+            r"[^A-Za-z0-9]+",
+            "_",
+            name,
+        ).strip("_").upper() or "HEADER"
+        secrets.append(
+            SecretValue(
+                value=value,
+                name=safe_name,
+                source=f"mcp.header:{name}",
+            )
+        )
+        parts = value.rsplit(None, 1)
+        if len(parts) == 2 and parts[1]:
+            secrets.append(
+                SecretValue(
+                    value=parts[1],
+                    name=safe_name,
+                    source=f"mcp.header:{name}.credential",
+                )
+            )
+    return tuple(secrets)
+
+
+@dataclass(frozen=True, slots=True)
+class McpCatalogScopeKey:
+    session_id: str
+    core_root: str
+    workspace: str
+
+
+@dataclass(frozen=True, slots=True)
+class McpCatalogKey:
+    session_id: str
+    authority_key: str
+    core_root: str
+    core_revision: str
+    workspace: str
+    fingerprint: str
+
+    @property
+    def scope(self) -> McpCatalogScopeKey:
+        return McpCatalogScopeKey(
+            session_id=self.session_id,
+            core_root=self.core_root,
+            workspace=self.workspace,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class McpConnectionKey:
+    session_id: str
+    authority_key: str
+    core_root: str
+    core_revision: str
+    workspace: str
+    server_id: str
+    server_fingerprint: str
+
+    @property
+    def scope(self) -> McpCatalogScopeKey:
+        return McpCatalogScopeKey(
+            session_id=self.session_id,
+            core_root=self.core_root,
+            workspace=self.workspace,
+        )
+
+    def adapter_identity(self) -> str:
+        return ":".join(
+            (
+                self.session_id,
+                self.authority_key,
+                self.core_root,
+                self.core_revision,
+                self.workspace,
+                self.server_id,
+                self.server_fingerprint,
+            )
+        )
 
 
 class McpRuntimeError(RuntimeError):
@@ -46,7 +177,7 @@ class McpToolInfo:
     approval_policy: str
     capability: str
     timeout_seconds: float
-    connection_key: tuple[str, str, str, str, str]
+    connection_key: McpConnectionKey
 
     def to_definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -61,6 +192,17 @@ class McpCatalog:
     fingerprint: str
     tools: list[McpToolInfo] = field(default_factory=list)
     diagnostics: list[McpCatalogDiagnostic] = field(default_factory=list)
+    server_states: dict[str, "McpServerCatalogState"] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class McpServerCatalogState:
+    status: str
+    server_fingerprint: str
+    retry_after: float | None = None
+    diagnostic: McpCatalogDiagnostic | None = None
 
 
 class McpClientConnection(Protocol):
@@ -74,8 +216,26 @@ class McpClientConnection(Protocol):
         ...
 
 
+@dataclass(slots=True)
+class _McpDiscovery:
+    server: McpServerDefinition
+    connection: McpClientConnection | None = None
+    tools: list[Any] = field(default_factory=list)
+    error: str | None = None
+
+
 McpClientFactory = Callable[[McpServerDefinition, dict[str, str], dict[str, str], Path, Path], McpClientConnection]
+McpConnectAuthorizer = Callable[[McpServerDefinition], Awaitable[bool]]
 EventEmitter = Callable[..., dict[str, Any]]
+
+
+def _set_url_decision_sink(
+    connection: McpClientConnection,
+    sink: Callable[[UrlDecision], None],
+) -> None:
+    setter = getattr(connection, "set_url_decision_sink", None)
+    if callable(setter):
+        setter(sink)
 
 
 class McpRuntime:
@@ -85,42 +245,218 @@ class McpRuntime:
         home: Path,
         workspace: Path,
         client_factory: McpClientFactory | None = None,
+        url_policy: UrlPolicy | None = None,
+        failure_cache_ttl_seconds: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if failure_cache_ttl_seconds <= 0:
+            raise ValueError("MCP failure cache TTL must be positive")
         self.home = home
         self.workspace = workspace
-        self.client_factory = client_factory or DefaultMcpClientConnection
-        self._catalogs: dict[tuple[str, str, str, str], McpCatalog] = {}
-        self._connections: dict[tuple[str, str, str, str, str], McpClientConnection] = {}
-        self._tool_index: dict[str, McpToolInfo] = {}
+        self.url_policy = url_policy or UrlPolicy()
+        self.client_factory = client_factory or (
+            lambda server, env, headers, workspace, stderr_log_path: (
+                DefaultMcpClientConnection(
+                    server,
+                    env,
+                    headers,
+                    workspace,
+                    stderr_log_path,
+                    url_policy=self.url_policy,
+                )
+            )
+        )
+        self.failure_cache_ttl_seconds = float(failure_cache_ttl_seconds)
+        self._clock = clock
+        self._catalogs: dict[McpCatalogKey, McpCatalog] = {}
+        self._connections: dict[McpConnectionKey, McpClientConnection] = {}
+        self._catalog_locks: dict[McpCatalogScopeKey, asyncio.Lock] = {}
+        self._discovery_semaphore = asyncio.Semaphore(
+            MCP_DISCOVERY_CONCURRENCY
+        )
+        self._build_tasks: dict[
+            asyncio.Task[
+                tuple[
+                    McpCatalog,
+                    dict[McpConnectionKey, McpClientConnection],
+                ]
+            ],
+            McpCatalogKey,
+        ] = {}
+        self._session_generations: dict[str, int] = {}
         self._lock = asyncio.Lock()
+        self._closed = False
 
     async def prepare_for_turn(
         self,
         core: LoadedCore,
         turn: TurnContext,
         *,
+        authority_key: str = "unbound",
+        authorize_server: McpConnectAuthorizer | None = None,
         emit_event: EventEmitter | None = None,
     ) -> McpCatalog:
+        if (
+            authorize_server is None
+            or not authority_key.strip()
+            or authority_key == "unbound"
+        ):
+            raise McpRuntimeError(
+                "MCP prepare requires bound connect authority"
+            )
+        session_generation = self._session_generations.get(
+            turn.session_id,
+            0,
+        )
         fingerprint = self._fingerprint(core)
-        catalog_key = (turn.session_id, str(core.root), str(self.workspace), fingerprint)
+        catalog_key = McpCatalogKey(
+            session_id=turn.session_id,
+            authority_key=authority_key,
+            core_root=str(core.root),
+            core_revision=turn.core_revision,
+            workspace=str(self.workspace),
+            fingerprint=fingerprint,
+        )
+        scope_key = catalog_key.scope
         async with self._lock:
-            cached = self._catalogs.get(catalog_key)
-            if cached is not None:
-                return cached
-            catalog = await self._build_catalog(core, catalog_key=catalog_key, fingerprint=fingerprint, emit_event=emit_event)
-            self._catalogs[catalog_key] = catalog
-            for tool in catalog.tools:
-                self._tool_index[tool.name] = tool
+            if self._closed:
+                raise McpRuntimeError("MCP runtime is closed")
+            if (
+                self._session_generations.get(turn.session_id, 0)
+                != session_generation
+            ):
+                raise McpRuntimeError(
+                    "MCP session was evicted before discovery"
+                )
+            catalog_lock = self._catalog_locks.setdefault(
+                scope_key,
+                asyncio.Lock(),
+            )
+        async with catalog_lock:
+            connections_to_close: list[McpClientConnection] = []
+            cached_catalog: McpCatalog | None = None
+            refresh_catalog: McpCatalog | None = None
+            async with self._lock:
+                if self._closed:
+                    raise McpRuntimeError("MCP runtime is closed")
+                stale_keys = [
+                    key
+                    for key in self._catalogs
+                    if key.scope == scope_key and key != catalog_key
+                ]
+                for stale_key in stale_keys:
+                    if (
+                        stale_key.authority_key == catalog_key.authority_key
+                        and refresh_catalog is None
+                    ):
+                        refresh_catalog = self._catalogs[stale_key]
+                    else:
+                        connections_to_close.extend(
+                            self._pop_catalog_locked(stale_key)
+                        )
+                cached = self._catalogs.get(catalog_key)
+                if cached is not None:
+                    if not self._catalog_needs_refresh(cached, core):
+                        cached_catalog = cached
+                    else:
+                        refresh_catalog = cached
+            await self._close_connections(connections_to_close)
+            if cached_catalog is not None:
+                return cached_catalog
+
+            async with self._lock:
+                if self._closed:
+                    raise McpRuntimeError(
+                        "MCP runtime closed before discovery"
+                    )
+                if (
+                    self._session_generations.get(turn.session_id, 0)
+                    != session_generation
+                ):
+                    raise McpRuntimeError(
+                        "MCP session was evicted before discovery"
+                    )
+                build_task = asyncio.create_task(
+                    self._build_catalog(
+                        core,
+                        catalog_key=catalog_key,
+                        fingerprint=fingerprint,
+                        authorize_server=authorize_server,
+                        emit_event=emit_event,
+                        cached=refresh_catalog,
+                    )
+                )
+                self._build_tasks[build_task] = catalog_key
+            try:
+                catalog, discovered_connections = await build_task
+            finally:
+                async with self._lock:
+                    self._build_tasks.pop(build_task, None)
+            orphan_connections: list[McpClientConnection] = []
+            async with self._lock:
+                session_evicted = (
+                    self._session_generations.get(turn.session_id, 0)
+                    != session_generation
+                )
+                if self._closed or session_evicted:
+                    publish = False
+                else:
+                    self._connections.update(discovered_connections)
+                    self._catalogs[catalog_key] = catalog
+                    for obsolete_key in [
+                        key
+                        for key in self._catalogs
+                        if key.scope == scope_key and key != catalog_key
+                    ]:
+                        self._catalogs.pop(obsolete_key, None)
+                    referenced_keys = {
+                        tool.connection_key
+                        for current_catalog in self._catalogs.values()
+                        for tool in current_catalog.tools
+                    }
+                    for connection_key in [
+                        key
+                        for key in self._connections
+                        if key.scope == scope_key
+                        and key not in referenced_keys
+                    ]:
+                        orphan_connections.append(
+                            self._connections.pop(connection_key)
+                        )
+                    publish = True
+            if not publish:
+                await self._close_connections(
+                    list(discovered_connections.values())
+                )
+                if session_evicted:
+                    raise McpRuntimeError(
+                        "MCP session was evicted during discovery"
+                    )
+                raise McpRuntimeError("MCP runtime closed during discovery")
+            await self._close_connections(orphan_connections)
             return catalog
 
-    def entries_for(self, core: LoadedCore) -> list[McpToolInfo]:
+    def entries_for(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext | None = None,
+    ) -> list[McpToolInfo]:
         fingerprint = self._fingerprint(core)
         tools: list[McpToolInfo] = []
         seen: set[str] = set()
         for key, catalog in self._catalogs.items():
-            _session_id, core_root, workspace, catalog_fingerprint = key
-            if core_root != str(core.root) or workspace != str(self.workspace) or catalog_fingerprint != fingerprint:
+            if (
+                key.core_root != str(core.root)
+                or key.workspace != str(self.workspace)
+                or key.fingerprint != fingerprint
+            ):
                 continue
+            if turn is not None:
+                if key.session_id != turn.session_id:
+                    continue
+                if key.core_revision != turn.core_revision:
+                    continue
             for tool in catalog.tools:
                 if tool.name in seen:
                     continue
@@ -128,10 +464,11 @@ class McpRuntime:
                 tools.append(tool)
         return sorted(tools, key=lambda tool: tool.name)
 
-    def tool_info(self, name: str) -> McpToolInfo | None:
-        return self._tool_index.get(name)
-
-    async def call_tool(self, tool: McpToolInfo, arguments: dict[str, Any]) -> ToolResult:
+    async def call_tool(
+        self,
+        tool: McpToolInfo,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
         connection = self._connection_for_tool(tool)
         if connection is None:
             return ToolResult(
@@ -147,7 +484,15 @@ class McpRuntime:
             )
         except Exception as exc:
             return ToolResult(
-                content=f"MCP tool failed: {exc}",
+                content=(
+                    "MCP tool failed: "
+                    + redact_exception(
+                        exc,
+                        view=RedactionView.MODEL,
+                        context={"arguments": arguments},
+                        secrets=getattr(connection, "redaction_secrets", ()),
+                    )
+                ),
                 is_error=True,
                 data={
                     "executionStarted": True,
@@ -157,77 +502,402 @@ class McpRuntime:
             )
         return mcp_result_to_tool_result(tool, result)
 
+    async def evict_session(self, session_id: str) -> None:
+        async with self._lock:
+            self._session_generations[session_id] = (
+                self._session_generations.get(session_id, 0) + 1
+            )
+            build_tasks = [
+                task
+                for task, key in self._build_tasks.items()
+                if key.session_id == session_id
+            ]
+            for task in build_tasks:
+                task.cancel()
+            session_locks = [
+                lock
+                for scope_key, lock in self._catalog_locks.items()
+                if scope_key.session_id == session_id
+            ]
+        await asyncio.gather(*build_tasks, return_exceptions=True)
+        acquired: list[asyncio.Lock] = []
+        connections: list[McpClientConnection] = []
+        try:
+            for lock in session_locks:
+                await lock.acquire()
+                acquired.append(lock)
+            async with self._lock:
+                catalog_keys = [
+                    key
+                    for key in self._catalogs
+                    if key.session_id == session_id
+                ]
+                for catalog_key in catalog_keys:
+                    connections.extend(
+                        self._pop_catalog_locked(catalog_key)
+                    )
+                stale_connection_keys = [
+                    key
+                    for key in self._connections
+                    if key.session_id == session_id
+                ]
+                connections.extend(
+                    self._connections.pop(key)
+                    for key in stale_connection_keys
+                )
+                for scope_key in [
+                    key
+                    for key in self._catalog_locks
+                    if key.session_id == session_id
+                ]:
+                    self._catalog_locks.pop(scope_key, None)
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
+        await self._close_connections(connections)
+
     async def close(self) -> None:
         async with self._lock:
+            self._closed = True
+            build_tasks = list(self._build_tasks)
+            self._build_tasks.clear()
             connections = list(self._connections.values())
             self._connections.clear()
             self._catalogs.clear()
-            self._tool_index.clear()
-        await asyncio.gather(*(connection.close() for connection in connections), return_exceptions=True)
+            self._catalog_locks.clear()
+            self._session_generations.clear()
+        for task in build_tasks:
+            task.cancel()
+        await asyncio.gather(*build_tasks, return_exceptions=True)
+        await self._close_connections(connections)
 
     async def _build_catalog(
         self,
         core: LoadedCore,
         *,
-        catalog_key: tuple[str, str, str, str],
+        catalog_key: McpCatalogKey,
         fingerprint: str,
+        authorize_server: McpConnectAuthorizer | None,
         emit_event: EventEmitter | None,
-    ) -> McpCatalog:
+        cached: McpCatalog | None,
+    ) -> tuple[McpCatalog, dict[McpConnectionKey, McpClientConnection]]:
         catalog = McpCatalog(fingerprint=fingerprint)
+        connections: dict[McpConnectionKey, McpClientConnection] = {}
         reserved_names: set[str] = set()
         used_server_names: set[str] = set()
-        for server in core.mcp_servers:
-            if not server.enabled:
+        enabled_servers = [
+            server for server in core.mcp_servers if server.enabled
+        ]
+        safe_server_names = {
+            server.server_id: sanitize_server_name(
+                server.server_id,
+                used_server_names,
+            )
+            for server in enabled_servers
+        }
+        server_fingerprints = {
+            server.server_id: self._server_fingerprint(server)
+            for server in enabled_servers
+        }
+        authorized_servers: list[McpServerDefinition] = []
+        for server in enabled_servers:
+            server_fingerprint = server_fingerprints[server.server_id]
+            cached_state = (
+                cached.server_states.get(server.server_id)
+                if cached is not None
+                else None
+            )
+            if (
+                cached_state is not None
+                and cached_state.status == "connected"
+                and cached_state.server_fingerprint == server_fingerprint
+            ):
+                catalog.server_states[server.server_id] = cached_state
+                cached_tools = [
+                    tool
+                    for tool in cached.tools
+                    if tool.server_id == server.server_id
+                ]
+                if all(
+                    self._connection_for_tool(tool) is not None
+                    for tool in cached_tools
+                ):
+                    catalog.tools.extend(cached_tools)
+                    reserved_names.update(
+                        _normalize_tool_name(tool.name)
+                        for tool in cached_tools
+                    )
+                    continue
+            if (
+                cached_state is not None
+                and cached_state.status == "failed"
+                and cached_state.server_fingerprint == server_fingerprint
+                and cached_state.retry_after is not None
+                and self._clock() < cached_state.retry_after
+            ):
+                catalog.server_states[server.server_id] = cached_state
+                if cached_state.diagnostic is not None:
+                    catalog.diagnostics.append(cached_state.diagnostic)
                 continue
-            safe_server_name = sanitize_server_name(server.server_id, used_server_names)
+            if authorize_server is not None and not await authorize_server(server):
+                catalog.server_states[server.server_id] = (
+                    McpServerCatalogState(
+                        status="denied",
+                        server_fingerprint=server_fingerprint,
+                        retry_after=self._clock(),
+                    )
+                )
+                continue
+            authorized_servers.append(server)
+
+        discovery_tasks = [
+            asyncio.create_task(
+                self._discover_server(
+                    server,
+                    semaphore=self._discovery_semaphore,
+                    session_id=catalog_key.session_id,
+                )
+            )
+            for server in authorized_servers
+        ]
+        try:
+            discoveries = await asyncio.gather(*discovery_tasks)
+            for discovery in discoveries:
+                server = discovery.server
+                server_fingerprint = server_fingerprints[server.server_id]
+                if discovery.error is not None:
+                    diagnostic = self._diagnose(
+                        catalog,
+                        server,
+                        discovery.error,
+                        emit_event=emit_event,
+                    )
+                    catalog.server_states[server.server_id] = (
+                        McpServerCatalogState(
+                            status="failed",
+                            server_fingerprint=server_fingerprint,
+                            retry_after=(
+                                self._clock()
+                                + self.failure_cache_ttl_seconds
+                            ),
+                            diagnostic=diagnostic,
+                        )
+                    )
+                    continue
+                connection = discovery.connection
+                if connection is None:
+                    diagnostic = self._diagnose(
+                        catalog,
+                        server,
+                        "MCP discovery did not return a connection",
+                        emit_event=emit_event,
+                    )
+                    catalog.server_states[server.server_id] = (
+                        McpServerCatalogState(
+                            status="failed",
+                            server_fingerprint=server_fingerprint,
+                            retry_after=(
+                                self._clock()
+                                + self.failure_cache_ttl_seconds
+                            ),
+                            diagnostic=diagnostic,
+                        )
+                    )
+                    continue
+                safe_server_name = safe_server_names[server.server_id]
+                connection_key = McpConnectionKey(
+                    session_id=catalog_key.session_id,
+                    authority_key=catalog_key.authority_key,
+                    core_root=catalog_key.core_root,
+                    core_revision=catalog_key.core_revision,
+                    workspace=catalog_key.workspace,
+                    server_id=server.server_id,
+                    server_fingerprint=server_fingerprint,
+                )
+                connections[connection_key] = connection
+                catalog.server_states[server.server_id] = (
+                    McpServerCatalogState(
+                        status="connected",
+                        server_fingerprint=server_fingerprint,
+                    )
+                )
+                for listed_tool in discovery.tools:
+                    tool_name = str(
+                        getattr(listed_tool, "name", "") or ""
+                    ).strip()
+                    if not tool_name or not self._tool_selected(
+                        server,
+                        tool_name,
+                    ):
+                        continue
+                    safe_tool_name = build_safe_tool_name(
+                        server_name=safe_server_name,
+                        tool_name=tool_name,
+                        reserved_names=reserved_names,
+                    )
+                    reserved_names.add(_normalize_tool_name(safe_tool_name))
+                    catalog.tools.append(
+                        McpToolInfo(
+                            name=safe_tool_name,
+                            server_id=server.server_id,
+                            server_tool_name=tool_name,
+                            description=self._tool_description(
+                                server,
+                                listed_tool,
+                            ),
+                            input_schema=self._tool_schema(listed_tool),
+                            relative_path=server.relative_path,
+                            risk=server.manifest.risk,
+                            approval_policy=server.manifest.approval_policy,
+                            capability=server.capability,
+                            timeout_seconds=server.manifest.timeout_seconds,
+                            connection_key=connection_key,
+                        )
+                    )
+        except BaseException:
+            results = await asyncio.gather(
+                *discovery_tasks,
+                return_exceptions=True,
+            )
+            pending_connections = [
+                result.connection
+                for result in results
+                if isinstance(result, _McpDiscovery)
+                and result.connection is not None
+            ]
+            await self._close_connections(
+                [*connections.values(), *pending_connections]
+            )
+            raise
+        catalog.tools.sort(key=lambda tool: tool.name)
+        catalog.diagnostics.sort(key=lambda item: item.server_id)
+        return catalog, connections
+
+    def _pop_catalog_locked(
+        self,
+        catalog_key: McpCatalogKey,
+    ) -> list[McpClientConnection]:
+        catalog = self._catalogs.pop(catalog_key, None)
+        if catalog is None:
+            return []
+        candidate_keys = {tool.connection_key for tool in catalog.tools}
+        referenced_keys = {
+            tool.connection_key
+            for current_catalog in self._catalogs.values()
+            for tool in current_catalog.tools
+        }
+        stale_keys = {
+            key
+            for key in candidate_keys - referenced_keys
+            if key in self._connections
+        }
+        return [self._connections.pop(key) for key in stale_keys]
+
+    async def _close_connections(
+        self,
+        connections: list[McpClientConnection],
+    ) -> None:
+        unique = list({id(connection): connection for connection in connections}.values())
+        await asyncio.gather(
+            *(connection.close() for connection in unique),
+            return_exceptions=True,
+        )
+
+    async def _discover_server(
+        self,
+        server: McpServerDefinition,
+        *,
+        semaphore: asyncio.Semaphore,
+        session_id: str,
+    ) -> _McpDiscovery:
+        async with semaphore:
             try:
                 env = interpolate_env_map(server.manifest.env)
                 headers = interpolate_env_map(server.manifest.headers)
             except KeyError as exc:
-                message = f"missing environment variable: {exc.args[0]}"
-                self._diagnose(catalog, server, message, emit_event=emit_event)
-                continue
+                return _McpDiscovery(
+                    server=server,
+                    error=f"missing environment variable: {exc.args[0]}",
+                )
             connection: McpClientConnection | None = None
             try:
-                connection = self.client_factory(server, env, headers, self.workspace, self._stderr_log_path())
-                tools = await connection.list_tools()
+                connection = self.client_factory(
+                    server,
+                    env,
+                    headers,
+                    self.workspace,
+                    self._stderr_log_path(),
+                )
+                event_log = EventLog(self.home, session_id)
+                _set_url_decision_sink(
+                    connection,
+                    lambda decision: event_log.emit(
+                        "mcp.url_decision",
+                        server_id=server.server_id,
+                        phase="request",
+                        url_policy=decision.audit_view(),
+                    ),
+                )
+                try:
+                    tools = await asyncio.wait_for(
+                        connection.list_tools(),
+                        timeout=server.manifest.connect_timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise McpRuntimeError(
+                        "MCP discovery timed out after "
+                        f"{server.manifest.connect_timeout_seconds:g}s"
+                    ) from exc
+            except asyncio.CancelledError:
+                if connection is not None:
+                    with contextlib.suppress(Exception):
+                        await connection.close()
+                raise
             except Exception as exc:
                 if connection is not None:
                     with contextlib.suppress(Exception):
                         await connection.close()
-                self._diagnose(catalog, server, str(exc), emit_event=emit_event)
-                continue
-            connection_key = (*catalog_key, server.server_id)
-            self._connections[connection_key] = connection
-            for listed_tool in tools:
-                tool_name = str(getattr(listed_tool, "name", "") or "").strip()
-                if not tool_name or not self._tool_selected(server, tool_name):
-                    continue
-                safe_tool_name = build_safe_tool_name(
-                    server_name=safe_server_name,
-                    tool_name=tool_name,
-                    reserved_names=reserved_names,
+                return _McpDiscovery(
+                    server=server,
+                    error=redact_exception(
+                        exc,
+                        view=RedactionView.EVENT,
+                        context={"env": env, "headers": headers},
+                        secrets=_mcp_redaction_secrets(env, headers),
+                    ),
                 )
-                reserved_names.add(_normalize_tool_name(safe_tool_name))
-                catalog.tools.append(
-                    McpToolInfo(
-                        name=safe_tool_name,
-                        server_id=server.server_id,
-                        server_tool_name=tool_name,
-                        description=self._tool_description(server, listed_tool),
-                        input_schema=self._tool_schema(listed_tool),
-                        relative_path=server.relative_path,
-                        risk=server.manifest.risk,
-                        approval_policy=server.manifest.approval_policy,
-                        capability=server.capability,
-                        timeout_seconds=server.manifest.timeout_seconds,
-                        connection_key=connection_key,
-                    )
-                )
-        return catalog
+            return _McpDiscovery(
+                server=server,
+                connection=connection,
+                tools=list(tools),
+            )
 
     def _connection_for_tool(self, tool: McpToolInfo) -> McpClientConnection | None:
         return self._connections.get(tool.connection_key)
+
+    def _catalog_needs_refresh(
+        self,
+        catalog: McpCatalog,
+        core: LoadedCore,
+    ) -> bool:
+        for server in core.mcp_servers:
+            if not server.enabled:
+                continue
+            state = catalog.server_states.get(server.server_id)
+            if (
+                state is None
+                or state.server_fingerprint
+                != self._server_fingerprint(server)
+                or state.status == "denied"
+            ):
+                return True
+            if (
+                state.status == "failed"
+                and state.retry_after is not None
+                and self._clock() >= state.retry_after
+            ):
+                return True
+        return False
 
     def _diagnose(
         self,
@@ -236,7 +906,7 @@ class McpRuntime:
         message: str,
         *,
         emit_event: EventEmitter | None,
-    ) -> None:
+    ) -> McpCatalogDiagnostic:
         diagnostic = McpCatalogDiagnostic(
             server_id=server.server_id,
             relative_path=server.relative_path,
@@ -250,6 +920,7 @@ class McpRuntime:
                 path=server.relative_path,
                 message=message,
             )
+        return diagnostic
 
     def _tool_selected(self, server: McpServerDefinition, tool_name: str) -> bool:
         include = server.manifest.tools.include
@@ -276,19 +947,18 @@ class McpRuntime:
 
     def _fingerprint(self, core: LoadedCore) -> str:
         payload = [
-            {
-                "server_id": server.server_id,
-                "relative_path": server.relative_path,
-                "raw_manifest": server.raw_manifest,
-            }
+            mcp_server_identity_payload(server)
             for server in core.mcp_servers
         ]
         text = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    def _server_fingerprint(self, server: McpServerDefinition) -> str:
+        return mcp_server_fingerprint(server)
+
     def _stderr_log_path(self) -> Path:
         log_dir = self.home / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(log_dir)
         return log_dir / "mcp-stderr.log"
 
 
@@ -300,15 +970,22 @@ class DefaultMcpClientConnection:
         headers: dict[str, str],
         workspace: Path,
         stderr_log_path: Path,
+        *,
+        url_policy: UrlPolicy | None = None,
+        httpx_transport_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.server = server
         self.env = env
         self.headers = headers
+        self.redaction_secrets = _mcp_redaction_secrets(env, headers)
         self.workspace = workspace
         self.stderr_log_path = stderr_log_path
+        self.url_policy = url_policy or UrlPolicy()
+        self._httpx_transport_factory = httpx_transport_factory
+        self._url_decision_sink: Callable[[UrlDecision], None] | None = None
         self._stack: AsyncExitStack | None = None
         self._session: Any | None = None
-        self._stderr_fh: Any | None = None
+        self._stderr_capture: Any | None = None
 
     async def list_tools(self) -> list[Any]:
         session = await self._ensure_session()
@@ -326,10 +1003,7 @@ class DefaultMcpClientConnection:
         if stack is not None:
             with contextlib.suppress(Exception):
                 await stack.aclose()
-        if self._stderr_fh is not None:
-            with contextlib.suppress(Exception):
-                self._stderr_fh.close()
-            self._stderr_fh = None
+        self._persist_redacted_stderr()
 
     async def _ensure_session(self) -> Any:
         if self._session is not None:
@@ -337,7 +1011,7 @@ class DefaultMcpClientConnection:
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from mcp.client.streamable_http import streamablehttp_client
+            from mcp.client.streamable_http import streamable_http_client
         except ImportError as exc:
             raise McpRuntimeError("mcp package is not installed") from exc
 
@@ -351,16 +1025,33 @@ class DefaultMcpClientConnection:
                     env=self._stdio_env(),
                     cwd=self._cwd(),
                 )
-                self._stderr_fh = self.stderr_log_path.open("a", encoding="utf-8", errors="replace", buffering=1)
-                self._stderr_fh.write(f"\n===== starting MCP server '{self.server.server_id}' =====\n")
-                read_stream, write_stream = await stack.enter_async_context(stdio_client(params, errlog=self._stderr_fh))
+                self._stderr_capture = tempfile.TemporaryFile(
+                    mode="w+",
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                read_stream, write_stream = await stack.enter_async_context(
+                    stdio_client(params, errlog=self._stderr_capture)
+                )
             else:
+                import httpx
+
+                http_client = self._httpx_client_factory(
+                    headers=self.headers or None,
+                    timeout=httpx.Timeout(
+                        self.server.manifest.connect_timeout_seconds,
+                        read=max(
+                            self.server.manifest.timeout_seconds,
+                            60,
+                        ),
+                    ),
+                    auth=None,
+                )
+                await stack.enter_async_context(http_client)
                 read_stream, write_stream, _get_session_id = await stack.enter_async_context(
-                    streamablehttp_client(
+                    streamable_http_client(
                         str(self.server.manifest.url),
-                        headers=self.headers or None,
-                        timeout=self.server.manifest.connect_timeout_seconds,
-                        sse_read_timeout=max(self.server.manifest.timeout_seconds, 60),
+                        http_client=http_client,
                     )
                 )
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
@@ -371,25 +1062,112 @@ class DefaultMcpClientConnection:
             await self.close()
             raise
 
-    def _cwd(self) -> Path | None:
+    def _persist_redacted_stderr(self) -> None:
+        capture = self._stderr_capture
+        self._stderr_capture = None
+        if capture is None:
+            return
+        try:
+            capture.flush()
+            capture.seek(0)
+            raw = capture.read(MCP_STDERR_LOG_LIMIT_CHARS + 1)
+        except (OSError, ValueError):
+            raw = ""
+        finally:
+            with contextlib.suppress(Exception):
+                capture.close()
+        if not raw:
+            return
+        capture_truncated = len(raw) > MCP_STDERR_LOG_LIMIT_CHARS
+        raw = raw[:MCP_STDERR_LOG_LIMIT_CHARS]
+        payload = {
+            "env": self.env,
+            "headers": self.headers,
+            "stderr": raw,
+        }
+        result = SecretRedactor(
+            self.redaction_secrets,
+            max_string_chars=MCP_STDERR_LOG_LIMIT_CHARS,
+        ).redact_with_value(
+            payload,
+            view=RedactionView.DURABLE,
+        )
+        rendered = (
+            result.value.get("stderr")
+            if isinstance(result.value, dict)
+            else None
+        )
+        if not isinstance(rendered, str):
+            rendered = "<redaction-failed>"
+        with open_private_text(
+            self.stderr_log_path,
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            buffering=1,
+        ) as handle:
+            handle.write(
+                f"\n===== MCP server '{self.server.server_id}' stderr =====\n"
+            )
+            handle.write(rendered)
+            if not rendered.endswith("\n"):
+                handle.write("\n")
+            if capture_truncated:
+                handle.write("...[stderr capture truncated]\n")
+
+    def set_url_decision_sink(
+        self,
+        sink: Callable[[UrlDecision], None],
+    ) -> None:
+        self._url_decision_sink = sink
+
+    def _httpx_client_factory(
+        self,
+        headers: dict[str, str] | None = None,
+        timeout: Any | None = None,
+        auth: Any | None = None,
+    ) -> Any:
+        import httpx
+
+        kwargs: dict[str, Any] = {
+            "follow_redirects": True,
+            "transport": UrlPolicyAsyncTransport(
+                self.url_policy,
+                transport_factory=self._httpx_transport_factory,
+                decision_sink=self._record_url_decision,
+            ),
+        }
+        if headers is not None:
+            kwargs["headers"] = headers
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if auth is not None:
+            kwargs["auth"] = auth
+        return httpx.AsyncClient(**kwargs)
+
+    def _record_url_decision(self, decision: UrlDecision) -> None:
+        sink = self._url_decision_sink
+        if sink is not None:
+            sink(decision)
+
+    def _cwd(self) -> Path:
         cwd = self.server.manifest.cwd
         if not cwd:
-            return None
+            return self.workspace.resolve()
         path = Path(cwd).expanduser()
         if not path.is_absolute():
             path = self.workspace / path
         return path.resolve()
 
-    def _stdio_env(self) -> dict[str, str] | None:
-        if not self.env:
-            return None
-        merged = {
-            key: value
-            for key, value in os.environ.items()
-            if key in {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"}
-        }
-        merged.update(self.env)
-        return merged
+    def _stdio_env(self) -> dict[str, str]:
+        home = ensure_subprocess_home(
+            self.stderr_log_path.parent.parent / "mcp-home"
+        )
+        return build_sanitized_subprocess_env(
+            os.environ,
+            self.env,
+            home=home,
+        )
 
 
 def mcp_result_to_tool_result(tool: McpToolInfo, result: Any) -> ToolResult:

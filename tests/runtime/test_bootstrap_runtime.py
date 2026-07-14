@@ -129,6 +129,7 @@ async def test_bootstrap_runtime_persists_fragments_and_ignores_return_value(tmp
         "bootstrap.module.completed",
         "bootstrap.completed",
     ]
+    assert {event[1]["session_id"] for event in host.events} == {"session_1"}
 
 
 @pytest.mark.asyncio

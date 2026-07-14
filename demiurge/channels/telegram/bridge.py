@@ -16,12 +16,18 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from demiurge.channels.commands import ChannelCommandExecutor, ChannelCommandRuntime
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+    redact_exception_message,
+)
 from demiurge.core import TelegramChannelConfig
 from demiurge.runtime.conversation_keys import build_conversation_key
 from demiurge.runtime.conversation_lifecycle import ConversationLifecycleConfig, ConversationLifecycleRuntime
@@ -83,6 +89,10 @@ class TelegramPendingApproval:
     reply_to: str | None
     conversation_key: str
     message_id: int | None = None
+    message_ready: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        repr=False,
+    )
 
 
 class TelegramInboundMediaError(RuntimeError):
@@ -485,6 +495,7 @@ class TelegramInteractionBridge:
                 channel=inbound.channel,
                 text=inbound.text,
                 source=inbound.source,
+                principal_key=inbound.principal_key,
                 reply_to=inbound.reply_to,
                 conversation_key=inbound.conversation_key,
                 metadata=metadata,
@@ -493,17 +504,42 @@ class TelegramInteractionBridge:
 
         attachments = list(inbound.attachments)
         errors: list[str] = []
+        bot_token = getattr(self.api, "token", None)
+        media_secrets = (
+            (
+                SecretValue(
+                    value=bot_token,
+                    name="TELEGRAM_TOKEN",
+                    source="channel.telegram.token",
+                ),
+            )
+            if isinstance(bot_token, str) and bot_token
+            else ()
+        )
         for item in pending:
             if not isinstance(item, dict):
                 continue
             try:
                 attachment = await asyncio.to_thread(self._download_inbound_media, inbound, item)
             except TelegramInboundMediaError as exc:
-                logger.warning("telegram inbound media skipped: %s", exc)
-                errors.append(str(exc))
+                safe_error = redact_exception_message(
+                    exc,
+                    view=RedactionView.OPERATOR,
+                    secrets=media_secrets,
+                )
+                logger.warning("telegram inbound media skipped: %s", safe_error)
+                errors.append(safe_error)
             except Exception as exc:
-                logger.warning("telegram inbound media download failed: %s", exc)
-                errors.append(str(exc))
+                safe_error = redact_exception_message(
+                    exc,
+                    view=RedactionView.OPERATOR,
+                    secrets=media_secrets,
+                )
+                logger.warning(
+                    "telegram inbound media download failed: %s",
+                    safe_error,
+                )
+                errors.append(safe_error)
             else:
                 attachments.append(attachment)
 
@@ -521,6 +557,7 @@ class TelegramInteractionBridge:
             channel=inbound.channel,
             text=inbound.text,
             source=inbound.source,
+            principal_key=inbound.principal_key,
             reply_to=inbound.reply_to,
             conversation_key=inbound.conversation_key,
             metadata=metadata,
@@ -664,6 +701,12 @@ class TelegramInteractionBridge:
         )
 
     async def handle_inbound(self, inbound: InteractionInbound) -> None:
+        if not inbound.principal_key:
+            inbound.principal_key = inbound.conversation_key or build_conversation_key(
+                "telegram",
+                "source",
+                inbound.source,
+            )
         state = self._conversation_state(inbound.conversation_key or build_conversation_key("telegram", "dm", inbound.source))
         self._conversation_lifecycle.remember_route(state, inbound)
         command_outcome = await self._handle_telegram_command(inbound, state)
@@ -736,6 +779,7 @@ class TelegramInteractionBridge:
                 sent = await send_task
             except BaseException:
                 self._pending_approvals.discard(pending.approval_id)
+                payload.message_ready.set()
             else:
                 self._record_pending_approval_message(pending, sent, conversation_key)
                 resolved = self._resolve_pending_approval(
@@ -751,6 +795,7 @@ class TelegramInteractionBridge:
             raise
         except BaseException:
             self._pending_approvals.discard(pending.approval_id)
+            payload.message_ready.set()
             raise
         self._record_pending_approval_message(pending, sent, conversation_key)
         try:
@@ -966,8 +1011,44 @@ class TelegramInteractionBridge:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("telegram turn failed")
-            await self._send_text(inbound.source, f"Turn failed: {exc}", reply_to=inbound.reply_to)
+            secrets: list[SecretValue] = []
+            provider_api_key = getattr(
+                getattr(
+                    getattr(state.runtime, "runner", None),
+                    "provider",
+                    None,
+                ),
+                "api_key",
+                None,
+            )
+            if isinstance(provider_api_key, str) and provider_api_key:
+                secrets.append(
+                    SecretValue(
+                        value=provider_api_key,
+                        name="API_KEY",
+                        source="provider.api_key",
+                    )
+                )
+            bot_token = getattr(self.api, "token", None)
+            if isinstance(bot_token, str) and bot_token:
+                secrets.append(
+                    SecretValue(
+                        value=bot_token,
+                        name="TELEGRAM_TOKEN",
+                        source="channel.telegram.token",
+                    )
+                )
+            safe_error = redact_exception(
+                exc,
+                view=RedactionView.OPERATOR,
+                secrets=secrets,
+            )
+            logger.error("telegram turn failed: %s", safe_error)
+            await self._send_text(
+                inbound.source,
+                f"Turn failed: {safe_error}",
+                reply_to=inbound.reply_to,
+            )
         finally:
             self._active_inbound.reset(token)
 
@@ -1144,6 +1225,7 @@ class TelegramInteractionBridge:
     ) -> None:
         payload: TelegramPendingApproval = pending.payload
         payload.message_id = _telegram_message_id(sent)
+        payload.message_ready.set()
         self._conversation_state(conversation_key).pending_approval_id = pending.approval_id
 
     async def _cancel_pending_approval(self, state: TelegramConversationState, *, reason: str) -> None:
@@ -1156,6 +1238,8 @@ class TelegramInteractionBridge:
 
     async def _edit_approval_message(self, pending: PendingApproval, title: str, detail: str) -> None:
         payload: TelegramPendingApproval = pending.payload
+        if payload.message_id is None:
+            await payload.message_ready.wait()
         if payload.message_id is None or not hasattr(self.api, "edit_message_text"):
             return
         text = format_resolved_approval_text(pending.request, title=title, detail=detail)

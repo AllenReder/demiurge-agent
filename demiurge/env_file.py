@@ -4,6 +4,8 @@ import os
 import re
 from pathlib import Path
 
+from demiurge.util import atomic_write_private_text
+
 
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -44,7 +46,6 @@ def parse_env_text(text: str) -> dict[str, str]:
 def upsert_env_value(path: Path, key: str, value: str) -> None:
     if not _ENV_KEY_RE.fullmatch(key):
         raise ValueError(f"invalid env key: {key}")
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = f"{key}={quote_env_value(value)}"
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     replaced = False
@@ -61,7 +62,7 @@ def upsert_env_value(path: Path, key: str, value: str) -> None:
         if next_lines and next_lines[-1].strip():
             next_lines.append("")
         next_lines.append(line)
-    path.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
+    atomic_write_private_text(path, "\n".join(next_lines) + "\n")
 
 
 def quote_env_value(value: str) -> str:

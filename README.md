@@ -56,6 +56,11 @@ uv sync --all-groups
 uv run demiurge --provider fake
 ```
 
+Normal launches use the tracked packaged TUI bundle even when an ignored
+`ui-tui/dist/entry.js` exists in a source checkout. TUI contributors can opt
+into local source artifacts with `DEMIURGE_TUI_DEV=1`; protocol/build identity
+mismatches fail before the operator gateway initializes.
+
 If you want to use a real provider, run `demiurge setup` to configure your API key and endpoint.
 
 Follow the

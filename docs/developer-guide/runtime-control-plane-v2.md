@@ -133,6 +133,19 @@ Task-completion claim and acknowledgement flow through
 `HostWorkLifecycleRuntime`, so bridges and operator surfaces share the same
 claim/ack vocabulary.
 
+Terminal task handles carry a Host-issued process `spawn_id` plus an OS
+process-start marker; durable metadata contains PID/process-group/platform
+identity but is never used alone to kill a process. Concurrent cancellation is
+single-flight: one cleanup callback commits return code/exit reason in one
+terminal event before completion-ready, and all callers observe that result.
+`DemiurgeApp.close()` cancels and drains active runtime tasks and registered
+foreground terminal owners before tool resources close. Task admission closes
+before shutdown snapshots active work, so a late approval cannot start a new
+background process during drain. Output-persistence
+failure follows the same tree-cleanup path before `task.failed` is committed.
+Full terminal streams are durable artifact rows/files; task logs and model
+results remain bounded projections.
+
 `BackgroundWorkRuntime` tracks in-process background coroutines created by
 parallel slots and delivery dispatch. It composes those local tasks with the
 durable `RuntimeTaskWorker` for drain and active-count behavior; the foreground
@@ -162,8 +175,10 @@ must not rewrite the original history body.
 - session creation, update, turn lifecycle, and message persistence to
   `SessionRuntime`;
 - foreground turn admission, including session/core resolution, route binding,
-  bootstrap, and turn begin, to `TurnAdmissionRuntime`;
-- authored input -> model/tool -> output execution to `TurnPipelineRuntime`;
+  revision/capability pinning, and turn begin, to `TurnAdmissionRuntime`;
+- authored input -> model/tool -> output execution, captured-route context,
+  bootstrap, owner-checked cancellation, delivery drain, and final cleanup to
+  `TurnExecution`;
 - foreground input records, assistant output records, display turns,
   completion, and interruption to `TurnPersistenceRuntime`;
 - provider/tool loop execution to `TurnEngine`;

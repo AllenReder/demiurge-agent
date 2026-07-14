@@ -8,6 +8,7 @@ from typing import Any, Mapping, Protocol
 from demiurge.core import LoadedCore, SlotDefinition
 from demiurge.providers import ToolCall
 from demiurge.runtime.interactions import InteractionInbound
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.tasks import (
     RuntimeTaskConflictError,
     RuntimeTaskContext,
@@ -49,6 +50,8 @@ class ChildAgentRunRequest:
     use_bootstrap: bool = False
     tools: ChildToolRequest = CHILD_AGENT_ALL_TOOLS
     session_id: str | None = None
+    delegation_id: str | None = None
+    parent_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -65,6 +68,7 @@ class ChildAgentSpawnRequest:
     notify_on_complete: bool = True
     session_id: str | None = None
     resolved_child_tools: "ResolvedChildAgentTools | None" = None
+    parent_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -113,10 +117,6 @@ class ChildAgentHost(Protocol):
     def sessions(self) -> Any:
         ...
 
-    @property
-    def session_id(self) -> str:
-        ...
-
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         ...
 
@@ -126,9 +126,17 @@ class ChildAgentHost(Protocol):
     def resolve_model_name(self, core: LoadedCore) -> str:
         ...
 
-    def create_child_runner(self, *, core_id: str, session_id: str) -> Any:
+    def create_child_runner(
+        self,
+        *,
+        core_id: str,
+        session_id: str,
+        principal_scope: PrincipalScope,
+    ) -> Any:
         ...
 
+    def principal_scope_for_turn(self, turn: TurnContext) -> PrincipalScope | None:
+        ...
 
 class RunnerChildAgentHost:
     """Adapter from SessionTurnStepRunner to ChildAgentHost."""
@@ -160,12 +168,8 @@ class RunnerChildAgentHost:
     def sessions(self) -> Any:
         return self.runner.sessions
 
-    @property
-    def session_id(self) -> str:
-        return self.runner.session_id
-
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
     def core_revision(self, core: LoadedCore) -> str:
         return self.runner._core_revision(core)
@@ -173,7 +177,13 @@ class RunnerChildAgentHost:
     def resolve_model_name(self, core: LoadedCore) -> str:
         return self.runner._resolve_model_name(core)
 
-    def create_child_runner(self, *, core_id: str, session_id: str) -> Any:
+    def create_child_runner(
+        self,
+        *,
+        core_id: str,
+        session_id: str,
+        principal_scope: PrincipalScope,
+    ) -> Any:
         return self.runner.__class__(
             home=self.runner.home,
             version_store=self.runner.version_store,
@@ -193,8 +203,14 @@ class RunnerChildAgentHost:
             slot_runtime=self.runner.slot_runtime,
             interaction_router=self.runner.interaction_router,
             prepare_live_core=self.runner.prepare_live_core_callback,
+            principal_scope=principal_scope,
         )
 
+    def principal_scope_for_turn(self, turn: TurnContext) -> PrincipalScope | None:
+        return self.runner.task_worker.scope_for_turn(
+            session_id=turn.session_id,
+            turn_id=turn.turn_id,
+        )
 
 class ChildAgentRuntime:
     """Runs and spawns child agents behind a dedicated child lifecycle interface."""
@@ -302,9 +318,15 @@ class ChildAgentRuntime:
             return CHILD_AGENT_ALL_SLOTS
         return list(normalized)
 
-    def resolve_tools(self, core: LoadedCore, requested: ChildToolRequest) -> ResolvedChildAgentTools:
+    def resolve_tools(
+        self,
+        core: LoadedCore,
+        requested: ChildToolRequest,
+        *,
+        turn: TurnContext | None = None,
+    ) -> ResolvedChildAgentTools:
         requested_tools = self.normalize_tool_request(requested)
-        registry_entries = self.host.tool_runtime.registry_for(core)
+        registry_entries = self.host.tool_runtime.registry_for(core, turn=turn)
         available_tool_ids = [entry.name for entry in registry_entries]
         available_tool_id_set = set(available_tool_ids)
         if requested_tools == CHILD_AGENT_ALL_TOOLS:
@@ -336,9 +358,16 @@ class ChildAgentRuntime:
         requested: ChildToolRequest,
         *,
         session_id: str,
+        principal_scope: PrincipalScope,
     ) -> ResolvedChildAgentTools:
         core = self.host.core_loader.load(self.host.version_store.active_core_path(core_id))
-        return await self.resolve_tools_prepared(core, requested, session_id=session_id)
+        return await self.resolve_tools_prepared(
+            core,
+            requested,
+            session_id=session_id,
+            capability=CapabilityFacade(core),
+            principal_scope=principal_scope,
+        )
 
     async def resolve_tools_prepared(
         self,
@@ -346,15 +375,28 @@ class ChildAgentRuntime:
         requested: ChildToolRequest,
         *,
         session_id: str,
+        capability: CapabilityFacade | None = None,
+        principal_scope: PrincipalScope | None = None,
     ) -> ResolvedChildAgentTools:
         normalized = self.normalize_tool_request(requested)
+        turn = None
         if normalized != CHILD_AGENT_NO_TOOLS:
-            await self.prepare_tool_registry(core, session_id=session_id)
-        return self.resolve_tools(core, normalized)
+            turn = await self.prepare_tool_registry(
+                core,
+                session_id=session_id,
+                capability=capability,
+                principal_scope=principal_scope,
+            )
+        return self.resolve_tools(core, normalized, turn=turn)
 
-    async def prepare_tool_registry(self, core: LoadedCore, *, session_id: str) -> None:
-        if not core.mcp_servers:
-            return
+    async def prepare_tool_registry(
+        self,
+        core: LoadedCore,
+        *,
+        session_id: str,
+        capability: CapabilityFacade | None = None,
+        principal_scope: PrincipalScope | None = None,
+    ) -> TurnContext:
         turn = TurnContext(
             session_id=session_id,
             turn_id=utc_id("turn_child_tools_"),
@@ -363,7 +405,18 @@ class ChildAgentRuntime:
             user_input=AgentInput(content=""),
             metadata={},
         )
-        await self.host.tool_runtime.prepare_for_turn(core, turn, emit_event=self.host.emit_event)
+        if core.mcp_servers:
+            await self.host.tool_runtime.prepare_for_turn(
+                core,
+                turn,
+                capability=capability,
+                principal_scope=principal_scope,
+                emit_event=lambda event_type, **payload: self.host.emit_event(
+                    event_type,
+                    **{**payload, "session_id": session_id},
+                ),
+            )
+        return turn
 
     def requested_tools_for_core_id(self, core_id: str, requested: ChildToolRequest) -> str | list[str]:
         normalized = self.normalize_tool_request(requested)
@@ -405,7 +458,26 @@ class ChildAgentRuntime:
 
     async def run_child(self, request: ChildAgentRunRequest) -> AgentRunResult:
         child_session_id = request.session_id or utc_id("session_child_")
-        child_runner = self.host.create_child_runner(core_id=request.core_id, session_id=child_session_id)
+        parent_scope = request.parent_scope or self.host.principal_scope_for_turn(
+            request.parent_turn
+        )
+        if parent_scope is None:
+            raise RuntimeError("child agent requires the admitted parent PrincipalScope")
+        if parent_scope.session_id != request.parent_turn.session_id:
+            raise PermissionError("parent PrincipalScope does not match parent turn session")
+        child_scope = PrincipalScopeResolver(
+            self.host.session_runtime.store
+        ).delegated_agent(
+            parent=parent_scope,
+            task_id=request.delegation_id or child_session_id,
+            parent_turn_id=request.parent_turn.turn_id,
+            child_session_id=child_session_id,
+        )
+        child_runner = self.host.create_child_runner(
+            core_id=request.core_id,
+            session_id=child_session_id,
+            principal_scope=child_scope,
+        )
         await child_runner.prepare_live_core()
         child_core_path = self.host.version_store.active_core_path(request.core_id)
         child_core = self.host.core_loader.load(child_core_path)
@@ -415,80 +487,106 @@ class ChildAgentRuntime:
             output_slots=request.output_slots,
             use_bootstrap=request.use_bootstrap,
         )
-        child_tools = await self.resolve_tools_prepared(
-            child_core,
-            request.tools,
-            session_id=child_session_id,
-        )
-        self.host.session_runtime.update_session(
-            child_session_id,
-            core_id=child_core.core_id,
-            core_revision=self.host.core_revision(child_core),
-            provider=child_runner.provider_name,
-            model=self.host.resolve_model_name(child_core),
-            touch=False,
-        )
-        child_slot_metadata = child_slots.to_metadata()
-        child_tool_metadata = {"requested": child_tools.requested, "resolved": child_tools.resolved}
-        child_metadata = {
-            "delegation_depth": int(request.parent_turn.metadata.get("delegation_depth") or 0) + 1,
-            "parent_session_id": request.parent_turn.session_id,
-            "parent_turn_id": request.parent_turn.turn_id,
-            "parent_slot": request.parent_slot_path,
-            "child_agent_slots": child_slot_metadata,
-            "child_agent_tools": child_tool_metadata,
-        }
-        if child_tools.tool_policy:
-            child_metadata["tool_policy"] = child_tools.tool_policy
-        result = await child_runner.run_turn(
-            request.raw_input,
-            core_path=child_core_path,
-            interaction=InteractionInbound(
-                channel="agent",
-                text=request.raw_input,
-                source=request.parent_turn.session_id,
-                metadata=child_metadata,
-            ),
-            injected_system_context=list(request.context),
-            input_phase_slots=child_slots.input,
-            output_phase_slots=child_slots.output,
-            use_bootstrap=child_slots.use_bootstrap,
-        )
-        await child_runner.background_tasks.drain(include_runtime_tasks=False)
-        needs_user = result.needs_user or self._turn_result_needs_user(result)
-        return AgentRunResult(
-            content="\n\n".join(delivery.text for delivery in result.deliveries if delivery.text).strip(),
-            core_id=result.core_id,
-            session_id=result.session_id,
-            turn_id=result.turn_id,
-            result=result.agent_result,
-            deliveries=tuple(
-                AgentDeliverySummary(
-                    kind=delivery.kind,
-                    text=delivery.text,
-                    history_policy=delivery.history_policy,
-                    visible=delivery.visible,
+        try:
+            child_tools = await self.resolve_tools_prepared(
+                child_core,
+                request.tools,
+                session_id=child_session_id,
+                capability=CapabilityFacade(child_core),
+                principal_scope=child_scope,
+            )
+            self.host.session_runtime.update_session(
+                child_session_id,
+                core_id=child_core.core_id,
+                core_revision=self.host.core_revision(child_core),
+                provider=child_runner.provider_name,
+                model=self.host.resolve_model_name(child_core),
+                touch=False,
+            )
+            child_slot_metadata = child_slots.to_metadata()
+            child_tool_metadata = {
+                "requested": child_tools.requested,
+                "resolved": child_tools.resolved,
+            }
+            child_metadata = {
+                "delegation_depth": int(
+                    request.parent_turn.metadata.get("delegation_depth") or 0
                 )
-                for delivery in result.deliveries
-            ),
-            tools=tuple(
-                AgentToolSummary(
-                    name=record.call.name,
-                    content=record.result.content,
-                    is_error=record.result.is_error,
-                )
-                for record in result.tool_results
-            ),
-            metadata={
+                + 1,
+                "parent_session_id": request.parent_turn.session_id,
                 "parent_turn_id": request.parent_turn.turn_id,
                 "parent_slot": request.parent_slot_path,
-                "needs_user": needs_user,
                 "child_agent_slots": child_slot_metadata,
                 "child_agent_tools": child_tool_metadata,
-            },
-        )
+            }
+            if child_tools.tool_policy:
+                child_metadata["tool_policy"] = child_tools.tool_policy
+            result = await child_runner.run_turn(
+                request.raw_input,
+                core_path=child_core_path,
+                interaction=InteractionInbound(
+                    channel="agent",
+                    text=request.raw_input,
+                    source=request.parent_turn.session_id,
+                    metadata=child_metadata,
+                ),
+                injected_system_context=list(request.context),
+                input_phase_slots=child_slots.input,
+                output_phase_slots=child_slots.output,
+                use_bootstrap=child_slots.use_bootstrap,
+            )
+            await child_runner.background_tasks.drain(
+                include_runtime_tasks=False
+            )
+            needs_user = result.needs_user or self._turn_result_needs_user(
+                result
+            )
+            return AgentRunResult(
+                content="\n\n".join(
+                    delivery.text
+                    for delivery in result.deliveries
+                    if delivery.text
+                ).strip(),
+                core_id=result.core_id,
+                session_id=result.session_id,
+                turn_id=result.turn_id,
+                result=result.agent_result,
+                deliveries=tuple(
+                    AgentDeliverySummary(
+                        kind=delivery.kind,
+                        text=delivery.text,
+                        history_policy=delivery.history_policy,
+                        visible=delivery.visible,
+                    )
+                    for delivery in result.deliveries
+                ),
+                tools=tuple(
+                    AgentToolSummary(
+                        name=record.call.name,
+                        content=record.result.content,
+                        is_error=record.result.is_error,
+                    )
+                    for record in result.tool_results
+                ),
+                metadata={
+                    "parent_turn_id": request.parent_turn.turn_id,
+                    "parent_slot": request.parent_slot_path,
+                    "needs_user": needs_user,
+                    "child_agent_slots": child_slot_metadata,
+                    "child_agent_tools": child_tool_metadata,
+                },
+            )
+        finally:
+            await self.host.tool_runtime.evict_session(child_session_id)
 
     def spawn_child(self, request: ChildAgentSpawnRequest) -> AgentSpawnHandle:
+        parent_scope = request.parent_scope or self.host.principal_scope_for_turn(
+            request.parent_turn
+        )
+        if parent_scope is None:
+            raise RuntimeError("child agent spawn requires the admitted parent PrincipalScope")
+        if parent_scope.session_id != request.parent_turn.session_id:
+            raise PermissionError("parent PrincipalScope does not match parent turn session")
         self.resolve_slots_for_core_id(
             request.core_id,
             input_slots=request.input_slots,
@@ -518,6 +616,7 @@ class ChildAgentRuntime:
         async def run_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
             self.host.emit_event(
                 "agent_spawn.started",
+                session_id=request.parent_turn.session_id,
                 turn_id=request.parent_turn.turn_id,
                 slot=request.parent_slot_path,
                 task_id=ctx.task_id,
@@ -537,6 +636,8 @@ class ChildAgentRuntime:
                         use_bootstrap=request.use_bootstrap,
                         tools=request.tools,
                         session_id=session_id,
+                        delegation_id=ctx.task_id,
+                        parent_scope=parent_scope,
                     )
                 )
                 child_slot_metadata = result.metadata.get("child_agent_slots")
@@ -559,6 +660,7 @@ class ChildAgentRuntime:
                     ctx.mark_blocked(summary, metadata={"needs_user": True})
                 self.host.emit_event(
                     event_name,
+                    session_id=request.parent_turn.session_id,
                     turn_id=request.parent_turn.turn_id,
                     slot=request.parent_slot_path,
                     task_id=ctx.task_id,
@@ -581,6 +683,7 @@ class ChildAgentRuntime:
             except Exception as exc:
                 self.host.emit_event(
                     "agent_spawn.failed",
+                    session_id=request.parent_turn.session_id,
                     turn_id=request.parent_turn.turn_id,
                     slot=request.parent_slot_path,
                     task_id=ctx.task_id,
@@ -610,6 +713,7 @@ class ChildAgentRuntime:
         except RuntimeTaskConflictError as exc:
             self.host.emit_event(
                 "agent_spawn.rejected",
+                session_id=request.parent_turn.session_id,
                 turn_id=request.parent_turn.turn_id,
                 slot=request.parent_slot_path,
                 child_core_id=request.core_id,
@@ -660,14 +764,13 @@ class ChildAgentRuntime:
             return ToolResult(content=f"unsupported notify_policy: {notify_policy}", is_error=True)
         raw_use_bootstrap = call.arguments.get("use_bootstrap", False)
         use_bootstrap = False if raw_use_bootstrap is None else raw_use_bootstrap
-        context = self.delegation_context(context_mode)
+        context = self.delegation_context(context_mode, session_id=turn.session_id)
         child_tools_request = call.arguments.get("tools", CHILD_AGENT_ALL_TOOLS)
         child_session_id = utc_id("session_child_")
         try:
-            child_tools = await self.resolve_tools_for_core_id_prepared(
+            requested_child_tools = self.requested_tools_for_core_id(
                 child_core_id,
                 child_tools_request,
-                session_id=child_session_id,
             )
             handle = self.spawn_child(
                 ChildAgentSpawnRequest(
@@ -679,10 +782,9 @@ class ChildAgentRuntime:
                     input_slots=call.arguments.get("input_slots"),
                     output_slots=call.arguments.get("output_slots"),
                     use_bootstrap=use_bootstrap,
-                    tools=child_tools_request,
+                    tools=requested_child_tools,
                     notify_on_complete=notify_policy == "return_to_parent",
                     session_id=child_session_id,
-                    resolved_child_tools=child_tools,
                 )
             )
         except ValueError as exc:
@@ -690,10 +792,10 @@ class ChildAgentRuntime:
         payload = {"task_id": handle.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    def delegation_context(self, context_mode: str) -> list[str]:
+    def delegation_context(self, context_mode: str, *, session_id: str) -> list[str]:
         if context_mode == "isolated":
             return []
-        messages = self.host.sessions.history_for_context(self.host.session_id)[-12:]
+        messages = self.host.sessions.history_for_context(session_id)[-12:]
         if not messages:
             return []
         transcript = "\n".join(f"{message.role}: {message.content}" for message in messages if message.content.strip())

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import inspect
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
 from demiurge.providers import ToolCall
@@ -10,16 +11,21 @@ from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 
+if TYPE_CHECKING:
+    from demiurge.runtime.scope import PrincipalScope
+
 
 @dataclass(slots=True)
 class InteractionInbound:
     channel: str
     text: str
     source: str
+    principal_key: str | None = None
     reply_to: str | None = None
     conversation_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     attachments: list[Any] = field(default_factory=list)
+    principal_scope: PrincipalScope | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -259,6 +265,10 @@ class SessionInteractionRouter:
 
     def __init__(self) -> None:
         self._routes: dict[str, dict[str, _BoundSessionRoute]] = {}
+        self._execution_route: ContextVar[SessionRouteToken | None] = ContextVar(
+            f"demiurge_execution_route_{id(self)}",
+            default=None,
+        )
 
     def bind(self, session_id: str, route: SessionInteractionRoute) -> SessionRouteToken:
         if not session_id:
@@ -278,9 +288,29 @@ class SessionInteractionRouter:
     def is_bound(self, token: SessionRouteToken) -> bool:
         return token.token_id in self._routes.get(token.session_id, {})
 
+    def activate_execution_route(
+        self,
+        token: SessionRouteToken | None,
+    ) -> Token[SessionRouteToken | None] | None:
+        if token is None:
+            return None
+        return self._execution_route.set(token)
+
+    def release_execution_route(
+        self,
+        handle: Token[SessionRouteToken | None] | None,
+    ) -> None:
+        if handle is not None:
+            self._execution_route.reset(handle)
+
     def route_for(self, session_id: str | None) -> _BoundSessionRoute | None:
         if not session_id:
             return None
+        execution_token = self._execution_route.get()
+        if execution_token is not None:
+            if execution_token.session_id != session_id:
+                return None
+            return self._routes.get(session_id, {}).get(execution_token.token_id)
         routes = self._routes.get(session_id)
         if not routes:
             return None

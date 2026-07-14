@@ -67,8 +67,18 @@ def test_turn_io_send_user_persists_message_and_emits_event(tmp_path):
     host = _Host(tmp_path)
     runtime = TurnIO(host)
 
-    assert runtime.send_user(turn_id="turn_1", content="", interaction_metadata={"channel": "tui"}) is None
-    message = runtime.send_user(turn_id="turn_1", content="hello", interaction_metadata={"channel": "tui"})
+    assert runtime.send_user(
+        session_id="session_1",
+        turn_id="turn_1",
+        content="",
+        interaction_metadata={"channel": "tui"},
+    ) is None
+    message = runtime.send_user(
+        session_id="session_1",
+        turn_id="turn_1",
+        content="hello",
+        interaction_metadata={"channel": "tui"},
+    )
 
     assert message is not None
     assert message.role == "user"
@@ -134,6 +144,8 @@ async def test_turn_io_send_assistant_step_with_empty_content_only_persists_mess
 
 def test_turn_io_send_tool_result_persists_hidden_tool_message_and_schedules_item(tmp_path):
     host = _Host(tmp_path)
+    host.session_runtime.ensure_session("session_2", core_id="assistant", core_revision="rev_1", channel="tui")
+    host.session_id = "session_2"
     runtime = TurnIO(host)
     record = ToolExecutionRecord(
         call=ToolCall(id="call_1", name="read_file", arguments={"path": "note.txt"}),
@@ -155,6 +167,7 @@ def test_turn_io_send_tool_result_persists_hidden_tool_message_and_schedules_ite
     assert item.kind == "tool_result"
     assert item.metadata["message_id"] == messages[-1].id
     assert host.scheduled == [item]
+    assert host.session_runtime.read_messages("session_2") == []
 
 
 @pytest.mark.asyncio

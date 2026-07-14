@@ -8,8 +8,19 @@ description: Reference for host-owned capability and approval behavior.
 Capabilities are host-owned grants for effect classes. Approval policy decides
 whether a requested effect can run automatically, must prompt, or is denied.
 
-Declaring a tool, slot, schedule, or MCP server is not enough to run dangerous
-effects. The host checks capabilities at execution time.
+Declaring a tool, slot, schedule, or MCP server does not grant a capability by
+itself. Builtin and MCP call handlers generally check their required
+capabilities at execution time. Authored tool dispatch requires the singular
+registry capability before module import, while authored SDK clients continue
+to enforce explicit `ctx.capability.require(...)` calls inside the module. MCP
+spawn/connect/discovery requires `mcp.connect:<server>` and connect approval
+before client construction; later tool calls use the manifest call capability.
+Core mutation builtins require the
+resolved registry capability and effective approval policy before every
+evolution/version-store adapter call or background task creation. See
+[Host Runtime Contracts](../developer-guide/runtime-contracts.md#effectruntime)
+for the single target ordering. Capabilities are not principal authorization or
+a Python sandbox.
 
 ## Capability Grants
 
@@ -49,6 +60,9 @@ ctx.capability.require("fs.read", slot_path=ctx.slot_path)
 ```
 
 If the capability is not declared, the host raises `capability denied`.
+This plural implementation grant does not satisfy an authored tool's singular
+registry `capability`; the pre-import dispatcher gate requires a core default
+or path-scoped capability grant.
 
 ## Prefix Grants
 
@@ -57,11 +71,16 @@ The capability checker supports exact keys and prefix wildcards:
 ```yaml
 capabilities:
   defaults:
+    mcp.connect:*:
+      scope: core
     mcp.call:*:
       scope: core
 ```
 
-This grants capabilities such as `mcp.call:docs`.
+This grants capabilities such as `mcp.connect:docs` and `mcp.call:docs`.
+Secret binding is the exception: `secret.bind:<ENV_NAME>` must be declared as
+an exact default capability. `secret.bind:*` never grants access to ambient
+Host secrets.
 
 ## Common Capabilities
 
@@ -70,10 +89,13 @@ This grants capabilities such as `mcp.call:docs`.
 | `fs.read` | Read host-visible files through host checks or an authored component that requires it. Outside-workspace and sensitive reads require approval. |
 | `fs.write` | Write workspace files. |
 | `terminal.exec` | Run terminal commands in workspace scope. |
+| `secret.bind:<ENV_NAME>` | Allow a foreground terminal effect to request one named Host environment secret. It still requires one-shot approval and expires no later than the command timeout. |
 | `network.fetch` | Fetch network content. |
 | `schedule.manage` | Manage core schedule YAML files. |
 | `task.control` | List, inspect, wait for, or cancel background runtime tasks. |
+| `session.read` | Browse or search session history through owner-scoped Host queries. `session_search` also requires approval. |
 | `tool.call:<tool>` | Let authored code call a visible tool through `ctx.tools.call(...)`. |
+| `mcp.connect:<server>` | Let the Host start/connect and discover one MCP server after approval. |
 | `mcp.call:<server>` | Let the model call tools from an MCP server. |
 | `skill.activate` | Let input slots activate skills. |
 | `skill.activate:<skill>` | Let input slots activate a specific skill. |
@@ -100,10 +122,24 @@ Risk values are:
 low < medium < high < critical
 ```
 
-For most tools, the host starts from tool metadata, then applies core approval
-overrides, then global fallback approval. More restrictive core policy wins over
-tool metadata. Global fallback approval is host-level policy and can be used as
-the final default.
+For authored tools and core mutation builtins, the Host starts from tool
+metadata and applies applicable core/global approval policy monotonically:
+core/global `auto` cannot weaken registry `prompt` or `deny`. Other builtin
+handlers and MCP calls retain their documented handler-specific resolution.
+Global fallback approval cannot lower a terminal command guard result from
+`prompt/high` to automatic execution. Only `allow/low` terminal commands can be
+auto-approved; hardline blocks terminate before approval. Commands that execute
+workspace/project code and calls with an explicit environment overlay require
+`prompt/high`. Secret bindings are never session-cacheable even when the
+provider returns `always_allow_for_session`.
+
+`always_allow_for_session` is scoped to the Host-issued principal, active
+session, effective policy/effect fingerprint, and rule key. It expires after a
+bounded eight-hour lifetime and is invalidated when the session is replaced,
+the Host closes or revokes authority, or the affected core is promoted or
+rolled back. Concurrent matching requests share one decision admission; a
+cached allow from one principal, session, revision, or capability snapshot
+never authorizes another.
 
 ## Core Approval Config
 
@@ -135,10 +171,13 @@ tools:
 ```
 
 Built-in tools cannot be made less restrictive by core metadata. Authored and
-MCP tools can be fully overridden because they are core-declared surfaces.
+MCP registry entries can be overridden because they are core-declared surfaces,
+but the authored enforcement limitation above still applies.
 
 ## Boundary
 
-Capabilities are not a sandbox by themselves. The host still enforces workspace
-scope, sensitive path checks, command guards, approval prompts, channel policy,
-and tool runtime rules before effects execute.
+Capabilities are not a sandbox by themselves. The Host's supported builtin and
+SDK paths also apply workspace, sensitive-path, command, approval, channel, and
+tool rules. In the default `host_shared` mode, imported authored Python can use
+ordinary Python/OS APIs outside those SDK paths. The target `EffectRuntime`
+centralizes model-triggered effect policy without claiming process isolation.

@@ -8,6 +8,8 @@ from typing import Any
 
 
 JsonEventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
+TUI_PROTOCOL_VERSION = 1
+TUI_BUILD_STAMP = "demiurge-operator-v1"
 
 
 class NdjsonRpcEndpoint:

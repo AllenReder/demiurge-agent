@@ -56,10 +56,6 @@ class SlotContextHost(Protocol):
         ...
 
     @property
-    def session_id(self) -> str:
-        ...
-
-    @property
     def workspace(self) -> str | None:
         ...
 
@@ -100,10 +96,6 @@ class RunnerSlotContextHost:
         return self.runner.home
 
     @property
-    def session_id(self) -> str:
-        return self.runner.session_id
-
-    @property
     def workspace(self) -> str | None:
         return self.runner.workspace
 
@@ -112,7 +104,7 @@ class RunnerSlotContextHost:
         return self.runner.sessions
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_slot_event(event_type, **payload)
 
     async def execute_tool(
         self,
@@ -124,11 +116,16 @@ class RunnerSlotContextHost:
         emit_event: Callable[..., dict[str, Any]] | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        return await self.runner.execute_tool(
+        return await self.runner.execute_call(
             call,
             core=core,
             turn=turn,
             capability=capability,
+            origin="authored",
+            principal_scope=self.runner.task_worker.scope_for_turn(
+                session_id=turn.session_id,
+                turn_id=turn.turn_id,
+            ),
             emit_event=emit_event,
             output_factory=output_factory,
         )
@@ -1059,7 +1056,7 @@ class SlotContextRuntime:
                 writable=request.builder_writable,
                 sender=io_client,
             ),
-            history=ModuleHistoryClient(sessions=self.host.sessions, session_id=self.host.session_id),
+            history=ModuleHistoryClient(sessions=self.host.sessions, session_id=request.turn.session_id),
             agents=ModuleAgentsClient(
                 host=self.host,
                 capability=request.capability,
@@ -1112,7 +1109,7 @@ class SlotContextRuntime:
             slot_path=request.slot.relative_path,
             capability=request.capability,
             output=ModuleOutputClient(content=request.current_output, metadata=request.envelope.metadata, sender=io_client),
-            history=ModuleHistoryClient(sessions=self.host.sessions, session_id=self.host.session_id),
+            history=ModuleHistoryClient(sessions=self.host.sessions, session_id=request.turn.session_id),
             agents=ModuleAgentsClient(
                 host=self.host,
                 capability=request.capability,
@@ -1144,8 +1141,8 @@ class SlotContextRuntime:
         )
         return SlotContextBuild(context=ctx, io_client=io_client)
 
-    def result_client(self, *, writable: bool) -> ModuleResultClient:
-        return self.effects.result_client(writable=writable)
+    def result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
+        return self.effects.result_client(session_id=session_id, writable=writable)
 
     def module_io_client(
         self,

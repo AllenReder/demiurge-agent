@@ -8,6 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs
 
+from demiurge.security.redaction import RedactionView, redact_exception_message
+
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ class WebhookHttpServer:
                     self._send_json(408, {"error": "request body timed out"})
                     return
                 content_type = self.headers.get("Content-Type") or ""
+                request: dict[str, Any] | None = None
                 try:
                     payload = _parse_body(raw_body, content_type)
                     request = {
@@ -84,8 +87,13 @@ class WebhookHttpServer:
                     future = asyncio.run_coroutine_threadsafe(_call_handler(owner.handler, request), loop)
                     result = future.result(timeout=120)
                 except Exception as exc:
-                    logger.exception("webhook request failed")
-                    self._send_json(400, {"error": str(exc)})
+                    safe_error = redact_exception_message(
+                        exc,
+                        view=RedactionView.OPERATOR,
+                        context=request,
+                    )
+                    logger.error("webhook request failed: %s", safe_error)
+                    self._send_json(400, {"error": safe_error})
                     return
                 status = int(result.get("status", 200)) if isinstance(result, dict) else 200
                 body = result.get("body", result) if isinstance(result, dict) else result

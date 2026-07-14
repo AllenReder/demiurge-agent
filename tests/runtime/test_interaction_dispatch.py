@@ -46,7 +46,6 @@ class _Harness:
         self.delivery_runtime = _DeliveryRuntime()
         self.tasks: list[asyncio.Task] = []
         self.runtime = InteractionDispatchRuntime(
-            session_id=lambda: "session_1",
             delivery_runtime=self.delivery_runtime,
             track_background_task=self.tasks.append,
         )
@@ -105,3 +104,31 @@ def test_mark_pending_failed_annotates_item_and_delivery_metadata():
     assert item.metadata["delivery_failed_reason"] == "slot_failed"
     assert item.delivery is not None
     assert item.delivery.metadata["delivery_failed_reason"] == "slot_failed"
+
+
+@pytest.mark.asyncio
+async def test_cancel_turn_cancels_and_awaits_scheduled_delivery_tasks():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingDeliveryRuntime:
+        async def dispatch_item(self, item, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    tasks: list[asyncio.Task] = []
+    runtime = InteractionDispatchRuntime(
+        delivery_runtime=BlockingDeliveryRuntime(),
+        track_background_task=tasks.append,
+    )
+    item = _delivery_item()
+    runtime.schedule(item, turn=_turn(), interaction_metadata={"channel": "tui"})
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await runtime.cancel_turn("turn_1")
+
+    assert cancelled.is_set()
+    assert all(task.done() for task in tasks)

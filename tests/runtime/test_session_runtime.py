@@ -1,8 +1,9 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import demiurge.runtime.session as session_module
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.control import RuntimeControlPlane
@@ -143,6 +144,33 @@ def test_session_runtime_uses_unique_conversation_binding(tmp_path):
     ) == first.session_id
 
 
+def test_store_01_latest_session_limit_includes_newest(tmp_path, monkeypatch):
+    """STORE-01: a bounded latest-session query includes the newest session."""
+    store = RuntimeStore(tmp_path / "runtime.sqlite3")
+    runtime = SessionRuntime(control_plane=RuntimeControlPlane(store))
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = iter(
+        (base + timedelta(seconds=index)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for index in range(105)
+    )
+    monkeypatch.setattr(session_module, "utc_now", lambda: next(timestamps))
+
+    for index in range(105):
+        runtime.create_session(
+            session_id=f"session_{index:03d}",
+            core_id="assistant",
+            core_revision="0001",
+        )
+
+    latest_session_ids = [
+        record.session_id
+        for record in runtime.list_sessions(core_id="assistant", limit=20)
+    ]
+
+    assert len(latest_session_ids) == 20
+    assert "session_104" in latest_session_ids
+
+
 def test_create_app_recovers_stale_delivery_work_once(tmp_path):
     home = tmp_path / "home"
     store = RuntimeStore.default(home)
@@ -227,18 +255,20 @@ async def test_runner_turn_projects_to_runtime_store(tmp_path):
         user_input=AgentInput(content="", metadata={}),
         metadata={},
     )
-    status = await app.runner.execute_tool(
+    status = await app.runner.execute_call(
         ToolCall(name="task_status", arguments={"task_id": result.turn_id}),
         core=core,
         turn=status_turn,
         capability=CapabilityFacade(core),
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
-    control = await app.runner.execute_tool(
+    control = await app.runner.execute_call(
         ToolCall(name="task_control", arguments={"task_id": result.turn_id}),
         core=core,
         turn=status_turn,
         capability=CapabilityFacade(core),
+        principal_scope=app.runner.principal_scope,
         emit_event=app.runner.event_log.emit,
     )
     assert status.is_error is True
@@ -263,6 +293,39 @@ async def test_runner_marks_turn_failed_when_provider_raises(tmp_path):
     assert failed_turn["status"] == "failed"
     with pytest.raises(KeyError, match="task not found"):
         app.control_plane.read(failed_turn["turn_id"])
+
+
+@pytest.mark.asyncio
+async def test_runner_redacts_known_provider_secret_from_persisted_failure(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    secret = "SYNTHETIC_PERSISTED_PROVIDER_SECRET"
+
+    class SecretRaisingProvider:
+        api_key = secret
+
+        async def complete(self, _request):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    app.runner.provider = SecretRaisingProvider()
+
+    with pytest.raises(RuntimeError, match=secret):
+        await app.runner.run_turn("hello")
+
+    turns = app.runtime_store.query(
+        RuntimeQuery(table="turns", order_by="created_at", limit=10)
+    ).rows
+    failed_turn = turns[-1]
+
+    assert failed_turn["status"] == "failed"
+    assert secret not in repr(failed_turn)
+    failed_event = next(
+        event
+        for event in reversed(app.runner.event_log.read_all())
+        if event["type"] == "turn.failed"
+    )
+    assert secret not in repr(failed_event)
+    assert "<redacted:API_KEY>" in failed_event["error"]
+    await app.close()
 
 
 @pytest.mark.asyncio

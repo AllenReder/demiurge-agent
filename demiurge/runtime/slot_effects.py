@@ -19,23 +19,21 @@ class SlotEffectRuntime:
         self,
         *,
         home: Path,
-        session_id: Callable[[], str],
         workspace: str | None,
         module_delivery: ModuleDeliveryRuntime,
         dispatch: InteractionDispatchRuntime,
         on_history_changed: Callable[[], None] | None = None,
     ) -> None:
         self.home = home
-        self._session_id = session_id
         self.workspace = workspace
         self.module_delivery = module_delivery
         self.dispatch = dispatch
         self.on_history_changed = on_history_changed
 
-    def result_client(self, *, writable: bool) -> ModuleResultClient:
+    def result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
         return ModuleResultClient(
             home=self.home,
-            session_id=self._session_id(),
+            session_id=session_id,
             workspace=self.workspace,
             writable=writable,
         )
@@ -58,7 +56,7 @@ class SlotEffectRuntime:
             allow_write_history = not background
         return ModuleIOClient(
             home=self.home,
-            session_id=self._session_id(),
+            session_id=turn.session_id,
             workspace=self.workspace,
             default_history_policy=slot.history_policy,
             default_write_history=default_write_history,
@@ -162,7 +160,7 @@ class SlotEffectRuntime:
         interaction_metadata: dict[str, Any],
     ) -> DeliveryRouteContext:
         return DeliveryRouteContext(
-            session_id=self._session_id(),
+            session_id=turn.session_id,
             turn_id=turn.turn_id,
             channel=interaction_metadata.get("channel"),
             conversation_key=interaction_metadata.get("conversation_key"),

@@ -158,6 +158,8 @@ def test_non_text_delivery_requires_history_text_when_history_is_writable(tmp_pa
 
 def test_artifact_delivery_stores_artifact_and_records_tui_text_fallback_degradation(tmp_path):
     host = _Host(tmp_path)
+    host.session_runtime.ensure_session("session_2", core_id="assistant", core_revision="rev_1", channel="tui")
+    host.session_id = "session_2"
     runtime = ModuleDeliveryRuntime(host)
 
     delivery = runtime.apply_request(
@@ -191,11 +193,14 @@ def test_artifact_delivery_stores_artifact_and_records_tui_text_fallback_degrada
     assert len(artifact_events) == 1
     assert artifact_events[0]["payload"]["kind"] == "audio"
     assert artifact_events[0]["payload"]["owner_turn_id"] == "turn_1"
+    assert artifact_events[0]["payload"]["metadata"]["session_id"] == "session_1"
     assert artifact_rows[0]["owner_turn_id"] == "turn_1"
     assert artifact_rows[0]["kind"] == "audio"
     assert delivery is not None
     assert delivery.blocks[0]["type"] == "audio"
-    assert Path(delivery.blocks[0]["artifact"]["resolved_path"]).name == "voice.txt"
+    resolved_path = Path(delivery.blocks[0]["artifact"]["resolved_path"])
+    assert resolved_path.name == "voice.txt"
+    assert "session_1" in resolved_path.parts
     assert delivery.metadata["artifacts"][0]["summary"] == "sample voice"
     degraded = [event for event in host.events if event[0] == "delivery.degraded"]
     assert [event[1]["reason"] for event in degraded] == ["channel_text_fallback"]

@@ -46,6 +46,13 @@ Sessions can be resumed by id. Manual compaction can summarize long sessions
 when the runtime supports it for the current path. The durable session store,
 not the Agent Core, owns history persistence.
 
+The current alpha runtime does not automatically budget against a model context
+window, reserve output tokens, compact before overflow, or serialize concurrent
+compaction. The frozen target `ContextManager.prepare()/observe()` owns those
+rules, while `PrincipalScope` and `TurnExecutionContext` keep history and resume
+operations bound to the authenticated session owner. See
+[Host Runtime Contracts](../developer-guide/runtime-contracts.md).
+
 ## Boundary
 
 Agent Cores may shape inputs and outputs. They do not own session storage,

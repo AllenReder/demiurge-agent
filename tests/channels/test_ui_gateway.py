@@ -1,12 +1,18 @@
 import asyncio
+import json
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from demiurge.app import create_app
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.interactions import InteractionDelivery, InteractionItem, InteractionOutbound, ToolInteractionRecord, UserPromptRequest
-from demiurge.security.approval import ApprovalRequest
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.security.approval import ApprovalRequest, ApprovalScope
+from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge.sdk import ToolResult
 from demiurge.slash import specs_for_surface
 from demiurge.tools.records import ToolExecutionRecord
@@ -35,6 +41,379 @@ class EventSink:
             for tool in payload.get("tool_results", []):
                 values.append(str(tool))
         return "\n".join(values)
+
+
+@pytest.mark.asyncio
+async def test_tui_01_initialize_rejects_protocol_mismatch_before_gateway_start():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    with pytest.raises(ValueError, match="TUI protocol mismatch"):
+        await _dispatch(
+            gateway,
+            "operator.initialize",
+            {
+                "protocol_version": TUI_PROTOCOL_VERSION + 1,
+                "build_stamp": TUI_BUILD_STAMP,
+            },
+        )
+
+    assert gateway.initialize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_01_initialize_rejects_build_mismatch_before_gateway_start():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    with pytest.raises(ValueError, match="TUI build mismatch"):
+        await _dispatch(
+            gateway,
+            "operator.initialize",
+            {
+                "protocol_version": TUI_PROTOCOL_VERSION,
+                "build_stamp": "stale-interaction-bundle",
+            },
+        )
+
+    assert gateway.initialize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_01_initialize_returns_host_protocol_identity():
+    from demiurge.ui_gateway.entry import _dispatch
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeGateway:
+        def __init__(self):
+            self.initialize_calls = 0
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    gateway = FakeGateway()
+
+    result = await _dispatch(
+        gateway,
+        "operator.initialize",
+        {
+            "protocol_version": TUI_PROTOCOL_VERSION,
+            "build_stamp": TUI_BUILD_STAMP,
+        },
+    )
+
+    assert gateway.initialize_calls == 1
+    assert result == {
+        "status": "idle",
+        "protocol_version": TUI_PROTOCOL_VERSION,
+        "build_stamp": TUI_BUILD_STAMP,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tui_01_non_initialize_first_frame_requires_identity_handshake():
+    from demiurge.ui_gateway.entry import TuiIdentityMismatch, _dispatch
+
+    class FakeGateway:
+        pass
+
+    with pytest.raises(TuiIdentityMismatch, match="identity handshake required"):
+        await _dispatch(FakeGateway(), "interaction.initialize", {})
+
+
+@pytest.mark.asyncio
+async def test_tui_01_gateway_waits_for_identity_before_initialize(monkeypatch):
+    from demiurge.ui_gateway import entry
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeGateway:
+        instance = None
+
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.initialize_calls = 0
+            self.should_exit = False
+            FakeGateway.instance = self
+
+        async def initialize(self):
+            self.initialize_calls += 1
+            return {"status": "idle"}
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.errors = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            return None
+
+        async def write_error(self, message_id, message, *, code="error"):
+            self.errors.append((message_id, code, message))
+
+        async def write_result(self, message_id, result=None):
+            raise AssertionError("mismatched initialize must not return a result")
+
+        async def iter_requests(self):
+            yield {
+                "id": 1,
+                "method": "operator.initialize",
+                "params": {
+                    "protocol_version": TUI_PROTOCOL_VERSION + 1,
+                    "build_stamp": TUI_BUILD_STAMP,
+                },
+            }
+
+    app = FakeApp()
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", FakeGateway)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert FakeGateway.instance.initialize_calls == 0
+    assert FakeEndpoint.instance.errors == [
+        (1, "protocol_mismatch", "TUI protocol mismatch: expected 1, got 2")
+    ]
+    assert exit_code == 2
+    assert app.closed is True
+
+
+@pytest.mark.asyncio
+async def test_ui_01_gateway_initialize_failure_is_fatal_startup_error(monkeypatch):
+    from demiurge.ui_gateway import entry
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeGateway:
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.should_exit = False
+
+        async def initialize(self):
+            raise RuntimeError("initialize failed")
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.events = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            self.events.append((event, payload))
+
+        async def write_error(self, message_id, message, *, code="error"):
+            raise AssertionError("fatal initialize failure must be an operator event")
+
+        async def write_result(self, message_id, result=None):
+            raise AssertionError("fatal initialize failure must not return a result")
+
+        async def iter_requests(self):
+            yield {
+                "id": 1,
+                "method": "operator.initialize",
+                "params": {
+                    "protocol_version": TUI_PROTOCOL_VERSION,
+                    "build_stamp": TUI_BUILD_STAMP,
+                },
+            }
+
+    app = FakeApp()
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", FakeGateway)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert exit_code == 1
+    assert FakeEndpoint.instance.events == [
+        (
+            "operator.error",
+            {
+                "message": "initialize failed",
+                "method": "operator.initialize",
+                "source": "gateway_startup",
+            },
+        )
+    ]
+    assert app.closed is True
+
+
+@pytest.mark.asyncio
+async def test_ui_01_gateway_constructor_failure_closes_created_app(monkeypatch):
+    from demiurge.ui_gateway import entry
+
+    class FakeApp:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeEndpoint:
+        instance = None
+
+        def __init__(self):
+            self.events = []
+            FakeEndpoint.instance = self
+
+        async def write_event(self, event, payload):
+            self.events.append((event, payload))
+
+    app = FakeApp()
+
+    def fail_gateway_construction(*args, **kwargs):
+        raise RuntimeError("gateway construction failed")
+
+    monkeypatch.setattr(entry, "create_app", lambda **kwargs: app)
+    monkeypatch.setattr(entry, "OperatorGatewayRuntime", fail_gateway_construction)
+    monkeypatch.setattr(entry, "NdjsonRpcEndpoint", FakeEndpoint)
+
+    exit_code = await entry.async_main(["--config-json", "{}"])
+
+    assert exit_code == 1
+    assert FakeEndpoint.instance.events == [
+        (
+            "operator.error",
+            {
+                "message": "gateway construction failed",
+                "source": "gateway_startup",
+            },
+        )
+    ]
+    assert app.closed is True
+
+
+def test_tui_01_protocol_mismatch_exits_nonzero_with_structured_error(tmp_path):
+    request = {
+        "id": 1,
+        "method": "operator.initialize",
+        "params": {
+            "protocol_version": 999,
+            "build_stamp": "stale-interaction-bundle",
+        },
+    }
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "id": 1,
+            "error": {
+                "code": "protocol_mismatch",
+                "message": "TUI protocol mismatch: expected 1, got 999",
+            },
+        }
+    ]
+
+
+def test_tui_01_long_command_first_frame_cannot_bypass_identity_gate(tmp_path):
+    request = {
+        "id": 1,
+        "method": "operator.command",
+        "params": {"text": "/doctor"},
+    }
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "id": 1,
+            "error": {
+                "code": "protocol_mismatch",
+                "message": "TUI identity handshake required before method: operator.command",
+            },
+        }
+    ]
+
+
+def test_tui_01_python_and_typescript_protocol_identity_match():
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "ui-tui"
+        / "src"
+        / "gateway"
+        / "protocol.ts"
+    ).read_text(encoding="utf-8")
+
+    assert f"TUI_PROTOCOL_VERSION = {TUI_PROTOCOL_VERSION}" in source
+    assert f'TUI_BUILD_STAMP = "{TUI_BUILD_STAMP}"' in source
 
 
 class BlockingProvider:
@@ -131,6 +510,11 @@ async def _complete_background_task(app, *, summary: str = "background complete"
         ctx.append_log("background tail")
         return summary
 
+    app.task_worker.bind_turn_scope(
+        session_id=app.runner.session_id,
+        turn_id="turn_origin",
+        scope=PrincipalScopeResolver(app.runtime_store).admit(app.runner.principal_scope),
+    )
     record = app.task_worker.start_task(
         kind="terminal.exec",
         owner_session_id=app.runner.session_id,
@@ -140,6 +524,153 @@ async def _complete_background_task(app, *, summary: str = "background complete"
     )
     await app.task_worker.wait(record.task_id, timeout_seconds=1)
     return record
+
+
+def test_ui_01_gateway_startup_error_emits_operator_error_and_exits_nonzero(tmp_path):
+    """UI-01: startup errors are observable frames and failing process exits."""
+    config = {
+        "home": str(tmp_path / "home"),
+        "agents_root": str(tmp_path / "missing-agents"),
+        "provider": "fake",
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    startup_error = next(frame for frame in frames if frame.get("event") == "operator.error")
+    assert startup_error["payload"]["source"] == "gateway_startup"
+    assert startup_error["payload"]["message"]
+    assert completed.returncode == 1
+
+
+def test_ui_01_gateway_configuration_error_is_structured_and_exits_two():
+    """UI-01: malformed launcher configuration is a structured usage failure."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            "[",
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    assert completed.returncode == 2
+    assert frames == [
+        {
+            "event": "operator.error",
+            "payload": {
+                "code": "config_error",
+                "message": "gateway configuration could not be loaded",
+                "source": "gateway_config",
+            },
+        }
+    ]
+    assert completed.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        pytest.param("operator.shutdown", {}, id="rpc"),
+        pytest.param("operator.command", {"text": "/exit"}, id="slash-exit"),
+        pytest.param("operator.command", {"text": "/quit"}, id="slash-quit"),
+    ],
+)
+def test_ui_01_gateway_explicit_shutdown_exits_zero(tmp_path, method, params):
+    """UI-01: verified explicit shutdown paths are normal zero-exit lifecycles."""
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+    requests = [
+        {
+            "id": 1,
+            "method": "operator.initialize",
+            "params": {
+                "protocol_version": TUI_PROTOCOL_VERSION,
+                "build_stamp": TUI_BUILD_STAMP,
+            },
+        },
+        {"id": 2, "method": method, "params": params},
+    ]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    frames = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    assert completed.returncode == 0
+    assert any(frame.get("event") == "operator.shutdown" for frame in frames)
+
+
+def test_ui_01_gateway_eof_without_shutdown_exits_one(tmp_path):
+    """UI-01: losing the client without shutdown is not a normal lifecycle."""
+    from demiurge.ui_gateway.protocol import TUI_BUILD_STAMP, TUI_PROTOCOL_VERSION
+
+    config = {
+        "home": str(tmp_path / "home"),
+        "provider": "fake",
+        "workspace": str(tmp_path / "workspace"),
+    }
+    initialize = {
+        "id": 1,
+        "method": "operator.initialize",
+        "params": {
+            "protocol_version": TUI_PROTOCOL_VERSION,
+            "build_stamp": TUI_BUILD_STAMP,
+        },
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "demiurge.ui_gateway.entry",
+            "--config-json",
+            json.dumps(config),
+        ],
+        input=json.dumps(initialize) + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
 
 
 def test_parse_approval_response():
@@ -170,6 +701,60 @@ def test_operator_gateway_long_command_isolation_predicate():
 
 
 @pytest.mark.asyncio
+async def test_tui_evolve_promote_forwards_manual_review_token(tmp_path):
+    class FakeEvolutionRuntime:
+        def __init__(self):
+            self.calls = []
+
+        async def promote(
+            self,
+            run_id,
+            *,
+            target_core_id,
+            reason,
+            manual_review_token=None,
+        ):
+            self.calls.append(
+                {
+                    "run_id": run_id,
+                    "target_core_id": target_core_id,
+                    "reason": reason,
+                    "manual_review_token": manual_review_token,
+                }
+            )
+            return type(
+                "PromoteResult",
+                (),
+                {
+                    "summary": "promoted",
+                    "report_path": str(tmp_path / "report.md"),
+                },
+            )()
+
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionRuntime()
+    app.evolution_runtime = fake
+    bridge = OperatorGatewayRuntime(app, emit=sink)
+
+    result = await bridge.command(
+        "/evolve promote run_probe mcp-review:probe"
+    )
+
+    assert result["handled"] is True
+    assert fake.calls == [
+        {
+            "run_id": "run_probe",
+            "target_core_id": "assistant",
+            "reason": "tui promote",
+            "manual_review_token": "mcp-review:probe",
+        }
+    ]
+    assert "promoted" in sink.texts()
+    await app.close()
+
+
+@pytest.mark.asyncio
 async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
@@ -184,6 +769,30 @@ async def test_tui_bridge_submit_uses_interaction_runtime(tmp_path):
     received = next(event for event in app.runner.event_log.tail(30) if event["type"] == "message.received")
     assert received["channel"] == "tui"
     assert received["source"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_tui_bridge_turn_exception_redacts_known_provider_secret(tmp_path):
+    secret = "SYNTHETIC_TUI_PROVIDER_SECRET"
+    sink = EventSink()
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.runner.provider = SimpleNamespace(api_key=secret)
+    bridge = OperatorGatewayRuntime(app, emit=sink)
+
+    class FailingRuntime:
+        async def handle(self, _inbound, *, route_binding):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    bridge.runtime = FailingRuntime()
+    inbound = bridge._user_inbound("hello")
+
+    await bridge._run_inbound(bridge._ingress_state, inbound)
+
+    error = sink.payloads("operator.error")[-1]
+    assert secret not in repr(error)
+    assert "<redacted:API_KEY>" in error["message"]
+    assert secret not in bridge._last_error
+    await app.close()
 
 
 @pytest.mark.asyncio
@@ -203,6 +812,8 @@ async def test_tui_bridge_ready_includes_tui_slash_command_catalog(tmp_path):
     assert "busy" in names
     assert "stop" not in names
     assert "queue" not in names
+    evolve = next(command for command in commands if command["name"] == "evolve")
+    assert "promote <run_id> [manual_review_token]" in evolve["usage"]
     assert {"name", "description", "group", "usage"} <= set(commands[0])
     assert ready["user_message_align"] == "left"
     assert ready["demiurge_theme_color"] == "#ff9afc"
@@ -406,10 +1017,17 @@ async def test_tui_bridge_approval_request_round_trip(tmp_path):
     sink = EventSink()
     app = create_app(home=tmp_path / "home", provider_name="fake")
     bridge = OperatorGatewayRuntime(app, emit=sink)
+    core = await app.runner.load_active_core()
     request = ApprovalRequest(
+        scope=ApprovalScope.for_host_operation(
+            principal_scope=app.runner.principal_scope,
+            turn_id="turn_1",
+            core_id=core.core_id,
+            core_revision=core.revision,
+            capability_snapshot=CapabilitySnapshot.capture(core),
+        ),
         tool_name="terminal",
         tool_call_id="call_1",
-        turn_id="turn_1",
         capability="terminal.exec",
         action="exec",
         risk="critical",
@@ -603,6 +1221,11 @@ async def test_tui_bridge_yield_until_consumes_background_completion_turn(tmp_pa
         ctx.append_log("done")
         return "background complete"
 
+    app.task_worker.bind_turn_scope(
+        session_id=app.runner.session_id,
+        turn_id="turn_origin",
+        scope=PrincipalScopeResolver(app.runtime_store).admit(app.runner.principal_scope),
+    )
     record = app.task_worker.start_task(
         kind="terminal.exec",
         owner_session_id=app.runner.session_id,

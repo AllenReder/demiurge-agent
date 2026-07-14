@@ -107,6 +107,7 @@ class ChannelCommandExecutor:
             state.route_binding,
             channel=self.channel_name,
             conversation_key=inbound.conversation_key,
+            principal_key=inbound.principal_key,
             source=inbound.source,
             reply_to=inbound.reply_to,
             replace_conversation_binding=True,
@@ -137,6 +138,7 @@ class ChannelCommandExecutor:
                 channel=inbound.channel,
                 text=text,
                 source=inbound.source,
+                principal_key=inbound.principal_key,
                 reply_to=inbound.reply_to,
                 conversation_key=inbound.conversation_key,
                 metadata=dict(inbound.metadata),
@@ -157,8 +159,12 @@ class ChannelCommandExecutor:
 
     async def _command_sessions(self, args: str, inbound: InteractionInbound, state: Any) -> None:
         limit = int(args.strip()) if args.strip().isdigit() else 10
+        principal_scope = await state.runtime.runner.resolve_command_principal_scope(
+            inbound
+        )
         view = build_session_list_view(
             state.runtime.session_runtime,
+            principal_scope=principal_scope,
             core_id=state.runtime.runner.core_id,
             active_session_id=state.runtime.runner.session_id,
             limit=limit,
@@ -167,8 +173,12 @@ class ChannelCommandExecutor:
 
     async def _command_resume(self, args: str, inbound: InteractionInbound, state: Any) -> None:
         raw = args.strip()
+        principal_scope = await state.runtime.runner.resolve_command_principal_scope(
+            inbound
+        )
         view = build_session_list_view(
             state.runtime.session_runtime,
+            principal_scope=principal_scope,
             core_id=state.runtime.runner.core_id,
             active_session_id=state.runtime.runner.session_id,
             limit=20,
@@ -181,12 +191,21 @@ class ChannelCommandExecutor:
             await self._send(inbound, resolution.message or "Invalid session selection.")
             return
         assert resolution.session_id is not None
+        try:
+            state.runtime.session_runtime.get_owned_session(
+                principal_scope,
+                resolution.session_id,
+            )
+        except (FileNotFoundError, PermissionError):
+            await self._send(inbound, "Session not found or not authorized.")
+            return
         result = resume_bound_session(
             state.runtime.runner,
             state.route_binding,
             resolution.session_id,
             channel=self.channel_name,
             conversation_key=inbound.conversation_key,
+            principal_key=inbound.principal_key,
             source=inbound.source,
             reply_to=inbound.reply_to,
             replace_conversation_binding=True,
@@ -199,8 +218,19 @@ class ChannelCommandExecutor:
     async def _command_tools(self, _: str, inbound: InteractionInbound, state: Any) -> None:
         runner = state.runtime.runner
         core = await runner.load_active_core()
+        turn = TurnContext(
+            session_id=runner.session_id,
+            turn_id=f"{self.channel_name}_tools",
+            core_id=core.core_id,
+            core_revision=getattr(core, "revision", "untracked"),
+            user_input=AgentInput(
+                content=inbound.text,
+                metadata=dict(inbound.metadata),
+            ),
+            metadata=dict(inbound.metadata),
+        )
         lines = ["# Tools"]
-        for entry in runner.tool_runtime.registry_for(core):
+        for entry in runner.tool_runtime.registry_for(core, turn=turn):
             lines.append(f"- `{entry.name}` - {entry.source} - {entry.approval_policy}")
         await self._send(inbound, "\n".join(lines))
 
@@ -221,7 +251,8 @@ class ChannelCommandExecutor:
             return
         runner = state.runtime.runner
         core = await runner.load_active_core()
-        result = await runner.tool_runtime.execute(
+        principal_scope = await runner.resolve_command_principal_scope(inbound)
+        result = await runner.execute_call(
             ToolCall(name="skill_view", arguments={"name": parts[0]}, id=f"{self.channel_name}_skill_view"),
             core=core,
             turn=TurnContext(
@@ -233,6 +264,7 @@ class ChannelCommandExecutor:
                 metadata=dict(inbound.metadata),
             ),
             capability=CapabilityFacade(core),
+            principal_scope=principal_scope,
             emit_event=runner.event_log.emit,
         )
         content = result.content
@@ -241,9 +273,12 @@ class ChannelCommandExecutor:
         await self._send(inbound, content, limit=True)
 
     async def _command_subagents(self, args: str, inbound: InteractionInbound, state: Any) -> None:
+        principal_scope = await state.runtime.runner.resolve_command_principal_scope(
+            inbound
+        )
         text = await subagents_command_text(
             state.runtime.runner.task_worker,
-            session_id=state.runtime.runner.session_id,
+            principal_scope=principal_scope,
             args=args,
         )
         await self._send(inbound, text, limit=True)
@@ -287,6 +322,7 @@ class ChannelCommandRuntime:
                     channel=inbound.channel,
                     text=command.args,
                     source=inbound.source,
+                    principal_key=inbound.principal_key,
                     reply_to=inbound.reply_to,
                     conversation_key=inbound.conversation_key,
                     metadata=dict(inbound.metadata),

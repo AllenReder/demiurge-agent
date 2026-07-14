@@ -243,6 +243,16 @@ Target-specific grants such as `state.session.write:draft_count` can satisfy a
 targeted operation when configured. Otherwise the generic scope capability is
 required.
 
+Each `set`, `merge`, or `append` call is serialized with other writes to the
+same state file inside one host process and commits the state snapshot together
+with its proposal-audit record. The host uses atomic files and recovers an
+interrupted commit on the next state read. POSIX state directories/files are
+restricted to `0700`/`0600`; Windows uses platform ACL semantics. This is not
+an inter-process transaction boundary: multiple host processes must not share
+one runtime home. Also, a separate `get()` followed by `set()` is not one
+atomic read-modify-write operation; the planned transactional `StateRuntime`
+will own that stronger contract.
+
 ## Tools Client
 
 Input and output slots can call visible tools:

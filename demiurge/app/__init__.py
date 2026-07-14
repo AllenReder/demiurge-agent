@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from weakref import WeakValueDictionary
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator, model_validator
 
 from demiurge.env_file import load_runtime_env
 from demiurge.security.approval import ApprovalRuntime
+from demiurge.security.url_policy import UrlPolicy
+from demiurge.security.private_files import require_private_runtime_permissions
 from demiurge.core import AgentFallbackConfig, ApprovalInfo, CoreLoader, ModelInfo, UiInfo
 from demiurge.evolution import EvolutionRuntime, EvolverRunResult, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateRunner
@@ -22,6 +25,11 @@ from demiurge.runtime.runner import SessionTurnStepRunner
 from demiurge.runtime.interactions import BridgeApprovalProvider, SessionInteractionRouter
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.session import SessionRuntime
+from demiurge.runtime.scope import (
+    PrincipalScopeResolver,
+    _activate_operator_authority,
+    _deactivate_operator_authority,
+)
 from demiurge.runtime.store import RuntimeStore
 from demiurge.providers import Provider, ProviderFactoryConfig, create_provider_from_config
 from demiurge.providers.profiles import (
@@ -32,7 +40,12 @@ from demiurge.providers.profiles import (
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone, validate_timezone_name
 from demiurge.storage import VersionStore
 from demiurge.tools.runtime import ToolRuntime
-from demiurge.util import default_home, ensure_dir
+from demiurge.util import (
+    atomic_write_private_text,
+    default_home,
+    ensure_dir,
+    utc_id,
+)
 from demiurge.security.workspace import WorkspaceScope
 
 
@@ -283,7 +296,14 @@ class ResolvedProviderConfig:
     runtime_profile: ProviderRuntimeProfile | None = None
 
 
-@dataclass(slots=True)
+_ACTIVE_APP_LIFECYCLES: WeakValueDictionary[int, Any] = WeakValueDictionary()
+
+
+def _is_active_app_lifecycle(host: Any) -> bool:
+    return _ACTIVE_APP_LIFECYCLES.get(id(host)) is host and not host._closed
+
+
+@dataclass(slots=True, weakref_slot=True)
 class DemiurgeApp:
     home: Path
     project_root: Path
@@ -326,6 +346,8 @@ class DemiurgeApp:
     runtime_recovery_summary: dict[str, int]
     host_config_path: Path
     fallback_config_path: Path
+    _operator_authority: object | None
+    _closed: bool
 
     @property
     def agents_root(self) -> Path:
@@ -341,7 +363,23 @@ class DemiurgeApp:
         return self.core_loader.load(self.version_store.active_core_path(self.runner.core_id))
 
     async def close(self) -> None:
-        await self.tool_runtime.close()
+        if self._closed:
+            return
+        try:
+            try:
+                await self.task_worker.shutdown()
+            finally:
+                await self.tool_runtime.close()
+        finally:
+            self.approval_runtime.close()
+            _deactivate_operator_authority(
+                self.runtime_store,
+                self,
+                self._operator_authority,
+            )
+            self._operator_authority = None
+            self._closed = True
+            _ACTIVE_APP_LIFECYCLES.pop(id(self), None)
 
     def status(self) -> dict[str, object]:
         pointer = self.version_store.active_pointer(self.runner.core_id)
@@ -607,7 +645,8 @@ def create_app(
     resume_required: bool = False,
 ) -> DemiurgeApp:
     project_root = project_root or Path.cwd().resolve()
-    home = ensure_dir((home or default_home()).resolve())
+    home = (home or default_home()).resolve()
+    require_private_runtime_permissions(home)
     load_runtime_env(home)
     host_config_path = home / "config.yaml"
     host_config, host_sources = load_host_config(host_config_path)
@@ -620,7 +659,10 @@ def create_app(
     source_agents = source_agents_root(agents_root)
     interaction_router = SessionInteractionRouter()
     approval_runtime = ApprovalRuntime(BridgeApprovalProvider(interaction_router))
-    version_store = VersionStore(home)
+    version_store = VersionStore(
+        home,
+        on_core_changed=approval_runtime.invalidate_core,
+    )
     ensure_runtime_defaults(version_store, source_agents, requested_core_id=resolved_core_id)
     runtime_store = RuntimeStore.default(home)
     control_plane = RuntimeControlPlane(runtime_store)
@@ -654,7 +696,12 @@ def create_app(
         fake_script=fake_script,
     )
     gate_runner = GateRunner(project_root=project_root)
-    mcp_runtime = McpRuntime(home=home, workspace=workspace_scope.root)
+    url_policy = UrlPolicy()
+    mcp_runtime = McpRuntime(
+        home=home,
+        workspace=workspace_scope.root,
+        url_policy=url_policy,
+    )
     task_worker = RuntimeTaskWorker(control_plane=control_plane, host_work=host_work)
     tool_runtime = ToolRuntime(
         version_store,
@@ -665,6 +712,7 @@ def create_app(
         runtime_timezone=runtime_timezone,
         task_worker=task_worker,
         session_runtime=session_runtime,
+        url_policy=url_policy,
     )
     evolution_runtime = EvolutionRuntime(
         core_repository=version_store.core_repository,
@@ -681,8 +729,10 @@ def create_app(
             session_runtime=session_runtime,
             task_worker=task_worker,
         ),
+        on_core_changed=approval_runtime.invalidate_core,
     )
     tool_runtime.evolution_runtime = evolution_runtime
+    runner_session_id = session_id or utc_id("session_")
     runner = SessionTurnStepRunner(
         home=home,
         version_store=version_store,
@@ -690,7 +740,7 @@ def create_app(
         provider=provider,
         tool_runtime=tool_runtime,
         core_id=resolved_core_id,
-        session_id=session_id,
+        session_id=runner_session_id,
         model_override=model,
         model_resolver=lambda core_model: resolve_model_name(core_model, fallback.model, override=model)[0],
         provider_name=resolved_provider_name,
@@ -703,9 +753,11 @@ def create_app(
         prepare_live_core=lambda: version_store.core_repository.prepare_live_for_edit_async(
             validate=lambda agents_root, changed_paths: gate_runner.run(agents_root, changed_paths=changed_paths)
         ),
+        principal_scope=None,
+        initialize_session=False,
     )
     runtime_recovery_summary = runner.delivery_runtime.recover()
-    return DemiurgeApp(
+    app = DemiurgeApp(
         home=home,
         project_root=project_root,
         version_store=version_store,
@@ -747,7 +799,27 @@ def create_app(
         runtime_recovery_summary=runtime_recovery_summary,
         host_config_path=host_config_path,
         fallback_config_path=version_store.fallback_config_path,
+        _operator_authority=None,
+        _closed=False,
     )
+    _ACTIVE_APP_LIFECYCLES[id(app)] = app
+    operator_authority = _activate_operator_authority(runtime_store, app)
+    app._operator_authority = operator_authority
+    try:
+        runner.principal_scope = PrincipalScopeResolver(runtime_store).local_operator(
+            active_session_id=runner_session_id,
+            reason="bootstrap local operator runner",
+            allow_unowned_active=True,
+        )
+        runner._ensure_current_session()
+    except Exception:
+        _deactivate_operator_authority(runtime_store, app, operator_authority)
+        app._operator_authority = None
+        app._closed = True
+        _ACTIVE_APP_LIFECYCLES.pop(id(app), None)
+        raise
+    require_private_runtime_permissions(home)
+    return app
 
 
 def init_runtime(
@@ -757,7 +829,8 @@ def init_runtime(
     agents_root: Path | None = None,
     reason: str = "init",
 ) -> dict[str, object]:
-    resolved_home = ensure_dir((home or default_home()).resolve())
+    resolved_home = (home or default_home()).resolve()
+    require_private_runtime_permissions(resolved_home)
     load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     host_config_path = resolved_home / "config.yaml"
@@ -768,6 +841,7 @@ def init_runtime(
     version_store.ensure_initialized("evolver", source_agents / "evolver")
     core_pointer = version_store.active_pointer(core_id)
     evolver_pointer = version_store.active_pointer("evolver")
+    require_private_runtime_permissions(resolved_home)
     return {
         "home": str(resolved_home),
         "host_config": str(host_config_path),
@@ -791,7 +865,8 @@ def refresh_runtime(
     agents_root: Path | None = None,
     reason: str = "refresh",
 ) -> dict[str, object]:
-    resolved_home = ensure_dir((home or default_home()).resolve())
+    resolved_home = (home or default_home()).resolve()
+    require_private_runtime_permissions(resolved_home)
     load_runtime_env(resolved_home)
     source_agents = source_agents_root(agents_root)
     version_store = VersionStore(resolved_home)
@@ -829,6 +904,7 @@ def refresh_runtime(
                 "previous_revision": result.previous_revision,
             }
     refreshed["items"] = items
+    require_private_runtime_permissions(resolved_home)
     return refreshed
 
 
@@ -918,8 +994,10 @@ def default_host_config_dict() -> dict[str, object]:
 
 
 def write_host_config(path: Path, config: HostConfig) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(host_config_to_dict(config), sort_keys=False), encoding="utf-8")
+    atomic_write_private_text(
+        path,
+        yaml.safe_dump(host_config_to_dict(config), sort_keys=False),
+    )
 
 
 def host_config_to_dict(config: HostConfig) -> dict[str, object]:
@@ -930,8 +1008,10 @@ def write_default_host_config_if_missing(path: Path) -> bool:
     if path.exists():
         load_host_config(path)
         return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(default_host_config_dict(), sort_keys=False), encoding="utf-8")
+    atomic_write_private_text(
+        path,
+        yaml.safe_dump(default_host_config_dict(), sort_keys=False),
+    )
     return True
 
 

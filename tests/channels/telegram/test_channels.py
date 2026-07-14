@@ -3,14 +3,20 @@ import contextlib
 import io
 import json
 import shutil
+import tempfile
+import threading
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
-from demiurge.security.approval import ApprovalRequest
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeStore
+from demiurge.security.approval import ApprovalRequest, ApprovalScope
+from demiurge.security.capabilities import CapabilitySnapshot
 from demiurge import cli
 from demiurge.app import create_app, source_agents_root
 from demiurge.channels.gateway import build_enabled_gateway_channels
@@ -32,6 +38,7 @@ from demiurge.runtime.interactions import (
     InteractionItem,
     InteractionOutbound,
     InteractionRuntime,
+    SessionRouteBinding,
     SessionInteractionRouter,
     ToolInteractionRecord,
     UserPromptRequest,
@@ -40,6 +47,31 @@ from demiurge.providers import LLMResponse, ToolCall
 from demiurge.sdk import ToolResult
 from demiurge.tools.records import ToolExecutionRecord
 from demiurge.util import write_json
+
+
+_APPROVAL_SCOPE_HOME = tempfile.TemporaryDirectory()
+
+
+def _approval_scope(session_id="session_1", turn_id="turn_1"):
+    principal_scope = PrincipalScopeResolver(
+        RuntimeStore(Path(_APPROVAL_SCOPE_HOME.name) / "runtime.sqlite3")
+    ).issue_conversation(
+        channel="telegram",
+        principal_key="chat_1",
+        conversation_key="telegram:dm:chat_1",
+        session_id=session_id,
+    )
+    return ApprovalScope.for_host_operation(
+        principal_scope=principal_scope,
+        turn_id=turn_id,
+        core_id="assistant",
+        core_revision="revision_1",
+        capability_snapshot=CapabilitySnapshot(
+            defaults=frozenset({"terminal.exec"}),
+            manifest_slots=(),
+            component_slots=(),
+        ),
+    )
 
 
 def _outbound(
@@ -146,10 +178,9 @@ class ApprovalRunner(FakeRunner):
         if route_binding is not None:
             route_binding.bind(self.interaction_router, "session_1")
         request = ApprovalRequest(
+            scope=_approval_scope(),
             tool_name="terminal",
             tool_call_id="call_1",
-            turn_id="turn_1",
-            session_id="session_1",
             capability="terminal.exec",
             action="exec",
             risk="critical",
@@ -666,10 +697,9 @@ async def test_interaction_runtime_calls_runner_with_metadata():
 async def test_bridge_approval_provider_fails_closed_without_bridge():
     router = SessionInteractionRouter()
     request = ApprovalRequest(
+        scope=_approval_scope(),
         tool_name="terminal",
         tool_call_id="call_1",
-        turn_id="turn_1",
-        session_id="session_1",
         capability="terminal.exec",
         action="exec",
         risk="high",
@@ -708,6 +738,43 @@ def test_telegram_normalizes_private_group_command_mention_and_reply():
     assert reply.text == "continue"
     assert private.metadata["telegram_user_id"] == 42
     assert private.metadata["telegram_chat_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_turn_exception_redacts_known_provider_secret(caplog):
+    secret = "SYNTHETIC_TELEGRAM_PROVIDER_SECRET"
+    api = FakeApi()
+
+    class FailingRuntime:
+        runner = SimpleNamespace(
+            provider=SimpleNamespace(api_key=secret),
+        )
+
+        async def handle(self, _inbound, *, route_binding):
+            raise RuntimeError(f"upstream rejected credential {secret}")
+
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(FakeRunner()),
+        api=api,
+        bot_username="demiurge_bot",
+    )
+    state = SimpleNamespace(
+        runtime=FailingRuntime(),
+        route_binding=SessionRouteBinding(route=bridge),
+    )
+    inbound = InteractionInbound(
+        channel="telegram",
+        text="hello",
+        source="123",
+        conversation_key="telegram:dm:123",
+        reply_to="77",
+    )
+
+    await bridge._run_inbound(state, inbound)
+
+    assert secret not in caplog.text
+    assert secret not in api.sent[-1]["text"]
+    assert "redacted:API" in api.sent[-1]["text"]
 
 
 def _media_bridge(tmp_path):
@@ -2067,6 +2134,75 @@ async def test_telegram_private_approval_callback_returns_decision(action, expec
     assert edited["reply_markup"] is None
     assert ("Denied" if expected == "deny" else "Approved") in edited["text"]
     assert api.reply_markup_edits[-1] == {"chat_id": "123", "message_id": 1000, "reply_markup": None}
+
+
+@pytest.mark.asyncio
+async def test_telegram_approval_callback_waits_for_sent_message_registration():
+    class DelayedSendApi(FakeApi):
+        def __init__(self):
+            super().__init__()
+            self.release_send = threading.Event()
+
+        def send_message(self, **kwargs):
+            sent = super().send_message(**kwargs)
+            self.release_send.wait(timeout=5)
+            return sent
+
+    runner = ApprovalRunner()
+    api = DelayedSendApi()
+    bridge = TelegramInteractionBridge(
+        runtime=InteractionRuntime(runner),
+        api=api,
+        bot_username="demiurge_bot",
+        allowed_users=[42],
+    )
+
+    await bridge.handle_inbound(
+        InteractionInbound(
+            channel="telegram",
+            text="run",
+            source="123",
+            reply_to="456",
+            conversation_key="telegram:dm:123",
+            metadata={"telegram_chat_type": "private"},
+        )
+    )
+    await asyncio.wait_for(runner.request_started.wait(), timeout=1)
+    await _wait_until(lambda: bool(api.sent))
+    await _wait_until(lambda: bridge._pending_approvals.count > 0)
+    approval_id = bridge._pending_approvals.pending_ids()[0]
+    state = bridge._conversations["telegram:dm:123"]
+    callback_task = asyncio.create_task(
+        bridge.handle_update(
+            _callback(
+                approval_callback_data(approval_id, "allow"),
+                chat_id=123,
+                message_id=1000,
+                callback_id="cb_approval",
+            )
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        assert callback_task.done() is False
+
+        api.release_send.set()
+        await asyncio.wait_for(callback_task, timeout=1)
+        assert state.active_task is not None
+        await asyncio.wait_for(state.active_task, timeout=1)
+    finally:
+        api.release_send.set()
+        if not callback_task.done():
+            callback_task.cancel()
+            await asyncio.gather(callback_task, return_exceptions=True)
+
+    assert api.edits[-1]["message_id"] == 1000
+    assert "Approved" in api.edits[-1]["text"]
+    assert api.reply_markup_edits[-1] == {
+        "chat_id": "123",
+        "message_id": 1000,
+        "reply_markup": None,
+    }
 
 
 @pytest.mark.asyncio

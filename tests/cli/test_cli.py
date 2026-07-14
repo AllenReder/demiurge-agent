@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 from io import StringIO
 
 import pytest
@@ -7,10 +10,203 @@ from rich.console import Console
 from demiurge import cli
 from demiurge import setup_cli
 from demiurge.app import init_runtime, source_agents_root
+from demiurge.evolution import EvolveResult
 from demiurge.provider_presets import get_provider_preset
 from demiurge.providers import LLMResponse
 from demiurge.storage import VersionStore
 from demiurge.ui import tui_launcher
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "demiurge", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def _filesystem_snapshot(root):
+    if not root.exists():
+        return {}
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", str(path.readlink()))
+        elif path.is_dir():
+            snapshot[relative] = ("dir",)
+        else:
+            snapshot[relative] = ("file", path.read_bytes())
+    return snapshot
+
+
+def _assert_filesystem_snapshot(root, before):
+    after = _filesystem_snapshot(root)
+    changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+    assert not changed, f"filesystem changed ({len(changed)} paths): {changed[:20]}"
+
+
+def test_cli_01_doctor_json_error_exits_nonzero(tmp_path):
+    """CLI-01: doctor JSON ok:false must be a failing process result."""
+    completed = _run_cli(
+        "--home",
+        str(tmp_path / "home"),
+        "--agents-root",
+        str(tmp_path / "missing-agents"),
+        "doctor",
+        "--json",
+    )
+
+    assert json.loads(completed.stdout)["ok"] is False
+    assert completed.returncode == 1
+
+
+def test_cli_01_init_check_json_error_exits_nonzero(tmp_path):
+    """CLI-01: init --check JSON ok:false must be a failing process result."""
+    completed = _run_cli(
+        "--agents-root",
+        str(tmp_path / "missing-agents"),
+        "init",
+        "--home",
+        str(tmp_path / "home"),
+        "--check",
+        "--json",
+    )
+
+    assert json.loads(completed.stdout)["ok"] is False
+    assert completed.returncode == 1
+
+
+def test_cli_01_healthy_doctor_json_exits_zero(tmp_path):
+    """CLI-01: a healthy doctor report remains a successful process result."""
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+
+    completed = _run_cli(
+        "--home",
+        str(home),
+        "--agents-root",
+        str(source_agents_root()),
+        "doctor",
+        "--json",
+    )
+
+    assert json.loads(completed.stdout)["ok"] is True
+    assert completed.returncode == 0
+
+
+def test_cli_01_bad_arguments_exit_two():
+    """CLI-01: argparse failures remain usage errors rather than health failures."""
+    completed = _run_cli("doctor", "--not-a-real-option")
+
+    assert completed.returncode == 2
+    assert "unrecognized arguments" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(lambda home: ["--home", str(home), "doctor", "--json"], id="doctor"),
+        pytest.param(lambda home: ["init", "--home", str(home), "--check", "--json"], id="init-check"),
+    ],
+)
+def test_cli_01_check_configuration_error_exits_two_with_json(tmp_path, args):
+    """CLI-01: checks that cannot load configuration fail as structured usage errors."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("providers: [\n", encoding="utf-8")
+
+    completed = _run_cli(*args(home))
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "doctor.execution_error"
+    assert completed.stderr == ""
+
+
+def test_cli_02_init_check_preserves_runtime_filesystem_snapshot(tmp_path):
+    """CLI-02: init --check is read-only, including a custom .core-ignore."""
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+    core_ignore = home / ".core-ignore"
+    core_ignore.write_text("sentinel\n", encoding="utf-8")
+    before = _filesystem_snapshot(home)
+
+    completed = _run_cli(
+        "--agents-root",
+        str(source_agents_root()),
+        "init",
+        "--home",
+        str(home),
+        "--check",
+        "--json",
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["ok"] is True
+    _assert_filesystem_snapshot(home, before)
+
+
+def test_cli_02_setup_status_preserves_missing_home_filesystem_snapshot(tmp_path):
+    """CLI-02: setup status probes a missing home without initializing it."""
+    home = tmp_path / "missing-home"
+    before = _filesystem_snapshot(tmp_path)
+
+    completed = _run_cli(
+        "--home",
+        str(home),
+        "setup",
+        "status",
+        "--json",
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["home"] == str(home)
+    _assert_filesystem_snapshot(tmp_path, before)
+
+
+def test_cli_02_doctor_preserves_missing_home_filesystem_snapshot(tmp_path):
+    """CLI-02: doctor probes a missing home without initializing it."""
+    home = tmp_path / "missing-home"
+    before = _filesystem_snapshot(tmp_path)
+
+    completed = _run_cli(
+        "--home",
+        str(home),
+        "--agents-root",
+        str(tmp_path / "missing-agents"),
+        "doctor",
+        "--json",
+    )
+
+    assert json.loads(completed.stdout)["ok"] is False
+    _assert_filesystem_snapshot(tmp_path, before)
+
+
+def test_cli_02_doctor_preserves_initialized_home_filesystem_snapshot(tmp_path):
+    """CLI-02: doctor does not rewrite an initialized runtime home."""
+    home = tmp_path / "home"
+    init_runtime(home=home, agents_root=source_agents_root())
+    core_ignore = home / ".core-ignore"
+    core_ignore.write_text("sentinel\n", encoding="utf-8")
+    before = _filesystem_snapshot(home)
+
+    completed = _run_cli(
+        "--home",
+        str(home),
+        "--agents-root",
+        str(source_agents_root()),
+        "--provider",
+        "fake",
+        "doctor",
+        "--json",
+    )
+
+    assert "ok" in json.loads(completed.stdout)
+    _assert_filesystem_snapshot(home, before)
 
 
 def test_default_cli_launches_ts_tui(monkeypatch, tmp_path):
@@ -184,6 +380,76 @@ def test_core_cli_status_check_versions_and_rollback(tmp_path, capsys):
     rollback_output = capsys.readouterr().out
     assert "rollback committed:" in rollback_output
     assert "CLI rollback setup." not in soul.read_text(encoding="utf-8")
+
+
+def test_core_cli_evolve_promote_forwards_manual_review_token(
+    tmp_path, monkeypatch, capsys
+):
+    class FakeEvolutionRuntime:
+        def __init__(self):
+            self.calls = []
+
+        async def promote(
+            self,
+            run_id,
+            *,
+            target_core_id,
+            reason,
+            manual_review_token=None,
+        ):
+            self.calls.append(
+                {
+                    "run_id": run_id,
+                    "target_core_id": target_core_id,
+                    "reason": reason,
+                    "manual_review_token": manual_review_token,
+                }
+            )
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(tmp_path / "agents"),
+                summary="promoted",
+                report_path=str(tmp_path / "report.md"),
+                promoted=True,
+            )
+
+    class FakeApp:
+        def __init__(self):
+            self.runner = type("Runner", (), {"core_id": "assistant"})()
+            self.evolution_runtime = FakeEvolutionRuntime()
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    app = FakeApp()
+    monkeypatch.setattr(cli, "create_app", lambda **kwargs: app)
+
+    cli.main(
+        [
+            "--home",
+            str(tmp_path / "home"),
+            "core",
+            "evolve",
+            "promote",
+            "run_probe",
+            "--manual-review-token",
+            "mcp-review:probe",
+        ]
+    )
+
+    assert app.evolution_runtime.calls == [
+        {
+            "run_id": "run_probe",
+            "target_core_id": "assistant",
+            "reason": "cli promote",
+            "manual_review_token": "mcp-review:probe",
+        }
+    ]
+    assert app.closed is True
+    assert "promoted" in capsys.readouterr().out
 
 
 def test_core_cli_status_shows_repository_consistency_issues(tmp_path, capsys):
@@ -721,19 +987,119 @@ def test_update_requires_managed_checkout(tmp_path):
     assert "managed checkout not found" in str(exc.value)
 
 
-def test_tui_launcher_prefers_repo_dist(monkeypatch, tmp_path):
+def test_tui_launcher_dev_override_prefers_repo_dist(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     entry = repo / "ui-tui" / "dist" / "entry.js"
     entry.parent.mkdir(parents=True)
     entry.write_text("console.log('repo')\n")
+    packaged = tmp_path / "package" / "entry.js"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text("console.log('package')\n")
 
     monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
-    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: tmp_path / "package" / "entry.js")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: packaged)
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
 
     resolved, command = tui_launcher._resolve_tui_entry("/usr/bin/node")
 
     assert resolved == entry
     assert command == ["/usr/bin/node", str(entry)]
+
+
+def test_tui_01_default_launcher_ignores_stale_repo_dist(monkeypatch, tmp_path):
+    """TUI-01: default launch selects the tracked package without mutating bundles."""
+    repo = tmp_path / "repo"
+    stale_entry = repo / "ui-tui" / "dist" / "entry.js"
+    stale_entry.parent.mkdir(parents=True)
+    stale_entry.write_text("console.log('stale interaction protocol')\n", encoding="utf-8")
+    packaged_entry = tmp_path / "package" / "entry.js"
+    packaged_entry.parent.mkdir(parents=True)
+    packaged_entry.write_text("console.log('tracked operator protocol')\n", encoding="utf-8")
+    bundle_snapshot = {
+        stale_entry: stale_entry.read_bytes(),
+        packaged_entry: packaged_entry.read_bytes(),
+    }
+    launched = {}
+
+    def fake_run(command, *, env):
+        launched["command"] = command
+        launched["env"] = env
+        return subprocess.CompletedProcess(command, 0)
+
+    module_path = tui_launcher.Path(tui_launcher.__file__)
+    original_resolve = tui_launcher.Path.resolve
+
+    # Model source-checkout and package-resource roots without touching either real bundle.
+    def fake_resolve(path, *args, **kwargs):
+        if path == module_path:
+            return repo / "demiurge" / "ui" / "tui_launcher.py"
+        return original_resolve(path, *args, **kwargs)
+
+    class FakePackageResources:
+        def joinpath(self, name):
+            assert name == "entry.js"
+            return packaged_entry
+
+    monkeypatch.setattr(tui_launcher.Path, "resolve", fake_resolve)
+    monkeypatch.setattr(tui_launcher, "files", lambda package: FakePackageResources())
+    monkeypatch.setattr(tui_launcher.shutil, "which", lambda executable: "/usr/bin/node")
+    monkeypatch.setattr(tui_launcher.subprocess, "run", fake_run)
+    args = cli.build_parser().parse_args(["--home", str(tmp_path / "home"), "--provider", "fake"])
+
+    tui_launcher.run_tui_from_args(args)
+
+    assert {path: path.read_bytes() for path in bundle_snapshot} == bundle_snapshot
+    assert launched["command"] == ["/usr/bin/node", str(packaged_entry)]
+
+
+def test_tui_launcher_default_does_not_fallback_to_repo_dist(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    stale_entry = repo / "ui-tui" / "dist" / "entry.js"
+    stale_entry.parent.mkdir(parents=True)
+    stale_entry.write_text("console.log('stale')\n", encoding="utf-8")
+    missing_packaged = tmp_path / "package" / "entry.js"
+
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: missing_packaged)
+    monkeypatch.delenv("DEMIURGE_TUI_DEV", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert "reinstall a wheel" in str(exc.value).lower()
+
+
+def test_tui_launcher_dev_override_uses_source_when_dist_is_missing(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    source = repo / "ui-tui" / "src" / "entry.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export {}\n", encoding="utf-8")
+    tsx_loader = repo / "ui-tui" / "node_modules" / "tsx" / "dist" / "loader.mjs"
+    tsx_loader.parent.mkdir(parents=True)
+    tsx_loader.write_text("", encoding="utf-8")
+    packaged = tmp_path / "package" / "entry.js"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text("console.log('package')\n", encoding="utf-8")
+
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setattr(tui_launcher, "_packaged_tui_entry", lambda: packaged)
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
+
+    resolved, command = tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert resolved == source
+    assert command == ["/usr/bin/node", "--import", str(tsx_loader), str(source)]
+
+
+def test_tui_launcher_dev_override_reports_missing_artifact(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(tui_launcher.Path, "resolve", lambda self: repo / "demiurge" / "ui" / "tui_launcher.py")
+    monkeypatch.setenv("DEMIURGE_TUI_DEV", "1")
+
+    with pytest.raises(SystemExit) as exc:
+        tui_launcher._resolve_tui_entry("/usr/bin/node")
+
+    assert "npm ci && npm run build" in str(exc.value)
 
 
 def test_tui_launcher_uses_packaged_dist_when_repo_dist_missing(monkeypatch, tmp_path):

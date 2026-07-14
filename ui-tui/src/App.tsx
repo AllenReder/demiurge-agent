@@ -22,7 +22,7 @@ export function App(props: { client: GatewayClient }) {
       if (event.event === "operator.shutdown") app.exit()
     })
     props.client.start()
-    void props.client.request("operator.initialize").catch((error) => {
+    void props.client.initialize().catch((error) => {
       setState((current) =>
         reduceGatewayEvent(current, {
           event: "operator.error",

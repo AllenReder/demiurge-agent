@@ -44,6 +44,47 @@ The TUI reducer consumes only `operator.*` frames. Internal
 messaging channels below the gateway, but those names are not the operator wire
 protocol.
 
+## Initialize Identity Handshake
+
+The tracked packaged bundle is the default launcher asset. An ignored
+source-checkout `ui-tui/dist/entry.js` is used only when
+`DEMIURGE_TUI_DEV=1`; development mode can also run `src/entry.tsx` when local
+`tsx` is installed.
+
+The first RPC is `operator.initialize` with `protocol_version` and
+`build_stamp`. The Python entrypoint validates both values before calling
+`OperatorGatewayRuntime.initialize()`, then returns the Host identity in the
+result. The TUI validates that response before treating initialization as
+successful. A mismatch returns RPC code `protocol_mismatch` and exits with code
+2, so a stale bundle cannot appear as a normal shutdown.
+
+## Process Exit Contract
+
+The NDJSON entrypoint uses process status as part of the operator protocol:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The verified client explicitly requested shutdown by RPC, `/exit`, or `/quit`. |
+| `1` | Host startup failed, or the client stream ended without an explicit shutdown. |
+| `2` | CLI parsing, gateway configuration, or the initialize identity handshake failed. |
+
+When Host creation or `OperatorGatewayRuntime.initialize()` fails, stdout first
+receives an `operator.error` event with `source: gateway_startup`, then the
+process exits with code 1. Clients must not translate that lifecycle into
+`operator.shutdown`. Protocol/build mismatch
+continues to use the structured RPC code `protocol_mismatch` and process exit
+2. Losing stdin after initialization is also abnormal; only an explicit,
+verified shutdown request is a zero-exit lifecycle. The `/exit` and `/quit`
+operator commands call the same shutdown path as the `operator.shutdown` RPC.
+Malformed launcher configuration emits `operator.error` with
+`source: gateway_config` and `code: config_error` before exiting with code 2;
+the payload does not echo raw configuration values.
+
+Keep `demiurge/ui_gateway/protocol.py` and
+`ui-tui/src/gateway/protocol.ts` synchronized when the wire contract changes,
+then rebuild and byte-compare `ui-tui/dist/entry.js` with
+`demiurge/ui/tui_dist/entry.js`.
+
 ## Boundary With Channels
 
 Messaging channels own external platform concerns: allowlists, remote user and

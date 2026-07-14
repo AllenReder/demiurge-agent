@@ -50,7 +50,12 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("interrupt", "Soft-cancel the current turn", "Control"),
     SlashCommandSpec("stop", "Stop the current turn and clear queued input", "Control", surfaces=("telegram", "text")),
     SlashCommandSpec("queue", "Queue a prompt for the next turn", "Control", "/queue <prompt>", surfaces=("telegram", "text")),
-    SlashCommandSpec("evolve", "Manage evolve runs", "Control", "/evolve <goal>|review <run_id>|promote <run_id>|discard <run_id>"),
+    SlashCommandSpec(
+        "evolve",
+        "Manage evolve runs",
+        "Control",
+        "/evolve <goal>|review <run_id>|promote <run_id> [manual_review_token]|discard <run_id>",
+    ),
     SlashCommandSpec("rollback", "Create a rollback commit for the next turn", "Control", "/rollback [target]"),
     SlashCommandSpec("exit", "Quit", "Control"),
     SlashCommandSpec("quit", "Quit", "Control"),

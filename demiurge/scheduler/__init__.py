@@ -15,6 +15,7 @@ from demiurge.runtime.durable_work import DurableClaim, DurableClaimConflict
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
 from demiurge.runtime.interactions import InteractionInbound, SessionRouteBinding
 from demiurge.runtime.runner import SessionTurnStepRunner
+from demiurge.runtime.scope import PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
 from demiurge.util import utc_id
@@ -358,7 +359,7 @@ class ScheduleFireRuntime:
             if schedule.delivery.mode != "local":
                 self._require_channel_target_allowed(core, schedule)
                 route_binding = SessionRouteBinding(route=self._delivery_route(core, schedule))
-            runner = self._new_run_runner()
+            runner = self._new_run_runner(core, schedule, claim)
             inbound = self._schedule_inbound(schedule, claim)
             try:
                 result = await runner.run_turn(
@@ -431,7 +432,13 @@ class ScheduleFireRuntime:
                 error=str(exc),
             )
 
-    def _new_run_runner(self) -> SessionTurnStepRunner:
+    def _new_run_runner(
+        self,
+        core: LoadedCore,
+        schedule: ScheduleDefinition,
+        claim: ScheduleRunClaim,
+    ) -> SessionTurnStepRunner:
+        session_id = utc_id("session_schedule_")
         return SessionTurnStepRunner(
             home=self.app.home,
             version_store=self.app.version_store,
@@ -439,7 +446,7 @@ class ScheduleFireRuntime:
             provider=self.app.runner.provider,
             tool_runtime=self.app.tool_runtime,
             core_id=self.app.runner.core_id,
-            session_id=utc_id("session_schedule_"),
+            session_id=session_id,
             model_override=self.app.runner.model_override,
             model_resolver=self.app.runner.model_resolver,
             provider_name=self.app.runner.provider_name,
@@ -450,6 +457,12 @@ class ScheduleFireRuntime:
             session_runtime=self.app.session_runtime,
             interaction_router=self.app.runner.interaction_router,
             prepare_live_core=self.app.prepare_live_core,
+            principal_scope=PrincipalScopeResolver(self.app.session_runtime.store).scheduled_run(
+                core_id=core.core_id,
+                schedule_id=schedule.schedule_id,
+                run_id=claim.run_id,
+                session_id=session_id,
+            ),
         )
 
     def _record_claim_task(

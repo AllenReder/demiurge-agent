@@ -3,12 +3,17 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
-import socket
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+from demiurge.security.url_policy import (
+    PinnedHTTPSConnection,
+    UnsafeUrlError,
+    UrlPolicy,
+)
 
 
 class HttpRequestError(RuntimeError):
@@ -106,7 +111,7 @@ def _open_public_https(request: urllib.request.Request, *, timeout: float) -> "_
         raise ValueError(f"callback URL hostname could not be resolved: {parsed.hostname}")
     connect_host = str(addresses[0])
     context = ssl.create_default_context()
-    connection = _PinnedHTTPSConnection(
+    connection = PinnedHTTPSConnection(
         connect_host,
         port=port,
         timeout=timeout,
@@ -131,18 +136,6 @@ def _open_public_https(request: urllib.request.Request, *, timeout: float) -> "_
     return _ResponseWrapper(connection, response)
 
 
-class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, *args: Any, server_hostname: str, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._server_hostname = server_hostname
-
-    def connect(self) -> None:
-        self.sock = socket.create_connection((self.host, self.port), self.timeout, self.source_address)
-        if self._tunnel_host:
-            self._tunnel()
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._server_hostname)
-
-
 class _ResponseWrapper:
     def __init__(self, connection: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:
         self.connection = connection
@@ -164,34 +157,16 @@ def require_public_http_url(url: str) -> None:
 
 
 def _public_addresses(hostname: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
     try:
-        ip_addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            raise ValueError(f"callback URL hostname could not be resolved: {hostname}") from exc
-        ip_addresses = []
-        for info in infos:
-            address = info[4][0]
-            try:
-                ip_addresses.append(ipaddress.ip_address(address))
-            except ValueError:
-                continue
-    if not ip_addresses:
-        raise ValueError(f"callback URL hostname could not be resolved: {hostname}")
-    blocked = [address for address in ip_addresses if _private_or_local(address)]
-    if blocked:
-        raise ValueError("callback URL resolves to a private, loopback, link-local, multicast, or reserved address")
-    return ip_addresses
-
-
-def _private_or_local(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return bool(
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    )
+        decision = UrlPolicy().require(
+            f"https://{rendered_host}:{port}/"
+        )
+    except UnsafeUrlError as exc:
+        raise ValueError(
+            f"callback URL rejected by Host policy: {exc.decision.reason}"
+        ) from None
+    return [
+        ipaddress.ip_address(address)
+        for address in decision.resolved_addresses
+    ]

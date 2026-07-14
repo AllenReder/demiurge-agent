@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -8,6 +9,11 @@ from demiurge.runtime.tasks import (
 )
 from demiurge.runtime.background import BackgroundWorkRuntime
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.runtime.bootstrap import BootstrapSlotRuntime, RunnerBootstrapSlotHost
 from demiurge.runtime.context import ContextAssembler
 from demiurge.core import CoreLoader, LoadedCore, SlotDefinition
@@ -15,7 +21,11 @@ from demiurge.runtime.child_agents import (
     ChildAgentRuntime,
     RunnerChildAgentHost,
 )
-from demiurge.runtime.delegation_tools import DelegationToolRuntime, RunnerDelegationToolHost
+from demiurge.runtime.delegation_tools import (
+    DELEGATION_TOOL_NAMES,
+    DelegationToolRuntime,
+    RunnerDelegationToolHost,
+)
 from demiurge.runtime.interaction_dispatch import InteractionDispatchRuntime
 from demiurge.runtime.interactions import (
     InteractionInbound,
@@ -26,6 +36,7 @@ from demiurge.runtime.io import RunnerTurnIOHost, TurnIO
 from demiurge.runtime.module_delivery import ModuleDeliveryRuntime, RunnerModuleDeliveryHost
 from demiurge.runtime.outbox import DeliveryRuntime
 from demiurge.runtime.prompt_context import PromptBuildRequest, PromptContextRuntime, PromptDebugRequest
+from demiurge.runtime.scope import AuthorityKind, PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.session_compaction import CompactionResult, SessionCompactionRuntime
 from demiurge.runtime.session import SessionRuntime
 from demiurge.runtime.session_routing import SessionCoreBinding, SessionRoutingRuntime
@@ -48,9 +59,10 @@ from demiurge.runtime.turn_pipeline import (
     RunnerTurnPersistenceHost,
     RunnerTurnPipelineHost,
     TurnAdmissionRuntime,
+    TurnExecutionContext,
     TurnPersistenceRuntime,
-    TurnPipelineRequest,
-    TurnPipelineRuntime,
+    TurnRequest,
+    TurnExecution,
     TurnResult,
 )
 from demiurge.runtime_timezone import RuntimeTimezone, resolve_runtime_timezone
@@ -62,6 +74,7 @@ from demiurge.sdk import (
 )
 from demiurge.storage import EventLog, VersionStore
 from demiurge.tools.runtime import ToolRuntime
+from demiurge.tools.registry import EffectOrigin, EffectRequest, EffectResult
 from demiurge.util import utc_id
 
 
@@ -89,6 +102,8 @@ class SessionTurnStepRunner:
         turn_engine: TurnEngine | None = None,
         interaction_router: SessionInteractionRouter | None = None,
         prepare_live_core: Callable[[], Awaitable[Any]] | None = None,
+        principal_scope: PrincipalScope | None = None,
+        initialize_session: bool = True,
     ):
         self.home = home
         self.version_store = version_store
@@ -97,6 +112,8 @@ class SessionTurnStepRunner:
         self.tool_runtime = tool_runtime
         self.core_id = core_id
         self.session_id = session_id or utc_id("session_")
+        self.principal_scope = principal_scope
+        self._turn_session_ids: dict[str, str] = {}
         self.model_override = model_override
         self.model_resolver = model_resolver
         self.provider_name = provider_name
@@ -124,9 +141,8 @@ class SessionTurnStepRunner:
             assembler=self.context_assembler,
             sessions=self.sessions,
             interaction_router=self.interaction_router,
-            session_id=lambda: self.session_id,
             show_system_prompt=lambda: self.show_system_prompt,
-            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            emit_event=self.emit_turn_event,
         )
         self.session_compaction = SessionCompactionRuntime(
             sessions=self.sessions,
@@ -162,13 +178,11 @@ class SessionTurnStepRunner:
         )
         self.module_delivery = ModuleDeliveryRuntime(RunnerModuleDeliveryHost(self))
         self.interaction_dispatch = InteractionDispatchRuntime(
-            session_id=lambda: self.session_id,
             delivery_runtime=self.delivery_runtime,
             track_background_task=self.background_tasks.track,
         )
         self.slot_effects = SlotEffectRuntime(
             home=self.home,
-            session_id=lambda: self.session_id,
             workspace=self.workspace,
             module_delivery=self.module_delivery,
             dispatch=self.interaction_dispatch,
@@ -179,23 +193,39 @@ class SessionTurnStepRunner:
             slot_runtime=self.slot_runtime,
             slot_context=self.slot_context,
             slot_effects=self.slot_effects,
-            emit_event=lambda event_type, **payload: self.event_log.emit(event_type, **payload),
+            emit_event=self.emit_slot_event,
             track_background_task=self.background_tasks.track,
             refresh_history=self._refresh_history,
         )
         self.runtime_io = TurnIO(RunnerTurnIOHost(self))
-        self.turn_pipeline = TurnPipelineRuntime(
+        self.turn_execution = TurnExecution(
             RunnerTurnPipelineHost(self),
             admission=TurnAdmissionRuntime(RunnerTurnAdmissionHost(self)),
             persistence=TurnPersistenceRuntime(RunnerTurnPersistenceHost(self)),
+            scope_resolver=PrincipalScopeResolver(self.session_runtime.store),
         )
-        self._ensure_current_session()
+        if initialize_session:
+            self._ensure_current_session()
 
     def emit_turn_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.event_log.emit(event_type, **payload)
+        session_id = self._event_session_id(payload)
+        payload.pop("session_id", None)
+        return EventLog(self.home, session_id).emit(event_type, **payload)
 
     def emit_slot_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.event_log.emit(event_type, **payload)
+        return self.emit_turn_event(event_type, **payload)
+
+    def _event_session_id(self, payload: Mapping[str, Any]) -> str:
+        turn_id = payload.get("turn_id")
+        if turn_id and str(turn_id) in self._turn_session_ids:
+            return self._turn_session_ids[str(turn_id)]
+        explicit = payload.get("session_id")
+        if explicit:
+            return str(explicit)
+        return self.session_id
+
+    def release_turn_event_scope(self, turn_id: str) -> None:
+        self._turn_session_ids.pop(turn_id, None)
 
     def _bind_event_log(self) -> None:
         self.event_log = EventLog(self.home, self.session_id)
@@ -218,8 +248,8 @@ class SessionTurnStepRunner:
         use_bootstrap: bool = True,
         route_binding: SessionRouteBinding | None = None,
     ) -> TurnResult:
-        return await self.turn_pipeline.run(
-            TurnPipelineRequest(
+        return await self.turn_execution.run(
+            TurnRequest(
                 text=text,
                 core_path=core_path,
                 interaction=interaction,
@@ -243,12 +273,14 @@ class SessionTurnStepRunner:
         context: list[ContextContribution],
         turn_messages: list[LLMMessage],
         *,
+        session_id: str,
         turn_id: str,
         step_id: str,
         use_bootstrap_context: bool = True,
     ) -> list[LLMMessage]:
         return self.prompt_context.build_messages(
             PromptBuildRequest(
+                session_id=session_id,
                 core=core,
                 context=context,
                 turn_messages=turn_messages,
@@ -302,6 +334,19 @@ class SessionTurnStepRunner:
         await self.prepare_live_core()
         return self.core_loader.load(self.version_store.active_core_path(self.core_id))
 
+    async def resolve_command_principal_scope(
+        self,
+        interaction: InteractionInbound,
+    ) -> PrincipalScope:
+        core = await self.load_active_core()
+        metadata = self.session_routes.metadata_for(interaction)
+        return self.session_routes.resolve_for_interaction(
+            self._session_core_binding(core),
+            interaction,
+            metadata,
+            fixed_scope=self.principal_scope,
+        )
+
     def _session_core_binding(self, core: LoadedCore) -> SessionCoreBinding:
         return SessionCoreBinding(
             core_id=core.core_id,
@@ -316,11 +361,30 @@ class SessionTurnStepRunner:
         *,
         channel: str | None = None,
         conversation_key: str | None = None,
+        principal_key: str | None = None,
         source: str | None = None,
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> str:
+        previous_session_id = self.session_id
         core = self.core_loader.load(self.version_store.active_core_path(self.core_id))
+        new_scope: PrincipalScope | None = None
+        resolver = PrincipalScopeResolver(self.session_runtime.store)
+        if channel and conversation_key and channel != "tui":
+            new_session_id = utc_id("session_")
+            new_scope = resolver.issue_conversation(
+                channel=channel,
+                principal_key=principal_key or conversation_key,
+                conversation_key=conversation_key,
+                session_id=new_session_id,
+            )
+        elif self.principal_scope is not None and self.principal_scope.authority is AuthorityKind.OPERATOR:
+            new_session_id = utc_id("session_")
+            new_scope = resolver.local_operator(
+                active_session_id=new_session_id,
+                reason="start new local operator session",
+                allow_unowned_active=True,
+            )
         record = self.session_routes.start_new(
             self._session_core_binding(core),
             channel=channel,
@@ -328,7 +392,15 @@ class SessionTurnStepRunner:
             source=source,
             reply_to=reply_to,
             replace_conversation_binding=replace_conversation_binding,
+            principal_scope=new_scope,
         )
+        if new_scope is not None and new_scope.authority is AuthorityKind.OPERATOR:
+            self.principal_scope = new_scope
+        if record.session_id != previous_session_id:
+            self.tool_runtime.approval_runtime.invalidate_session(
+                previous_session_id
+            )
+            self._schedule_session_effect_eviction(previous_session_id)
         return record.session_id
 
     def resume_session(
@@ -337,10 +409,29 @@ class SessionTurnStepRunner:
         *,
         channel: str | None = None,
         conversation_key: str | None = None,
+        principal_key: str | None = None,
         source: str | None = None,
         reply_to: str | None = None,
         replace_conversation_binding: bool = False,
     ) -> None:
+        previous_session_id = self.session_id
+        resolver = PrincipalScopeResolver(self.session_runtime.store)
+        if self.principal_scope is not None and self.principal_scope.authority is AuthorityKind.OPERATOR:
+            resume_scope = resolver.local_operator(
+                active_session_id=self.session_id,
+                reason=f"resume operator session {session_id}",
+            )
+        elif channel and conversation_key:
+            resume_scope = resolver.conversation(
+                channel=channel,
+                principal_key=principal_key or conversation_key,
+                conversation_key=conversation_key,
+                session_id=session_id,
+            )
+        elif self.principal_scope is not None:
+            resume_scope = self.principal_scope
+        else:
+            resume_scope = resolver.origin_scope(session_id=self.session_id)
         self.session_routes.resume(
             session_id,
             channel=channel,
@@ -348,6 +439,22 @@ class SessionTurnStepRunner:
             source=source,
             reply_to=reply_to,
             replace_conversation_binding=replace_conversation_binding,
+            principal_scope=resume_scope,
+        )
+        if self.session_id != previous_session_id:
+            self.tool_runtime.approval_runtime.invalidate_session(
+                previous_session_id
+            )
+            self._schedule_session_effect_eviction(previous_session_id)
+
+    def _schedule_session_effect_eviction(self, session_id: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.tool_runtime.evict_session(session_id))
+            return
+        self.background_tasks.track(
+            loop.create_task(self.tool_runtime.evict_session(session_id))
         )
 
     async def compact_session(self, *, focus: str | None = None, protect_last_n: int = 6) -> CompactionResult:
@@ -355,7 +462,10 @@ class SessionTurnStepRunner:
 
     def _ensure_current_session(self) -> None:
         core = self.core_loader.load(self.initial_core_path or self.version_store.active_core_path(self.core_id))
-        self.session_routes.ensure_current(self._session_core_binding(core))
+        self.session_routes.ensure_current(
+            self._session_core_binding(core),
+            principal_scope=self.principal_scope,
+        )
 
     def _activate_session(self, session_id: str) -> None:
         if not self.sessions.exists(session_id):
@@ -389,45 +499,96 @@ class SessionTurnStepRunner:
     def _refresh_history(self) -> None:
         self.history = self._session_history_messages()
 
-    def _module_result_client(self, *, writable: bool) -> ModuleResultClient:
-        return self.slot_context.result_client(writable=writable)
+    def _module_result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
+        return self.slot_context.result_client(session_id=session_id, writable=writable)
 
     async def execute_tool(
+        self,
+        request: EffectRequest,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
+        emit_event: Callable[..., dict[str, Any]] | None = None,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
+    ) -> ToolResult:
+        effect_result = await self.tool_runtime.execute(
+            request,
+            core=core,
+            turn=turn,
+            capability=capability,
+            execution_context=execution_context,
+            principal_scope=principal_scope,
+            delegation_runtime=self.delegation_tools,
+            emit_event=emit_event,
+            output_factory=output_factory,
+        )
+        return effect_result.to_tool_result()
+
+    async def execute_call(
         self,
         call: ToolCall,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        origin: EffectOrigin = "host",
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
         emit_event: Callable[..., dict[str, Any]] | None = None,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        if self.delegation_tools.can_handle(call.name):
-            return await self.delegation_tools.execute(call, core=core, turn=turn, capability=capability)
-        return await self.tool_runtime.execute(
-            call,
+        catalog = self.tool_runtime.resolve_effects(core, turn=turn)
+        request = catalog.request_for(call, origin=origin)
+        if request is None:
+            return EffectResult.not_found(
+                name=call.name,
+                core_id=turn.core_id,
+                core_revision=turn.core_revision,
+            ).to_tool_result()
+        if (
+            execution_context is None
+            and principal_scope is None
+            and request.entry.name in DELEGATION_TOOL_NAMES
+        ):
+            principal_scope = self.task_worker.scope_for_turn(
+                session_id=turn.session_id,
+                turn_id=turn.turn_id,
+            )
+        return await self.execute_tool(
+            request,
             core=core,
             turn=turn,
             capability=capability,
+            execution_context=execution_context,
+            principal_scope=principal_scope,
             emit_event=emit_event,
             output_factory=output_factory,
         )
 
     async def execute_turn_tool(
         self,
-        call: ToolCall,
+        request: EffectRequest,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        execution_context: TurnExecutionContext,
         output_factory: Callable[[SlotDefinition], Any],
-    ) -> ToolResult:
-        return await self.execute_tool(
-            call,
+    ) -> EffectResult:
+        return await self.tool_runtime.execute(
+            request,
             core=core,
             turn=turn,
             capability=capability,
-            emit_event=self.event_log.emit,
+            execution_context=execution_context,
+            delegation_runtime=self.delegation_tools,
+            emit_event=lambda event_type, **payload: self.emit_turn_event(
+                event_type,
+                **{**payload, "session_id": turn.session_id},
+            ),
             output_factory=output_factory,
         )
 
@@ -443,7 +604,21 @@ class SessionTurnStepRunner:
             control_plane.record_events(events)
 
     def _sanitize_runtime_error(self, exc: Exception) -> str:
-        message = str(exc).replace("\n", " ").strip()
-        if len(message) > 500:
-            message = f"{message[:500]}... [truncated]"
-        return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
+        api_key = getattr(self.provider, "api_key", None)
+        context = (
+            {
+                "api_key": SecretValue(
+                    value=api_key,
+                    name="API_KEY",
+                    source="provider.api_key",
+                )
+            }
+            if isinstance(api_key, str) and api_key
+            else None
+        )
+        return redact_exception(
+            exc,
+            view=RedactionView.EVENT,
+            context=context,
+            limit=500,
+        )

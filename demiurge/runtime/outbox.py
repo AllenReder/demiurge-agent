@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Any, Mapping
 
@@ -63,6 +64,7 @@ class DeliveryRuntime:
             if result.status == "unrouted":
                 self.mark_unrouted(
                     item,
+                    session_id=session_id,
                     turn_id=turn_id,
                     event_metadata=event_metadata,
                     attempts=claim.attempt if claim is not None else None,
@@ -85,12 +87,27 @@ class DeliveryRuntime:
                         },
                     )
                 )
+        except asyncio.CancelledError:
+            if claim is not None:
+                with contextlib.suppress(DurableClaimConflict):
+                    self.work.fail_delivery(claim, error="delivery cancelled")
+            self.mark_failed(
+                item,
+                session_id=session_id,
+                turn_id=turn_id,
+                error="delivery cancelled",
+                reason="delivery_cancelled",
+                event_metadata=event_metadata,
+                attempts=claim.attempt if claim is not None else None,
+            )
+            raise
         except Exception as exc:
             if claim is not None:
                 with contextlib.suppress(DurableClaimConflict):
                     self.work.fail_delivery(claim, error=str(exc))
             self.mark_failed(
                 item,
+                session_id=session_id,
                 turn_id=turn_id,
                 error=str(exc),
                 reason="bridge_deliver_failed",
@@ -102,6 +119,7 @@ class DeliveryRuntime:
         self,
         item: InteractionItem,
         *,
+        session_id: str,
         turn_id: str,
         event_metadata: Mapping[str, Any] | None = None,
         attempts: int | None = None,
@@ -127,7 +145,7 @@ class DeliveryRuntime:
                     )
                 )
         item.set_dispatch_status("unrouted")
-        self.event_log.emit(
+        EventLog(self.event_log.home, session_id).emit(
             "delivery.unrouted",
             turn_id=turn_id,
             reason="no_interactive_route",
@@ -138,6 +156,7 @@ class DeliveryRuntime:
         self,
         item: InteractionItem,
         *,
+        session_id: str,
         turn_id: str,
         error: str | None,
         reason: str,
@@ -186,7 +205,7 @@ class DeliveryRuntime:
                     )
                 )
         item.set_dispatch_status("failed")
-        self.event_log.emit(
+        EventLog(self.event_log.home, session_id).emit(
             "delivery.failed",
             turn_id=turn_id,
             reason=reason,

@@ -50,6 +50,10 @@ uv sync --all-groups
 uv run demiurge --provider fake
 ```
 
+普通启动始终使用 tracked packaged TUI bundle，即使 source checkout 中残留 ignored
+`ui-tui/dist/entry.js`。TUI contributor 可以设置 `DEMIURGE_TUI_DEV=1` 显式使用本地
+source artifact；protocol/build identity 不匹配会在 operator gateway 初始化前失败。
+
 如果你想使用真实 provider，运行 `demiurge setup` 配置 API key 和 endpoint。
 
 完整首次运行见

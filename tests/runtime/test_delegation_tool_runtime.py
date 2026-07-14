@@ -45,12 +45,8 @@ def _turn() -> TurnContext:
     )
 
 
-class _ToolRuntime:
-    def __init__(self, names):
-        self.names = list(names)
-
-    def registry_for(self, core, *, turn=None):
-        return [SimpleNamespace(name=name) for name in self.names]
+def _scope():
+    return SimpleNamespace(session_id="session_1")
 
 
 class _ChildAgents:
@@ -63,6 +59,12 @@ class _ChildAgents:
 
 
 class _TaskWorker:
+    def get_owned(self, scope, task_id):
+        raise KeyError(task_id)
+
+    def log_owned(self, scope, task_id):
+        return []
+
     def get(self, task_id):
         raise KeyError(task_id)
 
@@ -72,29 +74,32 @@ class _TaskWorker:
     async def cancel(self, task_id):
         raise KeyError(task_id)
 
+    async def cancel_owned(self, scope, task_id):
+        raise KeyError(task_id)
+
     async def wait(self, task_id, *, timeout_seconds, consume_completion):
+        raise KeyError(task_id)
+
+    async def wait_owned(
+        self,
+        scope,
+        task_id,
+        *,
+        timeout_seconds,
+        consume_completion,
+    ):
         raise KeyError(task_id)
 
 
 class _Host:
-    def __init__(self, *, visible_names=None):
+    def __init__(self):
         self.child_agents = _ChildAgents()
         self.task_worker = _TaskWorker()
-        self.tool_runtime = _ToolRuntime(
-            [
-                "delegate_task",
-                "task_status",
-                "task_control",
-                "yield_until",
-            ]
-            if visible_names is None
-            else visible_names
-        )
 
 
 @pytest.mark.asyncio
-async def test_delegation_runtime_rejects_hidden_builtin_tool():
-    host = _Host(visible_names=[])
+async def test_delegation_adapter_does_not_repeat_visibility_resolution():
+    host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core()
 
@@ -103,15 +108,16 @@ async def test_delegation_runtime_rejects_hidden_builtin_tool():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
-    assert result.content == "builtin tool is not allowed: task_status"
+    assert result.content == "background task not found: task_1"
 
 
 @pytest.mark.asyncio
-async def test_delegation_runtime_rejects_unsupported_visible_tool():
-    host = _Host(visible_names=["unsupported_builtin"])
+async def test_delegation_runtime_rejects_unsupported_tool():
+    host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core()
 
@@ -120,6 +126,7 @@ async def test_delegation_runtime_rejects_unsupported_visible_tool():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -133,7 +140,13 @@ async def test_delegation_runtime_dispatches_delegate_task_to_child_agent_runtim
     core = _core()
     call = ToolCall(name="delegate_task", arguments={"goal": "work"})
 
-    result = await runtime.execute(call, core=core, turn=_turn(), capability=CapabilityFacade(core))
+    result = await runtime.execute(
+        call,
+        core=core,
+        turn=_turn(),
+        capability=CapabilityFacade(core),
+        principal_scope=_scope(),
+    )
 
     assert result.data == {"task_id": "task_1"}
     assert host.child_agents.calls[0][0] is call
@@ -150,6 +163,7 @@ async def test_task_status_requires_task_id():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -167,6 +181,7 @@ async def test_task_control_rejects_unsupported_command_before_lookup():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -184,6 +199,7 @@ async def test_yield_until_missing_task_returns_model_facing_error():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
@@ -191,7 +207,7 @@ async def test_yield_until_missing_task_returns_model_facing_error():
 
 
 @pytest.mark.asyncio
-async def test_task_control_capability_denial_becomes_tool_error():
+async def test_delegation_adapter_does_not_repeat_capability_preflight():
     host = _Host()
     runtime = DelegationToolRuntime(host)
     core = _core(task_control=False)
@@ -201,8 +217,8 @@ async def test_task_control_capability_denial_becomes_tool_error():
         core=core,
         turn=_turn(),
         capability=CapabilityFacade(core),
+        principal_scope=_scope(),
     )
 
     assert result.is_error is True
-    assert "capability denied: task.control" in result.content
-    assert result.data == {"executionStarted": False}
+    assert result.content == "background task not found: task_1"

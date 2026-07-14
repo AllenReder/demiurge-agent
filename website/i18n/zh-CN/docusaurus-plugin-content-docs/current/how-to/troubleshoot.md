@@ -74,6 +74,24 @@ uv run demiurge init --refresh assistant
 `init --refresh global` 只用于 global fallback config；只有当你确实想刷新所有 runtime
 templates 时才使用 `init --refresh all`。
 
+## Runtime 权限检查失败
+
+`demiurge doctor` 是只读命令。在 POSIX 上，如果 runtime home、`.env`、`config.yaml`、
+SQLite file、log、state 或 artifact 不满足 Host 的 `0700`/`0600` policy，它会报告
+`runtime.permissions.insecure`。
+
+先停止正在运行的 Demiurge process，检查 finding 中列出的每条 path，并确认不存在意外的
+symbolic link 或 owner 变化。普通会写入的 startup/init 会只收紧 mode，不重写 file content：
+
+```bash
+uv run demiurge init
+uv run demiurge doctor
+```
+
+如果 init 无法收紧某条 path，请先在 Demiurge 外修复其 owner/permission 再重试。不要把
+列出的 runtime path 替换成 symlink；private write path 会拒绝 symlink。Windows 使用平台
+ACL semantics，因此不会产生数字 POSIX mode finding。
+
 ## Provider 或 API Key 失败
 
 检查 setup state：

@@ -137,10 +137,10 @@ class _Effects:
         self.committed: list[Any] = []
         self.scheduled: list[InteractionItem] = []
 
-    def result_client(self, *, writable: bool) -> ModuleResultClient:
+    def result_client(self, *, session_id: str, writable: bool) -> ModuleResultClient:
         return ModuleResultClient(
             home=self.host.home,
-            session_id=self.host.session_id,
+            session_id=session_id,
             workspace=self.host.workspace,
             writable=writable,
         )
@@ -256,7 +256,7 @@ def test_build_output_context_exposes_output_and_result_clients(tmp_path):
     runtime = SlotContextRuntime(host, effects=_Effects(host))
     core = _core(tmp_path)
     slot = _slot(tmp_path, "summary", kind="output")
-    result_client = runtime.result_client(writable=True)
+    result_client = runtime.result_client(session_id="session_1", writable=True)
     request = OutputSlotRunRequest(
         slot=slot,
         core=core,
@@ -285,13 +285,41 @@ def test_build_output_context_exposes_output_and_result_clients(tmp_path):
     assert ctx.result.value == {"summary": "done"}
 
 
+def test_output_context_history_keeps_captured_turn_session(tmp_path):
+    host = _Host(tmp_path)
+    host.sessions.ensure_session("session_2", core_id="assistant", core_revision="rev_1", channel="tui")
+    host.sessions.append_message("session_2", role="user", content="history-B", turn_id="turn_2")
+    host.session_id = "session_2"
+    runtime = SlotContextRuntime(host, effects=_Effects(host))
+    core = _core(tmp_path)
+    request = OutputSlotRunRequest(
+        slot=_slot(tmp_path, "summary", kind="output"),
+        core=core,
+        turn=_turn(),
+        capability=_capability(core),
+        envelope=OutputEnvelope(content="assistant text"),
+        current_output="assistant text",
+        tool_records=[],
+        state_stores=_state_stores(tmp_path),
+        interaction_metadata={"channel": "tui"},
+        result_client=runtime.result_client(session_id="session_1", writable=True),
+    )
+
+    ctx = runtime.build_output_context(request, items=[]).context
+
+    assert [message.content for message in ctx.history.recent_messages(3)] == [
+        "history user",
+        "history assistant",
+    ]
+
+
 def test_parallel_output_context_can_emit_transient_updates_but_cannot_write_history_or_result(tmp_path):
     host = _Host(tmp_path)
     effects = _Effects(host)
     runtime = SlotContextRuntime(host, effects=effects)
     core = _core(tmp_path)
     slot = _slot(tmp_path, "background", kind="output")
-    result_client = runtime.result_client(writable=False)
+    result_client = runtime.result_client(session_id="session_1", writable=False)
     items: list[InteractionItem] = []
     request = OutputSlotRunRequest(
         slot=slot,

@@ -5,17 +5,27 @@ description: Contributor notes for turn execution and provider context assembly.
 
 # Runner and Context
 
-The runner wires the turn lifecycle modules. `TurnAdmissionRuntime` resolves the
-core/session route and starts the turn, `TurnPipelineRuntime` runs the authored
-input -> model/tool -> output path, and `TurnPersistenceRuntime` records input,
-assistant output, display state, completion, and interruption. Agent Core slots
-participate through controlled interfaces; they do not own the lifecycle.
+The current alpha runner wires the turn lifecycle modules.
+`TurnAdmissionRuntime` resolves the core/session route and starts the turn,
+`TurnExecution` owns the authored input -> model/tool -> output path, and
+`TurnPersistenceRuntime` records input, assistant output, display state,
+completion, and interruption. Agent Core slots participate through controlled
+interfaces; they do not own the lifecycle.
+
+This layout now implements the scoped `TurnExecution`, `PrincipalScope`, and
+immutable execution-identity contracts. `ContextManager` and durable restart
+semantics remain later work. See
+[Host Runtime Contracts](runtime-contracts.md) for the authoritative target
+contract. The current runner does not yet satisfy every invariant below.
 
 ## Turn Flow
 
+The current flow is:
+
 ```text
 inbound interaction
-  -> admit turn: resolve session/core, bind route, run bootstrap, begin turn
+  -> admit turn: resolve session/core, bind route, pin scope, begin turn
+  -> activate captured route/principal and run bootstrap
   -> run authored input pipeline
   -> assemble provider context
   -> call provider
@@ -24,6 +34,115 @@ inbound interaction
   -> run authored output pipeline
   -> persist input, assistant output, display state, completion, and session events
 ```
+
+## TurnExecution Interface
+
+The external Host seam is deliberately small:
+
+```text
+TurnExecution.run(TurnRequest) -> TurnResult
+TurnExecution.cancel(TurnId, PrincipalScope) -> TurnCancelResult
+```
+
+`TurnExecution` must hide session admission, core-revision pinning, context
+preparation, provider/tool steps, slot execution, persistence, delivery, and
+cleanup. A caller supplies immutable request values, not a mutable runner,
+loaded core, store, provider client, or capability facade.
+
+The module owns these observable contracts:
+
+- same-session turns are serialized by admission, while different sessions can
+  run concurrently;
+- the session, core revision, capability snapshot, route, and trace identity
+  captured for a turn do not change after an await;
+- provider, slot, effect, cancellation, and unexpected failures create one
+  terminal turn state before resources are released;
+- restart marks or recovers orphaned admissions explicitly and never silently
+  replays a dangerous provider/effect step;
+- detached work is a separately owned runtime task, not a late mutation of a
+  completed turn.
+
+The current implementation exposes `TurnExecution.run()` and owner-checked
+`cancel()` as the Host test seam. It enforces one in-process active turn per
+session with a keyed admission lock, removes idle lock entries, and keeps
+different sessions concurrent. Admission captures the resolved session, loaded
+core plus revision, immutable capability declarations, route token, trace id,
+and cancellation identity in a frozen `TurnExecutionContext`. Replacing the
+active core or mutating its capability manifest later does not change the
+admitted turn's revision or capability decisions.
+Queued same-session requests reload and verify the active core/revision only
+after acquiring admission, so a promotion while waiting cannot pair old loaded
+content with the new revision label.
+
+The captured route is activated in Host execution-local context. Delivery,
+prompt, approval, and child asyncio tasks created during the turn therefore use
+the exact admitted token rather than the session's latest binding. A token that
+is unbound while the turn is running fails closed instead of switching to a new
+adapter. The token and principal never enter model-facing metadata or the
+authored `TurnContext` SDK.
+
+Prompt, IO, slot history/result, event, artifact, and delivery hot paths use the
+captured session or immutable `TurnContext.session_id` after an await. Owner
+cancel, coroutine cancellation, route activation failure, and unexpected
+exceptions persist interruption where the lifecycle has started and release
+principal binding, route context, and admission in nested `finally` cleanup.
+Live delivery tasks are tracked by turn and drained before that turn leaves the
+active registry; cancellation during adapter delivery therefore cancels the
+owned delivery claim, records failure, terminates the turn, and releases the
+session admission without waiting on unrelated sessions.
+Any earlier provider/tool/slot failure cancels and awaits already scheduled
+interim deliveries from the same lifecycle cleanup path.
+Admission also resolves a frozen `PrincipalScope` before bootstrap: external conversations are matched
+against the durable `session_owners` projection, TUI runs use explicit local
+operator authority, schedules use run-scoped system authority, and child agents
+own only their delegated child session. The scope is carried by
+`TurnExecutionContext`; it is not added to the authored `TurnContext` SDK.
+Background tasks capture a bounded record of that admitted scope before their
+detached task starts. Completion intake restores and validates the record
+against the durable session owner before claiming the event; route metadata
+cannot elevate the completion, and the internal scope record is not exposed in
+model-facing metadata. Child spawn closures likewise capture the admitted
+parent scope instead of reconstructing authority from a legacy session row.
+
+This is not yet the final durable 1.0 lifecycle contract. Admission and the
+active-turn cancel registry are process-local, restart recovery is not
+implemented here, and `TurnRequest`/`TurnResult` still retain alpha compatibility
+surfaces that are not the final deeply immutable 1.0 products. Live core,
+lifecycle, state, lock, and task controls are private admitted-turn state rather
+than fields on `TurnExecutionContext`. PrincipalScope now reaches store-owned
+session/message/task predicates, channel and operator session list/resume,
+`session_search`, task detail/wait/cancel, `/subagents`, and
+principal/session/policy-scoped approval caching. Later EffectRuntime work
+extends the same owner seam across every effect adapter.
+
+## Principal and Execution Context
+
+`PrincipalScope` is Host authority, not an Agent Core capability grant. It is
+derived from authenticated channel/operator/system facts plus durable
+conversation/session bindings, and it supplies the owner predicate for session,
+history, task, wait, cancel, resume, search, and approval-cache operations.
+
+External adapter facts enter the Host through `InteractionInbound.principal_key`.
+That field is set by the adapter after its transport authentication/allowlist
+step and is kept separate from delivery `source`, arbitrary metadata, and raw
+webhook body identifiers. A conversation scope is accepted only when that key,
+channel, conversation binding, and session owner all match durable state.
+The store-bound resolver is the only issuer. Operator issuance never accepts a
+caller-supplied session set: it binds one active session, requires the active
+Host's in-memory operator issuer plus an explicit reason, and writes a
+`principal_scope.operator_issued` audit event. Cross-session operator queries
+use a relational `session_owners` predicate rather than materializing an
+unbounded SQL `IN` list. A scope issued by another store instance is rejected
+at owned-query and session-persistence boundaries. Closing the Host revokes its
+process-local operator capability even when tool shutdown fails, so a retained
+scope cannot authorize reads after `DemiurgeApp.close()`.
+
+`TurnExecutionContext` binds that principal to one session, turn, core revision,
+capability snapshot, workspace, route token, admission lease, cancellation
+token, and trace. Those bindings are immutable for the turn. Agent Slots and
+authored tools continue to receive the reduced author-facing SDK contexts;
+where applicable those contexts contain `TurnContext`. They do not receive
+operator authority, Host stores, or admission internals.
 
 ## Context Layers
 
@@ -37,7 +156,16 @@ Provider context can include:
 - current user turn
 - tool call and tool result history
 
-The context assembler decides final provider message order and content.
+The current `ContextAssembler` decides final provider message order and content.
+It does not know the model context window, reserve an output budget, or trigger
+automatic compaction.
+
+The target `ContextManager.prepare()` owns layer budgets, full-request
+estimation, cheap pruning, compaction lease and fallback, and typed overflow
+before provider IO. `ContextManager.observe()` consumes normalized usage and
+finish-reason observations without relying on ambient mutable session state.
+Manual `/compact` remains the current alpha mechanism until that module is
+implemented.
 
 ## Bootstrap
 
@@ -46,12 +174,12 @@ within a session and safe to quote as reference context.
 
 ## Background Task Completion Turns
 
-The runner preserves one active turn per session. Background task completion is
-modeled as a synthetic inbound event for the originating session rather than as
-direct channel output. Channel bridges use live subscription as a wakeup path
-and recover pending completion events from SQLite. If user input and completion
-are both pending, the user input runs first and pending completion summaries are
-merged into that user turn. Completion notifications use durable work state:
+Background task completion is modeled as a synthetic inbound event for the
+originating session rather than as direct channel output. Channel bridges use
+live subscription as a wakeup path and recover pending completion events from
+SQLite. If user input and completion are both pending, the user input runs first
+and pending completion summaries are merged into that user turn. Completion
+notifications use durable work state:
 `ready` work is claimed before a bridge queues or merges the synthetic inbound,
 and it is acknowledged only through the task-worker seam. A successful
 `yield_until` call claims and acknowledges the matching pending completion, so
@@ -61,10 +189,22 @@ result.
 Parallel input and output slots are still scheduled concurrently, but the
 runner waits for their host-managed work to finish before marking the parent
 turn terminal. Detached slot work must be modeled as a child runtime task rather
-than mutating after the parent turn is complete.
+than mutating after the parent turn is complete. Here **parallel** means
+concurrent-but-joined within the parent turn; it is not detached or
+restart-durable.
 
 `/stop` and foreground cancellation affect only the active turn. Background
 tasks continue until they finish or a user calls `task_control(command="cancel")`.
+Model-facing `task_status`, `task_control`, and `yield_until`, plus the
+`/subagents` list/detail/cancel command, use the admitted `PrincipalScope` in
+store-side task predicates. A guessed task id owned by another principal is
+reported exactly like a missing id and cannot expose logs, wait for completion,
+consume completion state, or cancel the task.
+The model-facing controls return bounded status/result fields, not task logs;
+full log inspection remains an independent Host/operator surface.
+Delegation controls and ordinary ToolRuntime dispatch share the same
+`resolve_approval_scope(...)` identity validation, including session, turn,
+core revision, and capability snapshot checks.
 
 Background work that needs user input is marked `blocked_needs_user` and is
 not auto-approved.
@@ -73,7 +213,8 @@ not auto-approved.
 
 The runner owns a shared `SessionInteractionRouter`. `InteractionRuntime`
 passes the current adapter as a `SessionRouteBinding`; after the runner resolves
-the final session for the inbound, it binds that route to `runner.session_id`.
+the final session for the inbound, admission captures that session id and binds
+the route to the captured value.
 TUI and channel `/new`, `/resume`, and session switch paths must rebind the
 same adapter route to the new session.
 
@@ -83,6 +224,18 @@ host-owned route key built from explicit platform facts, for example
 `telegram:dm:123` or `slack:channel:T1:C1:thread:123.4`. Channel `/resume`
 rebinds the current conversation key to the resumed session so the next inbound
 message from that external conversation continues in the same transcript.
+Channel `/sessions` and `/resume` use owned session list/get queries; ordinary
+conversation authority sees only its bound session, while the local TUI can
+cross sessions only through its explicit audited operator scope. A raw session
+id that is missing or outside the scope returns the same external error before
+the runner or route binding is changed.
+Rows migrated as `legacy_local` remain excluded from normal operator browsing
+and history reads; only the dedicated repair/status path may inspect them.
+
+The containment path now builds delivery from the captured turn session rather
+than rereading `runner.session_id`. The final contract still moves the route
+token itself into `TurnExecutionContext` so restart, owner checks, and route
+lifetime are represented by one durable execution interface.
 
 Ordinary output, tool lifecycle events, and background output flushes create
 `InteractionOutbound` objects with a required `session_id`. The router delivers
@@ -110,14 +263,26 @@ looked up by `turn.session_id`; when no interactive route is bound, the approval
 provider denies with `no_interactive_route` unless a host, global, or core
 policy has already auto-allowed the action.
 
+The session-allow cache is owned by `ApprovalRuntime` and consumes the immutable
+scope derived from `TurnExecutionContext`. Its key binds principal, session,
+policy/effect fingerprint, and rule; route lookup alone is not authorization.
+Non-turn Host operations must supply an explicit Host-issued `PrincipalScope`.
+
 ## Failure Handling
 
-Slot `failure_policy` determines whether a failed slot is soft or hard. Provider
-errors and cancellation after a turn starts write terminal turn and task state
-before the exception is re-raised. Tool errors, channel delivery errors, and
-schedule errors are handled at their host-owned layers.
+In the current alpha runner, slot `failure_policy` determines whether a failed
+slot is soft or hard. Exceptions/cancellation inside the guarded input,
+provider/model-loop, and output stages write terminal turn state before being
+re-raised. Tool-catalog preparation currently sits outside those guarded
+regions, so its failure does not yet have the same guarantee. A foreground turn
+is not a `RuntimeTask`; channel delivery, background task, and schedule errors
+remain owned by their respective Host modules.
+
+The target `TurnExecution` interface returns typed failed/cancelled product
+outcomes and exposes only typed rejection or infrastructure failures. Adapter
+exceptions do not become part of its caller interface.
 
 ## Boundary
 
-Do not move provider request construction or session ownership into Agent Core
-code.
+Do not move provider request construction, context budgeting, principal
+authority, or session ownership into Agent Core code.

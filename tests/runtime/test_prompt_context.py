@@ -52,6 +52,7 @@ class _Harness:
         self.store = RuntimeStore(tmp_path / "runtime.sqlite3")
         self.sessions = SessionRuntime(control_plane=RuntimeControlPlane(self.store))
         self.sessions.ensure_session("session_1", core_id="assistant", core_revision="rev_1")
+        self.sessions.ensure_session("session_2", core_id="assistant", core_revision="rev_1")
         self.router = SessionInteractionRouter()
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.show_system_prompt = show_system_prompt
@@ -59,7 +60,6 @@ class _Harness:
             assembler=ContextAssembler(),
             sessions=self.sessions,
             interaction_router=self.router,
-            session_id=lambda: "session_1",
             show_system_prompt=lambda: self.show_system_prompt,
             emit_event=self.emit_event,
         )
@@ -84,6 +84,7 @@ def test_prompt_context_builds_messages_from_session_layers_and_emits_event(tmp_
 
     messages = harness.runtime.build_messages(
         PromptBuildRequest(
+            session_id="session_1",
             core=_core(tmp_path),
             context=[ContextContribution(type="instruction", content="INJECTED", placement="system_context")],
             turn_messages=[LLMMessage(role="user", content="current user")],
@@ -108,6 +109,26 @@ def test_prompt_context_builds_messages_from_session_layers_and_emits_event(tmp_
         "compaction_summary",
         "current_turn",
     ]
+
+
+def test_prompt_context_uses_captured_session_instead_of_other_session_history(tmp_path):
+    harness = _Harness(tmp_path)
+    harness.sessions.append_message("session_1", role="user", content="history-A", turn_id="turn_old_a")
+    harness.sessions.append_message("session_2", role="user", content="history-B", turn_id="turn_old_b")
+    messages = harness.runtime.build_messages(
+        PromptBuildRequest(
+            session_id="session_1",
+            core=_core(tmp_path),
+            context=[],
+            turn_messages=[LLMMessage(role="user", content="current-A")],
+            turn_id="turn_1",
+            step_id="step_1",
+        )
+    )
+
+    contents = [message.content for message in messages]
+    assert "history-A" in contents
+    assert "history-B" not in contents
 
 
 @pytest.mark.asyncio

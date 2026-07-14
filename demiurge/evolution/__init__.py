@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from demiurge.core_repository import CommitResult, CoreRepository, PROTECTED_DEPENDENCY_FILES
 from demiurge.gates import GateResult, GateRunner
@@ -72,10 +72,13 @@ class EvolutionRuntime:
         core_repository: CoreRepository,
         gate_runner: GateRunner,
         evolver_runner: EvolverRunner | None = None,
+        on_core_changed: Callable[[str], None] | None = None,
     ):
         self.core_repository = core_repository
         self.gate_runner = gate_runner
         self.evolver_runner = evolver_runner
+        self.on_core_changed = on_core_changed
+        self.notifies_core_changes = on_core_changed is not None
         self._active_runs: set[str] = set()
 
     async def start(
@@ -165,7 +168,11 @@ class EvolutionRuntime:
                 proposal_metadata = json.loads(change_set.proposal_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 proposal_metadata = {}
-        gates = await self.gate_runner.run(change_set.agents_root, changed_paths=changed_files)
+        gates = await self.gate_runner.run(
+            change_set.agents_root,
+            changed_paths=changed_files,
+            reference_agents_root=self.core_repository.active_agents_root(),
+        )
         payload = {
             **proposal_metadata,
             "run_id": run_id,
@@ -188,7 +195,14 @@ class EvolutionRuntime:
             cleaned_artifacts=cleaned_artifacts,
         )
 
-    async def promote(self, run_id: str, *, target_core_id: str = "assistant", reason: str = "evolve promote") -> EvolveResult:
+    async def promote(
+        self,
+        run_id: str,
+        *,
+        target_core_id: str = "assistant",
+        reason: str = "evolve promote",
+        manual_review_token: str | None = None,
+    ) -> EvolveResult:
         self.core_repository.prepare_live_for_switch()
         review = await self.review(run_id, target_core_id=target_core_id, goal=reason)
         if not review.passed:
@@ -198,6 +212,28 @@ class EvolutionRuntime:
                 goal=reason,
                 agents_root=str(self.core_repository.change_set(run_id).agents_root),
                 summary=f"evolve run {run_id} failed gates",
+                report_path=review.report_path,
+                changed_files=review.changed_files,
+                proposal_revision=review.proposal_revision,
+                gates=review.gates.as_dict(),
+                promoted=False,
+                cleaned_artifacts=review.cleaned_artifacts,
+            )
+        required_review_token = review.gates.review_token or ""
+        if (
+            review.gates.manual_review_required
+            and manual_review_token != required_review_token
+        ):
+            return EvolveResult(
+                run_id=run_id,
+                target_core_id=target_core_id,
+                goal=reason,
+                agents_root=str(
+                    self.core_repository.change_set(run_id).agents_root
+                ),
+                summary=(
+                    f"evolve run {run_id} requires manual MCP security review"
+                ),
                 report_path=review.report_path,
                 changed_files=review.changed_files,
                 proposal_revision=review.proposal_revision,
@@ -220,6 +256,8 @@ class EvolutionRuntime:
                 cleaned_artifacts=review.cleaned_artifacts,
             )
         result = self.core_repository.promote_run(run_id, reason=reason)
+        if self.on_core_changed is not None:
+            self.on_core_changed(target_core_id)
         return EvolveResult(
             run_id=run_id,
             target_core_id=target_core_id,
@@ -234,6 +272,22 @@ class EvolutionRuntime:
             new_revision=result.revision,
             cleaned_artifacts=review.cleaned_artifacts,
         )
+
+    def promotion_security_preview(
+        self,
+        run_id: str,
+        *,
+        target_core_id: str = "assistant",
+    ) -> dict[str, Any]:
+        change_set = self.core_repository.change_set(run_id)
+        phase = self.gate_runner.mcp_security_review(
+            change_set.agents_root,
+            changed_paths=change_set.changed_paths(),
+            reference_agents_root=self.core_repository.active_agents_root(),
+        )
+        if not phase.passed:
+            raise CoreRepositoryError(phase.detail)
+        return phase.data
 
     def discard(self, run_id: str) -> dict[str, Any]:
         change_set = self.core_repository.change_set(run_id)

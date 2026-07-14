@@ -17,7 +17,9 @@ class BackgroundWorkRuntime:
 
     async def drain(self, *, include_runtime_tasks: bool = True) -> None:
         while self._local_tasks:
-            await asyncio.gather(*list(self._local_tasks), return_exceptions=True)
+            tasks = set(self._local_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._local_tasks.difference_update(tasks)
         if include_runtime_tasks:
             await self.task_worker.drain()
 

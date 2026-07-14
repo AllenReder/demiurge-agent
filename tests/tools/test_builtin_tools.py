@@ -1,4 +1,11 @@
+import asyncio
 import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -8,8 +15,11 @@ from demiurge.app import create_app
 from demiurge.evolution import EvolverRunResult
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.url_policy import UrlPolicy, UrlPolicyRedirectHandler
 from demiurge.core import BUILTIN_TOOLSETS
 from demiurge.providers import ToolCall
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.sdk import AgentInput, TurnContext
 from demiurge.tools import runtime as tool_runtime
 from demiurge.tools.registry import BUILTIN_TOOL_DEFINITIONS
@@ -29,9 +39,174 @@ class RecordingApprovalProvider:
         return ApprovalDecision("deny", "no recorded decision left")
 
 
+@dataclass
+class FakeCoreMutationResult:
+    summary: str = "fake mutation called"
+    promoted: bool = True
+    passed: bool = True
+
+
+class FakeEvolutionAdapter:
+    def __init__(self):
+        self.start_calls = 0
+        self.review_calls = 0
+        self.promote_calls = 0
+        self.discard_calls = 0
+
+    async def start(self, **kwargs):
+        self.start_calls += 1
+        return FakeCoreMutationResult()
+
+    async def review(self, run_id, *, target_core_id, goal):
+        self.review_calls += 1
+        return FakeCoreMutationResult()
+
+    async def promote(
+        self,
+        run_id,
+        *,
+        target_core_id,
+        reason,
+        manual_review_token=None,
+    ):
+        self.promote_calls += 1
+        self.manual_review_token = manual_review_token
+        return FakeCoreMutationResult()
+
+    def promotion_security_preview(self, run_id, *, target_core_id):
+        return {
+            "manual_review_required": True,
+            "review_token": "mcp-review:synthetic",
+            "changed_paths": [f"{target_core_id}/agent/mcp/docs.yaml"],
+            "changes": [
+                {
+                    "path": f"{target_core_id}/agent/mcp/docs.yaml",
+                    "change": "modified",
+                }
+            ],
+        }
+
+    def discard(self, run_id):
+        self.discard_calls += 1
+        return {"run_id": run_id}
+
+
+@dataclass
+class FakeRollbackPointer:
+    active_revision: str = "fake-revision"
+
+
+class FakeVersionStore:
+    def __init__(self):
+        self.rollback_calls = 0
+
+    def rollback(self, core_id, *, target, reason):
+        self.rollback_calls += 1
+        return FakeRollbackPointer()
+
+
+@dataclass
+class FakeTaskRecord:
+    task_id: str = "task_probe"
+
+
+class FakeTaskWorker:
+    def __init__(self):
+        self.start_calls = 0
+
+    def start_task(self, **kwargs):
+        self.start_calls += 1
+        return FakeTaskRecord()
+
+
 def _set_test_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+
+
+def _descendant_tree_command(
+    *,
+    sentinel: Path,
+    started_marker: Path | None = None,
+    release_marker: Path | None = None,
+    ignore_term: bool = False,
+    detach_stdio: bool = True,
+    emit_output: bool = False,
+) -> str:
+    grandchild_parts = [
+        "import signal, time" if ignore_term else "import time",
+        "from pathlib import Path",
+    ]
+    if ignore_term:
+        grandchild_parts.append("signal.signal(signal.SIGTERM, signal.SIG_IGN)")
+    grandchild_parts.extend(
+        (
+            [
+                f"release = Path({str(release_marker)!r})",
+                'exec("while not release.exists():\\n    time.sleep(0.01)")',
+            ]
+            if release_marker is not None
+            else ["time.sleep(1.5)"]
+        )
+    )
+    grandchild_parts.append(
+        f"Path({str(sentinel)!r}).write_text('survived', encoding='utf-8')"
+    )
+    grandchild_code = "; ".join(grandchild_parts)
+    child_parts = [
+        "import signal, subprocess, sys, time"
+        if ignore_term
+        else "import subprocess, sys, time",
+    ]
+    if started_marker is not None:
+        child_parts.extend(
+            [
+                "from pathlib import Path",
+                f"Path({str(started_marker)!r}).write_text('started', encoding='utf-8')",
+            ]
+        )
+    if ignore_term:
+        child_parts.append("signal.signal(signal.SIGTERM, signal.SIG_IGN)")
+    popen_options = (
+        ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+        if detach_stdio
+        else ""
+    )
+    child_parts.append(
+        f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]{popen_options})"
+    )
+    if emit_output:
+        child_parts.append("print('trigger', flush=True)")
+    child_parts.append(
+        "time.sleep(10)" if release_marker is not None else "time.sleep(3)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote('; '.join(child_parts))}"
+    if detach_stdio:
+        command += " >/dev/null 2>&1"
+    return command
+
+
+def _exited_leader_with_inherited_pipe_command(
+    *,
+    sentinel: Path,
+    started_marker: Path | None = None,
+) -> str:
+    started_write = (
+        f"Path({str(started_marker)!r}).write_text('started', encoding='utf-8'); "
+        if started_marker is not None
+        else ""
+    )
+    descendant_code = (
+        "import time; from pathlib import Path; "
+        f"{started_write}"
+        "time.sleep(1.5); "
+        f"Path({str(sentinel)!r}).write_text('survived', encoding='utf-8')"
+    )
+    leader_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}])"
+    )
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(leader_code)}"
 
 
 def _load_core_with(
@@ -39,6 +214,7 @@ def _load_core_with(
     *,
     toolsets: list[str] | None = None,
     capabilities: dict[str, dict] | None = None,
+    tool_metadata: dict[str, dict] | None = None,
 ):
     manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
     raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -47,6 +223,9 @@ def _load_core_with(
     defaults = raw.setdefault("capabilities", {}).setdefault("defaults", {})
     for capability, value in (capabilities or {}).items():
         defaults[capability] = value
+    raw.setdefault("tools", {}).setdefault("metadata", {}).update(
+        tool_metadata or {}
+    )
     manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return app.core_loader.load(app.version_store.active_core_path("assistant"))
 
@@ -89,14 +268,458 @@ def _turn(core):
     )
 
 
+def _principal_scope(app, core, turn):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    if not app.runtime_store.session_owner_exists(turn.session_id):
+        issued = resolver.local_operator(
+            active_session_id=turn.session_id,
+            reason="bind direct tool test session",
+            allow_unowned_active=True,
+        )
+        app.session_runtime.create_session(
+            session_id=turn.session_id,
+            core_id=core.core_id,
+            core_revision=core.revision,
+            principal_scope=issued,
+        )
+    return resolver.origin_scope(session_id=turn.session_id)
+
+
+def _conversation_scope(app, core, suffix):
+    resolver = PrincipalScopeResolver(app.runtime_store)
+    session_id = f"session_{suffix}"
+    conversation_key = f"probe:conversation:{suffix}"
+    principal_key = f"user_{suffix}"
+    issued = resolver.issue_conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+    app.session_runtime.create_session(
+        session_id=session_id,
+        core_id=core.core_id,
+        core_revision=core.revision,
+        channel="probe",
+        conversation_key=conversation_key,
+        principal_scope=issued,
+    )
+    return resolver.conversation(
+        channel="probe",
+        principal_key=principal_key,
+        conversation_key=conversation_key,
+        session_id=session_id,
+    )
+
+
 async def _execute(app, core, name, arguments):
-    return await app.tool_runtime.execute(
+    turn = _turn(core)
+    return await app.runner.execute_call(
         ToolCall(name=name, arguments=arguments, id=f"call_{name}"),
         core=core,
-        turn=_turn(core),
+        turn=turn,
         capability=CapabilityFacade(core),
+        principal_scope=_principal_scope(app, core, turn),
         emit_event=app.runner.event_log.emit,
     )
+
+
+def _install_authored_policy_tool(
+    app,
+    *,
+    name: str,
+    module_source: str,
+    capability: str = "probe.effect",
+    capabilities: list[str] | None = None,
+    risk: str = "medium",
+    approval_policy: str = "prompt",
+) -> None:
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / name
+    tool_root.mkdir(parents=True)
+    capability_block = "capabilities: []\n"
+    if capabilities:
+        capability_block = "capabilities:\n" + "".join(
+            f"  - {item}\n"
+            for item in capabilities
+        )
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        f"description: Authored policy test tool {name}.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        f"{capability_block}"
+        f"capability: {capability}\n"
+        f"risk: {risk}\n"
+        f"approval_policy: {approval_policy}\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(module_source, encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_prompt_policy_denial_prevents_execution(tmp_path):
+    """TOOL-01: authored prompt policy must be enforced before module execution."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-tool-ran.txt"
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / "policy_probe"
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Authored approval policy probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n"
+        "capability: probe.effect\n"
+        "risk: medium\n"
+        "approval_policy: prompt\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "from pathlib import Path\n\n"
+        "def run(ctx, arguments):\n"
+        f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+        "    return {'content': 'probe-ran'}\n",
+        encoding="utf-8",
+    )
+    approval_provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = approval_provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "policy_probe")
+
+    result = await _execute(app, core, "policy_probe", {})
+    approval_events = [
+        event["type"]
+        for event in app.runner.event_log.tail(20)
+        if event["type"].startswith("approval.")
+    ]
+
+    assert entry.source == "authored"
+    assert entry.capability == "probe.effect"
+    assert entry.approval_policy == "prompt"
+    assert {
+        "marker_exists": marker.exists(),
+        "is_error": result.is_error,
+        "approval_requests": len(approval_provider.requests),
+        "approval_risks": [request.risk for request in approval_provider.requests],
+        "approval_events": approval_events,
+        "execution_started": result.data["executionStarted"],
+        "decision": result.data["approval"]["value"],
+    } == {
+        "marker_exists": False,
+        "is_error": True,
+        "approval_requests": 1,
+        "approval_risks": ["medium"],
+        "approval_events": ["approval.requested", "approval.decided", "approval.denied"],
+        "execution_started": False,
+        "decision": "deny",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_approval_uses_bounded_redacted_preview(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_authored_policy_tool(
+        app,
+        name="preview_probe",
+        module_source="def run(ctx, arguments):\n    return {'content': 'probe-ran'}\n",
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+    secret = "SYNTHETIC_AUTHORED_SECRET_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "preview_probe",
+        {
+            "api_key": secret,
+            "note": "x" * 5000,
+            "nested": {"token": secret, "visible": "ok"},
+        },
+    )
+
+    preview = provider.requests[0].arguments_preview
+    serialized = json.dumps(preview, ensure_ascii=False)
+    assert result.is_error is True
+    assert preview["api_key"] == "<redacted>"
+    assert preview["nested"]["token"] == "<redacted>"
+    assert preview["nested"]["visible"] == "ok"
+    assert secret not in serialized
+    assert len(serialized) <= 2048
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_missing_capability_prevents_module_import(tmp_path):
+    """TOOL-01: capability denial must happen before authored module import."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-tool-imported.txt"
+    tool_root = app.version_store.active_core_path("assistant") / "agent" / "tools" / "capability_probe"
+    tool_root.mkdir(parents=True)
+    (tool_root / "tool.yaml").write_text(
+        "entrypoint: module:run\n"
+        "description: Authored capability probe.\n"
+        "input_schema:\n"
+        "  type: object\n"
+        "  properties: {}\n"
+        "capabilities: []\n"
+        "capability: probe.missing\n"
+        "risk: medium\n"
+        "approval_policy: auto\n",
+        encoding="utf-8",
+    )
+    (tool_root / "module.py").write_text(
+        "from pathlib import Path\n\n"
+        f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+        "def run(ctx, arguments):\n"
+        "    return {'content': 'probe-ran'}\n",
+        encoding="utf-8",
+    )
+    approval_provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = approval_provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "capability_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+    assert result.data["executionStarted"] is False
+    assert result.content == "capability denied: probe.missing for agent/tools/capability_probe"
+    assert approval_provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_plural_capabilities_cannot_self_grant_singular_gate(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-self-grant.txt"
+    _install_authored_policy_tool(
+        app,
+        name="self_grant_probe",
+        capabilities=["probe.effect"],
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+            "def run(ctx, arguments):\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "self_grant_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert marker.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_global_auto_cannot_weaken_prompt_policy(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-global-auto.txt"
+    _install_authored_policy_tool(
+        app,
+        name="global_auto_probe",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.global_approval.tools["global_auto_probe"] = "auto"
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "global_auto_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_core_prompt_makes_auto_policy_stricter(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-core-prompt.txt"
+    _install_authored_policy_tool(
+        app,
+        name="core_prompt_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["approval"] = {"tools": {"core_prompt_probe": "prompt"}}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "core_prompt_probe", {})
+
+    assert result.is_error is True
+    assert marker.exists() is False
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_prompt_without_interactive_route_denies_before_import(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-no-route.txt"
+    _install_authored_policy_tool(
+        app,
+        name="no_route_probe",
+        module_source=(
+            "from pathlib import Path\n\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n\n"
+            "def run(ctx, arguments):\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "no_route_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["reason"] == "no_interactive_route"
+    assert marker.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_deny_policy_does_not_call_provider(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-deny.txt"
+    _install_authored_policy_tool(
+        app,
+        name="deny_probe",
+        approval_policy="deny",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "deny_probe", {})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert marker.exists() is False
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_auto_policy_executes_without_provider(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-auto.txt"
+    _install_authored_policy_tool(
+        app,
+        name="auto_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "    return {'content': 'probe-ran'}\n"
+        ),
+    )
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "auto_probe", {})
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+
+    assert result.is_error is False
+    assert result.content == "probe-ran"
+    assert marker.exists() is True
+    assert provider.requests == []
+    assert approval["automatic"] is True
+    assert approval["policy"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_session_allow_reuses_same_rule(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    _install_authored_policy_tool(
+        app,
+        name="session_allow_probe",
+        module_source="def run(ctx, arguments):\n    return {'content': 'probe-ran'}\n",
+    )
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    first = await _execute(app, core, "session_allow_probe", {"value": 1})
+    second = await _execute(app, core, "session_allow_probe", {"value": 2})
+
+    assert first.is_error is False
+    assert second.is_error is False
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_01_authored_exception_reports_execution_started(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    marker = workspace / "authored-exception.txt"
+    _install_authored_policy_tool(
+        app,
+        name="exception_probe",
+        approval_policy="auto",
+        module_source=(
+            "from pathlib import Path\n\n"
+            "def run(ctx, arguments):\n"
+            f"    Path({str(marker)!r}).write_text('started', encoding='utf-8')\n"
+            "    raise RuntimeError('synthetic authored failure')\n"
+        ),
+    )
+    core = _load_core_with(app, capabilities={"probe.effect": {}})
+
+    result = await _execute(app, core, "exception_probe", {})
+
+    assert marker.exists() is True
+    assert result.is_error is True
+    assert result.content == "synthetic authored failure"
+    assert result.data["executionStarted"] is True
 
 
 def test_default_assistant_exposes_all_functional_builtin_tools(tmp_path):
@@ -583,6 +1206,485 @@ async def test_terminal_command_success_denial_timeout_and_cwd_scope(tmp_path):
     assert (workspace / "denied.txt").exists()
 
 
+@pytest.mark.asyncio
+async def test_terminal_records_process_start_identity(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "printf identity", "cwd": "."})
+
+    assert result.is_error is False
+    process = result.data["process"]
+    assert process["pid"] > 0
+    assert process["spawn_id"].startswith("proc_")
+    assert process["start_identity"]
+    assert process["platform"] in {"posix", "windows", "other"}
+    if os.name == "posix":
+        assert process["process_group_id"] == process["pid"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_timeout_records_bounded_output_stats(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    payload_bytes = 200_000
+    code = (
+        "import sys, time; "
+        f"sys.stdout.write(chr(120) * {payload_bytes}); "
+        "sys.stdout.flush(); "
+        "time.sleep(3)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert result.data["output"]["stdout"]["total_bytes"] == payload_bytes
+    assert result.data["output"]["stdout"]["truncated"] is True
+    assert len(result.content) <= 12_100
+
+
+@pytest.mark.asyncio
+async def test_terminal_foreground_high_output_has_durable_artifact(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    payload_bytes = 50_000
+    code = f"import sys; sys.stdout.write(chr(120) * {payload_bytes})"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 5},
+    )
+
+    assert result.is_error is False
+    assert result.data["output"]["stdout"]["truncated"] is True
+    artifact = result.data["output_artifact"]
+    rows = app.runtime_store.query(
+        RuntimeQuery(table="artifacts", where={"artifact_id": artifact["artifact_id"]}, limit=1)
+    ).rows
+    assert len(rows) == 1
+    artifact_root = app.home / "runtime" / "artifacts" / artifact["root"]
+    stdout_path = artifact_root / artifact["streams"]["stdout"]
+    if os.name != "nt":
+        assert stdout_path.stat().st_mode & 0o777 == 0o600
+    assert stdout_path.read_text(encoding="utf-8") == "x" * payload_bytes
+    assert len(result.content) <= 12_100
+
+
+@pytest.mark.asyncio
+async def test_terminal_output_artifact_path_cannot_escape_runtime_home(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+
+    artifact_id, paths = app.tool_runtime._terminal_output_artifact_paths(
+        session_id="../../escaped",
+    )
+    artifacts_root = (app.home / "runtime" / "artifacts").resolve()
+
+    for path in paths.values():
+        assert path.resolve().is_relative_to(artifacts_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("artifact", encoding="utf-8")
+
+    descriptor = app.tool_runtime._register_terminal_output_artifact(
+        artifact_id=artifact_id,
+        session_id="../../escaped",
+        turn_id="turn_test",
+        paths={label: str(path) for label, path in paths.items()},
+        stats={
+            label: {"total_bytes": 8}
+            for label in paths
+        },
+    )
+
+    assert descriptor is not None
+    assert descriptor["root"].startswith("session-")
+    assert "escaped" not in descriptor["root"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        release_marker=release_marker,
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+
+    assert result.is_error is True
+    assert result.data.get("timed_out") is True, (result.content, result.data)
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(20):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.1)
+    assert not sentinel.exists(), "terminal timeout left a descendant process running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_foreground_cancellation_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    terminal_task = asyncio.create_task(
+        _execute(
+            app,
+            core,
+            "terminal",
+            {"command": command, "cwd": ".", "timeout_seconds": 10},
+        )
+    )
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "foreground child did not start"
+
+    terminal_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await terminal_task
+
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "foreground cancellation left a descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_escalates_and_closes_orphaned_pipes(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        ignore_term=True,
+        detach_stdio=False,
+    )
+
+    started_at = time.monotonic()
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert elapsed < 2.5
+    for _ in range(20):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "KILL escalation left a TERM-resistant descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_timeout_remains_active_after_leader_exits_with_pipe_open(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _exited_leader_with_inherited_pipe_command(sentinel=sentinel)
+
+    started_at = time.monotonic()
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "timeout_seconds": 1},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert result.is_error is True
+    assert result.data["timed_out"] is True
+    assert elapsed < 1.4
+    await asyncio.sleep(0.8)
+    assert not sentinel.exists(), "timeout left an inherited-pipe descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_cancel_stops_descendant_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background child did not start"
+
+    cancelled = await app.task_worker.cancel(task_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata["exit_reason"] == "cancelled"
+    assert cancelled.metadata["returncode"] is not None
+    debug_task = app.control_plane.read(task_id, view="debug")
+    assert debug_task["status"] == "cancelled"
+    cancelled_event = next(
+        event for event in debug_task["events"] if event["type"] == "task.cancelled"
+    )
+    assert cancelled_event["payload"]["metadata"]["exit_reason"] == "cancelled"
+    assert cancelled_event["payload"]["metadata"]["returncode"] is not None
+    runtime_events = app.runtime_store.query(
+        RuntimeQuery(table="runtime_events", order_by="seq", limit=1_000)
+    ).rows
+    cancelled_seq = next(
+        event["seq"]
+        for event in runtime_events
+        if event["type"] == "task.cancelled" and event["aggregate_id"] == task_id
+    )
+    completion_seq = next(
+        event["seq"]
+        for event in runtime_events
+        if event["type"] == "task.completion_ready"
+        and event["payload"]["task_id"] == task_id
+    )
+    assert cancelled_seq < completion_seq
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "terminal cancellation left a descendant process running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_cancel_stops_descendant_after_leader_exits(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "descendant-started.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _exited_leader_with_inherited_pipe_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background descendant did not start"
+    await asyncio.sleep(0.05)
+
+    cancelled = await app.task_worker.cancel(task_id)
+
+    assert cancelled.status == "cancelled"
+    await asyncio.sleep(1.5)
+    assert not sentinel.exists(), "background cancel trusted an exited leader and left its descendant running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_app_shutdown_cancels_background_terminal_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    task_id = started.data["task_id"]
+    for _ in range(20):
+        if started_marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started_marker.exists(), "background child did not start"
+
+    await app.close()
+
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(40):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "app shutdown left a terminal descendant running"
+    assert app.task_worker.get(task_id).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_rejected_after_task_worker_shutdown_is_not_started(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    await app.task_worker.shutdown()
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "printf not-started", "cwd": ".", "background": True},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "task_id" not in result.data
+    assert app.task_worker.active_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_app_shutdown_cancels_foreground_terminal_process_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    started_marker = workspace / "child-started.txt"
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        started_marker=started_marker,
+        release_marker=release_marker,
+    )
+    terminal_task = asyncio.create_task(
+        _execute(
+            app,
+            core,
+            "terminal",
+            {"command": command, "cwd": ".", "timeout_seconds": 10},
+        )
+    )
+    try:
+        for _ in range(20):
+            if started_marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started_marker.exists(), "foreground child did not start"
+
+        await app.close()
+
+        release_marker.write_text("release", encoding="utf-8")
+        for _ in range(20):
+            if sentinel.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert not sentinel.exists(), "app shutdown left a foreground descendant running"
+        with pytest.raises(asyncio.CancelledError):
+            await terminal_task
+    finally:
+        if not terminal_task.done():
+            terminal_task.cancel()
+            await asyncio.gather(terminal_task, return_exceptions=True)
+
+
 @pytest.mark.cross_platform
 def test_windows_terminal_printf_compat_formats_common_smoke_command():
     assert tool_runtime._format_windows_printf("%s\\n", ["hello"]) == "hello\n"
@@ -592,6 +1694,41 @@ def test_windows_terminal_printf_compat_formats_common_smoke_command():
     assert translated is not None
     assert "_format_windows_printf" in translated
     assert "printf" not in translated.split(" -c ", 1)[0]
+
+
+@pytest.mark.cross_platform
+def test_windows_terminal_compat_normalizes_posix_quoted_argv_command():
+    code = "import sys; sys.stdout.write('WINDOWS_ARGV_SENTINEL')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    translated = tool_runtime._windows_posix_compat_command(command)
+
+    assert translated is not None
+    completed = subprocess.run(
+        translated,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "WINDOWS_ARGV_SENTINEL"
+
+
+@pytest.mark.cross_platform
+def test_windows_terminal_printf_compat_expands_overlay_environment():
+    assert tool_runtime._format_windows_printf(
+        "%s",
+        ["$VALUE"],
+        env={"VALUE": "WINDOWS_ENV_SENTINEL"},
+    ) == "WINDOWS_ENV_SENTINEL"
+
+    translated = tool_runtime._windows_posix_compat_command(
+        'printf "%s" "$VALUE"'
+    )
+
+    assert translated is not None
+    assert "os.environ" in translated
 
 
 @pytest.mark.asyncio
@@ -611,7 +1748,16 @@ async def test_windows_terminal_executes_compat_command_but_approves_original(mo
         stdout = ""
         stderr = ""
 
-    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
         captured["command"] = command
         return Completed()
 
@@ -619,7 +1765,7 @@ async def test_windows_terminal_executes_compat_command_but_approves_original(mo
         "demiurge.tools.runtime._terminal_execution_command",
         lambda command: tool_runtime._windows_posix_compat_command(command) or command,
     )
-    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
 
     result = await _execute(app, core, "terminal", {"command": "rm target.txt", "cwd": "."})
 
@@ -644,17 +1790,442 @@ async def test_terminal_injects_runtime_timezone_env(monkeypatch, tmp_path):
         stdout = "ok"
         stderr = ""
 
-    def fake_run(command, *, cwd, env, shell, text, stdout, stderr, timeout, check):
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
         captured["env"] = env
         return Completed()
 
-    monkeypatch.setattr("demiurge.tools.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
 
     result = await _execute(app, core, "terminal", {"command": "printf ok", "cwd": "."})
 
     assert result.is_error is False
     assert captured["env"]["TZ"] == "Asia/Shanghai"
     assert "DEMIURGE_TIMEZONE" not in captured["env"]
+
+
+@pytest.mark.asyncio
+async def test_env_01_terminal_subprocess_does_not_inherit_host_secret(monkeypatch, tmp_path):
+    """ENV-01: terminal subprocesses do not inherit synthetic host secrets."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET"
+    sentinel = "SYNTHETIC_ENV_01_SECRET_SENTINEL"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "env"})
+
+    assert result.is_error is False
+    assert result.data["executionStarted"] is True
+    assert sentinel not in result.content
+
+
+@pytest.mark.asyncio
+async def test_env_01_project_code_execution_requires_approval(tmp_path):
+    """ENV-01: commands that execute workspace code are not automatically approved."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "test_env_01_project_code.py").write_text(
+        "def test_harmless_project_code():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "python -m pytest -q test_env_01_project_code.py"},
+    )
+    approval_events = [
+        event
+        for event in app.runner.event_log.tail(20)
+        if event["type"] == "approval.decided"
+    ]
+
+    assert {
+        "is_error": result.is_error,
+        "execution_started": result.data["executionStarted"],
+        "automatic": approval_events[-1]["automatic"],
+    } == {
+        "is_error": True,
+        "execution_started": False,
+        "automatic": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_requires_specific_capability_before_approval(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": variable,
+                    "expires_in_seconds": 30,
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert f"secret.bind:{variable}" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_wildcard_capability(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "secret.bind:*": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [{"source": f"env:{variable}"}],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert f"exact capability denied: secret.bind:{variable}" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_execution_control_target(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {"source": f"env:{variable}", "target": "PATH"}
+            ],
+        },
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "reserved execution environment target" in result.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_is_one_shot_redacted_and_auditable(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    sentinel = "SYNTHETIC_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = sentinel
+        stderr = ""
+
+    def fake_run(
+        command,
+        *,
+        cwd,
+        env,
+        timeout_seconds,
+        output_limit_chars,
+        cancel_event,
+        **kwargs,
+    ):
+        captured["bound_secret"] = env["BOUND_SECRET"]
+        captured["timeout"] = timeout_seconds
+        return Completed()
+
+    monkeypatch.setattr("demiurge.tools.runtime.run_foreground_process", fake_run)
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                    "expires_in_seconds": 5,
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is False
+    assert captured["bound_secret"] == sentinel
+    assert 0 < captured["timeout"] <= 5
+    assert sentinel not in result.content
+    assert "<redacted:BOUND_SECRET>" in result.content
+    assert app.approval_runtime.cached_allow_count == 0
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    first_decision = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    encoded_request = json.dumps(request.redacted_view(), ensure_ascii=False)
+    encoded_events = json.dumps(app.runner.event_log.tail(20), ensure_ascii=False)
+    encoded_audit = json.dumps(result.data["audit"], ensure_ascii=False)
+    assert sentinel not in encoded_request
+    assert sentinel not in encoded_events
+    assert sentinel not in encoded_audit
+    assert first_decision["decision"] == "allow"
+    assert first_decision["session_cacheable"] is False
+    assert request.arguments_preview["secret_bindings"][0]["source"] == f"env:{variable}"
+    assert result.data["audit"]["secret_bindings"][0]["target"] == "BOUND_SECRET"
+    assert result.data["audit"]["secret_bindings"][0]["capability"] == f"secret.bind:{variable}"
+    assert result.data["audit"]["secret_bindings"][0]["expires_at"]
+
+    denied_reuse = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                    "expires_in_seconds": 5,
+                }
+            ],
+        },
+    )
+    assert denied_reuse.is_error is True
+    assert denied_reuse.data["executionStarted"] is False
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_is_redacted_from_durable_output_artifact(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_SYNTHETIC_ARTIFACT_SECRET"
+    sentinel = "artifact-secret-sentinel"
+    monkeypatch.setenv(variable, sentinel)
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+    code = "import os, sys; sys.stdout.write(os.environ['BOUND_SECRET'])"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": command,
+            "cwd": ".",
+            "secret_bindings": [
+                {
+                    "source": f"env:{variable}",
+                    "target": "BOUND_SECRET",
+                }
+            ],
+        },
+    )
+
+    assert result.is_error is False
+    artifact = result.data["output_artifact"]
+    stdout_path = (
+        app.home
+        / "runtime"
+        / "artifacts"
+        / artifact["root"]
+        / artifact["streams"]["stdout"]
+    )
+    persisted = stdout_path.read_text(encoding="utf-8")
+    assert sentinel not in persisted
+    assert persisted == "<redacted:BOUND_SECRET>"
+
+
+@pytest.mark.asyncio
+async def test_terminal_secret_binding_rejects_expired_or_background_scope_before_approval(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    variable = "DEMIURGE_TERMINAL_BINDING_SECRET"
+    monkeypatch.setenv(variable, "SYNTHETIC_TERMINAL_BINDING_SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            f"secret.bind:{variable}": {"scope": "session"},
+        },
+    )
+    binding = {
+        "source": f"env:{variable}",
+        "target": variable,
+        "expires_in_seconds": 0,
+    }
+
+    expired = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "env", "secret_bindings": [binding]},
+    )
+    background = await _execute(
+        app,
+        core,
+        "terminal",
+        {
+            "command": "env",
+            "background": True,
+            "secret_bindings": [{**binding, "expires_in_seconds": 30}],
+        },
+    )
+
+    assert expired.is_error is True
+    assert expired.data["executionStarted"] is False
+    assert "expires_in_seconds" in expired.content
+    assert background.is_error is True
+    assert background.data["executionStarted"] is False
+    assert "background" in background.content
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_binds_actual_environment_cwd_and_executable(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET", "SECRET")
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "env", "cwd": "."})
+
+    audit = result.data["audit"]
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    preview = approval["arguments_preview"]["execution"]
+    assert audit["cwd"] == str(workspace.resolve())
+    assert audit["resolved_executable"]
+    assert audit["shell_executable"]
+    assert audit["command_executable"]
+    assert "PATH" in audit["env_keys"]
+    assert "DEMIURGE_ENV_01_SYNTHETIC_PROVIDER_SECRET" not in audit["env_keys"]
+    assert preview["cwd"] == audit["cwd"]
+    assert preview["env_keys"] == audit["env_keys"]
+    assert preview["resolved_executable"] == audit["resolved_executable"]
+    assert preview["command_executable"] == audit["command_executable"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_explicit_environment_overlay_requires_approval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": "printf safe", "env": {"VISIBLE_SETTING": "synthetic-value"}},
+    )
+
+    approval = next(
+        event
+        for event in reversed(app.runner.event_log.tail(20))
+        if event["type"] == "approval.decided"
+    )
+    encoded = json.dumps(approval, ensure_ascii=False)
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert approval["automatic"] is False
+    assert approval["arguments_preview"]["execution"]["overlay_env_keys"] == [
+        "VISIBLE_SETTING"
+    ]
+    assert "synthetic-value" not in encoded
+    assert not (tmp_path / "home/terminal-home").exists()
 
 
 @pytest.mark.asyncio
@@ -676,6 +2247,169 @@ async def test_safe_terminal_command_auto_approves_without_prompt(tmp_path):
     assert approval_events[0]["risk"] == "low"
 
 
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        pytest.param('echo "$(printf {sentinel})"', id="double-quoted"),
+        pytest.param("echo ＇$(printf {sentinel})＇", id="fullwidth-apostrophe"),
+        pytest.param("echo ＼$(printf {sentinel})", id="fullwidth-backslash"),
+        pytest.param("echo $\\\n(printf {sentinel})", id="line-continuation"),
+        pytest.param("printf {sentinel}_%s $[1+1]", id="legacy-arithmetic"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sec_01_terminal_does_not_auto_execute_shell_expansion(tmp_path, command_template):
+    """SEC-01: runtime must not auto-execute a harmless expansion sentinel."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    sentinel = "DEMIURGE_SEC_01_SUBSTITUTION_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command_template.format(sentinel=sentinel)},
+    )
+
+    assert {
+        "is_error": result.is_error,
+        "execution_started": result.data["executionStarted"],
+        "sentinel_exposed": sentinel in result.content,
+    } == {
+        "is_error": True,
+        "execution_started": False,
+        "sentinel_exposed": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sec_01_global_auto_does_not_override_shell_expansion_guard(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    sentinel = "DEMIURGE_SEC_01_GLOBAL_AUTO_SENTINEL"
+
+    result = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": f'echo "$(printf {sentinel})"'},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert sentinel not in result.content
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_sec_01_session_allow_is_scoped_to_the_exact_expansion_command(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    first = await _execute(app, core, "terminal", {"command": 'echo "$(printf FIRST_SENTINEL)"'})
+    second = await _execute(app, core, "terminal", {"command": 'echo "$(printf SECOND_SENTINEL)"'})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all("SENTINEL" not in request.cache_key for request in provider.requests)
+    assert all(request.cache_key.startswith("terminal:terminal.exec:command-substitution:") for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_session_allow_is_scoped_to_the_exact_shell_eval(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    first = await _execute(app, core, "terminal", {"command": "sh -c 'printf FIRST_SENTINEL'"})
+    second = await _execute(app, core, "terminal", {"command": "sh -c 'printf SECOND_SENTINEL'"})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all(request.cache_key.startswith("terminal:terminal.exec:shell-eval:") for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_expansion_approval_fingerprint_includes_env_overlay(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = 'printf "%s" "$VALUE"'
+
+    first = await _execute(app, core, "terminal", {"command": command, "env": {"VALUE": "FIRST_SENTINEL"}})
+    second = await _execute(app, core, "terminal", {"command": command, "env": {"VALUE": "SECOND_SENTINEL"}})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "FIRST_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "SECOND_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+    assert all("SENTINEL" not in request.cache_key for request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_sec_01_expansion_approval_fingerprint_includes_execution_options(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.approval_runtime.provider = provider
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+    command = 'printf "%s" "$VALUE"'
+    env = {"VALUE": "OPTIONS_SENTINEL"}
+
+    first = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 1})
+    second = await _execute(app, core, "terminal", {"command": command, "env": env, "timeout_seconds": 2})
+
+    assert first.is_error is False
+    assert first.data["executionStarted"] is True
+    assert "OPTIONS_SENTINEL" in first.content
+    assert second.is_error is True
+    assert second.data["executionStarted"] is False
+    assert "OPTIONS_SENTINEL" not in second.content
+    assert len(provider.requests) == 2
+    assert provider.requests[0].cache_key != provider.requests[1].cache_key
+
+
 @pytest.mark.asyncio
 async def test_global_terminal_deny_blocks_safe_commands(tmp_path):
     workspace = tmp_path / "workspace"
@@ -695,6 +2429,34 @@ async def test_global_terminal_deny_blocks_safe_commands(tmp_path):
     assert result.is_error is True
     assert result.data["executionStarted"] is False
     assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_resolved_terminal_deny_blocks_safe_commands(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(
+        home=tmp_path / "home",
+        provider_name="fake",
+        workspace=workspace,
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={"terminal.exec": {"scope": "workspace"}},
+        tool_metadata={
+            "terminal": {
+                "approval_policy": "deny",
+            }
+        },
+    )
+
+    result = await _execute(app, core, "terminal", {"command": "printf no"})
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert "no" not in result.content
 
 
 @pytest.mark.asyncio
@@ -723,6 +2485,108 @@ async def test_terminal_background_task_can_be_listed_and_waited(tmp_path):
     assert task["status"] == "succeeded"
     assert task["notify_policy"] == "completion_event"
     assert any("ready" in line["text"] for line in task["logs"])
+
+
+@pytest.mark.asyncio
+async def test_terminal_background_drains_large_unbroken_output_in_bounded_chunks(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    payload_bytes = 200_000
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote(f'import sys; sys.stdout.write(chr(120) * {payload_bytes})')}"
+    )
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    record = await app.task_worker.wait(started.data["task_id"], timeout_seconds=5)
+    logs = app.task_worker.log(record.task_id)
+
+    assert record.status == "succeeded", (record.summary, logs[-3:], record.metadata)
+    assert logs
+    assert max(len(line) for line in logs) <= 8_200
+    assert record.metadata["output"]["stdout"]["total_bytes"] == payload_bytes
+    assert record.metadata["output"]["stdout"]["truncated"] is True
+    artifact = record.metadata["output_artifact"]
+    assert record.result_ref == f"artifact:{artifact['artifact_id']}"
+    rows = app.runtime_store.query(
+        RuntimeQuery(table="artifacts", where={"artifact_id": artifact["artifact_id"]}, limit=1)
+    ).rows
+    assert len(rows) == 1
+    stdout_path = (
+        app.home
+        / "runtime"
+        / "artifacts"
+        / artifact["root"]
+        / artifact["streams"]["stdout"]
+    )
+    if os.name != "nt":
+        assert stdout_path.stat().st_mode & 0o777 == 0o600
+    assert stdout_path.stat().st_size == payload_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+async def test_terminal_background_output_persistence_failure_stops_process_tree(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release_marker = workspace / "release-descendant.txt"
+    sentinel = workspace / "descendant-survived.txt"
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = _load_core_with(
+        app,
+        capabilities={
+            "terminal.exec": {"scope": "workspace"},
+            "task.control": {},
+        },
+    )
+    command = _descendant_tree_command(
+        sentinel=sentinel,
+        release_marker=release_marker,
+        detach_stdio=False,
+        emit_output=True,
+    )
+    original_append_log = app.task_worker.append_log
+    append_calls = 0
+
+    def fail_first_output_log(task_id, text):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 1:
+            raise RuntimeError("synthetic task-log persistence failure")
+        return original_append_log(task_id, text)
+
+    monkeypatch.setattr(app.task_worker, "append_log", fail_first_output_log)
+
+    started = await _execute(
+        app,
+        core,
+        "terminal",
+        {"command": command, "cwd": ".", "background": True},
+    )
+    record = await app.task_worker.wait(started.data["task_id"], timeout_seconds=5)
+
+    assert record.status == "failed"
+    release_marker.write_text("release", encoding="utf-8")
+    for _ in range(30):
+        if sentinel.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not sentinel.exists(), "task-log failure left the terminal process tree running"
 
 
 @pytest.mark.asyncio
@@ -766,6 +2630,7 @@ async def test_task_list_is_scoped_to_current_session(tmp_path):
         owner_turn_id="turn_test",
         source_tool="terminal",
         task_factory=quick_task,
+        metadata={"private_token": "task-list-private-metadata"},
     )
     other = app.task_worker.start_task(
         kind="terminal.exec",
@@ -776,11 +2641,23 @@ async def test_task_list_is_scoped_to_current_session(tmp_path):
     )
     await app.task_worker.wait(current.task_id, timeout_seconds=5)
     await app.task_worker.wait(other.task_id, timeout_seconds=5)
+    app.task_worker.set_result_ref(current.task_id, "file:///operator/private/task-list.json")
 
     listed = await _execute(app, core, "task_list", {"kind": "terminal.exec"})
 
     assert current.task_id in listed.content
     assert other.task_id not in listed.content
+    assert "task-list-private-metadata" not in listed.content
+    assert "operator/private/task-list.json" not in listed.content
+    assert set(listed.data["tasks"][0]) == {
+        "task_id",
+        "kind",
+        "status",
+        "running",
+        "started_at",
+        "completed_at",
+        "summary",
+    }
 
 
 def test_task_list_schema_does_not_expose_owner_session_id(tmp_path):
@@ -801,8 +2678,369 @@ def test_skill_manage_schema_exposes_file_level_actions():
 
 
 @pytest.mark.asyncio
+async def test_tool_03_evolve_promote_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: registry prompt denial must precede core promotion."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "evolve_core")
+
+    result = await _execute(app, core, "evolve_core", {"action": "promote", "run_id": "run_probe"})
+    approval_events = [
+        event["type"]
+        for event in app.runner.event_log.tail(20)
+        if event["type"].startswith("approval.")
+    ]
+
+    assert entry.source == "builtin"
+    assert entry.capability == "tool.call:evolve_core"
+    assert entry.risk == "high"
+    assert entry.approval_policy == "prompt"
+    assert fake.promote_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert approval_events == ["approval.requested", "approval.decided", "approval.denied"]
+
+
+@pytest.mark.asyncio
+async def test_tool_03_rollback_denial_prevents_version_store_call(tmp_path):
+    """TOOL-03: registry prompt denial must precede core rollback."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeVersionStore()
+    app.tool_runtime.version_store = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "rollback_core", {"target": "previous"})
+
+    assert fake.rollback_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_background_denial_prevents_task_creation(tmp_path):
+    """TOOL-03: background evolution must be approved before task creation."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeTaskWorker()
+    app.tool_runtime.task_worker = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "start", "goal": "safe fake goal", "background": True},
+    )
+
+    assert fake.start_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_foreground_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: foreground evolution must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "start", "goal": "safe fake goal", "background": False},
+    )
+
+    assert fake.start_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_review_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: evolve review must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
+
+    assert fake.review_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_discard_denial_prevents_adapter_call(tmp_path):
+    """TOOL-03: evolve discard must be approved before adapter execution."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_allow_uses_resolved_entry_and_safe_preview(tmp_path):
+    """TOOL-03: approval requests must preserve resolved registry policy safely."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {
+            "action": "promote",
+            "run_id": "run_probe",
+            "reason": "r" * 5000,
+            "secret_token": "synthetic-secret",
+        },
+    )
+
+    assert fake.promote_calls == 1
+    assert fake.manual_review_token == "mcp-review:synthetic"
+    assert result.is_error is False
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    assert request.tool_name == "evolve_core"
+    assert request.capability == "tool.call:evolve_core"
+    assert request.risk == "high"
+    assert request.policy == "prompt"
+    assert request.action == "evolve.promote"
+    assert request.arguments_preview["mcp_security_review"][
+        "manual_review_required"
+    ] is True
+    assert request.arguments_preview["mcp_security_review"][
+        "changed_paths"
+    ] == ["assistant/agent/mcp/docs.yaml"]
+    assert request.target == "assistant:run_probe"
+    assert request.arguments_preview["secret_token"] == "<redacted>"
+    assert len(request.arguments_preview["reason"]) <= 300
+    assert "[truncated 4744 chars]" in request.arguments_preview["reason"]
+    assert len(json.dumps(request.arguments_preview, ensure_ascii=False)) <= 2048
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_promote_supports_adapter_without_security_preview(
+    tmp_path,
+):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    fake.promotion_security_preview = None
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(
+        app.version_store.active_core_path("assistant")
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "evolve_core",
+        {"action": "promote", "run_id": "run_probe"},
+    )
+
+    assert fake.promote_calls == 1
+    assert fake.manual_review_token is None
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_tool_03_evolve_session_allow_is_cached_per_mutation_action(tmp_path):
+    """TOOL-03: a session allow may repeat one rule but not authorize another action."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["always_allow_for_session", "deny"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    first = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
+    cached = await _execute(app, core, "evolve_core", {"action": "review", "run_id": "run_probe"})
+    different_action = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert first.is_error is False
+    assert cached.is_error is False
+    assert different_action.is_error is True
+    assert fake.review_calls == 2
+    assert fake.discard_calls == 0
+    assert [request.action for request in provider.requests] == ["evolve.review", "evolve.discard"]
+    assert different_action.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_global_auto_cannot_weaken_builtin_prompt_policy(tmp_path):
+    """TOOL-03: global policy may tighten but cannot lower the registry baseline."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["deny"])
+    app.tool_runtime.evolution_runtime = fake
+    app.tool_runtime.global_approval.tools["evolve_core"] = "auto"
+    app.approval_runtime.provider = provider
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert len(provider.requests) == 1
+    assert provider.requests[0].policy == "prompt"
+    assert result.data["approval"]["value"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_core_deny_prevents_adapter_without_calling_provider(tmp_path):
+    """TOOL-03: a stricter core policy must deny before interactive routing."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["approval"] = {"tools": {"evolve_core": "deny"}}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.data["approval"]["value"] == "deny"
+    assert result.data["approval"]["reason"] == "denied by approval policy"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_no_interactive_route_denies_before_adapter_call(tmp_path):
+    """TOOL-03: prompt policy without a route must fail closed."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    app.tool_runtime.evolution_runtime = fake
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert result.data["approval"]["value"] == "deny"
+    assert result.data["approval"]["reason"] == "no_interactive_route"
+
+
+@pytest.mark.asyncio
+async def test_tool_03_capability_failure_precedes_approval_and_adapter(tmp_path):
+    """TOOL-03: the resolved singular capability remains the first mutation gate."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["capabilities"]["defaults"].pop("tool.call:evolve_core", None)
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert "capability denied: tool.call:evolve_core" in result.content
+
+
+@pytest.mark.asyncio
+async def test_tool_03_builtin_dispatch_uses_the_resolved_metadata_override(tmp_path):
+    """TOOL-03: visibility, capability, risk, policy, and dispatch share one entry."""
+
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    fake = FakeEvolutionAdapter()
+    provider = RecordingApprovalProvider(["allow"])
+    app.tool_runtime.evolution_runtime = fake
+    app.approval_runtime.provider = provider
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw["tools"]["metadata"]["evolve_core"] = {
+        "risk": "critical",
+        "capability": "tool.call:core_mutation_probe",
+        "approval_policy": "deny",
+    }
+    defaults = raw["capabilities"]["defaults"]
+    defaults.pop("tool.call:evolve_core", None)
+    defaults["tool.call:core_mutation_probe"] = {"scope": "core"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    entry = next(item for item in app.tool_runtime.registry_for(core) if item.name == "evolve_core")
+
+    result = await _execute(app, core, "evolve_core", {"action": "discard", "run_id": "run_probe"})
+    approval = next(
+        event
+        for event in app.runner.event_log.tail(20)
+        if event["type"] == "approval.decided"
+    )
+
+    assert (entry.capability, entry.risk, entry.approval_policy) == (
+        "tool.call:core_mutation_probe",
+        "critical",
+        "deny",
+    )
+    assert fake.discard_calls == 0
+    assert provider.requests == []
+    assert result.data["approval"]["value"] == "deny"
+    assert {
+        "tool_name": approval["tool_name"],
+        "capability": approval["capability"],
+        "risk": approval["risk"],
+        "policy": approval["policy"],
+        "action": approval["action"],
+    } == {
+        "tool_name": "evolve_core",
+        "capability": "tool.call:core_mutation_probe",
+        "risk": "critical",
+        "policy": "deny",
+        "action": "evolve.discard",
+    }
+
+
+@pytest.mark.asyncio
 async def test_evolve_core_background_creates_candidate_without_promoting(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     before = app.version_store.active_pointer("assistant").active_revision
 
@@ -836,6 +3074,7 @@ async def test_evolve_core_background_creates_candidate_without_promoting(tmp_pa
 @pytest.mark.asyncio
 async def test_rollback_core_returns_error_when_live_tree_has_local_edits(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     soul = app.version_store.active_core_path("assistant") / "agent" / "SOUL.md"
     soul.write_text(soul.read_text(encoding="utf-8") + "\n\nCommitted setup edit.\n", encoding="utf-8")
     app.version_store.core_repository.commit_live(reason="test setup", summary="test setup")
@@ -1184,6 +3423,7 @@ async def test_skill_manage_uses_configured_skills_root(tmp_path):
 @pytest.mark.asyncio
 async def test_session_search_reads_existing_messages_without_history_write(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     await app.runner.run_turn("alpha search target")
     core = app.core_loader.load(app.version_store.active_core_path("assistant"))
     before = app.session_runtime.message_count(app.runner.session_id)
@@ -1194,6 +3434,210 @@ async def test_session_search_reads_existing_messages_without_history_write(tmp_
     assert result.is_error is False
     assert "alpha search target" in result.content
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_session_search_requires_session_read_capability(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {}).pop(
+        "session.read",
+        None,
+    )
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "secret history", "limit": 5},
+    )
+
+    assert result.is_error is True
+    assert result.data == {
+        "executionStarted": False,
+        "denial": "capability",
+    }
+    assert result.content == "capability denied: session.read for host"
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_core_metadata_cannot_replace_host_capability(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    defaults = raw.setdefault("capabilities", {}).setdefault("defaults", {})
+    defaults.pop("session.read", None)
+    defaults["task.control"] = {"scope": "session"}
+    raw.setdefault("tools", {}).setdefault("metadata", {})["session_search"] = {
+        "capability": "task.control",
+        "risk": "medium",
+        "approval_policy": "prompt",
+    }
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "secret history", "limit": 5},
+    )
+
+    assert result.is_error is True
+    assert result.data == {
+        "executionStarted": False,
+        "denial": "capability",
+    }
+    assert result.content == "capability denied: session.read for host"
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_approval_denial_prevents_history_read(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    manifest_path = app.version_store.active_core_path("assistant") / "agent.yaml"
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {})[
+        "session.read"
+    ] = {"scope": "session"}
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    turn = _turn(core)
+    principal_scope = _principal_scope(app, core, turn)
+    app.session_runtime.append_message(
+        turn.session_id,
+        role="user",
+        content="private history marker",
+    )
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+
+    result = await app.runner.execute_call(
+        ToolCall(
+            name="session_search",
+            arguments={"query": "private", "limit": 5},
+            id="call_session_search",
+        ),
+        core=core,
+        turn=turn,
+        capability=CapabilityFacade(core),
+        principal_scope=principal_scope,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert "private history marker" not in result.content
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_does_not_read_another_principal_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    scope_a = _conversation_scope(app, core, "a")
+    scope_b = _conversation_scope(app, core, "b")
+    app.session_runtime.append_message(
+        scope_a.session_id,
+        role="user",
+        content="alpha visible marker",
+    )
+    app.session_runtime.append_message(
+        scope_b.session_id,
+        role="user",
+        content="alpha private marker",
+    )
+    turn_a = TurnContext(
+        session_id=scope_a.session_id,
+        turn_id="turn_a",
+        core_id=core.core_id,
+        core_revision=core.revision,
+        user_input=AgentInput(content="search alpha"),
+    )
+
+    result = await app.runner.execute_call(
+        ToolCall(
+            name="session_search",
+            arguments={"query": "alpha", "limit": 10},
+            id="call_session_search",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+    browse = await app.runner.execute_call(
+        ToolCall(
+            name="session_search",
+            arguments={"limit": 10},
+            id="call_session_browse",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+    direct = await app.runner.execute_call(
+        ToolCall(
+            name="session_search",
+            arguments={"session_id": scope_b.session_id, "limit": 10},
+            id="call_session_direct",
+        ),
+        core=core,
+        turn=turn_a,
+        capability=CapabilityFacade(core),
+        principal_scope=scope_a,
+        emit_event=app.runner.event_log.emit,
+    )
+
+    assert result.is_error is False
+    assert "alpha visible marker" in result.content
+    assert "alpha private marker" not in result.content
+    assert scope_b.session_id not in result.content
+    assert browse.is_error is False
+    assert scope_a.session_id in browse.content
+    assert scope_b.session_id not in browse.content
+    assert direct.is_error is True
+    assert "alpha private marker" not in direct.content
+    await app.close()
+
+
+@pytest.mark.asyncio
+async def test_session_search_operator_scope_does_not_browse_legacy_history(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
+    core = app.core_loader.load(app.version_store.active_core_path("assistant"))
+    app.session_runtime.create_session(
+        session_id="session_legacy_search",
+        core_id="assistant",
+        core_revision="legacy-rev",
+    )
+    app.session_runtime.append_message(
+        "session_legacy_search",
+        role="user",
+        content="legacy-search-private-marker",
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "session_search",
+        {"query": "legacy-search-private-marker", "limit": 10},
+    )
+    browse = await _execute(app, core, "session_search", {"limit": 50})
+
+    assert result.is_error is False
+    assert "legacy-search-private-marker" not in result.content
+    assert "session_legacy_search" not in browse.content
+    await app.close()
 
 
 @pytest.mark.asyncio
@@ -1218,19 +3662,29 @@ async def test_web_extract_requires_approval_and_truncates(tmp_path, monkeypatch
         def read(self, size):
             return ("x" * 100).encode("utf-8")[:size]
 
-    def fake_urlopen(request, timeout):
-        return Response()
+        def geturl(self):
+            return "https://example.com/final"
+
+    class Opener:
+        def open(self, request, timeout):
+            return Response()
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
     core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
 
     app.approval_runtime.provider = StaticApprovalProvider("deny")
     denied = await _execute(app, core, "web_extract", {"url": "https://example.com"})
 
     app.approval_runtime.provider = StaticApprovalProvider("allow")
-    monkeypatch.setattr("demiurge.tools.runtime.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        lambda *handlers: Opener(),
+    )
     fetched = await _execute(app, core, "web_extract", {"url": "https://example.com", "max_chars": 20})
 
     assert denied.is_error is True
@@ -1239,6 +3693,155 @@ async def test_web_extract_requires_approval_and_truncates(tmp_path, monkeypatch
     assert fetched.content == "x" * 20
     assert fetched.model_output == "x" * 20
     assert fetched.data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_extract_rejects_metadata_target_before_approval_or_socket(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+    socket_calls = 0
+
+    def forbidden_build_opener(*args, **kwargs):
+        nonlocal socket_calls
+        socket_calls += 1
+        raise AssertionError("unsafe URL reached urllib")
+
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        forbidden_build_opener,
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {"url": "http://169.254.169.254/latest/meta-data"},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["url_policy"]["reason"] == "metadata_address"
+    assert provider.requests == []
+    assert socket_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_web_extract_revalidates_redirect_before_following_private_target(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["allow"])
+    app.approval_runtime.provider = provider
+    resolver_calls = 0
+
+    def resolver(hostname: str, port: int) -> tuple[str, ...]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls <= 2:
+            return ("93.184.216.34",)
+        return ("10.0.0.8",)
+
+    app.tool_runtime.url_policy = UrlPolicy(resolver=resolver)
+    followed = False
+
+    class RedirectingOpener:
+        def __init__(self, handler):
+            self.handler = handler
+
+        def open(self, request, timeout):
+            nonlocal followed
+            self.handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {"location": "/private"},
+                "https://public.example/private?token=SENSITIVE_REDIRECT_SECRET",
+            )
+            followed = True
+            raise AssertionError("unsafe redirect was followed")
+
+    monkeypatch.setattr(
+        "demiurge.tools.runtime.urllib.request.build_opener",
+        lambda *handlers: RedirectingOpener(
+            next(
+                handler
+                for handler in handlers
+                if isinstance(handler, UrlPolicyRedirectHandler)
+            )
+        ),
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {"url": "https://public.example/start"},
+    )
+
+    assert result.is_error is True
+    assert result.data["executionStarted"] is True
+    assert result.data["url_policy"]["reason"] == "private_address"
+    assert followed is False
+    assert resolver_calls == 3
+    assert len(provider.requests) == 1
+    assert "SENSITIVE_REDIRECT_SECRET" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_web_extract_approval_uses_secret_safe_url_policy_summary(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app = create_app(home=tmp_path / "home", provider_name="fake", workspace=workspace)
+    core = _load_core_with(app, capabilities={"network.fetch": {"requires_approval": True}})
+    provider = RecordingApprovalProvider(["deny"])
+    app.approval_runtime.provider = provider
+    app.tool_runtime.url_policy = UrlPolicy(
+        resolver=lambda hostname, port: ("93.184.216.34",),
+    )
+
+    result = await _execute(
+        app,
+        core,
+        "web_extract",
+        {
+            "url": (
+                "https://user:SENSITIVE_PASSWORD@public.example/"
+                "SENSITIVE_PATH?token=SENSITIVE_QUERY"
+            )
+        },
+    )
+
+    request = provider.requests[0]
+    serialized = json.dumps(
+        {
+            "summary": request.summary,
+            "target": request.target,
+            "arguments_preview": request.arguments_preview,
+            "cache_key": request.cache_key,
+            "result": result.content,
+        },
+        sort_keys=True,
+    )
+    assert request.target == "https://public.example"
+    assert request.arguments_preview == {"url": "https://public.example"}
+    assert request.cache_key.startswith("web_extract:network.fetch:")
+    assert "user" not in serialized
+    assert "SENSITIVE" not in serialized
+
+
+def test_host_shares_one_url_policy_between_web_and_mcp_adapters(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+
+    assert app.tool_runtime.url_policy is app.tool_runtime.mcp_runtime.url_policy
 
 
 @pytest.mark.asyncio
@@ -1333,7 +3936,7 @@ async def test_core_approval_config_cannot_lower_host_safety_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
+async def test_global_approval_auto_cannot_lower_prompt_command_guard_decision(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     doomed = workspace / "doomed.txt"
@@ -1350,9 +3953,37 @@ async def test_global_approval_config_can_auto_allow_prompt_tools(tmp_path):
 
     result = await _execute(app, core, "terminal", {"command": "rm doomed.txt"})
 
-    assert result.is_error is False
-    assert result.data["executionStarted"] is True
-    assert not doomed.exists()
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert doomed.exists()
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_global_approval_auto_cannot_execute_unknown_terminal_command(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    fallback = home / "agents" / "agent.yaml"
+    raw_fallback = yaml.safe_load(fallback.read_text(encoding="utf-8"))
+    raw_fallback["approval"] = {"tools": {"terminal": "auto"}}
+    fallback.write_text(yaml.safe_dump(raw_fallback, sort_keys=False), encoding="utf-8")
+    app = create_app(home=home, provider_name="fake", workspace=workspace)
+    app.approval_runtime.provider = StaticApprovalProvider("deny")
+    core = _load_core_with(app, capabilities={"terminal.exec": {"scope": "workspace"}})
+
+    result = await _execute(app, core, "terminal", {"command": "id"})
+
+    approval = next(event for event in reversed(app.runner.event_log.tail(20)) if event["type"] == "approval.decided")
+    assert result.is_error is True
+    assert result.data["executionStarted"] is False
+    assert result.data["approval"]["value"] == "deny"
+    assert approval["automatic"] is False
+    assert approval["policy"] == "prompt"
 
 
 @pytest.mark.asyncio

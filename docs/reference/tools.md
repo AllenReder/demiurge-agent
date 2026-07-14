@@ -11,9 +11,16 @@ The host builds the visible tool registry for each turn from:
 - authored tools under `slots.tools`
 - MCP tools discovered from `slots.mcp`
 
-The Agent Core declares tool surfaces. The host owns selection, dispatch,
-capability checks, approvals, workspace scope, task control, and result
-conversion.
+The Agent Core declares tool surfaces. The Host is the product owner for
+selection, dispatch, capability checks, approvals, workspace scope, task
+control, and result conversion. One per-turn resolved catalog now produces the
+provider definitions, `tools_list` display, effective approval metadata, and
+the exact adapter-bound `EffectRequest` used by dispatch. Builtin, authored,
+and MCP calls no longer perform a second source lookup by global tool name.
+MCP connect/discovery now has its own `mcp.connect:<server>` capability and
+approval gate before client construction; a later call uses the separate
+connection-bound `mcp.call:<server>` path.
+`web_extract`, MCP HTTP, and callback URL validation share one Host URL policy.
 
 ## Built-In Toolsets
 
@@ -25,12 +32,21 @@ conversion.
 
 Unknown toolset names fail core loading.
 
+## Tool Name Uniqueness
+
+Model-visible tool names must be unique across builtin, authored, and MCP
+sources. A builtin/authored collision fails core loading. A collision involving
+a discovered MCP tool fails final catalog construction. The diagnostic includes
+both provenances and requires a rename; the Host never silently prefers the
+builtin implementation. This is an intentional alpha breaking change for cores
+that previously relied on ambiguous names.
+
 ## Built-In Tool Metadata
 
 Built-in tools have host-defined risk, capability, and approval defaults. For
 example:
 
-| Tool | Capability | Default approval |
+| Tool | Capability | Registry approval metadata |
 | --- | --- | --- |
 | `read_file` | `fs.read` | `auto` for non-sensitive workspace reads; `prompt` outside workspace or for sensitive paths |
 | `write_file` | `fs.write` | `prompt` |
@@ -41,8 +57,109 @@ example:
 | `evolve_core` | `tool.call:evolve_core` | `prompt` |
 | `rollback_core` | `tool.call:rollback_core` | `prompt` |
 
-Core metadata can make built-in tools stricter, but it cannot lower their risk
-or weaken their approval policy.
+Before terminal approval, the Host lexically reviews the execution-faithful raw
+command and additional ANSI-stripped/NFKC detection candidates. Normalization
+adds checks; it never replaces the raw shell interpretation. Only recognized
+literal commands classified `allow/low` can use automatic approval. Command
+substitution (`$()` and backticks), process substitution, parameter/arithmetic
+expansion (including legacy `$[...]`), malformed shell forms, and unknown
+commands remain `prompt/high`; a global `auto` fallback cannot lower that
+command-guard decision. Known destructive payloads are blocked before the
+approval provider is called. Single-quoted or escaped metacharacters remain
+literal when the scanner can prove that interpretation.
+
+This lexical guard is containment, not a shell sandbox or a complete shell AST.
+An explicitly approved command still runs through the Host terminal runtime.
+Ambiguous shell approvals use a fingerprint of the command, cwd, explicit
+environment overlay, and execution options such as foreground/background mode
+and timeout. One approval therefore does not authorize a different execution
+shape through the same coarse rule key. This fingerprint does not replace the
+separate session/principal ownership contract. Ambiguous shell text, including
+expansion syntax inside comments, can conservatively require approval.
+
+### Terminal environment and secret bindings
+
+Terminal subprocesses are built from an environment allowlist rather than
+`os.environ`. The Host preserves basic execution/locale/temp variables, sets
+`HOME` to a dedicated runtime directory, applies the configured timezone, and
+omits provider, channel, MCP, cloud, and desktop credentials. Explicit `env`
+overlays require approval and are included in the command fingerprint by key
+and value; approval/event views expose keys only.
+
+Commands such as `pytest`, `python -m pytest`, `uv run`, `npm run`, `cargo
+test/build`, and `make` can execute repository code, plugins, or build scripts,
+so they are `prompt/high` rather than unconditional safe commands. Literal
+read-only commands remain eligible for automatic approval. Execution-capable
+forms such as `rg --pre`, `find -exec`, GNU `sed` `e`, and Git external
+diff/textconv/pager options are also `prompt/high`. Git auto-approval is limited
+to explicit read-only shapes; remote network operations and branch, tag, remote,
+or worktree mutations require approval, as do `--output` file writes. Common
+embedded write modes in otherwise read-oriented commands and inline environment
+assignments also require approval; system-time mutation is never treated as a
+literal read. Auto-approved executable names must be bare commands rather than
+workspace-relative paths. Wrapper or shell cwd changes, command files, embedded
+read-path options, and unquoted filename expansion require approval. Common
+credential paths such as `.npmrc`, `.pypirc`, `.netrc`, `.aws/`, `.kube/`,
+`.ssh/`, and `.env*` are sensitive defense-in-depth paths.
+
+`terminal.secret_bindings` is an array of objects with `source` (`env:<NAME>`),
+optional `target`, and optional `expires_in_seconds`. Each source requires the
+exact `secret.bind:<NAME>` capability. Bindings are foreground-only, cannot
+outlive the terminal timeout, never reuse a session approval, and are removed
+from the Host-side environment after completion. Approval/audit views record
+source, target, capability, expiry, actual cwd, environment keys, the resolved
+shell/process executable, and the best-effort command executable without
+values. Exact bound values in
+stdout/stderr are replaced with `<redacted:TARGET>`.
+
+Wildcard grants such as `secret.bind:*` are rejected. Binding targets also
+cannot replace execution-control variables such as `PATH`, `HOME`, `COMSPEC`,
+loader injection variables, language runtime search paths, or option hooks.
+The earliest binding expiry clamps the foreground subprocess timeout; expiry
+therefore terminates the owned process tree even when the requested command
+timeout is longer.
+
+### Terminal process and output lifecycle
+
+Foreground and background terminal calls start under one Host-owned process
+lifecycle and both are registered with Host shutdown. POSIX starts a new
+session/process group, sends TERM, waits for a short grace deadline, then sends
+KILL. Windows creates the process suspended, assigns a kill-on-close Job Object,
+then resumes it. Timeout, foreground turn cancellation,
+`task_control(command="cancel")`, and Host shutdown terminate the owned tree.
+Cancellation is single-flight, and its terminal state is persisted before its
+completion notification. Drain or task-log persistence failure also triggers
+tree cleanup before a failed task is published.
+
+The Host records the PID, process-group id, platform, a unique `spawn_id`, and
+an OS process-start marker. Live cancellation closes over that process handle
+and revalidates the marker before PID/PGID fallback termination rather than
+trusting a caller-supplied or stale PID. This covers descendants that stay
+in the owned OS process tree; it is not a hardened sandbox against approved
+`host_shared` code that deliberately creates a new session or otherwise
+escapes the platform tree boundary.
+
+Stdout and stderr are drained continuously. Foreground results retain at most
+12,000 characters per stream as a tail plus total byte/character and truncation
+metadata; they do not first materialize complete output in memory. Background
+terminal output is drained in bounded chunks into `task_logs`, with the same
+bounded tail statistics stored in operator/debug task metadata. In parallel,
+full streams are written incrementally to private durable terminal artifacts
+and registered in the runtime artifact projection; a background task's
+`result_ref` points to that artifact. Exact bound secrets are redacted before
+artifact persistence. The artifact descriptor contains an opaque `root` and
+stream-relative paths; the Host derives that root from session identity and
+enforces containment below `runtime/artifacts`. If artifact open, write, flush,
+or sync fails, the operation fails after continuing to drain the child pipes.
+Durable log retention remains a separate runtime-store policy.
+
+This filtering and redaction are not OS isolation. An approved command still
+runs through the Host shell, and transformed/encoded secret output is outside
+the exact-value redactor's guarantee.
+
+For builtin handlers that use approval resolution, core metadata can make the
+effective policy stricter but cannot lower risk or weaken the registry policy.
+This includes every `evolve_core` action and `rollback_core`.
 
 ## Authored Tools
 
@@ -63,9 +180,9 @@ Accepted `tool.yaml` fields are:
 | `entrypoint` | `module:execute` | Callable loaded from the tool directory. |
 | `description` | `""` | Model-visible tool description. |
 | `input_schema` | `{}` | Model-visible JSON schema. |
-| `risk` | `medium` | Registry risk metadata. |
-| `capability` | `null` | Primary registry capability for this tool's approval metadata. |
-| `approval_policy` | `prompt` | Tool-level approval metadata. |
+| `risk` | `medium` | Registry risk used by authored approval resolution. |
+| `capability` | `null` | Primary registry capability required before module import when non-null. |
+| `approval_policy` | `prompt` | Tool-level policy resolved before module import and invocation. |
 | `display_policy` | `summary` | Operator display hint. |
 | `model_output_policy` | `content` | Model-output conversion hint. |
 | `capabilities` | `[]` | Capabilities the implementation may require through `ctx.capability.require(...)`. |
@@ -75,8 +192,22 @@ Accepted `tool.yaml` fields are:
 
 The singular `capability` and the `capabilities` list are separate:
 
-- `capability` identifies the tool in registry and approval metadata.
+- `capability` identifies the tool in registry and approval metadata and must
+  be granted by core defaults or path-scoped Host capability configuration.
 - `capabilities` grants effect capabilities to the tool implementation.
+
+The plural list cannot satisfy the singular dispatcher gate; an authored tool
+cannot authorize its own invocation by repeating the singular value there.
+
+The authored dispatcher resolves the same registry entry used for definitions,
+requires its singular `capability` when present, then applies its `risk` and
+`approval_policy` plus stricter core/global approval policy before importing and
+calling the entrypoint. Approval requests use a bounded, field-name-redacted
+argument preview rather than raw arguments. The `capabilities` list remains
+separate and is enforced when authored code or an SDK client calls
+`ctx.capability.require(...)`.
+Because `host_shared` Python can also call ordinary Python/OS APIs directly,
+these declarations are not a sandbox.
 
 Authored tools are not listed in `agent/pipelines.yaml`.
 
@@ -103,11 +234,26 @@ The host passes a `ToolContext` with:
 Return `demiurge.sdk.ToolResult`, a compatible dict, or any value that can be
 converted to text.
 
+For error results, `executionStarted`, `denial`, and `approval` are reserved
+Host lifecycle fields. Authored values for those keys are ignored: once the
+entrypoint is invoked, the Host records `executionStarted: true` and derives
+the typed effect status from its own capability, approval, and dispatch state.
+
 `ToolResult.content` is the default model-visible result. `model_output`
 overrides what the model sees, and `display_output` overrides what operator UIs
 and channels show in tool cards. For `terminal`, display output includes the
 executed command and cwd before the exit code, stdout, and stderr; the
 model-visible result keeps the existing exit/output shape.
+
+Raw tool arguments and raw adapter results are internal execution data. Before
+any observable result is returned, the Host discovers known secret values from
+structured fields and explicit bindings, URL userinfo/query values,
+authorization headers, command options, and exception text. It produces five
+views: model history/provider replay, operator tool cards, EventLog events,
+durable SQLite records, and Host debug. Event/durable views preserve safe source
+metadata while removing values; debug may include a one-way value fingerprint.
+If redaction fails, every view becomes a fixed failed result containing
+`<redaction-failed>` instead of raw content.
 
 ## MCP Tools
 
@@ -119,14 +265,50 @@ agent/mcp/<server_id>.yaml
 
 For each enabled server, the host:
 
-1. Starts or connects to the server.
-2. Lists server tools.
-3. Applies `tools.include` and `tools.exclude`.
-4. Builds safe names such as `docs__search_docs`.
-5. Exposes those tools through the same registry as built-in and authored tools.
+1. Requires `mcp.connect:<server_id>` and resolves connect approval.
+2. Starts or connects to the server only when connect authority allows it.
+3. Lists server tools.
+4. Applies `tools.include` and `tools.exclude`.
+5. Builds safe names such as `docs__search_docs`.
+6. Exposes those tools through the same registry as built-in and authored tools.
 
-MCP tool calls require the server capability, defaulting to
+MCP tool calls then require the separate server call capability, defaulting to
 `mcp.call:<server_id>` unless the server manifest sets `capability`.
+
+Current behavior bounds `list_tools()` by `connect_timeout_seconds`; a timeout
+closes that server connection, records a diagnostic, and continues to later
+servers. Discovery uses one runtime-wide limit of four concurrent server
+operations across sessions and preserves deterministic naming. Discovery
+failure diagnostics use a per-server 30-second negative-cache TTL; within one
+catalog authority, expiry retries only that server and preserves healthy peer
+connections. Connect denial is rechecked per server on the next turn.
+Per-server manifest fingerprints support targeted reconnects only while the
+overall authority/core snapshot is unchanged. Catalog identity also binds
+principal, capability snapshot, core revision, and effective connect policy;
+changes to those bindings evict the whole stale catalog. Configured cwd must resolve inside the Host workspace before
+approval/client construction.
+Declaration changes close the older connection and require connect reapproval
+before a replacement client starts. Removing all declarations closes remaining
+connections. Starting or resuming another session tracks eviction of the
+previous session, while explicit eviction closes only the selected session's
+catalogs. Delegated children use their Host-issued authority and close MCP
+connections when the child run ends. Connect approval previews expose safe
+launch metadata without environment, header, URL credential/query, or argument
+secret values. Stdio children use the shared allowlisted environment plus only
+manifest-declared env entries after connect approval. Streamable HTTP validates
+the initial URL and every request/redirect, requires every DNS answer to be
+safe, and pins the connection to a validated address while preserving the
+original Host/TLS SNI. DNS failures and malformed answers fail closed. Agent
+Core declarations cannot opt into private targets or ambient HTTP proxies.
+Every MCP HTTP request emits a secret-safe `mcp.url_decision` event with
+`phase: request`, so redirect hops and the final attempted origin/address
+remain auditable.
+
+MCP call/discovery exceptions are redacted with their known arguments,
+environment, and header sources. Stdio stderr is captured temporarily, read
+through a bounded 12,000-character window on connection close, redacted, and
+appended to the private `logs/mcp-stderr.log` (`0700` directory and `0600` file
+on POSIX).
 
 ## Tool Metadata Overrides
 
@@ -183,9 +365,22 @@ does not hot-reload the active core.
 | `promote` | `run_id` | Reruns gates and advances `refs/demiurge/previous` and `refs/demiurge/live`. |
 | `discard` | `run_id` | Removes the run worktree and metadata. |
 
-`promote` is a high-risk operation and requires approval. `rollback_core`
-creates a new rollback commit for the live Agent Core tree; the new revision
-takes effect on the next turn.
+Every action is classified as high risk with registry `prompt` policy.
+When MCP declarations change, review records the exact changed declaration
+paths plus a secret-safe before/after security summary and content-bound
+`mcp-review:<sha256>` token. The model-visible promote path binds that token to
+the normal promote approval; CLI/TUI callers must return the exact printed
+token. Missing or stale confirmation does not move Git refs.
+`evolve_core` requires its resolved capability and approval before foreground
+adapter calls or background task creation; `rollback_core` does the same before
+calling the version store. Approval rules are action-scoped, so a cached
+allow for `promote` does not authorize `discard`, `review`, `start`, or
+rollback. Session allows are bound to the Host-issued principal, session, core,
+effective policy, and capability/core snapshot fingerprint. They expire after a
+bounded TTL and are invalidated when the owner is revoked, the session is
+replaced, the core changes, or the app closes. `rollback_core` creates a new
+rollback commit for the live Agent Core tree; the new revision takes effect on
+the next turn.
 
 ## Child Agent Controls
 
@@ -235,8 +430,9 @@ pipeline. Invalid ids raise `ValueError` from authored `ctx.agents` calls.
 | non-empty list | Allow only the listed tool ids from the child core's configured tools. |
 
 Tool selection only narrows the child core's configured tools; it does not grant
-missing tools or bypass capabilities and approval policy. Invalid tool ids raise
-`ValueError` from authored `ctx.agents` calls.
+missing tools or capability grants. Builtin, authored, and MCP call policy still
+applies in a child turn. Invalid tool ids raise `ValueError` from authored
+`ctx.agents` calls.
 
 `use_bootstrap` defaults to `False`. When false, the child turn does not run
 bootstrap slots, create a bootstrap snapshot, or inject an existing bootstrap
@@ -273,19 +469,46 @@ These calls submit host-owned background tasks:
 
 Background task tools return a `task_id`. Use `task_status`,
 `task_control(command="cancel")`, `yield_until`, or `task_list` to inspect or
-control them. If `yield_until` returns a terminal or blocked status, that tool
-result consumes the task's pending completion notification, so the same result
+control them. Detail, wait, completion consumption, and cancel are restricted
+by the admitted `PrincipalScope`; an unowned id is indistinguishable from a
+missing id. These model-facing tools return bounded status/result fields only;
+they do not accept operator/debug views or return task logs. Full log inspection
+uses a separate Host/operator surface. Model task payloads omit owner ids,
+write scope, arbitrary metadata, and result references, and bound the summary.
+`task_list` uses the same projection and remains restricted to the current turn
+session. `/subagents` uses the same owner checks.
+If `yield_until`
+returns a terminal or blocked status, that tool result consumes the task's
+pending completion notification, so the same result
 does not also trigger a separate background-completion turn. If `yield_until`
 reaches its timeout while the task is still running, it returns the current task
 status with `timed_out=true`; the timeout does not mean the task failed.
 `task_list` is scoped to the current session.
 
+Cancelling a background terminal task first seals its in-memory state as
+cancelled, terminates the owned process tree, records return code and exit
+reason in the durable terminal event, and only then emits completion-ready.
+Closing the Host applies the same cancellation path to active runtime tasks.
+
+## Session History Search
+
+`session_search` requires the `session.read` capability and resolved
+`prompt/medium` approval before reading history. Its explicit-session, browse,
+and full-text paths all use owner-scoped `SessionRuntime` queries. Ordinary
+channel authority can read only the currently bound session. The local operator
+may cross sessions only through its explicit audited operator scope, and a
+missing or unauthorized session id produces the same external error.
+Ambiguous `legacy_local` sessions remain hidden from normal owned queries and
+are available only to the dedicated, reasoned, durably audited Host/operator
+repair/status path.
+
 Foreground `/stop` cancels only the foreground turn. It does not cancel
 background tasks.
 
 `agent.spawn` task metadata includes both the requested child slot controls and
-the resolved child pipeline slots after the child turn runs. Use `task_status`
-or `yield_until` to inspect those fields.
+the resolved child pipeline slots after the child turn runs. This operator-only
+metadata is intentionally absent from model task payloads; inspect it through
+the owner-checked `/subagents <task_id>` Host/operator detail surface.
 
 ## Package-Provided Web Search
 
@@ -296,7 +519,15 @@ Both packages expose the model-facing tool name `web_search`. Because both
 packages target `agent/tools/web_search`, install only one web search provider
 package in a core at a time.
 
-`web_extract` remains the built-in tool for fetching a known URL.
+`web_extract` remains the built-in tool for fetching a known URL. Before
+approval it reduces the URL to a credential-free origin summary; after approval
+it revalidates the URL and each redirect, then connects only to the validated
+address. The returned metadata records the final safe origin and resolved
+addresses, not userinfo, path, query, or fragment values. Private, loopback,
+link-local, CGNAT, metadata, multicast, reserved, unspecified, DNS-failure, and
+mixed-answer targets fail closed. Legacy numeric, hexadecimal, octal, and short
+IPv4 host forms are normalized before policy evaluation rather than delegated
+to platform-specific resolver interpretation.
 
 ## Inspect Visible Tools
 

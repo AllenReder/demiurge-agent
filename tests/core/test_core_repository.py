@@ -6,6 +6,7 @@ import yaml
 from demiurge.app import source_agents_root
 from demiurge.core_repository import LIVE_REF, PREVIOUS_REF, CoreRepository, CoreRepositoryError, reject_dependency_files, reject_generated_artifacts
 from demiurge.gates import GatePhase, GateResult
+from demiurge.storage import VersionStore
 
 
 def passing_gates() -> GateResult:
@@ -65,6 +66,31 @@ def test_core_repository_change_set_proposal_promote_discard_and_rollback(tmp_pa
     run_root = disposable.run_root
     disposable.discard()
     assert not run_root.exists()
+
+
+def test_version_store_rollback_notifies_core_policy_change(tmp_path):
+    invalidated_cores = []
+    store = VersionStore(
+        tmp_path / "home",
+        on_core_changed=invalidated_cores.append,
+    )
+    store.initialize_repository(source_agents_root(), reason="test init")
+    change_set = store.core_repository.begin_change_set(
+        kind="evolve",
+        reason="edit soul",
+        run_id="run_notify",
+    )
+    soul = change_set.agents_root / "assistant" / "agent" / "SOUL.md"
+    soul.write_text(
+        soul.read_text(encoding="utf-8") + "\n\nNotify rollback.\n",
+        encoding="utf-8",
+    )
+    change_set.commit_proposal(reason="review")
+    store.core_repository.promote_run("run_notify", reason="promote")
+
+    store.rollback("assistant", target="previous", reason="rollback")
+
+    assert invalidated_cores == ["assistant"]
 
 
 def test_core_repository_change_set_cleans_generated_artifacts_before_proposal(tmp_path):

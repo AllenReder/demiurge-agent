@@ -7,6 +7,7 @@ pytestmark = pytest.mark.slow_integration
 
 from demiurge.app import create_app, source_agents_root
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.providers import LLMResponse, ToolCall
 
 
@@ -294,6 +295,17 @@ async def test_new_session_can_replace_conversation_binding(tmp_path):
         source="123",
         replace_conversation_binding=True,
     )
+    owner = app.runtime_store.query(
+        RuntimeQuery(
+            table="session_owners",
+            where={"session_id": new_session_id},
+            limit=1,
+        )
+    ).rows[0]
+
+    assert owner["owner_kind"] == "conversation"
+    assert owner["conversation_key"] == "telegram:dm:123"
+
     followup = await runtime.handle(
         InteractionInbound(channel="telegram", text="fresh chat message", source="123", conversation_key="telegram:dm:123")
     )

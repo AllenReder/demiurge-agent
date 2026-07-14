@@ -61,7 +61,7 @@ class RunnerBootstrapSlotHost:
         return self.runner.slot_runtime
 
     def emit_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
-        return self.runner.event_log.emit(event_type, **payload)
+        return self.runner.emit_turn_event(event_type, **payload)
 
 
 class BootstrapSlotRuntime:
@@ -79,7 +79,14 @@ class BootstrapSlotRuntime:
 
         pipeline = core.bootstrap_pipeline
         serial_slots = list(pipeline.serial) if pipeline is not None else []
-        self.host.emit_event(
+
+        def emit(event_type: str, **payload: Any) -> dict[str, Any]:
+            return self.host.emit_event(
+                event_type,
+                **{**payload, "session_id": request.session_id},
+            )
+
+        emit(
             "bootstrap.started",
             core_id=core.core_id,
             core_revision=request.core_revision,
@@ -89,7 +96,7 @@ class BootstrapSlotRuntime:
         fragments: list[str] = []
         try:
             for slot in serial_slots:
-                self.host.emit_event(
+                emit(
                     "bootstrap.module.started",
                     core_id=core.core_id,
                     core_revision=request.core_revision,
@@ -114,7 +121,7 @@ class BootstrapSlotRuntime:
                     )
                     outcome.raise_for_error()
                     if outcome.value is not None:
-                        self.host.emit_event(
+                        emit(
                             "bootstrap.module.return_ignored",
                             core_id=core.core_id,
                             core_revision=request.core_revision,
@@ -123,7 +130,7 @@ class BootstrapSlotRuntime:
                             **request.interaction_metadata,
                         )
                     fragments.extend(client.fragments)
-                    self.host.emit_event(
+                    emit(
                         "bootstrap.module.completed",
                         core_id=core.core_id,
                         core_revision=request.core_revision,
@@ -134,7 +141,7 @@ class BootstrapSlotRuntime:
                         **request.interaction_metadata,
                     )
                 except Exception as exc:
-                    self.host.emit_event(
+                    emit(
                         "bootstrap.module.failed",
                         core_id=core.core_id,
                         core_revision=request.core_revision,
@@ -147,7 +154,7 @@ class BootstrapSlotRuntime:
                         raise
             content = "\n\n".join(fragments)
             self.host.session_runtime.write_bootstrap_context(request.session_id, content)
-            self.host.emit_event(
+            emit(
                 "bootstrap.completed",
                 core_id=core.core_id,
                 core_revision=request.core_revision,
@@ -156,7 +163,7 @@ class BootstrapSlotRuntime:
                 **request.interaction_metadata,
             )
         except Exception as exc:
-            self.host.emit_event(
+            emit(
                 "bootstrap.failed",
                 core_id=core.core_id,
                 core_revision=request.core_revision,

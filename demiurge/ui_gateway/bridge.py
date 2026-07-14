@@ -42,6 +42,11 @@ from demiurge.sdk import AgentInput, TurnContext
 from demiurge.scheduler import SchedulerService, start_scheduler_for_app
 from demiurge.security.approval import ApprovalDecision, ApprovalRequest
 from demiurge.security.capabilities import CapabilityFacade
+from demiurge.security.redaction import (
+    RedactionView,
+    SecretValue,
+    redact_exception,
+)
 from demiurge.slash import SlashCommand, SlashCommandSpec, help_text_for_surface, parse_slash_command, specs_for_surface
 from demiurge.storage import EventLog, SessionRecord
 from demiurge.ui_gateway.protocol import JsonEventSink
@@ -215,7 +220,10 @@ class OperatorGatewayRuntime:
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
         pending = self._pending_approvals.open(request)
-        payload = {"approval_id": pending.approval_id, "request": asdict(request)}
+        payload = {
+            "approval_id": pending.approval_id,
+            "request": request.redacted_view(),
+        }
         await self.emit("operator.approval.opened", payload)
         await self._emit_status()
         try:
@@ -333,8 +341,28 @@ class OperatorGatewayRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._last_error = str(exc)
-            await self.emit("operator.error", {"message": str(exc), "source": "operator_gateway"})
+            api_key = getattr(self.app.runner.provider, "api_key", None)
+            secrets = (
+                (
+                    SecretValue(
+                        value=api_key,
+                        name="API_KEY",
+                        source="provider.api_key",
+                    ),
+                )
+                if isinstance(api_key, str) and api_key
+                else ()
+            )
+            safe_error = redact_exception(
+                exc,
+                view=RedactionView.OPERATOR,
+                secrets=secrets,
+            )
+            self._last_error = safe_error
+            await self.emit(
+                "operator.error",
+                {"message": safe_error, "source": "operator_gateway"},
+            )
 
     async def _after_turn(self, state: ConversationIngressState, drained: bool) -> None:
         await self._emit_status()
@@ -534,6 +562,13 @@ class OperatorGatewayRuntime:
 
     async def _tools(self, _: str) -> bool:
         core = await self._active_core()
+        turn = TurnContext(
+            session_id=self.app.runner.session_id,
+            turn_id="tui_tools",
+            core_id=core.core_id,
+            core_revision=core.revision,
+            user_input=AgentInput(content="/tools"),
+        )
         rows = [
             (
                 entry.name,
@@ -543,7 +578,7 @@ class OperatorGatewayRuntime:
                 entry.approval_policy,
                 f"{entry.model_output_policy}/{entry.display_policy}",
             )
-            for entry in self.app.tool_runtime.registry_for(core)
+            for entry in self.app.tool_runtime.registry_for(core, turn=turn)
         ]
         await self._emit_command_output("tools", format_table(["name", "source", "risk", "capability", "approval", "output"], rows, title="Tools"))
         return True
@@ -560,14 +595,14 @@ class OperatorGatewayRuntime:
         return True
 
     async def _skill(self, args: str) -> bool:
-        parts = args.split(maxsplit=1)
+        parts = args.split(maxsplit=2)
         if not parts:
             await self._emit_command_output("skill", "usage: /skill <name> [file_path]")
             return True
         name = parts[0]
         file_path = parts[1] if len(parts) > 1 else None
         core = await self._active_core()
-        result = await self.app.tool_runtime.execute(
+        result = await self.app.runner.execute_call(
             ToolCall(
                 name="skill_view",
                 arguments={"name": name, **({"file_path": file_path} if file_path else {})},
@@ -576,6 +611,7 @@ class OperatorGatewayRuntime:
             core=core,
             turn=self._tui_turn(core),
             capability=CapabilityFacade(core),
+            principal_scope=self.app.runner.principal_scope,
             emit_event=self.app.runner.event_log.emit,
         )
         content = result.content if result.is_error else str(result.data.get("content") if isinstance(result.data, dict) else result.content)
@@ -636,9 +672,12 @@ class OperatorGatewayRuntime:
         return True
 
     async def _evolve(self, args: str) -> bool:
-        parts = args.split(maxsplit=1)
+        parts = args.split(maxsplit=2)
         if not parts:
-            await self._emit_command_output("evolve", "usage: /evolve <goal>|review <run_id>|promote <run_id>|discard <run_id>")
+            await self._emit_command_output(
+                "evolve",
+                "usage: /evolve <goal>|review <run_id>|promote <run_id> [manual_review_token]|discard <run_id>",
+            )
             return True
         action = parts[0]
         if action in {"review", "promote", "discard"}:
@@ -648,15 +687,31 @@ class OperatorGatewayRuntime:
                 return True
             if action == "review":
                 result = await self.app.evolution_runtime.review(run_id, target_core_id=self.app.runner.core_id)
-                await self._emit_command_output(
-                    "evolve",
+                manual_review_token = result.gates.review_token
+                token_line = (
+                    f"manual review token: {manual_review_token}\n"
+                    if manual_review_token
+                    else ""
+                )
+                message = (
                     f"review {run_id}: {'passed' if result.passed else 'failed'}\n"
                     f"proposal: {result.proposal_revision or '(none)'}\n"
-                    f"report: {result.report_path}",
+                    f"{token_line}"
+                    f"report: {result.report_path}"
+                )
+                await self._emit_command_output(
+                    "evolve",
+                    message,
                 )
                 return True
             if action == "promote":
-                result = await self.app.evolution_runtime.promote(run_id, target_core_id=self.app.runner.core_id, reason="tui promote")
+                manual_review_token = parts[2].strip() if len(parts) > 2 else None
+                result = await self.app.evolution_runtime.promote(
+                    run_id,
+                    target_core_id=self.app.runner.core_id,
+                    reason="tui promote",
+                    manual_review_token=manual_review_token,
+                )
                 await self._emit_command_output("evolve", f"{result.summary}\nreport: {result.report_path}")
                 return True
             payload = self.app.evolution_runtime.discard(run_id)
@@ -700,12 +755,14 @@ class OperatorGatewayRuntime:
                 summary = "; ".join(f"{phase.name}: {phase.detail}" for phase in failures[:5]) or "unknown gate failure"
                 raise PackageOperationError("package gates failed: " + summary)
             commit = repository.commit_live(reason=f"package {action}", summary=f"package {action}")
+            self.app.approval_runtime.invalidate_core(result.core_id)
             return replace(result, revision=commit.revision, previous_revision=commit.previous_revision)
 
     async def _sessions(self, args: str) -> bool:
         limit = int(args.strip()) if args.strip().isdigit() else 20
         view = build_session_list_view(
             self.app.session_runtime,
+            principal_scope=self.app.runner.principal_scope,
             core_id=self.app.runner.core_id,
             active_session_id=self.app.runner.session_id,
             limit=limit,
@@ -716,7 +773,7 @@ class OperatorGatewayRuntime:
     async def _subagents(self, args: str) -> bool:
         text = await subagents_command_text(
             self.app.task_worker,
-            session_id=self.app.runner.session_id,
+            principal_scope=self.app.runner.principal_scope,
             args=args,
         )
         await self._emit_command_output("subagents", text)
@@ -726,6 +783,7 @@ class OperatorGatewayRuntime:
         raw = args.strip()
         view = build_session_list_view(
             self.app.session_runtime,
+            principal_scope=self.app.runner.principal_scope,
             core_id=self.app.runner.core_id,
             active_session_id=self.app.runner.session_id,
             limit=20,
@@ -758,6 +816,17 @@ class OperatorGatewayRuntime:
             await self._emit_notice(resolution.message or "invalid session selection", level="error")
             return True
         assert resolution.session_id is not None
+        try:
+            self.app.session_runtime.get_owned_session(
+                self.app.runner.principal_scope,
+                resolution.session_id,
+            )
+        except (FileNotFoundError, PermissionError):
+            await self._emit_notice(
+                "session not found or not authorized",
+                level="error",
+            )
+            return True
         await self._resume_session(resolution.session_id)
         return True
 
@@ -773,7 +842,13 @@ class OperatorGatewayRuntime:
         await self._emit_status()
 
     async def _new(self, _: str) -> bool:
-        result = await start_bound_session(self.app.runner, self._route_binding, channel="tui", source="local")
+        result = await start_bound_session(
+            self.app.runner,
+            self._route_binding,
+            channel="tui",
+            principal_key="local-operator",
+            source="local",
+        )
         if not result.ok:
             await self._emit_notice(result.message, level="error")
             return True
@@ -899,6 +974,7 @@ class OperatorGatewayRuntime:
             channel="tui",
             text=text,
             source="local",
+            principal_key="local-operator",
             reply_to=None,
             conversation_key=self._conversation_key(),
         )

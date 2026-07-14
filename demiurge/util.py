@@ -7,6 +7,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from demiurge.security.private_files import (
+    append_private_jsonl,
+    atomic_write_private_text as _atomic_write_private_text,
+    ensure_private_directory,
+)
+
 
 def utc_id(prefix: str = "") -> str:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -26,14 +32,23 @@ def read_json(path: Path, default: Any) -> Any:
 
 
 def write_json(path: Path, value: Any) -> None:
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_private_json(path, value)
+
+
+def atomic_write_private_text(path: Path, value: str, *, mode: int = 0o600) -> None:
+    _atomic_write_private_text(path, value, mode=mode)
+
+
+def atomic_write_private_json(path: Path, value: Any, *, mode: int = 0o600) -> None:
+    atomic_write_private_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        mode=mode,
+    )
 
 
 def append_jsonl(path: Path, value: Any) -> None:
-    ensure_dir(path.parent)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+    append_private_jsonl(path, value)
 
 
 def project_root_from_cwd() -> Path:

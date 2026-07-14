@@ -4,6 +4,7 @@ import asyncio
 import codecs
 import difflib
 import fnmatch
+import hashlib
 import inspect
 import json
 import os
@@ -12,11 +13,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timedelta, timezone
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from demiurge.runtime.tasks import (
     RuntimeTaskConflictError,
@@ -24,12 +29,37 @@ from demiurge.runtime.tasks import (
     RuntimeTaskKindError,
     RuntimeTaskOutcome,
     RuntimeTaskWorker,
+    RuntimeTaskWorkerClosedError,
 )
 from demiurge.mcp import McpRuntime, McpToolInfo
-from demiurge.security.approval import ApprovalRequest, ApprovalRuntime
-from demiurge.security.capabilities import CapabilityDenied, CapabilityFacade
+from demiurge.mcp.security import (
+    mcp_connect_security_summary,
+    mcp_server_fingerprint,
+)
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeEvent
+from demiurge.security.approval import ApprovalRequest, ApprovalRuntime, ApprovalScope
+from demiurge.security.capabilities import (
+    CapabilityDenied,
+    CapabilityFacade,
+    CapabilitySnapshot,
+)
 from demiurge.security.command_guard import CommandGuardDecision, review_command
-from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, SlotDefinition, ToolMetadataInfo, load_slot_callable
+from demiurge.security.redaction import REDACTION_FAILED, SecretRedactor
+from demiurge.security.subprocess_env import (
+    ENV_NAME_RE,
+    RESERVED_SUBPROCESS_ENV_TARGETS,
+    build_sanitized_subprocess_env,
+    ensure_subprocess_home,
+)
+from demiurge.security.url_policy import (
+    UnsafeUrlError,
+    UrlDecision,
+    UrlPolicy,
+    UrlPolicyConnectionHandler,
+    UrlPolicyRedirectHandler,
+)
+from demiurge.core import ApprovalInfo, CoreLoadError, CoreLoader, LoadedCore, McpServerDefinition, SlotDefinition, ToolMetadataInfo, load_slot_callable
 from demiurge.core_repository import CoreRepositoryError
 from demiurge.providers import ToolCall, ToolDefinition
 from demiurge.sdk import ToolContext, ToolResult, TurnContext
@@ -41,21 +71,163 @@ from demiurge.tools.registry import (
     APPROVAL_ORDER,
     BUILTIN_TOOL_DEFINITIONS,
     BUILTIN_TOOL_METADATA,
+    EffectRequest,
+    EffectResult,
     RISK_ORDER,
-    ToolRegistryEntry,
+    ResolvedEffectCatalog,
+    ResolvedEffectEntry,
 )
-from demiurge.util import read_json, require_relative_path, write_json
+from demiurge.tools.process_lifecycle import (
+    BoundedProcessOutput,
+    ProcessExecutionCancelled,
+    ProcessLifecycleOwner,
+    bind_process_identity,
+    capture_async_process_identity,
+    drain_async_process_output,
+    process_group_spawn_kwargs,
+    release_process_resources,
+    run_foreground_process,
+    terminate_async_process_tree,
+)
+from demiurge.util import read_json, require_relative_path, utc_id, write_json
 from demiurge.security.workspace import (
     DEFAULT_READ_LIMIT_CHARS,
     DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+    ResolvedPath,
     WorkspaceScope,
     WorkspaceScopeError,
     truncate_text,
 )
 
+if TYPE_CHECKING:
+    from demiurge.runtime.turn_pipeline import TurnExecutionContext
+
+
+_AUTHORED_PREVIEW_MAX_CHARS = 2048
+_AUTHORED_PREVIEW_MAX_ITEMS = 20
+_AUTHORED_PREVIEW_MAX_DEPTH = 4
+_AUTHORED_PREVIEW_MAX_STRING = 256
+_SENSITIVE_ARGUMENT_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "private_key",
+    "secret",
+    "token",
+)
+_ADAPTER_SPECIFIC_APPROVAL_TOOLS = {
+    "evolve_core",
+    "patch",
+    "read_file",
+    "rollback_core",
+    "schedule_manage",
+    "search_files",
+    "session_search",
+    "skill_manage",
+    "terminal",
+    "web_extract",
+    "write_file",
+}
+
+
+def _safe_authored_arguments_preview(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    preview = _sanitize_authored_preview_value(dict(arguments), depth=0)
+    if not isinstance(preview, dict):
+        return {"value": preview}
+    serialized = json.dumps(preview, ensure_ascii=False, sort_keys=True)
+    if len(serialized) <= _AUTHORED_PREVIEW_MAX_CHARS:
+        return preview
+    bounded: dict[str, Any] = {}
+    for key, value in preview.items():
+        candidate = {**bounded, key: value, "_truncated": True}
+        if len(json.dumps(candidate, ensure_ascii=False, sort_keys=True)) <= _AUTHORED_PREVIEW_MAX_CHARS:
+            bounded[key] = value
+        else:
+            bounded[key] = "<truncated>"
+    bounded["_truncated"] = True
+    while len(json.dumps(bounded, ensure_ascii=False, sort_keys=True)) > _AUTHORED_PREVIEW_MAX_CHARS:
+        removable = next((key for key in reversed(bounded) if key != "_truncated"), None)
+        if removable is None:
+            break
+        bounded.pop(removable)
+    return bounded
+
+
+def _sanitize_authored_preview_value(value: Any, *, depth: int) -> Any:
+    if depth >= _AUTHORED_PREVIEW_MAX_DEPTH:
+        return "<truncated>"
+    if isinstance(value, Mapping):
+        preview: dict[str, Any] = {}
+        items = list(value.items())
+        for raw_key, child in items[:_AUTHORED_PREVIEW_MAX_ITEMS]:
+            key = truncate_text(str(raw_key), limit=80)
+            if _is_sensitive_argument_key(key):
+                preview[key] = "<redacted>"
+            else:
+                preview[key] = _sanitize_authored_preview_value(child, depth=depth + 1)
+        if len(items) > _AUTHORED_PREVIEW_MAX_ITEMS:
+            preview["_truncated_items"] = len(items) - _AUTHORED_PREVIEW_MAX_ITEMS
+        return preview
+    if isinstance(value, (list, tuple)):
+        items = [
+            _sanitize_authored_preview_value(item, depth=depth + 1)
+            for item in value[:_AUTHORED_PREVIEW_MAX_ITEMS]
+        ]
+        if len(value) > _AUTHORED_PREVIEW_MAX_ITEMS:
+            items.append(f"<truncated {len(value) - _AUTHORED_PREVIEW_MAX_ITEMS} items>")
+        return items
+    if isinstance(value, str):
+        return truncate_text(value, limit=_AUTHORED_PREVIEW_MAX_STRING)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return truncate_text(repr(value), limit=_AUTHORED_PREVIEW_MAX_STRING)
+
+
+def _is_sensitive_argument_key(key: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_ARGUMENT_KEY_PARTS)
+
 
 EventEmitter = Callable[..., dict[str, Any]]
 SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "scripts", "assets"})
+_COMMAND_SPECIFIC_APPROVAL_RULES = frozenset(
+    {
+        "command-substitution",
+        "complex-shell",
+        "pipeline",
+        "process-substitution",
+        "script-eval",
+        "shell-eval",
+        "shell-expansion",
+        "shell-redirection",
+        "unknown-command",
+    }
+)
+_TERMINAL_ENV_NAME_RE = ENV_NAME_RE
+_TERMINAL_SECRET_BINDING_LIMIT = 16
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalSecretBinding:
+    source_name: str
+    target: str
+    expires_in_seconds: int
+
+    @property
+    def capability(self) -> str:
+        return f"secret.bind:{self.source_name}"
+
+    def audit_view(self, *, expires_at: str) -> dict[str, Any]:
+        return {
+            "source": f"env:{self.source_name}",
+            "target": self.target,
+            "capability": self.capability,
+            "expires_at": expires_at,
+        }
 
 
 @dataclass(slots=True)
@@ -73,14 +245,175 @@ def _terminal_execution_command(command: str) -> str:
     return _windows_posix_compat_command(command) or command
 
 
+def _terminal_approval_cache_key(
+    command: str,
+    decision: CommandGuardDecision,
+    *,
+    cwd: str,
+    env_overlay: Mapping[str, str],
+    execution_options: Mapping[str, Any],
+) -> str:
+    base = f"terminal:terminal.exec:{decision.rule_key}"
+    if (
+        decision.rule_key not in _COMMAND_SPECIFIC_APPROVAL_RULES
+        and not env_overlay
+        and not execution_options.get("secret_bindings")
+    ):
+        return base
+    fingerprint = json.dumps(
+        {
+            "command": command,
+            "cwd": cwd,
+            "env": sorted((str(key), str(value)) for key, value in env_overlay.items()),
+            "execution_options": dict(execution_options),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+    return f"{base}:{digest}"
+
+
+def _terminal_timeout_seconds(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 30
+    if parsed <= 0:
+        parsed = 30
+    return min(parsed, 120)
+
+
+def _terminal_secret_bindings(arguments: Mapping[str, Any]) -> tuple[_TerminalSecretBinding, ...]:
+    raw_bindings = arguments.get("secret_bindings")
+    if raw_bindings in (None, []):
+        return ()
+    if not isinstance(raw_bindings, list):
+        raise ValueError("secret_bindings must be an array")
+    if len(raw_bindings) > _TERMINAL_SECRET_BINDING_LIMIT:
+        raise ValueError(
+            f"secret_bindings supports at most {_TERMINAL_SECRET_BINDING_LIMIT} entries"
+        )
+    if bool(arguments.get("background", False)):
+        raise ValueError("secret_bindings are not supported for background terminal commands")
+
+    timeout = _terminal_timeout_seconds(arguments.get("timeout_seconds"))
+    bindings: list[_TerminalSecretBinding] = []
+    targets: set[str] = set()
+    for index, raw in enumerate(raw_bindings):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"secret_bindings[{index}] must be an object")
+        source = str(raw.get("source") or "").strip()
+        if not source.startswith("env:"):
+            raise ValueError(
+                f"secret_bindings[{index}].source must use env:<NAME>"
+            )
+        source_name = source[4:]
+        target = str(raw.get("target") or source_name).strip()
+        if not _TERMINAL_ENV_NAME_RE.fullmatch(source_name):
+            raise ValueError(f"secret_bindings[{index}].source has an invalid environment name")
+        if not _TERMINAL_ENV_NAME_RE.fullmatch(target):
+            raise ValueError(f"secret_bindings[{index}].target has an invalid environment name")
+        if target.upper() in RESERVED_SUBPROCESS_ENV_TARGETS:
+            raise ValueError(
+                f"secret_bindings[{index}].target is a reserved execution environment target: {target}"
+            )
+        if target in targets:
+            raise ValueError(f"duplicate secret binding target: {target}")
+        try:
+            expires_in_seconds = int(raw.get("expires_in_seconds", timeout))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"secret_bindings[{index}].expires_in_seconds must be an integer"
+            ) from exc
+        if expires_in_seconds <= 0 or expires_in_seconds > timeout:
+            raise ValueError(
+                f"secret_bindings[{index}].expires_in_seconds must be between 1 and the terminal timeout ({timeout})"
+            )
+        targets.add(target)
+        bindings.append(
+            _TerminalSecretBinding(
+                source_name=source_name,
+                target=target,
+                expires_in_seconds=expires_in_seconds,
+            )
+        )
+    return tuple(bindings)
+
+
+def _terminal_executable_audit(
+    command: str,
+    env: Mapping[str, str],
+) -> tuple[str, str, str]:
+    if os.name == "nt":
+        shell_executable = str(
+            env.get("COMSPEC")
+            or env.get("ComSpec")
+            or os.environ.get("COMSPEC")
+            or "cmd.exe"
+        )
+    else:
+        shell_executable = "/bin/sh"
+    try:
+        tokens = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        tokens = []
+    index = 0
+    while index < len(tokens):
+        name, separator, _value = tokens[index].partition("=")
+        if not separator or not _TERMINAL_ENV_NAME_RE.fullmatch(name):
+            break
+        index += 1
+    command_executable = tokens[index] if index < len(tokens) else shell_executable
+    resolved_command = (
+        shutil.which(command_executable, path=env.get("PATH"))
+        or command_executable
+    )
+    resolved_shell = (
+        shutil.which(shell_executable, path=env.get("PATH"))
+        or shell_executable
+    )
+    return str(resolved_shell), shell_executable, str(resolved_command)
+
+
+def _redact_terminal_bound_secrets(
+    text: str,
+    bound_secrets: Mapping[str, str],
+) -> str:
+    redacted = text
+    ordered = sorted(
+        (
+            (target, value)
+            for target, value in bound_secrets.items()
+            if value
+        ),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    for target, value in ordered:
+        redacted = redacted.replace(value, f"<redacted:{target}>")
+    return redacted
+
+
 def _windows_posix_compat_command(command: str) -> str | None:
-    if any(token in command for token in ("\n", "\r", "|", "&&", ";", ">", "<")):
+    if "\n" in command or "\r" in command:
         return None
     try:
-        parts = shlex.split(command, posix=True)
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars="|&;<>",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
     except ValueError:
         return None
-    if not parts:
+    if not parts or any(
+        part and all(character in "|&;<>" for character in part)
+        for part in parts
+    ):
         return None
     name = parts[0]
     args = parts[1:]
@@ -102,6 +435,8 @@ def _windows_posix_compat_command(command: str) -> str | None:
         return _python_shell_command("import sys; sys.exit(0)", [])
     if name == "false" and not args:
         return _python_shell_command("import sys; sys.exit(1)", [])
+    if "'" in command:
+        return subprocess.list2cmdline(parts)
     return None
 
 
@@ -129,16 +464,40 @@ def _windows_rm_command(args: list[str]) -> str | None:
 
 def _windows_printf_command(args: list[str]) -> str:
     code = (
-        "import sys; "
+        "import os, sys; "
         "from demiurge.tools.runtime import _format_windows_printf; "
-        "sys.stdout.write(_format_windows_printf(sys.argv[1], sys.argv[2:]))"
+        "sys.stdout.write(_format_windows_printf(sys.argv[1], sys.argv[2:], env=os.environ))"
     )
     return _python_shell_command(code, args)
 
 
-def _format_windows_printf(format_text: str, values: list[str]) -> str:
+def _format_windows_printf(
+    format_text: str,
+    values: list[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    if env is not None:
+        values = [
+            _expand_windows_posix_env_argument(value, env)
+            for value in values
+        ]
     decoded_format = codecs.decode(format_text, "unicode_escape")
     return decoded_format % tuple(values) if values else decoded_format
+
+
+def _expand_windows_posix_env_argument(
+    value: str,
+    env: Mapping[str, str],
+) -> str:
+    name = ""
+    if value.startswith("${") and value.endswith("}"):
+        name = value[2:-1]
+    elif value.startswith("$"):
+        name = value[1:]
+    if name and _TERMINAL_ENV_NAME_RE.fullmatch(name):
+        return str(env.get(name, ""))
+    return value
 
 
 def _python_shell_command(code: str, args: list[str]) -> str:
@@ -158,6 +517,7 @@ class ToolRuntime:
         runtime_timezone: RuntimeTimezone | None = None,
         task_worker: RuntimeTaskWorker | None = None,
         session_runtime: SessionRuntime | None = None,
+        url_policy: UrlPolicy | None = None,
     ):
         self.version_store = version_store
         self.evolution_runtime = evolution_runtime
@@ -170,34 +530,403 @@ class ToolRuntime:
             raise ValueError("ToolRuntime requires a RuntimeControlPlane-backed RuntimeTaskWorker")
         self.task_worker = task_worker
         self.session_runtime = session_runtime
+        self.url_policy = url_policy or UrlPolicy()
+        self.process_lifecycle = ProcessLifecycleOwner()
+        self._approval_scope: ContextVar[ApprovalScope | None] = ContextVar(
+            f"demiurge_tool_approval_scope_{id(self)}",
+            default=None,
+        )
+        self._resolved_effect_entry: ContextVar[ResolvedEffectEntry | None] = ContextVar(
+            f"demiurge_resolved_effect_entry_{id(self)}",
+            default=None,
+        )
+        self._resolved_effect_catalog: ContextVar[ResolvedEffectCatalog | None] = ContextVar(
+            f"demiurge_resolved_effect_catalog_{id(self)}",
+            default=None,
+        )
 
     async def prepare_for_turn(
         self,
         core: LoadedCore,
         turn: TurnContext,
         *,
+        capability: CapabilityFacade | None = None,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
         emit_event: EventEmitter | None = None,
     ) -> None:
-        if self.mcp_runtime is None or not core.mcp_servers:
+        if self.mcp_runtime is None:
             return
-        await self.mcp_runtime.prepare_for_turn(core, turn, emit_event=emit_event)
+        if not core.mcp_servers:
+            await self.mcp_runtime.evict_session(turn.session_id)
+            return
+        if capability is None or (
+            execution_context is None and principal_scope is None
+        ):
+            for server in core.mcp_servers:
+                if server.enabled and emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=f"mcp.connect:{server.server_id}",
+                        reason="MCP connect authority is not bound to tool preparation",
+                    )
+            return
+        try:
+            approval_scope = self.resolve_approval_scope(
+                core=core,
+                turn=turn,
+                capability=capability,
+                execution_context=execution_context,
+                principal_scope=principal_scope,
+            )
+        except (PermissionError, TypeError, ValueError) as exc:
+            for server in core.mcp_servers:
+                if server.enabled and emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=f"mcp.connect:{server.server_id}",
+                        reason=str(exc),
+                    )
+            return
+
+        authority_key = self._mcp_connect_authority_key(
+            core,
+            turn=turn,
+            approval_scope=approval_scope,
+        )
+        scope_token = self._approval_scope.set(approval_scope)
+
+        async def authorize_server(server: McpServerDefinition) -> bool:
+            return await self._authorize_mcp_connect(
+                server,
+                core=core,
+                turn=turn,
+                capability=capability,
+                emit_event=emit_event,
+            )
+
+        try:
+            await self.mcp_runtime.prepare_for_turn(
+                core,
+                turn,
+                authority_key=authority_key,
+                authorize_server=authorize_server,
+                emit_event=emit_event,
+            )
+        finally:
+            self._approval_scope.reset(scope_token)
+
+    def _mcp_connect_authority_key(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext,
+        approval_scope: ApprovalScope,
+    ) -> str:
+        snapshot = approval_scope.capability_snapshot
+        server_authority = []
+        for server in core.mcp_servers:
+            if not server.enabled:
+                continue
+            entry = self._mcp_connect_entry(server, core=core, turn=turn)
+            server_authority.append(
+                {
+                    "server_id": server.server_id,
+                    "capability": entry.capability,
+                    "risk": entry.risk,
+                    "approval_policy": entry.approval_policy,
+                }
+            )
+        payload = {
+            "principal_id": approval_scope.principal_id,
+            "core_revision": turn.core_revision,
+            "capabilities": {
+                "defaults": sorted(snapshot.defaults),
+                "manifest_slots": [
+                    (path, sorted(names))
+                    for path, names in snapshot.manifest_slots
+                ],
+                "component_slots": [
+                    (path, sorted(names))
+                    for path, names in snapshot.component_slots
+                ],
+            },
+            "servers": server_authority,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _mcp_connect_entry(
+        self,
+        server: McpServerDefinition,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+    ) -> ResolvedEffectEntry:
+        capability_name = f"mcp.connect:{server.server_id}"
+        return self._resolve_entry_approval_policy(
+            core,
+            ResolvedEffectEntry(
+                name=capability_name,
+                description=f"Connect and discover MCP server {server.server_id}",
+                input_schema={"type": "object", "properties": {}},
+                source="mcp_connect",
+                core_id=core.core_id,
+                core_revision=turn.core_revision,
+                adapter_key=f"mcp-connect:{server.relative_path}",
+                provenance=f"mcp-connect:{server.relative_path}",
+                _adapter=server,
+                slot_path=server.relative_path,
+                risk=server.manifest.risk,
+                capability=capability_name,
+                approval_policy=self._stricter_policy(
+                    "prompt",
+                    server.manifest.approval_policy,
+                ),
+            ),
+        )
+
+    async def _authorize_mcp_connect(
+        self,
+        server: McpServerDefinition,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        emit_event: EventEmitter | None,
+    ) -> bool:
+        capability_name = f"mcp.connect:{server.server_id}"
+        entry = self._mcp_connect_entry(
+            server,
+            core=core,
+            turn=turn,
+        )
+        connect_summary = _safe_authored_arguments_preview(
+            mcp_connect_security_summary(server)
+        )
+        call = ToolCall(
+            name=entry.name,
+            arguments=connect_summary,
+            id=f"{turn.turn_id}:{entry.name}",
+        )
+        try:
+            self._require_resolved_capability(entry, call, capability)
+        except CapabilityDenied as exc:
+            if emit_event is not None:
+                emit_event(
+                    "mcp.server_denied",
+                    server_id=server.server_id,
+                    path=server.relative_path,
+                    capability=capability_name,
+                    reason=str(exc),
+                )
+            return False
+        if server.manifest.cwd:
+            try:
+                self.workspace.resolve_path(
+                    server.manifest.cwd,
+                    operation="write",
+                )
+            except (WorkspaceScopeError, ValueError, OSError) as exc:
+                if emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=capability_name,
+                        reason=str(exc),
+                    )
+                return False
+        if server.manifest.transport == "streamable_http":
+            url_decision = await asyncio.to_thread(
+                self.url_policy.evaluate,
+                str(server.manifest.url),
+            )
+            if not url_decision.allowed:
+                if emit_event is not None:
+                    emit_event(
+                        "mcp.server_denied",
+                        server_id=server.server_id,
+                        path=server.relative_path,
+                        capability=capability_name,
+                        reason=(
+                            "URL blocked by Host policy: "
+                            f"{url_decision.reason}"
+                        ),
+                        url_policy=url_decision.audit_view(),
+                    )
+                return False
+            safe_url_audit = url_decision.audit_view()
+            connect_summary["url"] = safe_url_audit["target"]
+            connect_summary["url_policy"] = safe_url_audit
+            call = ToolCall(
+                name=entry.name,
+                arguments=connect_summary,
+                id=f"{turn.turn_id}:{entry.name}",
+            )
+        denied = await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="mcp.connect",
+            summary=f"Connect and discover MCP server {server.server_id}",
+            target=server.relative_path,
+            arguments_preview=call.arguments,
+            cache_key=(
+                f"mcp.connect:{server.server_id}:"
+                f"{mcp_server_fingerprint(server)}"
+            ),
+            emit_event=emit_event,
+        )
+        if denied is None:
+            return True
+        if emit_event is not None:
+            emit_event(
+                "mcp.server_denied",
+                server_id=server.server_id,
+                path=server.relative_path,
+                capability=capability_name,
+                reason=denied.content,
+            )
+        return False
 
     async def close(self) -> None:
-        if self.mcp_runtime is not None:
-            await self.mcp_runtime.close()
+        try:
+            await self.process_lifecycle.shutdown()
+        finally:
+            if self.mcp_runtime is not None:
+                await self.mcp_runtime.close()
 
-    def registry_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolRegistryEntry]:
-        entries: list[ToolRegistryEntry] = []
+    def _terminal_output_artifact_paths(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[str, dict[str, Path]]:
+        artifact_id = utc_id("artifact_terminal_")
+        _, session_root = self._terminal_output_artifact_session_root(
+            session_id=session_id,
+        )
+        artifact_root = session_root / artifact_id
+        return artifact_id, {
+            "stdout": artifact_root / "stdout.txt",
+            "stderr": artifact_root / "stderr.txt",
+        }
+
+    def _terminal_output_artifact_session_root(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[Path, Path]:
+        runtime_root = (self.version_store.home / "runtime").resolve()
+        artifacts_root = (runtime_root / "artifacts").resolve()
+        try:
+            artifacts_root.relative_to(runtime_root)
+        except ValueError as exc:
+            raise RuntimeError("terminal artifact root escapes runtime home") from exc
+        session_component = (
+            "session-"
+            + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+        )
+        session_root = (artifacts_root / session_component).resolve()
+        try:
+            session_root.relative_to(artifacts_root)
+        except ValueError as exc:
+            raise RuntimeError("terminal session artifact root escapes runtime home") from exc
+        return artifacts_root, session_root
+
+    def _register_terminal_output_artifact(
+        self,
+        *,
+        artifact_id: str,
+        session_id: str,
+        turn_id: str,
+        paths: Mapping[str, str],
+        stats: Mapping[str, Mapping[str, object]],
+    ) -> dict[str, object] | None:
+        artifacts_root, session_root = self._terminal_output_artifact_session_root(
+            session_id=session_id,
+        )
+        root = session_root.relative_to(artifacts_root).as_posix()
+        streams: dict[str, str] = {}
+        for label, raw_path in paths.items():
+            if int(stats.get(label, {}).get("total_bytes") or 0) <= 0:
+                continue
+            path = Path(raw_path).resolve()
+            try:
+                streams[label] = path.relative_to(session_root).as_posix()
+            except ValueError:
+                continue
+        if not streams:
+            return None
+        descriptor: dict[str, object] = {
+            "artifact_id": artifact_id,
+            "kind": "terminal-output",
+            "root": root,
+            "streams": streams,
+        }
+        self.task_worker.control_plane.store.append(
+            (
+                RuntimeEvent(
+                    type="artifact.stored",
+                    aggregate_type="artifact",
+                    aggregate_id=artifact_id,
+                    payload={
+                        "owner_turn_id": turn_id,
+                        "kind": "terminal-output",
+                        "uri": artifact_id,
+                        "metadata": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "root": root,
+                            "streams": streams,
+                            "output": {
+                                key: dict(value)
+                                for key, value in stats.items()
+                            },
+                        },
+                    },
+                ),
+            )
+        )
+        return descriptor
+
+    async def evict_session(self, session_id: str) -> None:
+        if self.mcp_runtime is not None:
+            await self.mcp_runtime.evict_session(session_id)
+
+    def resolve_effects(
+        self,
+        core: LoadedCore,
+        *,
+        turn: TurnContext | None = None,
+    ) -> ResolvedEffectCatalog:
+        entries: list[ResolvedEffectEntry] = []
+        core_revision = turn.core_revision if turn is not None else core.revision
         for name in core.builtin_tool_names:
             definition = BUILTIN_TOOL_DEFINITIONS.get(name)
             if not definition:
                 continue
             metadata = BUILTIN_TOOL_METADATA.get(name, {})
-            entry = ToolRegistryEntry(
+            entry = ResolvedEffectEntry(
                 name=definition.name,
                 description=definition.description,
                 input_schema=definition.input_schema,
                 source="builtin",
+                core_id=core.core_id,
+                core_revision=core_revision,
+                adapter_key=f"builtin:{definition.name}",
+                provenance=f"builtin:{definition.name}",
+                _adapter=definition.name,
                 risk=self._normalize_risk(str(metadata.get("risk") or "low")),
                 capability=metadata.get("capability"),
                 approval_policy=self._normalize_approval_policy(str(metadata.get("approval_policy") or "auto")),
@@ -206,15 +935,26 @@ class ToolRuntime:
             )
             configured = core.manifest.tools.metadata.get(name)
             if configured:
-                self._apply_metadata(entry, configured, allow_lower_risk=False, allow_weaker_approval=False)
+                entry = self._apply_metadata(
+                    entry,
+                    configured,
+                    allow_lower_risk=False,
+                    allow_weaker_approval=False,
+                )
+            entry = self._resolve_entry_approval_policy(core, entry)
             if entry.enabled:
                 entries.append(entry)
         for slot in core.tool_slots:
-            entry = ToolRegistryEntry(
+            entry = ResolvedEffectEntry(
                 name=slot.slot_id,
                 description=slot.description,
                 input_schema=slot.input_schema or {"type": "object", "properties": {}},
                 source="authored",
+                core_id=core.core_id,
+                core_revision=core_revision,
+                adapter_key=f"authored:{slot.relative_path}",
+                provenance=f"authored:{slot.relative_path}",
+                _adapter=slot,
                 slot_path=slot.relative_path,
                 risk=self._normalize_risk(str(slot.manifest.get("risk") or "medium")),
                 capability=slot.manifest.get("capability"),
@@ -225,16 +965,33 @@ class ToolRuntime:
             )
             configured = core.manifest.tools.metadata.get(slot.slot_id)
             if configured:
-                self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
+                entry = self._apply_metadata(
+                    entry,
+                    configured,
+                    allow_lower_risk=True,
+                    allow_weaker_approval=True,
+                )
+            entry = self._resolve_entry_approval_policy(core, entry)
             if entry.enabled:
                 entries.append(entry)
         if self.mcp_runtime is not None:
-            for tool in self.mcp_runtime.entries_for(core):
-                entry = ToolRegistryEntry(
+            for tool in self.mcp_runtime.entries_for(core, turn=turn):
+                entry = ResolvedEffectEntry(
                     name=tool.name,
                     description=tool.description,
                     input_schema=tool.input_schema or {"type": "object", "properties": {}},
                     source="mcp",
+                    core_id=core.core_id,
+                    core_revision=core_revision,
+                    adapter_key=(
+                        f"mcp:{tool.connection_key.adapter_identity()}:"
+                        f"{tool.server_tool_name}"
+                    ),
+                    provenance=(
+                        f"mcp:{tool.relative_path}:"
+                        f"{tool.server_id}/{tool.server_tool_name}"
+                    ),
+                    _adapter=tool,
                     slot_path=tool.relative_path,
                     risk=self._normalize_risk(tool.risk),
                     capability=tool.capability,
@@ -245,89 +1002,491 @@ class ToolRuntime:
                 )
                 configured = core.manifest.tools.metadata.get(tool.name)
                 if configured:
-                    self._apply_metadata(entry, configured, allow_lower_risk=True, allow_weaker_approval=True)
+                    entry = self._apply_metadata(
+                        entry,
+                        configured,
+                        allow_lower_risk=True,
+                        allow_weaker_approval=True,
+                    )
+                entry = self._resolve_entry_approval_policy(core, entry)
                 if entry.enabled:
                     entries.append(entry)
-        return [entry for entry in entries if self._tool_policy_allows(entry, self._tool_policy(turn))]
+        catalog = ResolvedEffectCatalog(
+            core_id=core.core_id,
+            core_revision=core_revision,
+            entries=tuple(entries),
+        )
+        return catalog.filtered(
+            lambda entry: self._tool_policy_allows(entry, self._tool_policy(turn))
+        )
+
+    def registry_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ResolvedEffectEntry]:
+        return list(self.resolve_effects(core, turn=turn).entries)
 
     def _apply_metadata(
         self,
-        entry: ToolRegistryEntry,
+        entry: ResolvedEffectEntry,
         metadata: ToolMetadataInfo,
         *,
         allow_lower_risk: bool,
         allow_weaker_approval: bool,
-    ) -> None:
+    ) -> ResolvedEffectEntry:
+        updates: dict[str, Any] = {}
         if metadata.risk:
             risk = self._normalize_risk(metadata.risk)
             if allow_lower_risk or RISK_ORDER[risk] >= RISK_ORDER[entry.risk]:
-                entry.risk = risk
+                updates["risk"] = risk
         if metadata.capability:
-            entry.capability = metadata.capability
+            updates["capability"] = metadata.capability
         if metadata.approval_policy:
             policy = self._normalize_approval_policy(metadata.approval_policy)
             if allow_weaker_approval or APPROVAL_ORDER[policy] >= APPROVAL_ORDER[entry.approval_policy]:
-                entry.approval_policy = policy
+                updates["approval_policy"] = policy
         if metadata.model_output_policy:
-            entry.model_output_policy = metadata.model_output_policy
+            updates["model_output_policy"] = metadata.model_output_policy
         if metadata.display_policy:
-            entry.display_policy = metadata.display_policy
+            updates["display_policy"] = metadata.display_policy
         if metadata.enabled is not None:
-            entry.enabled = metadata.enabled
+            updates["enabled"] = metadata.enabled
+        return replace(entry, **updates)
+
+    def _resolve_entry_approval_policy(
+        self,
+        core: LoadedCore,
+        entry: ResolvedEffectEntry,
+    ) -> ResolvedEffectEntry:
+        policy = entry.approval_policy
+        capability_names = tuple(
+            dict.fromkeys(
+                value
+                for value in (entry.capability, f"tool.call:{entry.name}")
+                if value
+            )
+        )
+        for approval in (core.manifest.approval, self.global_approval):
+            for capability_name in capability_names:
+                configured = self._select_approval_policy(
+                    approval,
+                    tool_name=entry.name,
+                    capability_name=capability_name,
+                    risk=entry.risk,
+                )
+                if configured:
+                    policy = self._stricter_policy(policy, configured)
+        return replace(entry, approval_policy=policy)
 
     def definitions_for(self, core: LoadedCore, *, turn: TurnContext | None = None) -> list[ToolDefinition]:
-        return [entry.to_definition() for entry in self.registry_for(core, turn=turn)]
+        return self.resolve_effects(core, turn=turn).definitions()
 
     async def execute(
         self,
+        request: EffectRequest,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None = None,
+        principal_scope: PrincipalScope | None = None,
+        delegation_runtime: Any | None = None,
+        emit_event: EventEmitter | None = None,
+        output_factory: Callable[[SlotDefinition], Any] | None = None,
+    ) -> EffectResult:
+        if not isinstance(request, EffectRequest):
+            raise TypeError(
+                "ToolRuntime.execute requires an EffectRequest from a "
+                "ResolvedEffectCatalog"
+            )
+        entry = request.entry
+        try:
+            redactor = SecretRedactor.from_value(
+                {"arguments": dict(request.arguments)}
+            )
+        except Exception:
+            return EffectResult.normalize(
+                entry,
+                ToolResult(
+                    content=REDACTION_FAILED,
+                    data={
+                        "executionStarted": False,
+                        "redactionFailed": True,
+                    },
+                    is_error=True,
+                    model_output=REDACTION_FAILED,
+                    display_output=REDACTION_FAILED,
+                ),
+            )
+
+        def normalize(result: ToolResult) -> EffectResult:
+            return EffectResult.normalize(
+                entry,
+                result,
+                redactor=redactor,
+            )
+
+        try:
+            approval_scope = self.resolve_approval_scope(
+                core=core,
+                turn=turn,
+                capability=capability,
+                execution_context=execution_context,
+                principal_scope=principal_scope,
+            )
+        except (PermissionError, TypeError, ValueError) as exc:
+            return normalize(
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": False},
+                ),
+            )
+        scope_token = self._approval_scope.set(approval_scope)
+        entry_token = None
+        catalog_token = None
+        try:
+            call = request.to_tool_call()
+            catalog = request.catalog
+            if entry.core_id != core.core_id or entry.core_revision != turn.core_revision:
+                return normalize(
+                    ToolResult(
+                        content="resolved effect entry does not match the active core snapshot",
+                        is_error=True,
+                        data={"executionStarted": False},
+                    ),
+                )
+            if entry.source == "mcp" and not self._mcp_entry_matches_execution(
+                entry,
+                core=core,
+                turn=turn,
+                approval_scope=approval_scope,
+            ):
+                return normalize(
+                    ToolResult(
+                        content=(
+                            "resolved MCP effect entry does not match the "
+                            "active execution authority"
+                        ),
+                        is_error=True,
+                        data={"executionStarted": False},
+                    ),
+                )
+
+            entry_token = self._resolved_effect_entry.set(entry)
+            catalog_token = self._resolved_effect_catalog.set(catalog)
+
+            self._require_resolved_capability(entry, call, capability)
+            preflight_denial = await self._resolved_approval_preflight(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                emit_event=emit_event,
+            )
+            if preflight_denial is not None:
+                return normalize(preflight_denial)
+
+            try:
+                result = await self._execute_resolved_adapter(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    capability=capability,
+                    delegation_runtime=delegation_runtime,
+                    emit_event=emit_event,
+                    output_factory=output_factory,
+                )
+            except Exception as exc:
+                result = ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": True},
+                )
+            return normalize(result)
+        except CapabilityDenied as exc:
+            return normalize(
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={
+                        "executionStarted": False,
+                        "denial": "capability",
+                    },
+                ),
+            )
+        except (WorkspaceScopeError, ValueError, OSError) as exc:
+            return normalize(
+                ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    data={"executionStarted": False},
+                ),
+            )
+        finally:
+            if catalog_token is not None:
+                self._resolved_effect_catalog.reset(catalog_token)
+            if entry_token is not None:
+                self._resolved_effect_entry.reset(entry_token)
+            self._approval_scope.reset(scope_token)
+
+    def _mcp_entry_matches_execution(
+        self,
+        entry: ResolvedEffectEntry,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        approval_scope: ApprovalScope,
+    ) -> bool:
+        mcp_tool = entry._adapter
+        if not isinstance(mcp_tool, McpToolInfo):
+            return False
+        connection_key = mcp_tool.connection_key
+        server = next(
+            (
+                definition
+                for definition in core.mcp_servers
+                if definition.server_id == connection_key.server_id
+            ),
+            None,
+        )
+        return bool(
+            server is not None
+            and connection_key.session_id == turn.session_id
+            and connection_key.authority_key
+            == self._mcp_connect_authority_key(
+                core,
+                turn=turn,
+                approval_scope=approval_scope,
+            )
+            and connection_key.core_root == str(core.root)
+            and connection_key.core_revision == turn.core_revision
+            and connection_key.workspace == str(self.workspace.root)
+            and connection_key.server_fingerprint
+            == mcp_server_fingerprint(server)
+        )
+
+    async def _execute_resolved_adapter(
+        self,
+        entry: ResolvedEffectEntry,
         call: ToolCall,
         *,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
-        emit_event: EventEmitter | None = None,
-        output_factory: Callable[[SlotDefinition], Any] | None = None,
+        delegation_runtime: Any | None,
+        emit_event: EventEmitter | None,
+        output_factory: Callable[[SlotDefinition], Any] | None,
     ) -> ToolResult:
+        if entry.source == "builtin":
+            return await self._execute_builtin(
+                call,
+                entry=entry,
+                core=core,
+                turn=turn,
+                capability=capability,
+                delegation_runtime=delegation_runtime,
+                emit_event=emit_event,
+            )
+        if entry.source == "authored":
+            slot = entry._adapter
+            if not isinstance(slot, SlotDefinition):
+                return ToolResult(
+                    content=f"invalid authored effect adapter: {entry.adapter_key}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            approval_denial = await self._approval_for_authored(
+                entry,
+                slot,
+                call,
+                core=core,
+                turn=turn,
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
+            return await self._execute_authored(
+                slot,
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                output_factory=output_factory,
+            )
+        if entry.source == "mcp":
+            mcp_tool = entry._adapter
+            if not isinstance(mcp_tool, McpToolInfo):
+                return ToolResult(
+                    content=f"invalid MCP effect adapter: {entry.adapter_key}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            return await self._execute_mcp(
+                entry,
+                mcp_tool,
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                emit_event=emit_event,
+            )
+        return ToolResult(
+            content=f"unsupported effect source: {entry.source}",
+            is_error=True,
+            data={"executionStarted": False},
+        )
+
+    @staticmethod
+    def _preflight_error(exc: Exception) -> ToolResult:
+        return ToolResult(
+            content=str(exc),
+            is_error=True,
+            data={"executionStarted": False},
+        )
+
+    def _resolve_workspace_path(
+        self,
+        value: str | Path | None,
+        *,
+        operation: str,
+        allow_outside_read: bool = False,
+    ) -> ResolvedPath | ToolResult:
         try:
-            visible_tools = {entry.name for entry in self.registry_for(core, turn=turn)}
-            if call.name in BUILTIN_TOOL_DEFINITIONS:
-                if call.name not in visible_tools:
-                    return ToolResult(content=f"builtin tool is not allowed: {call.name}", is_error=True)
-                return await self._execute_builtin(
-                    call,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    emit_event=emit_event,
+            return self.workspace.resolve_path(
+                value,
+                operation=operation,
+                allow_outside_read=allow_outside_read,
+            )
+        except (WorkspaceScopeError, ValueError, OSError) as exc:
+            return self._preflight_error(exc)
+
+    def resolve_approval_scope(
+        self,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        execution_context: TurnExecutionContext | None,
+        principal_scope: PrincipalScope | None,
+    ) -> ApprovalScope:
+        if execution_context is not None and principal_scope is not None:
+            raise ValueError(
+                "tool execution accepts either TurnExecutionContext or explicit PrincipalScope"
+            )
+        if execution_context is not None:
+            scope = ApprovalScope.from_execution_context(execution_context)
+            if (
+                scope.session_id != turn.session_id
+                or scope.turn_id != turn.turn_id
+                or scope.core_id != core.core_id
+                or scope.core_revision != turn.core_revision
+            ):
+                raise PermissionError(
+                    "TurnExecutionContext does not match tool execution identity"
                 )
-            slot = next((item for item in core.tool_slots if item.slot_id == call.name), None)
-            if slot:
-                if call.name not in visible_tools:
-                    return ToolResult(content=f"authored tool is not allowed: {call.name}", is_error=True)
-                return await self._execute_authored(
-                    slot,
-                    call,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    output_factory=output_factory,
+            if capability.snapshot is not scope.capability_snapshot:
+                raise PermissionError(
+                    "tool capability snapshot does not match TurnExecutionContext"
                 )
-            mcp_tool = self.mcp_runtime.tool_info(call.name) if self.mcp_runtime is not None else None
-            if mcp_tool is not None:
-                if call.name not in visible_tools:
-                    return ToolResult(content=f"MCP tool is not allowed: {call.name}", is_error=True)
-                return await self._execute_mcp(
-                    mcp_tool,
-                    call,
-                    core=core,
-                    turn=turn,
-                    capability=capability,
-                    emit_event=emit_event,
+            return scope
+        if principal_scope is None:
+            raise PermissionError(
+                "tool execution requires TurnExecutionContext or explicit Host PrincipalScope"
+            )
+        if self.session_runtime is None:
+            raise RuntimeError("explicit tool PrincipalScope requires SessionRuntime")
+        admitted_scope = PrincipalScopeResolver(self.session_runtime.store).admit(
+            principal_scope
+        )
+        if admitted_scope.session_id != turn.session_id:
+            raise PermissionError("PrincipalScope does not match tool session")
+        snapshot = capability.snapshot or CapabilitySnapshot.capture(core)
+        return ApprovalScope.for_host_operation(
+            principal_scope=admitted_scope,
+            turn_id=turn.turn_id,
+            core_id=core.core_id,
+            core_revision=turn.core_revision,
+            capability_snapshot=snapshot,
+        )
+
+    def _current_approval_scope(self) -> ApprovalScope:
+        scope = self._approval_scope.get()
+        if scope is None:
+            raise RuntimeError("approval scope is not bound to tool execution")
+        return scope
+
+    def _require_resolved_capability(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        capability: CapabilityFacade,
+    ) -> None:
+        if (
+            entry.source == "builtin"
+            and entry.name == "schedule_manage"
+            and str(call.arguments.get("action") or "list").strip().lower() == "list"
+        ):
+            return
+        required = []
+        terminal_secret_bindings: tuple[_TerminalSecretBinding, ...] = ()
+        if entry.source == "builtin" and entry.name == "session_search":
+            required.append("session.read")
+        if entry.capability and entry.capability not in required:
+            required.append(entry.capability)
+        if entry.source == "builtin" and entry.name == "terminal":
+            terminal_secret_bindings = _terminal_secret_bindings(
+                call.arguments
+            )
+        for capability_name in required:
+            if entry.source == "authored" and isinstance(entry._adapter, SlotDefinition):
+                capability._require_registry_capability(
+                    capability_name,
+                    slot_path=entry._adapter.relative_path,
                 )
             else:
-                return ToolResult(content=f"tool not found: {call.name}", is_error=True)
-        except (CapabilityDenied, WorkspaceScopeError, ValueError, OSError) as exc:
-            return ToolResult(content=str(exc), is_error=True, data={"executionStarted": False})
+                capability.require(capability_name)
+        for binding in terminal_secret_bindings:
+            capability.require_exact(binding.capability)
+
+    def _resolved_effect_capability(self, default: str) -> str:
+        entry = self._resolved_effect_entry.get()
+        if entry is None:
+            return default
+        return entry.capability or default
+
+    async def _resolved_approval_preflight(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        if entry.approval_policy == "auto":
+            return None
+        schedule_list_denial = (
+            entry.source == "builtin"
+            and entry.name == "schedule_manage"
+            and str(call.arguments.get("action") or "list").strip().lower()
+            == "list"
+            and entry.approval_policy == "deny"
+        )
+        if (
+            entry.source in {"authored", "mcp"}
+            or entry.name in _ADAPTER_SPECIFIC_APPROVAL_TOOLS
+        ) and not schedule_list_denial:
+            return None
+        return await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="effect.call",
+            summary=f"Call {entry.source} tool {entry.name}",
+            target=entry.provenance,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            emit_event=emit_event,
+        )
 
     def _tool_policy(self, turn: TurnContext | None) -> Mapping[str, Any]:
         if turn is None or not isinstance(turn.metadata, Mapping):
@@ -335,7 +1494,7 @@ class ToolRuntime:
         policy = turn.metadata.get("tool_policy")
         return policy if isinstance(policy, Mapping) else {}
 
-    def _tool_policy_allows(self, entry: ToolRegistryEntry, policy: Mapping[str, Any]) -> bool:
+    def _tool_policy_allows(self, entry: ResolvedEffectEntry, policy: Mapping[str, Any]) -> bool:
         if not policy:
             return True
         deny = self._policy_patterns(policy.get("deny"))
@@ -373,7 +1532,7 @@ class ToolRuntime:
             return {str(item).strip() for item in value if str(item).strip()}
         return set()
 
-    def _policy_pattern_matches(self, entry: ToolRegistryEntry, pattern: str) -> bool:
+    def _policy_pattern_matches(self, entry: ResolvedEffectEntry, pattern: str) -> bool:
         normalized = pattern.strip()
         if not normalized:
             return False
@@ -388,17 +1547,32 @@ class ToolRuntime:
         self,
         call: ToolCall,
         *,
+        entry: ResolvedEffectEntry,
         core: LoadedCore,
         turn: TurnContext,
         capability: CapabilityFacade,
+        delegation_runtime: Any | None = None,
         emit_event: EventEmitter | None = None,
     ) -> ToolResult:
         if call.name == "rollback_core":
-            capability.require("tool.call:rollback_core")
+            target = str(call.arguments.get("target") or "previous")
+            approval_denial = await self._approval_for_resolved_entry(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                action="core.rollback",
+                summary=f"Rollback core {core.core_id} to {target}",
+                target=f"{core.core_id}:{target}",
+                arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
             try:
                 pointer = self.version_store.rollback(
                     core.core_id,
-                    target=str(call.arguments.get("target") or "previous"),
+                    target=target,
                     reason=str(call.arguments.get("reason") or "rollback_core"),
                 )
             except CoreRepositoryError as exc:
@@ -408,6 +1582,8 @@ class ToolRuntime:
                     is_error=True,
                     model_output=str(exc),
                 )
+            if not getattr(self.version_store, "notifies_core_changes", False):
+                self.approval_runtime.invalidate_core(core.core_id)
             payload = asdict(pointer)
             return ToolResult(
                 content=f"rollback committed: {pointer.active_revision[:12]} (takes effect next turn)",
@@ -415,7 +1591,6 @@ class ToolRuntime:
                 model_output=json.dumps(payload, ensure_ascii=False),
             )
         if call.name == "evolve_core":
-            capability.require("tool.call:evolve_core")
             if self.evolution_runtime is None:
                 return ToolResult(content="evolution runtime is not configured", is_error=True)
             action = str(call.arguments.get("action") or "start").strip().lower()
@@ -427,6 +1602,20 @@ class ToolRuntime:
             if action == "start":
                 if not goal.strip():
                     return ToolResult(content="goal is required for evolve_core start", is_error=True)
+                execution_mode = "background" if background else "foreground"
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action=f"evolve.start.{execution_mode}",
+                    summary=f"Start {execution_mode} evolve run for core {core.core_id}",
+                    target=core.core_id,
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 if background:
                     return self._start_evolve_task(
                         core=core,
@@ -444,6 +1633,19 @@ class ToolRuntime:
             if action == "review":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core review", is_error=True)
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.review",
+                    summary=f"Review evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 result = await self.evolution_runtime.review(run_id, target_core_id=core.core_id, goal=reason)
                 payload = asdict(result)
                 content = f"evolve review {run_id}: {'passed' if result.passed else 'failed'}"
@@ -451,15 +1653,83 @@ class ToolRuntime:
             if action == "promote":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core promote", is_error=True)
+                approval_arguments = dict(call.arguments)
+                security_preview: dict[str, Any] = {}
+                preview_loader = getattr(
+                    self.evolution_runtime,
+                    "promotion_security_preview",
+                    None,
+                )
+                if callable(preview_loader):
+                    try:
+                        security_preview = preview_loader(
+                            run_id,
+                            target_core_id=core.core_id,
+                        )
+                    except CoreRepositoryError as exc:
+                        return ToolResult(
+                            content=str(exc),
+                            data={"error": str(exc)},
+                            is_error=True,
+                            model_output=str(exc),
+                        )
+                    if security_preview:
+                        approval_arguments["mcp_security_review"] = (
+                            security_preview
+                        )
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.promote",
+                    summary=f"Promote evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(
+                        approval_arguments
+                    ),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 try:
-                    result = await self.evolution_runtime.promote(run_id, target_core_id=core.core_id, reason=reason)
+                    manual_review_token = None
+                    if security_preview:
+                        manual_review_token = str(
+                            security_preview.get("review_token") or ""
+                        ) or None
+                    result = await self.evolution_runtime.promote(
+                        run_id,
+                        target_core_id=core.core_id,
+                        reason=reason,
+                        manual_review_token=manual_review_token,
+                    )
                 except CoreRepositoryError as exc:
                     return ToolResult(content=str(exc), data={"error": str(exc)}, is_error=True, model_output=str(exc))
+                if result.promoted and not getattr(
+                    self.evolution_runtime,
+                    "notifies_core_changes",
+                    False,
+                ):
+                    self.approval_runtime.invalidate_core(core.core_id)
                 payload = asdict(result)
                 return ToolResult(content=result.summary, data=payload, is_error=not result.promoted, model_output=json.dumps(payload, ensure_ascii=False))
             if action == "discard":
                 if not run_id:
                     return ToolResult(content="run_id is required for evolve_core discard", is_error=True)
+                approval_denial = await self._approval_for_resolved_entry(
+                    entry,
+                    call,
+                    core=core,
+                    turn=turn,
+                    action="evolve.discard",
+                    summary=f"Discard evolve run {run_id} for core {core.core_id}",
+                    target=f"{core.core_id}:{run_id}",
+                    arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                    emit_event=emit_event,
+                )
+                if approval_denial is not None:
+                    return approval_denial
                 payload = self.evolution_runtime.discard(run_id)
                 return ToolResult(content=f"discarded evolve run {run_id}", data=payload, model_output=json.dumps(payload, ensure_ascii=False))
             return ToolResult(content=f"unsupported evolve_core action: {action}", is_error=True)
@@ -474,9 +1744,26 @@ class ToolRuntime:
         if call.name == "terminal":
             return await self._terminal(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "task_list":
-            return self._task_list(call, turn=turn, capability=capability)
+            return self._task_list(
+                call,
+                turn=turn,
+                capability=capability,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name in {"delegate_task", "task_status", "task_control", "yield_until"}:
-            return ToolResult(content=f"delegation tool requires the active turn runtime: {call.name}", is_error=True)
+            if delegation_runtime is None:
+                return ToolResult(
+                    content=f"delegation tool requires the active turn runtime: {call.name}",
+                    is_error=True,
+                    data={"executionStarted": False},
+                )
+            return await delegation_runtime.execute(
+                call,
+                core=core,
+                turn=turn,
+                capability=capability,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name == "skills_list":
             return self._skills_list(call, core=core)
         if call.name == "skill_view":
@@ -490,7 +1777,24 @@ class ToolRuntime:
         if call.name == "web_extract":
             return await self._web_extract(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "session_search":
-            return self._session_search(call)
+            target_session_id = str(call.arguments.get("session_id") or "").strip()
+            approval_denial = await self._approval_for_resolved_entry(
+                entry,
+                call,
+                core=core,
+                turn=turn,
+                action="session.search",
+                summary="Search session history",
+                target=target_session_id or "owned_sessions",
+                arguments_preview=_safe_authored_arguments_preview(call.arguments),
+                emit_event=emit_event,
+            )
+            if approval_denial is not None:
+                return approval_denial
+            return self._session_search(
+                call,
+                principal_scope=self._current_approval_scope().principal_scope,
+            )
         if call.name == "schedule_manage":
             return await self._schedule_manage(call, core=core, turn=turn, capability=capability, emit_event=emit_event)
         if call.name == "tools_list":
@@ -499,6 +1803,7 @@ class ToolRuntime:
 
     async def _execute_mcp(
         self,
+        entry: ResolvedEffectEntry,
         tool: McpToolInfo,
         call: ToolCall,
         *,
@@ -509,17 +1814,16 @@ class ToolRuntime:
     ) -> ToolResult:
         if self.mcp_runtime is None:
             return ToolResult(content="MCP runtime is not configured", is_error=True, data={"executionStarted": False})
-        entry = next((item for item in self.registry_for(core) if item.name == call.name), None)
-        capability_name = (entry.capability if entry is not None else None) or tool.capability
-        risk = (entry.risk if entry is not None else None) or tool.risk
-        capability.require(capability_name)
-        denied = await self._approval_for_mcp(
+        target = f"{tool.server_id}/{tool.server_tool_name}"
+        denied = await self._approval_for_resolved_entry(
+            entry,
             call,
             core=core,
             turn=turn,
-            tool=tool,
-            capability_name=capability_name,
-            risk=risk,
+            action="mcp.call",
+            summary=f"Call MCP tool {target}",
+            target=target,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
             emit_event=emit_event,
         )
         if denied:
@@ -535,18 +1839,19 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.read")
-        target = self.workspace.resolve_path(
+        target = self._resolve_workspace_path(
             str(call.arguments.get("path") or ""),
             operation="read",
             allow_outside_read=True,
         )
+        if isinstance(target, ToolResult):
+            return target
         needs_prompt = target.outside or target.sensitive
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.read",
+            capability_name=self._resolved_effect_capability("fs.read"),
             action="read",
             target=target.relative,
             risk="low" if not needs_prompt else "high",
@@ -585,18 +1890,19 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.read")
         query = str(call.arguments.get("query") or "")
         target_kind = str(call.arguments.get("target") or "content").strip().lower()
         if target_kind not in {"content", "name", "both"}:
             return ToolResult(content=f"unsupported search target: {target_kind}", is_error=True)
         if not query and target_kind in {"content", "both"}:
             return ToolResult(content="query is required for content search", is_error=True)
-        target = self.workspace.resolve_path(
+        target = self._resolve_workspace_path(
             call.arguments.get("path") or ".",
             operation="read",
             allow_outside_read=True,
         )
+        if isinstance(target, ToolResult):
+            return target
         include_sensitive = bool(call.arguments.get("include_sensitive", False))
         needs_prompt = target.outside or target.sensitive or (
             include_sensitive and self.workspace.contains_sensitive_children(target.path, operation="read")
@@ -605,7 +1911,7 @@ class ToolRuntime:
             call,
             core=core,
             turn=turn,
-            capability_name="fs.read",
+            capability_name=self._resolved_effect_capability("fs.read"),
             action="search",
             target=target.relative,
             risk="low" if not needs_prompt else "high",
@@ -685,13 +1991,17 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
-        target = self.workspace.resolve_path(str(call.arguments.get("path") or ""), operation="write")
+        target = self._resolve_workspace_path(
+            str(call.arguments.get("path") or ""),
+            operation="write",
+        )
+        if isinstance(target, ToolResult):
+            return target
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             action="write",
             target=target.relative,
             risk="high",
@@ -719,13 +2029,17 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
-        target = self.workspace.resolve_path(str(call.arguments.get("path") or ""), operation="write")
+        target = self._resolve_workspace_path(
+            str(call.arguments.get("path") or ""),
+            operation="write",
+        )
+        if isinstance(target, ToolResult):
+            return target
         denied = await self._approval_for_path(
             call,
             core=core,
             turn=turn,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             action="patch",
             target=target.relative,
             risk="high",
@@ -769,7 +2083,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("terminal.exec")
         command = str(call.arguments.get("command") or "").strip()
         if not command:
             content = "command is required"
@@ -779,7 +2092,12 @@ class ToolRuntime:
                 is_error=True,
                 display_output=self._format_command_display(command, cwd_display, content),
             )
-        cwd = self.workspace.resolve_path(call.arguments.get("cwd") or ".", operation="write")
+        cwd = self._resolve_workspace_path(
+            call.arguments.get("cwd") or ".",
+            operation="write",
+        )
+        if isinstance(cwd, ToolResult):
+            return cwd
         env_overlay = call.arguments.get("env") or {}
         if not isinstance(env_overlay, Mapping):
             content = "env must be an object"
@@ -788,12 +2106,77 @@ class ToolRuntime:
                 is_error=True,
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
+        normalized_env_overlay = {str(key): str(value) for key, value in env_overlay.items()}
+        invalid_env_key = next(
+            (key for key in normalized_env_overlay if not _TERMINAL_ENV_NAME_RE.fullmatch(key)),
+            None,
+        )
+        if invalid_env_key is not None:
+            content = f"invalid terminal environment name: {invalid_env_key}"
+            return ToolResult(
+                content=content,
+                is_error=True,
+                data={"executionStarted": False},
+                display_output=self._format_command_display(command, cwd.relative, content),
+            )
+        timeout = _terminal_timeout_seconds(call.arguments.get("timeout_seconds"))
+        background = bool(call.arguments.get("background", False))
+        secret_bindings = _terminal_secret_bindings(call.arguments)
+        binding_started_at = time.monotonic()
+        binding_deadlines = [
+            binding_started_at + binding.expires_in_seconds
+            for binding in secret_bindings
+        ]
+        binding_expiries = [
+            (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=binding.expires_in_seconds)
+            ).isoformat()
+            for binding in secret_bindings
+        ]
+        terminal_home = self.version_store.home / "terminal-home"
+        env = build_sanitized_subprocess_env(
+            os.environ,
+            normalized_env_overlay,
+            home=terminal_home,
+        )
+        env = self.runtime_timezone.apply_subprocess_env(env)
+        (
+            resolved_executable,
+            shell_executable,
+            command_executable,
+        ) = _terminal_executable_audit(command, env)
+        secret_binding_audit = [
+            binding.audit_view(expires_at=expires_at)
+            for binding, expires_at in zip(
+                secret_bindings,
+                binding_expiries,
+                strict=True,
+            )
+        ]
+        audit = {
+            "cwd": str(cwd.path),
+            "cwd_relative": cwd.relative,
+            "resolved_executable": resolved_executable,
+            "shell_executable": shell_executable,
+            "command_executable": command_executable,
+            "timeout_seconds": min(
+                [timeout, *(binding.expires_in_seconds for binding in secret_bindings)]
+            ),
+            "env_keys": sorted({*env, *(binding.target for binding in secret_bindings)}),
+            "overlay_env_keys": sorted(normalized_env_overlay),
+            "secret_bindings": secret_binding_audit,
+        }
         command_guard = review_command(command)
         if command_guard.action == "block":
             content = f"terminal command blocked: {command_guard.reason}"
             return ToolResult(
                 content=content,
-                data={"executionStarted": False, "command_guard": asdict(command_guard)},
+                data={
+                    "executionStarted": False,
+                    "command_guard": asdict(command_guard),
+                    "audit": audit,
+                },
                 is_error=True,
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
@@ -802,42 +2185,137 @@ class ToolRuntime:
             core=core,
             turn=turn,
             cwd=cwd.relative,
+            resolved_cwd=str(cwd.path),
             command=command,
-            env_keys=sorted(str(key) for key in env_overlay.keys()),
+            execution_audit=audit,
+            env_overlay=normalized_env_overlay,
+            execution_options={
+                "background": background,
+                "timeout_seconds": timeout,
+                "secret_bindings": secret_binding_audit,
+            },
             command_guard=command_guard,
+            has_secret_bindings=bool(secret_bindings),
+            has_env_overlay=bool(normalized_env_overlay),
             emit_event=emit_event,
         )
         if denied:
             return denied
-        timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=30, maximum=120)
-        env = os.environ.copy()
-        env.update({str(key): str(value) for key, value in env_overlay.items()})
-        env = self.runtime_timezone.apply_subprocess_env(env)
+        ensure_subprocess_home(terminal_home)
+        bound_secret_values: dict[str, str] = {}
+        for binding, deadline in zip(secret_bindings, binding_deadlines, strict=True):
+            if time.monotonic() >= deadline:
+                content = f"secret binding expired before execution: env:{binding.source_name}"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            value = os.environ.get(binding.source_name)
+            if value is None:
+                content = f"secret binding source is unavailable: env:{binding.source_name}"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            env[binding.target] = value
+            bound_secret_values[binding.target] = value
+        execution_timeout = float(timeout)
+        if binding_deadlines:
+            remaining_binding_seconds = min(binding_deadlines) - time.monotonic()
+            if remaining_binding_seconds <= 0:
+                content = "secret binding expired before execution"
+                return ToolResult(
+                    content=content,
+                    is_error=True,
+                    data={"executionStarted": False, "audit": audit},
+                    display_output=self._format_command_display(command, cwd.relative, content),
+                )
+            execution_timeout = min(
+                execution_timeout,
+                remaining_binding_seconds,
+            )
+        audit["effective_timeout_seconds"] = execution_timeout
+        audit["timeout_reason"] = (
+            "secret_binding_expiry"
+            if binding_deadlines and execution_timeout < timeout
+            else "command_timeout"
+        )
         execution_command = _terminal_execution_command(command)
-        if bool(call.arguments.get("background", False)):
+        if background:
             return self._start_background_task(
                 command=command,
                 execution_command=execution_command,
                 cwd=cwd,
                 env=env,
+                audit=audit,
                 owner_session_id=turn.session_id,
                 owner_turn_id=turn.turn_id,
                 notify_on_complete=bool(call.arguments.get("notify_on_complete", True)),
             )
+        artifact_id, artifact_paths = self._terminal_output_artifact_paths(
+            session_id=turn.session_id,
+        )
         try:
-            completed = await asyncio.to_thread(
-                subprocess.run,
-                execution_command,
-                cwd=cwd.path,
-                env=env,
-                shell=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
+            self.process_lifecycle.ensure_open()
+            cancel_event = threading.Event()
+            foreground_task = asyncio.create_task(
+                asyncio.to_thread(
+                    run_foreground_process,
+                    execution_command,
+                    cwd=cwd.path,
+                    env=env,
+                    timeout_seconds=execution_timeout,
+                    output_limit_chars=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+                    cancel_event=cancel_event,
+                    output_artifact_paths=artifact_paths,
+                    artifact_redactions=bound_secret_values,
+                )
             )
-            content = self._format_command_result(completed)
+            foreground_registration = self.process_lifecycle.track_foreground(
+                cancel_event=cancel_event,
+                task=foreground_task,
+            )
+            try:
+                try:
+                    completed = await asyncio.shield(foreground_task)
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    try:
+                        await asyncio.shield(foreground_task)
+                    except ProcessExecutionCancelled:
+                        pass
+                    except Exception as cleanup_error:
+                        raise RuntimeError(
+                            "foreground terminal cancellation cleanup failed"
+                        ) from cleanup_error
+                    raise
+                except ProcessExecutionCancelled:
+                    raise asyncio.CancelledError from None
+            finally:
+                self.process_lifecycle.release_foreground(
+                    foreground_registration
+                )
+            content = _redact_terminal_bound_secrets(
+                self._format_command_result(completed),
+                bound_secret_values,
+            )
+            process_identity = getattr(completed, "process_identity", None)
+            output_stats = getattr(completed, "output_stats", None)
+            output_artifact = (
+                self._register_terminal_output_artifact(
+                    artifact_id=artifact_id,
+                    session_id=turn.session_id,
+                    turn_id=turn.turn_id,
+                    paths=getattr(completed, "output_artifacts", {}),
+                    stats=output_stats,
+                )
+                if output_stats is not None
+                else None
+            )
             return ToolResult(
                 content=content,
                 is_error=completed.returncode != 0,
@@ -846,19 +2324,68 @@ class ToolRuntime:
                     "exit_code": completed.returncode,
                     "cwd": cwd.relative,
                     "timed_out": False,
+                    "audit": audit,
+                    **(
+                        {"process": process_identity.audit_view()}
+                        if process_identity is not None
+                        else {}
+                    ),
+                    **({"output": output_stats} if output_stats is not None else {}),
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
                 },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
             stderr = exc.stderr or ""
-            content = self._format_command_output(124, stdout, stderr, timed_out=True)
+            process_identity = getattr(exc, "process_identity", None)
+            output_stats = getattr(exc, "output_stats", None)
+            output_artifact = (
+                self._register_terminal_output_artifact(
+                    artifact_id=artifact_id,
+                    session_id=turn.session_id,
+                    turn_id=turn.turn_id,
+                    paths=getattr(exc, "output_artifacts", {}),
+                    stats=output_stats,
+                )
+                if output_stats is not None
+                else None
+            )
+            content = _redact_terminal_bound_secrets(
+                self._format_command_output(124, stdout, stderr, timed_out=True),
+                bound_secret_values,
+            )
             return ToolResult(
                 content=content,
                 is_error=True,
-                data={"executionStarted": True, "exit_code": 124, "cwd": cwd.relative, "timed_out": True},
+                data={
+                    "executionStarted": True,
+                    "exit_code": 124,
+                    "cwd": cwd.relative,
+                    "timed_out": True,
+                    "audit": audit,
+                    **(
+                        {"process": process_identity.audit_view()}
+                        if process_identity is not None
+                        else {}
+                    ),
+                    **({"output": output_stats} if output_stats is not None else {}),
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
+                },
                 display_output=self._format_command_display(command, cwd.relative, content),
             )
+        finally:
+            for binding in secret_bindings:
+                env.pop(binding.target, None)
+            bound_secret_values.clear()
 
     def _start_background_task(
         self,
@@ -867,21 +2394,34 @@ class ToolRuntime:
         execution_command: str,
         cwd: Any,
         env: Mapping[str, str],
+        audit: Mapping[str, Any],
         owner_session_id: str,
         owner_turn_id: str,
         notify_on_complete: bool,
     ) -> ToolResult:
         async def terminal_task(ctx: RuntimeTaskContext) -> RuntimeTaskOutcome:
+            artifact_id, artifact_paths = self._terminal_output_artifact_paths(
+                session_id=owner_session_id,
+            )
             process = await asyncio.create_subprocess_shell(
                 execution_command,
                 cwd=cwd.path,
                 env=dict(env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_spawn_kwargs(),
             )
+            process_identity = await capture_async_process_identity(process)
+            try:
+                bind_process_identity(process, process_identity)
+            except Exception:
+                process.kill()
+                await process.wait()
+                raise
             ctx.update_metadata(
                 {
                     "pid": process.pid,
+                    "process": process_identity.audit_view(),
                     "command": command,
                     "cwd": cwd.relative,
                     "returncode": None,
@@ -889,19 +2429,67 @@ class ToolRuntime:
             )
 
             async def cancel_process() -> None:
-                if process.returncode is not None:
-                    return
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                ctx.update_metadata(
+                    {
+                        "returncode": process.returncode,
+                        "exit_reason": "cancelled",
+                    }
+                )
 
             ctx.set_cancel_callback(cancel_process)
-            await self._capture_process_output(process, ctx)
+            try:
+                output = await self._capture_process_output(
+                    process,
+                    ctx,
+                    output_artifact_paths=artifact_paths,
+                )
+            except asyncio.CancelledError:
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                raise
+            except Exception:
+                await terminate_async_process_tree(
+                    process,
+                    identity=process_identity,
+                )
+                ctx.update_metadata(
+                    {
+                        "returncode": process.returncode,
+                        "exit_reason": "failed",
+                    }
+                )
+                raise
+            release_process_resources(process)
+            output_artifact = self._register_terminal_output_artifact(
+                artifact_id=artifact_id,
+                session_id=owner_session_id,
+                turn_id=owner_turn_id,
+                paths=output.artifacts,
+                stats=output.stats,
+            )
             returncode = process.returncode
-            ctx.update_metadata({"returncode": returncode})
+            ctx.update_metadata(
+                {
+                    "returncode": returncode,
+                    "exit_reason": "completed",
+                    "output": output.stats,
+                    **(
+                        {"output_artifact": output_artifact}
+                        if output_artifact is not None
+                        else {}
+                    ),
+                }
+            )
+            if output_artifact is not None:
+                ctx.set_result_ref(
+                    f"artifact:{output_artifact['artifact_id']}"
+                )
             summary = f"terminal command exited {returncode}"
             ctx.set_summary(summary)
             if returncode != 0 and self.task_worker.get(ctx.task_id).status != "cancelled":
@@ -917,9 +2505,9 @@ class ToolRuntime:
                 task_factory=terminal_task,
                 write_scope=f"terminal:{cwd.path}",
                 notify_on_complete=notify_on_complete,
-                metadata={"command": command, "cwd": cwd.relative},
+                metadata={"command": command, "cwd": cwd.relative, "audit": dict(audit)},
             )
-        except RuntimeTaskConflictError as exc:
+        except (RuntimeTaskConflictError, RuntimeTaskWorkerClosedError) as exc:
             content = str(exc)
             return ToolResult(
                 content=content,
@@ -939,18 +2527,17 @@ class ToolRuntime:
         self,
         process: asyncio.subprocess.Process,
         ctx: RuntimeTaskContext,
-    ) -> None:
-        async def read_stream(stream: asyncio.StreamReader | None, label: str) -> None:
-            if stream is None:
-                return
-            while True:
-                chunk = await stream.readline()
-                if not chunk:
-                    break
-                ctx.append_log(f"{label}: {chunk.decode('utf-8', errors='replace').rstrip()}")
-
-        await asyncio.gather(read_stream(process.stdout, "stdout"), read_stream(process.stderr, "stderr"))
-        await process.wait()
+        *,
+        output_artifact_paths: Mapping[str, Path] | None = None,
+    ) -> BoundedProcessOutput:
+        return await drain_async_process_output(
+            process,
+            output_limit_chars=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
+            on_chunk=lambda label, text: ctx.append_log(
+                f"{label}: {text.rstrip()}"
+            ),
+            output_artifact_paths=output_artifact_paths,
+        )
 
     def _start_evolve_task(
         self,
@@ -988,24 +2575,31 @@ class ToolRuntime:
                 notify_on_complete=notify_on_complete,
                 metadata={"target_core_id": core.core_id, "goal": goal},
             )
-        except RuntimeTaskConflictError as exc:
+        except (RuntimeTaskConflictError, RuntimeTaskWorkerClosedError) as exc:
             return ToolResult(content=str(exc), data={"executionStarted": False}, is_error=True)
         payload = {"task_id": record.task_id}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload)
 
-    def _task_list(self, call: ToolCall, *, turn: TurnContext, capability: CapabilityFacade) -> ToolResult:
-        capability.require("task.control")
+    def _task_list(
+        self,
+        call: ToolCall,
+        *,
+        turn: TurnContext,
+        capability: CapabilityFacade,
+        principal_scope: PrincipalScope,
+    ) -> ToolResult:
         kind = call.arguments.get("kind")
         include_completed = bool(call.arguments.get("include_completed", True))
         try:
-            records = self.task_worker.list_tasks(
+            records = self.task_worker.list_owned(
+                principal_scope,
                 owner_session_id=turn.session_id,
                 kind=str(kind) if kind else None,
                 include_completed=include_completed,
             )
         except RuntimeTaskKindError as exc:
             return ToolResult(content=str(exc), is_error=True)
-        tasks = [record.to_payload(include_log=False) for record in records]
+        tasks = [record.to_model_payload() for record in records]
         payload = {"tasks": tasks}
         return ToolResult(content=json.dumps(payload, ensure_ascii=False), data=payload, model_output=json.dumps(payload, ensure_ascii=False))
 
@@ -1024,7 +2618,14 @@ class ToolRuntime:
 
     def _skill_view(self, call: ToolCall, *, core: LoadedCore) -> ToolResult:
         name = str(call.arguments.get("name") or "").strip()
-        return self._skill_view_by_name(core, name=name, file_path=call.arguments.get("file_path"))
+        try:
+            return self._skill_view_by_name(
+                core,
+                name=name,
+                file_path=call.arguments.get("file_path"),
+            )
+        except ValueError as exc:
+            return self._preflight_error(exc)
 
     async def _skill_manage(
         self,
@@ -1035,7 +2636,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("fs.write")
         action = str(call.arguments.get("action") or "").strip().lower()
         name = str(call.arguments.get("name") or "").strip()
         if action not in {"create", "update", "delete", "patch", "write_file", "remove_file"}:
@@ -1043,15 +2643,23 @@ class ToolRuntime:
         if not name:
             return ToolResult(content="name is required", is_error=True)
 
-        skill_root = self._skill_root(core)
-        target_or_error = self._skill_target(core, name, skill_root)
-        if isinstance(target_or_error, ToolResult):
-            return target_or_error
-        target = target_or_error
+        try:
+            skill_root = self._skill_root(core)
+            target_or_error = self._skill_target(core, name, skill_root)
+            if isinstance(target_or_error, ToolResult):
+                return target_or_error
+            target = target_or_error
 
-        prepared = self._prepare_skill_manage_action(core, action, target, call.arguments)
-        if isinstance(prepared, ToolResult):
-            return prepared
+            prepared = self._prepare_skill_manage_action(
+                core,
+                action,
+                target,
+                call.arguments,
+            )
+            if isinstance(prepared, ToolResult):
+                return prepared
+        except (ValueError, OSError) as exc:
+            return self._preflight_error(exc)
         approval_target, mutation_root, mutate = prepared
 
         denied = await self._approval_for_skill_manage(
@@ -1495,7 +3103,11 @@ class ToolRuntime:
         }
 
     def _tools_list(self, core: LoadedCore) -> ToolResult:
-        tools = [entry.to_model_metadata() for entry in self.registry_for(core)]
+        catalog = self._resolved_effect_catalog.get()
+        if catalog is None:
+            raise RuntimeError("tools_list requires the bound resolved effect catalog")
+        entries = catalog.entries
+        tools = [entry.to_model_metadata() for entry in entries]
         model_tools = [
             {
                 "name": tool["name"],
@@ -1583,15 +3195,47 @@ class ToolRuntime:
         capability: CapabilityFacade,
         emit_event: EventEmitter | None,
     ) -> ToolResult:
-        capability.require("network.fetch")
         url = str(call.arguments.get("url") or "").strip()
         if not url:
             return ToolResult(content="url is required", is_error=True)
         if not url.startswith(("http://", "https://")):
             return ToolResult(content="only http and https URLs are supported", is_error=True)
-        denied = await self._approval_for_url(call, core=core, turn=turn, url=url, emit_event=emit_event)
+        url_decision = await asyncio.to_thread(self.url_policy.evaluate, url)
+        if not url_decision.allowed:
+            return ToolResult(
+                content=f"URL blocked by Host policy: {url_decision.reason}",
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "url_policy": url_decision.audit_view(),
+                },
+            )
+        denied = await self._approval_for_url(
+            call,
+            core=core,
+            turn=turn,
+            url=url,
+            url_decision=url_decision,
+            emit_event=emit_event,
+        )
         if denied:
             return denied
+        execution_url_decision = await asyncio.to_thread(
+            self.url_policy.evaluate,
+            url,
+        )
+        if not execution_url_decision.allowed:
+            return ToolResult(
+                content=(
+                    "URL blocked by Host policy before request: "
+                    f"{execution_url_decision.reason}"
+                ),
+                is_error=True,
+                data={
+                    "executionStarted": False,
+                    "url_policy": execution_url_decision.audit_view(),
+                },
+            )
         timeout = self._positive_int(call.arguments.get("timeout_seconds"), default=20, maximum=60)
         max_chars = self._positive_int(
             call.arguments.get("max_chars"),
@@ -1599,15 +3243,39 @@ class ToolRuntime:
             maximum=DEFAULT_TOOL_OUTPUT_LIMIT_CHARS,
         )
 
-        def fetch() -> tuple[int, str | None, str]:
+        def fetch() -> tuple[int, str | None, str, dict[str, object]]:
             request = urllib.request.Request(url, method="GET", headers={"User-Agent": "demiurge/0.1"})
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            connection_handler = UrlPolicyConnectionHandler(self.url_policy)
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                connection_handler,
+                UrlPolicyRedirectHandler(self.url_policy)
+            )
+            with opener.open(request, timeout=timeout) as response:
+                final_decision = (
+                    connection_handler.last_decision
+                    or self.url_policy.require(response.geturl())
+                )
                 charset = response.headers.get_content_charset() or "utf-8"
                 body = response.read(max_chars + 1).decode(charset, errors="replace")
-                return response.status, response.headers.get("content-type"), body
+                return (
+                    response.status,
+                    response.headers.get("content-type"),
+                    body,
+                    final_decision.audit_view(),
+                )
 
         try:
-            status, content_type, body = await asyncio.to_thread(fetch)
+            status, content_type, body, final_url_policy = await asyncio.to_thread(fetch)
+        except UnsafeUrlError as exc:
+            return ToolResult(
+                content=f"URL blocked by Host policy: {exc.decision.reason}",
+                is_error=True,
+                data={
+                    "executionStarted": True,
+                    "url_policy": exc.decision.audit_view(),
+                },
+            )
         except urllib.error.URLError as exc:
             return ToolResult(content=f"web_extract failed: {exc}", is_error=True, data={"executionStarted": True})
         truncated = len(body) > max_chars
@@ -1618,7 +3286,8 @@ class ToolRuntime:
             content=content,
             data={
                 "executionStarted": True,
-                "url": url,
+                "url": final_url_policy["target"],
+                "url_policy": final_url_policy,
                 "status": status,
                 "content_type": content_type,
                 "truncated": truncated,
@@ -1626,7 +3295,12 @@ class ToolRuntime:
             model_output=content,
         )
 
-    def _session_search(self, call: ToolCall) -> ToolResult:
+    def _session_search(
+        self,
+        call: ToolCall,
+        *,
+        principal_scope: PrincipalScope,
+    ) -> ToolResult:
         store = self.session_runtime
         if store is None:
             return ToolResult(content="session runtime is not configured", is_error=True)
@@ -1635,8 +3309,8 @@ class ToolRuntime:
         limit = self._positive_int(call.arguments.get("limit"), default=10, maximum=50)
         if session_id:
             try:
-                messages = store.read_messages(session_id)
-            except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+                messages = store.read_owned_messages(principal_scope, session_id)
+            except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError) as exc:
                 return ToolResult(content=f"session_search failed: {exc}", is_error=True)
             selected = messages[-limit:] if not query else [
                 message
@@ -1664,15 +3338,24 @@ class ToolRuntime:
                     "preview": record.preview,
                     "message_count": record.message_count,
                 }
-                for record in store.list_sessions(limit=limit)
+                for record in store.list_owned_sessions(
+                    principal_scope,
+                    limit=limit,
+                )
             ]
             content = json.dumps({"sessions": sessions}, ensure_ascii=False)
             return ToolResult(content=content, data={"sessions": sessions}, model_output=content)
         results: list[dict[str, Any]] = []
-        for record in store.list_sessions(limit=10_000):
+        for record in store.list_owned_sessions(
+            principal_scope,
+            limit=10_000,
+        ):
             try:
-                messages = store.read_messages(record.session_id)
-            except (OSError, json.JSONDecodeError):
+                messages = store.read_owned_messages(
+                    principal_scope,
+                    record.session_id,
+                )
+            except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError):
                 continue
             for message in messages:
                 if query.lower() not in message.content.lower():
@@ -1716,7 +3399,6 @@ class ToolRuntime:
             if action == "list":
                 return self._schedule_manage_result(manager.list())
 
-            capability.require("schedule.manage")
             schedule_id = str(call.arguments.get("schedule_id") or "").strip() or None
             schedule = call.arguments.get("schedule")
             prompt = call.arguments.get("prompt")
@@ -1796,9 +3478,9 @@ class ToolRuntime:
             default_auto=auto_approve,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
             capability=capability_name,
             action=action,
             risk=risk,
@@ -1808,7 +3490,6 @@ class ToolRuntime:
             cache_key=f"{call.name}:{capability_name}:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1826,51 +3507,84 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         cwd: str,
+        resolved_cwd: str,
         command: str,
-        env_keys: list[str],
+        execution_audit: Mapping[str, Any],
+        env_overlay: Mapping[str, str],
+        execution_options: Mapping[str, Any],
         command_guard: CommandGuardDecision,
+        has_secret_bindings: bool,
+        has_env_overlay: bool,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
-        if command_guard.action == "allow":
+        requires_explicit_approval = (
+            command_guard.action != "allow"
+            or has_secret_bindings
+            or has_env_overlay
+        )
+        approval_risk = (
+            "high"
+            if has_secret_bindings or has_env_overlay
+            else command_guard.risk
+        )
+        if (
+            command_guard.action == "allow"
+            and not has_secret_bindings
+            and not has_env_overlay
+        ):
             policy = self._safe_command_approval_policy(
                 core,
                 tool_name=call.name,
-                capability_name="terminal.exec",
-                risk=command_guard.risk,
+                capability_name=self._resolved_effect_capability("terminal.exec"),
+                risk=approval_risk,
             )
             auto_approve = policy != "deny"
         else:
             policy = self._effective_approval_policy(
                 core,
                 tool_name=call.name,
-                capability_name="terminal.exec",
-                risk=command_guard.risk,
+                capability_name=self._resolved_effect_capability("terminal.exec"),
+                risk=approval_risk,
                 default_auto=False,
             )
-            auto_approve = policy == "auto"
+            if requires_explicit_approval and policy == "auto":
+                policy = "prompt"
+            auto_approve = policy == "auto" and not requires_explicit_approval
         summary = f"Run terminal command in {cwd}"
         if command_guard.action != "allow":
             summary = f"{summary}: {command_guard.reason}"
+        if has_secret_bindings:
+            summary = f"{summary}: bind explicitly authorized secret environment"
+        elif has_env_overlay:
+            summary = f"{summary}: apply explicit environment overlay"
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
-            capability="terminal.exec",
+            capability=self._resolved_effect_capability("terminal.exec"),
             action="exec",
-            risk=command_guard.risk,
+            risk=approval_risk,
             summary=summary,
-            target=cwd,
+            target=resolved_cwd,
             command=command,
             arguments_preview={
-                "cwd": cwd,
                 "command": command,
-                "env_keys": env_keys,
+                "execution": dict(execution_audit),
+                "secret_bindings": list(
+                    execution_audit.get("secret_bindings", [])
+                ),
                 "command_guard": asdict(command_guard),
             },
-            cache_key=f"terminal:terminal.exec:{command_guard.rule_key}",
+            cache_key=_terminal_approval_cache_key(
+                command,
+                command_guard,
+                cwd=cwd,
+                env_overlay=env_overlay,
+                execution_options=execution_options,
+            ),
             auto_approve=auto_approve,
             policy=policy,
-            session_id=turn.session_id,
+            session_cacheable=not has_secret_bindings,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -1878,7 +3592,11 @@ class ToolRuntime:
         content = f"approval denied: terminal command in {cwd}"
         return ToolResult(
             content=content,
-            data={"executionStarted": False, "approval": asdict(decision)},
+            data={
+                "executionStarted": False,
+                "approval": asdict(decision),
+                "audit": dict(execution_audit),
+            },
             is_error=True,
             display_output=self._format_command_display(command, cwd, content),
         )
@@ -1890,78 +3608,39 @@ class ToolRuntime:
         core: LoadedCore,
         turn: TurnContext,
         url: str,
+        url_decision: UrlDecision,
         emit_event: EventEmitter | None,
     ) -> ToolResult | None:
+        safe_target = str(url_decision.audit_view()["target"])
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="network.fetch",
+            capability_name=self._resolved_effect_capability("network.fetch"),
             risk="high",
             default_auto=False,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
-            capability="network.fetch",
+            capability=self._resolved_effect_capability("network.fetch"),
             action="fetch",
             risk="high",
-            summary=f"Extract URL {url}",
-            target=url,
-            arguments_preview={"url": url},
-            cache_key=f"web_extract:network.fetch:{url}",
+            summary=f"Extract URL from {safe_target}",
+            target=safe_target,
+            arguments_preview={"url": safe_target},
+            cache_key=(
+                "web_extract:network.fetch:"
+                + hashlib.sha256(url.encode("utf-8")).hexdigest()
+            ),
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
             return None
         return ToolResult(
-            content=f"approval denied: extract URL {url}",
-            data={"executionStarted": False, "approval": asdict(decision)},
-            is_error=True,
-        )
-
-    async def _approval_for_mcp(
-        self,
-        call: ToolCall,
-        *,
-        core: LoadedCore,
-        turn: TurnContext,
-        tool: McpToolInfo,
-        capability_name: str,
-        risk: str,
-        emit_event: EventEmitter | None,
-    ) -> ToolResult | None:
-        policy = self._effective_approval_policy(
-            core,
-            tool_name=call.name,
-            capability_name=capability_name,
-            risk=risk,
-            default_auto=tool.approval_policy == "auto",
-        )
-        target = f"{tool.server_id}/{tool.server_tool_name}"
-        request = ApprovalRequest(
-            tool_name=call.name,
-            tool_call_id=call.id,
-            turn_id=turn.turn_id,
-            capability=capability_name,
-            action="mcp.call",
-            risk=risk,
-            summary=f"Call MCP tool {target}",
-            target=target,
-            arguments_preview=dict(call.arguments),
-            cache_key=f"{call.name}:{capability_name}:mcp.call:{target}",
-            auto_approve=policy == "auto",
-            policy=policy,
-            session_id=turn.session_id,
-        )
-        decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
-        if decision.allowed:
-            return None
-        return ToolResult(
-            content=f"approval denied: MCP tool {target}",
+            content=f"approval denied: extract URL from {safe_target}",
             data={"executionStarted": False, "approval": asdict(decision)},
             is_error=True,
         )
@@ -1979,15 +3658,15 @@ class ToolRuntime:
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="fs.write",
+            capability_name=self._resolved_effect_capability("fs.write"),
             risk="high",
             default_auto=False,
         )
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
-            capability="fs.write",
+            capability=self._resolved_effect_capability("fs.write"),
             action=f"skill.{action}",
             risk="high",
             summary=f"{action} skill {target}",
@@ -1996,7 +3675,6 @@ class ToolRuntime:
             cache_key=f"skill_manage:fs.write:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2020,16 +3698,16 @@ class ToolRuntime:
         policy = self._effective_approval_policy(
             core,
             tool_name=call.name,
-            capability_name="schedule.manage",
+            capability_name=self._resolved_effect_capability("schedule.manage"),
             risk="high",
             default_auto=False,
         )
         prompt = str(call.arguments.get("prompt") or "")
         request = ApprovalRequest(
+            scope=self._current_approval_scope(),
             tool_name=call.name,
             tool_call_id=call.id,
-            turn_id=turn.turn_id,
-            capability="schedule.manage",
+            capability=self._resolved_effect_capability("schedule.manage"),
             action=f"schedule.{action}",
             risk="high",
             summary=f"{action} schedule {target}",
@@ -2043,7 +3721,6 @@ class ToolRuntime:
             cache_key=f"schedule_manage:schedule.manage:{action}:{target}",
             auto_approve=policy == "auto",
             policy=policy,
-            session_id=turn.session_id,
         )
         decision = await self.approval_runtime.decide(request, emit_event=self._turn_event_emitter(emit_event, turn))
         if decision.allowed:
@@ -2064,6 +3741,72 @@ class ToolRuntime:
 
         return wrapped
 
+    async def _approval_for_authored(
+        self,
+        entry: ResolvedEffectEntry,
+        slot: SlotDefinition,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        emit_event: EventEmitter | None,
+    ) -> ToolResult | None:
+        return await self._approval_for_resolved_entry(
+            entry,
+            call,
+            core=core,
+            turn=turn,
+            action="authored.call",
+            summary=f"Call authored tool {entry.name}",
+            target=slot.relative_path,
+            arguments_preview=_safe_authored_arguments_preview(call.arguments),
+            emit_event=emit_event,
+        )
+
+    async def _approval_for_resolved_entry(
+        self,
+        entry: ResolvedEffectEntry,
+        call: ToolCall,
+        *,
+        core: LoadedCore,
+        turn: TurnContext,
+        action: str,
+        summary: str,
+        target: str | None,
+        arguments_preview: dict[str, Any],
+        emit_event: EventEmitter | None,
+        cache_key: str | None = None,
+    ) -> ToolResult | None:
+        capability_name = entry.capability or f"tool.call:{entry.name}"
+        policy = entry.approval_policy
+        request = ApprovalRequest(
+            scope=self._current_approval_scope(),
+            tool_name=entry.name,
+            tool_call_id=call.id,
+            capability=capability_name,
+            action=action,
+            risk=entry.risk,
+            summary=summary,
+            target=target,
+            arguments_preview=arguments_preview,
+            cache_key=cache_key or (
+                f"{entry.name}:{capability_name}:{action}:{target or ''}"
+            ),
+            auto_approve=policy == "auto",
+            policy=policy,
+        )
+        decision = await self.approval_runtime.decide(
+            request,
+            emit_event=self._turn_event_emitter(emit_event, turn),
+        )
+        if decision.allowed:
+            return None
+        return ToolResult(
+            content=f"approval denied: {summary}",
+            data={"executionStarted": False, "approval": asdict(decision)},
+            is_error=True,
+        )
+
     async def _execute_authored(
         self,
         slot: SlotDefinition,
@@ -2074,7 +3817,6 @@ class ToolRuntime:
         capability: CapabilityFacade,
         output_factory: Callable[[SlotDefinition], Any] | None = None,
     ) -> ToolResult:
-        func = load_slot_callable(slot)
         output = output_factory(slot) if output_factory is not None else None
         ctx = ToolContext(
             turn=turn,
@@ -2084,24 +3826,42 @@ class ToolRuntime:
             output=output,
             workspace=self.workspace.root,
         )
-        value = func(ctx, call.arguments)
-        if inspect.isawaitable(value):
-            value = await value
-        flush_slot_end = getattr(output, "flush_slot_end", None)
-        if callable(flush_slot_end):
-            flush_slot_end()
-        if isinstance(value, ToolResult):
-            return value
-        if isinstance(value, dict):
+        try:
+            func = load_slot_callable(slot)
+            value = func(ctx, call.arguments)
+            if inspect.isawaitable(value):
+                value = await value
+            flush_slot_end = getattr(output, "flush_slot_end", None)
+            if callable(flush_slot_end):
+                flush_slot_end()
+        except Exception as exc:
             return ToolResult(
+                content=str(exc),
+                data={"executionStarted": True},
+                is_error=True,
+            )
+        if isinstance(value, ToolResult):
+            return self._mark_authored_execution(value)
+        if isinstance(value, dict):
+            return self._mark_authored_execution(ToolResult(
                 content=str(value.get("content", "")),
                 data=value.get("data"),
                 is_error=bool(value.get("is_error", False)),
                 terminate=bool(value.get("terminate", False)),
                 model_output=value.get("model_output"),
                 display_output=value.get("display_output"),
-            )
+            ))
         return ToolResult(content=str(value))
+
+    @staticmethod
+    def _mark_authored_execution(result: ToolResult) -> ToolResult:
+        if not result.is_error:
+            return result
+        data = dict(result.data) if isinstance(result.data, Mapping) else {}
+        data.pop("denial", None)
+        data.pop("approval", None)
+        data["executionStarted"] = True
+        return replace(result, data=data)
 
     def _effective_approval_policy(
         self,
@@ -2113,9 +3873,10 @@ class ToolRuntime:
         default_auto: bool,
     ) -> str:
         baseline = "auto" if default_auto else "prompt"
-        entry = next((item for item in self.registry_for(core) if item.name == tool_name), None)
-        if entry:
+        entry = self._resolved_effect_entry.get()
+        if entry is not None and entry.name == tool_name:
             baseline = self._stricter_policy(baseline, entry.approval_policy)
+            return baseline
         core_policy = self._select_approval_policy(
             core.manifest.approval,
             tool_name=tool_name,
@@ -2142,6 +3903,13 @@ class ToolRuntime:
         capability_name: str,
         risk: str,
     ) -> str:
+        entry = self._resolved_effect_entry.get()
+        if (
+            entry is not None
+            and entry.name == tool_name
+            and entry.approval_policy == "deny"
+        ):
+            return "deny"
         global_policy = self._select_approval_policy(
             self.global_approval,
             tool_name=tool_name,

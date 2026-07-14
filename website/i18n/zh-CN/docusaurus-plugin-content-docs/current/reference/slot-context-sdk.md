@@ -237,6 +237,14 @@ scope。
 如果配置了 `state.session.write:draft_count` 这样的 target-specific grant，它可以
 满足对应 target 的操作。否则需要 generic scope capability。
 
+每次 `set`、`merge` 或 `append` 都会与同一 Host process 内针对同一 state file 的其他
+write 串行，并把 state snapshot 与对应 proposal audit 一起提交。Host 使用 atomic
+file，并在下一次 state read 时恢复中断的 commit。POSIX state directory/file 使用
+`0700`/`0600`；Windows 使用平台 ACL semantics。这不是 inter-process transaction
+boundary：多个 Host process 不得共用一个 runtime home。另需注意，分开的 `get()` 与
+`set()` 不是同一个 atomic read-modify-write；后续 transactional `StateRuntime` 会
+拥有这个更强的 contract。
+
 ## Tools Client
 
 Input 和 output slots 可以调用 visible tools：

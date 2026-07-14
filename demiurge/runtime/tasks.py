@@ -10,7 +10,9 @@ from typing import Any, Awaitable, Callable, Literal, Mapping
 from demiurge.runtime.control import RuntimeControlPlane, TaskSource, TaskSpec
 from demiurge.runtime.durable_work import DurableClaim
 from demiurge.runtime.host_work import HostWorkLifecycleRuntime
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeQuery
+from demiurge.runtime.text_format import shorten_text
 from demiurge.util import utc_id
 
 
@@ -29,6 +31,10 @@ class RuntimeTaskConflictError(RuntimeError):
 
 
 class RuntimeTaskKindError(ValueError):
+    pass
+
+
+class RuntimeTaskWorkerClosedError(RuntimeError):
     pass
 
 
@@ -55,6 +61,7 @@ class RuntimeTaskRecord:
     result_ref: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     notify_on_complete: bool = True
+    origin_scope_record: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     task: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -83,6 +90,22 @@ class RuntimeTaskRecord:
             payload["log"] = list(log or [])
         return payload
 
+    def to_model_payload(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "kind": self.kind,
+            "status": self.status,
+            "running": self.running,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "summary": shorten_text(
+                self.summary,
+                limit=1200,
+                marker="...",
+                normalize_whitespace=False,
+            ),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTaskCompletionEvent:
@@ -97,6 +120,7 @@ class RuntimeTaskCompletionEvent:
     log_tail: tuple[str, ...] = ()
     result_ref: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    origin_scope_record: Mapping[str, Any] | None = field(default=None, repr=False, compare=False)
 
     def to_inbound_text(self) -> str:
         lines = [
@@ -136,7 +160,7 @@ class RuntimeTaskCompletionEvent:
         }
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": self.task_id,
             "kind": self.kind,
             "owner_session_id": self.owner_session_id,
@@ -148,6 +172,9 @@ class RuntimeTaskCompletionEvent:
             "result_ref": self.result_ref,
             "metadata": dict(self.metadata),
         }
+        if self.origin_scope_record is not None:
+            payload["origin_scope"] = dict(self.origin_scope_record)
+        return payload
 
     @classmethod
     def from_runtime_event(cls, event: Mapping[str, Any]) -> "RuntimeTaskCompletionEvent":
@@ -164,6 +191,11 @@ class RuntimeTaskCompletionEvent:
             log_tail=tuple(str(line) for line in payload.get("log_tail") or ()),
             result_ref=payload.get("result_ref"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+            origin_scope_record=(
+                payload.get("origin_scope")
+                if isinstance(payload.get("origin_scope"), Mapping)
+                else None
+            ),
         )
 
 
@@ -212,8 +244,30 @@ class RuntimeTaskWorker:
         self._cancel_callbacks: dict[str, RuntimeTaskCancelCallback] = {}
         self._completion_callbacks: dict[str, RuntimeTaskCompletionCallback] = {}
         self._runtime_status_events: set[tuple[str, str]] = set()
+        self._cancellations_in_progress: set[str] = set()
+        self._cancellation_tasks: dict[str, asyncio.Task[None]] = {}
         self._completion_consumers: dict[str, int] = {}
+        self._turn_principal_scopes: dict[tuple[str, str], PrincipalScope] = {}
+        self._closed = False
         self.host_work = host_work or HostWorkLifecycleRuntime(store=control_plane.store)
+
+    def bind_turn_scope(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        scope: PrincipalScope,
+    ) -> None:
+        PrincipalScopeResolver(self.control_plane.store).validate_owned(scope)
+        if scope.session_id != session_id:
+            raise PermissionError("PrincipalScope does not match bound turn session")
+        self._turn_principal_scopes[(session_id, turn_id)] = scope
+
+    def release_turn_scope(self, *, session_id: str, turn_id: str) -> None:
+        self._turn_principal_scopes.pop((session_id, turn_id), None)
+
+    def scope_for_turn(self, *, session_id: str, turn_id: str) -> PrincipalScope | None:
+        return self._turn_principal_scopes.get((session_id, turn_id))
 
     def start_task(
         self,
@@ -228,9 +282,23 @@ class RuntimeTaskWorker:
         metadata: Mapping[str, Any] | None = None,
         task_id: str | None = None,
     ) -> RuntimeTaskRecord:
+        if self._closed:
+            raise RuntimeTaskWorkerClosedError("runtime task worker is closed")
         task_kind = self._validate_background_kind(kind)
         normalized_scope = self._normalize_scope(write_scope)
         self._ensure_scope_available(normalized_scope)
+        principal_scope = self.scope_for_turn(
+            session_id=owner_session_id,
+            turn_id=owner_turn_id,
+        )
+        origin_scope_record = None
+        if principal_scope is not None:
+            origin_scope_record = PrincipalScopeResolver(
+                self.control_plane.store
+            ).capture_origin_record(
+                scope=principal_scope,
+                owner_session_id=owner_session_id,
+            )
         record = RuntimeTaskRecord(
             task_id=task_id or utc_id("task_"),
             kind=task_kind,
@@ -241,6 +309,7 @@ class RuntimeTaskWorker:
             status="queued",
             metadata=dict(metadata or {}),
             notify_on_complete=notify_on_complete,
+            origin_scope_record=origin_scope_record,
         )
         self._submit_runtime_task(record)
         record.task = asyncio.create_task(self._run_record(record, task_factory), context=contextvars.Context())
@@ -282,20 +351,32 @@ class RuntimeTaskWorker:
                 record.completed_at = _now()
                 self._append_runtime_status_event(record, f"task.{record.status}")
         except asyncio.CancelledError:
-            if record.status != "cancelled":
+            if record.status not in TERMINAL_TASK_STATUSES:
                 record.status = "cancelled"
                 record.summary = record.summary or "task cancelled"
                 record.completed_at = _now()
-            self._append_runtime_status_event(record, "task.cancelled")
+            if record.task_id not in self._cancellations_in_progress:
+                self._append_runtime_status_event(record, "task.cancelled")
             raise
         except Exception as exc:
             record.status = "failed"
             record.summary = str(exc)
             record.completed_at = _now()
-            self.append_log(record.task_id, f"error: {exc}")
+            try:
+                self.append_log(record.task_id, f"error: {exc}")
+            except Exception as log_error:
+                record.metadata["error_log_persist_error_type"] = type(
+                    log_error
+                ).__name__
             self._append_runtime_status_event(record, "task.failed")
         finally:
-            if record.status in TERMINAL_TASK_STATUSES or record.status == "blocked_needs_user":
+            if (
+                record.task_id not in self._cancellations_in_progress
+                and (
+                    record.status in TERMINAL_TASK_STATUSES
+                    or record.status == "blocked_needs_user"
+                )
+            ):
                 self._emit_completion_once(record)
             self._cancel_callbacks.pop(record.task_id, None)
 
@@ -346,6 +427,26 @@ class RuntimeTaskWorker:
         except KeyError as exc:
             raise KeyError(f"background task not found: {task_id}") from exc
 
+    def get_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+    ) -> RuntimeTaskRecord:
+        rows = self.control_plane.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="tasks",
+                where={"task_id": task_id},
+                limit=1,
+            ),
+        ).rows
+        if not rows:
+            raise KeyError(f"background task not found: {task_id}")
+        try:
+            return self._record_from_projection(task_id, task_row=rows[0])
+        except KeyError as exc:
+            raise KeyError(f"background task not found: {task_id}") from exc
+
     def list_tasks(
         self,
         *,
@@ -373,8 +474,54 @@ class RuntimeTaskWorker:
             records = [record for record in records if record.running]
         return sorted(records, key=lambda record: record.started_at or "")
 
+    def list_owned(
+        self,
+        scope: PrincipalScope,
+        *,
+        owner_session_id: str | None = None,
+        kind: str | None = None,
+        include_completed: bool = True,
+    ) -> list[RuntimeTaskRecord]:
+        if kind is not None:
+            self._validate_background_kind(kind)
+        where: dict[str, Any] = {}
+        if owner_session_id is not None:
+            where["owner_session_id"] = owner_session_id
+        if kind is not None:
+            where["kind"] = kind
+        rows = self.control_plane.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="tasks",
+                where=where or None,
+                order_by="created_at",
+                limit=1000,
+            ),
+        ).rows
+        records = [
+            self._record_from_projection(str(row["task_id"]), task_row=row)
+            for row in rows
+            if str(row.get("kind") or "") in BACKGROUND_TASK_KINDS
+        ]
+        if not include_completed:
+            records = [record for record in records if record.running]
+        return sorted(records, key=lambda record: record.started_at or "")
+
     def log(self, task_id: str, *, tail: int | None = None) -> list[str]:
         self.get(task_id)
+        return self._task_log(task_id, tail=tail)
+
+    def log_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+        *,
+        tail: int | None = None,
+    ) -> list[str]:
+        self.get_owned(scope, task_id)
+        return self._task_log(task_id, tail=tail)
+
+    def _task_log(self, task_id: str, *, tail: int | None) -> list[str]:
         rows = self.control_plane.store.query(
             RuntimeQuery(table="task_logs", where={"task_id": task_id}, order_by="seq", limit=10000)
         ).rows
@@ -421,34 +568,89 @@ class RuntimeTaskWorker:
                     if record is not None and _is_completion_status(record.status):
                         self._emit_completion_once(record)
 
+    async def wait_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+        *,
+        timeout_seconds: int | float | None = None,
+        consume_completion: bool = False,
+    ) -> RuntimeTaskRecord:
+        self.get_owned(scope, task_id)
+        return await self.wait(
+            task_id,
+            timeout_seconds=timeout_seconds,
+            consume_completion=consume_completion,
+        )
+
     async def cancel(self, task_id: str) -> RuntimeTaskRecord:
         record = self.get(task_id)
         if record.status in TERMINAL_TASK_STATUSES:
             return record
+        cancellation_task = self._cancellation_tasks.get(task_id)
+        if cancellation_task is None:
+            cancellation_task = asyncio.create_task(
+                self._cancel_once(task_id)
+            )
+            self._cancellation_tasks[task_id] = cancellation_task
+
+            def release_cancel_task(completed: asyncio.Task[None]) -> None:
+                if self._cancellation_tasks.get(task_id) is completed:
+                    self._cancellation_tasks.pop(task_id, None)
+
+            cancellation_task.add_done_callback(release_cancel_task)
+        await asyncio.shield(cancellation_task)
+        return self.get(task_id)
+
+    async def _cancel_once(self, task_id: str) -> None:
+        record = self.get(task_id)
+        if record.status in TERMINAL_TASK_STATUSES:
+            return
         active_record = self._active_records.get(task_id)
         if active_record is None:
             self.control_plane.cancel(task_id)
-            return self.get(task_id)
+            return
         record = active_record
         record.status = "cancelled"
         record.summary = record.summary or "task cancelled"
         record.completed_at = _now()
-        self._append_runtime_status_event(record, "task.cancelled")
-        callback = self._cancel_callbacks.get(task_id)
-        if callback is not None:
-            value = callback()
-            if inspect.isawaitable(value):
-                await value
-        task = self._active_tasks.get(task_id)
-        if task is not None and not task.done():
-            task.cancel()
-            with_context = asyncio.gather(task, return_exceptions=True)
-            try:
-                await asyncio.wait_for(with_context, timeout=5)
-            except asyncio.TimeoutError:
-                pass
+        self._cancellations_in_progress.add(task_id)
+        try:
+            terminal_event_type = "task.cancelled"
+            callback = self._cancel_callbacks.get(task_id)
+            if callback is not None:
+                try:
+                    value = callback()
+                    if inspect.isawaitable(value):
+                        await value
+                except Exception as exc:
+                    record.status = "failed"
+                    record.summary = (
+                        "task cancellation cleanup failed: "
+                        f"{type(exc).__name__}"
+                    )
+                    record.metadata["cancel_cleanup_error_type"] = type(exc).__name__
+                    terminal_event_type = "task.failed"
+            self._append_runtime_status_event(record, terminal_event_type)
+            task = self._active_tasks.get(task_id)
+            if task is not None and not task.done():
+                task.cancel()
+                with_context = asyncio.gather(task, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(with_context, timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self._cancellations_in_progress.discard(task_id)
         self._emit_completion_once(record)
-        return self.get(task_id)
+
+    async def cancel_owned(
+        self,
+        scope: PrincipalScope,
+        task_id: str,
+    ) -> RuntimeTaskRecord:
+        self.get_owned(scope, task_id)
+        return await self.cancel(task_id)
 
     async def drain(self) -> None:
         while True:
@@ -456,6 +658,17 @@ class RuntimeTaskWorker:
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        self._closed = True
+        task_ids = [
+            task_id
+            for task_id, task in self._active_tasks.items()
+            if not task.done()
+        ]
+        for task_id in task_ids:
+            await self.cancel(task_id)
+        await self.drain()
 
     @property
     def active_count(self) -> int:
@@ -497,6 +710,7 @@ class RuntimeTaskWorker:
             "source_tool": record.source_tool,
             "write_scope": record.write_scope,
             "metadata": dict(record.metadata),
+            "origin_scope": dict(record.origin_scope_record) if record.origin_scope_record else None,
         }
         self.control_plane.submit_task(
             TaskSpec(
@@ -596,6 +810,7 @@ class RuntimeTaskWorker:
             log_tail=tuple(record.log_tail),
             result_ref=record.result_ref,
             metadata=dict(record.metadata),
+            origin_scope_record=record.origin_scope_record,
         )
         row = self.control_plane.emit_completion_ready(
             event_id=event.event_id,
@@ -705,6 +920,11 @@ class RuntimeTaskWorker:
         submitted = next((event for event in events if event.get("type") == "task.submitted"), {})
         submitted_payload = submitted.get("payload") if isinstance(submitted.get("payload"), Mapping) else {}
         action = submitted_payload.get("action") if isinstance(submitted_payload.get("action"), Mapping) else {}
+        origin_scope_record = (
+            action.get("origin_scope")
+            if isinstance(action.get("origin_scope"), Mapping)
+            else None
+        )
         source = task_row.get("source") if isinstance(task_row.get("source"), Mapping) else {}
         source_metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
         metadata: dict[str, Any] = {}
@@ -737,6 +957,7 @@ class RuntimeTaskWorker:
             result_ref=task_row.get("result_ref"),
             metadata=metadata,
             notify_on_complete=str(task_row.get("notify_policy") or "") != "silent",
+            origin_scope_record=dict(origin_scope_record) if origin_scope_record is not None else None,
             task=task,
         )
 

@@ -57,13 +57,60 @@ Common children:
 | `.core-ignore` | Host-owned Git ignore file for runtime cache artifacts such as `__pycache__/`. |
 | `.evolve/runs/<run_id>/agents/` | Isolated evolve worktree over the whole agents tree. |
 | `runtime/runtime.sqlite3` | Runtime control-plane event store and projections. |
+| `runtime/runtime.sqlite3.v4.bak` | Integrity-checked pre-migration backup retained when schema 4 is upgraded to schema 5. |
+| `runtime/runtime.sqlite3.migrate.lock` | Host migration lock that serializes runtime schema upgrade attempts. |
 | `runtime/artifacts/` | Host-owned artifacts referenced by runtime records. |
 | `runtime/session-events/` | Per-session diagnostic event logs. |
 | `state/<core_id>.json` | Core-scoped JSON state read and written through `ctx.state.core`. |
 | `state/sessions/<session_id>.json` | Session-scoped JSON state read and written through `ctx.state.session`. |
 | `state/proposals.jsonl` | Audit log for accepted core and session state writes. |
+| `state/**/.*.transaction.json` | Private transient recovery journal for an in-flight state snapshot plus proposal-audit commit. |
 | `workspace/` | Default workspace when no CLI/env/core workspace is selected. |
 | `logs/` | Runtime logs such as `mcp-stderr.log`. |
+
+On POSIX, the Host enforces `0700` for the runtime home and private directories
+under `runtime/`, `logs/`, and `state/`. It enforces `0600` for `.env`,
+`config.yaml`, SQLite database/WAL/SHM files, event logs, state files, MCP stderr
+logs, and artifacts. These modes do not depend on the launching shell's umask.
+Startup and mutating init/setup paths tighten existing files without changing
+their contents or modification times. Private write helpers reject symbolic
+links. On POSIX they anchor directory creation, final file opens, permission
+tightening, and atomic replacement to directory descriptors, so a concurrently
+substituted ancestor cannot redirect a private write. Windows uses platform ACL
+semantics instead of numeric POSIX modes.
+`demiurge doctor` only audits the tree and reports
+`runtime.permissions.insecure`; it does not repair permissions itself.
+
+Runtime schema 5 adds the immutable `session_owners` projection used by
+Host-owned `PrincipalScope` resolution. New sessions record conversation,
+operator, system, or delegated-agent ownership at creation. The schema 4
+migration safely backfills only a single matching conversation binding;
+ambiguous rows become `legacy_local` and are visible only through explicit
+operator repair; ordinary origin resolution fails closed and never promotes
+them. On POSIX, the migration backup and lock use mode `0600`.
+The backup is written to a private temporary SQLite file and atomically exposed
+only after its version, integrity, and logical-fingerprint checks pass. An
+existing valid-but-stale backup stops migration instead of being reused. A failed migration rolls back
+the database transaction, retains the version 4 backup, and reports absolute
+paths plus the stop-and-replace recovery action.
+
+State files are current alpha containment, not the final production state
+engine. Within one host process, writes to the same resolved state path are
+serialized. Snapshot and proposal-audit files are published through flushed,
+same-directory temporary files and atomic replacement. On POSIX,
+runtime-owned state directories use mode `0700` and files use `0600`,
+independent of the process umask. Windows uses platform ACL semantics, so the
+numeric POSIX mode guarantee does not apply there. A prepared transaction
+journal is rolled back on the next read after an interrupted commit; a
+committed journal is completed before it is removed.
+
+The containment does not provide an inter-process lock. Do not run multiple
+Demiurge host processes against the same runtime home. The JSON document shape
+is unchanged for existing runtime homes; internal compare-and-swap revisions
+are content hashes rather than new authored-state keys. Proposal audit entries
+also carry a full-entropy transaction identity so crash recovery does not rely
+on the shorter display id. Final transactional state ownership belongs in
+`StateRuntime` on `RuntimeStore`.
 
 ## Runtime Core
 

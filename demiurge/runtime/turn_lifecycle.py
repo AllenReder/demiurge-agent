@@ -83,7 +83,8 @@ class TurnLifecycleRuntime:
             metadata=metadata,
         )
 
-        self.event_log.emit(
+        event_log = EventLog(self.home, request.session_id)
+        event_log.emit(
             "turn.started",
             turn_id=turn_id,
             core_id=request.core_id,
@@ -91,7 +92,7 @@ class TurnLifecycleRuntime:
             **metadata,
         )
         self.session_runtime.start_turn(session_id=request.session_id, turn_id=turn_id)
-        self.event_log.emit("message.inbound", turn_id=turn_id, content=request.raw_text, **metadata)
+        event_log.emit("message.inbound", turn_id=turn_id, content=request.raw_text, **metadata)
 
         return TurnLifecycle(
             session_id=request.session_id,
@@ -105,7 +106,7 @@ class TurnLifecycleRuntime:
 
     def complete(self, lifecycle: TurnLifecycle, completion: TurnLifecycleCompletion) -> None:
         result_ref = completion.result_ref or lifecycle.turn_id
-        self.event_log.emit(
+        EventLog(self.home, lifecycle.session_id).emit(
             "turn.completed",
             turn_id=lifecycle.turn_id,
             items=[_serialize_item(item) for item in completion.items],
@@ -121,7 +122,12 @@ class TurnLifecycleRuntime:
         CompletionInbox(self.task_worker).ack_from_metadata(lifecycle.metadata)
 
     def interrupt(self, lifecycle: TurnLifecycle, *, status: TurnInterruptStatus, error: str) -> None:
-        self.event_log.emit(f"turn.{status}", turn_id=lifecycle.turn_id, error=error, **lifecycle.metadata)
+        EventLog(self.home, lifecycle.session_id).emit(
+            f"turn.{status}",
+            turn_id=lifecycle.turn_id,
+            error=error,
+            **lifecycle.metadata,
+        )
         self.session_runtime.complete_turn(
             session_id=lifecycle.session_id,
             turn_id=lifecycle.turn_id,

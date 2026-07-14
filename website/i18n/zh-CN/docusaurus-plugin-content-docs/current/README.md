@@ -47,7 +47,7 @@ declarations 和本地 libraries。
 | 本地运行者 | [故障排查](how-to/troubleshoot.md), [配置 channels](how-to/configure-channels.md), [安装 packages](how-to/install-packages.md) |
 | Agent Core 作者 | [Host 和 Agent Core](explanation/host-and-agent-core.md), [修改 Agent Core](tutorials/customize-agent-core.md), [编写 Agent Slot](how-to/write-slot-module.md), [Slot Context SDK](reference/slot-context-sdk.md), [Authored surface contract](reference/contracts/authored-surface.md) |
 | Package 作者 | [Package 模型](explanation/package-model.md), [编写 Package Recipe](how-to/write-package-recipe.md), [创建外部 package repository](tutorials/external-package-repository.md), [发布 package repository](how-to/publish-package-repository.md), [Package Recipe 参考](reference/package-recipes.md) |
-| 贡献者 | [Architecture](developer-guide/architecture.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
+| 贡献者 | [Architecture](developer-guide/architecture.md), [Host 运行时契约](developer-guide/runtime-contracts.md), [Runner and context](developer-guide/runner-and-context.md), [Tool runtime](developer-guide/tool-runtime.md), [Package installer](developer-guide/package-installer.md) |
 
 ## 安装路径
 
@@ -72,6 +72,11 @@ uv run demiurge --provider fake
 TUI 要求 Node.js 20 或更新版本。不带 subcommand 运行 `demiurge` 会启动 TUI。
 主要 subcommands 是 `init`、`doctor`、`core`、`package`、`update`、`setup` 和
 `gateway`。
+
+Launcher 默认使用 tracked packaged TUI bundle，并忽略 source checkout 中残留的
+`ui-tui/dist/entry.js`。只有明确运行本地 TUI build/source artifact 时才设置
+`DEMIURGE_TUI_DEV=1`。TUI 与 Host 会在 gateway 初始化前交换 protocol/build identity，
+不匹配时 fail closed。
 
 ## 配置解析顺序
 

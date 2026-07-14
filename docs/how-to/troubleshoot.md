@@ -77,6 +77,27 @@ uv run demiurge init --refresh assistant
 Use `init --refresh global` only for the global fallback config, and use
 `init --refresh all` only when you intend to refresh all runtime templates.
 
+## Runtime Permission Check Fails
+
+`demiurge doctor` is read-only. On POSIX it reports
+`runtime.permissions.insecure` when the runtime home, `.env`, `config.yaml`,
+SQLite files, logs, state, or artifacts do not satisfy the Host `0700`/`0600`
+policy.
+
+Stop running Demiurge processes, review every path in the finding, and check
+for unexpected symbolic links or ownership changes. A normal mutating startup
+or init tightens existing modes without rewriting file contents:
+
+```bash
+uv run demiurge init
+uv run demiurge doctor
+```
+
+If init cannot tighten a path, fix its owner/permissions outside Demiurge and
+retry. Do not replace a listed runtime path with a symlink; private write paths
+reject symlinks. Windows uses platform ACL semantics, so numeric POSIX mode
+findings are not emitted there.
+
 ## Provider or API Key Fails
 
 Inspect setup state:

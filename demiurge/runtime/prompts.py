@@ -169,6 +169,7 @@ class PromptDeliveryRuntime:
             channel=inbound.channel,
             text=text,
             source=inbound.source,
+            principal_key=inbound.principal_key,
             reply_to=inbound.reply_to,
             conversation_key=inbound.conversation_key,
             metadata=dict(inbound.metadata),

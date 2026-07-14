@@ -12,6 +12,8 @@ from demiurge.packages import PackageManager, load_package_repository_collection
 from demiurge.providers import LLMResponse, ToolCall
 from demiurge.runtime.child_agents import ChildAgentRunRequest
 from demiurge.runtime.interactions import InteractionInbound, InteractionRuntime
+from demiurge.runtime.scope import PrincipalScopeResolver
+from demiurge.runtime.store import RuntimeQuery
 from demiurge.security.approval import ApprovalDecision, StaticApprovalProvider
 from demiurge.security.capabilities import CapabilityDenied
 from demiurge.sdk import AgentInput, OutputContext, TurnContext
@@ -603,7 +605,8 @@ async def test_authored_tool_can_send_transient_audio_without_history(tmp_path):
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=["base_output"])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents, workspace=workspace)
@@ -652,7 +655,8 @@ async def test_tool_output_defaults_to_persist_when_write_history_is_omitted(tmp
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=[])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
@@ -698,7 +702,8 @@ async def test_tool_delivery_schedules_immediately_after_tool_returns(tmp_path):
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_pipeline(agents, "output", serial=[])
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
@@ -744,7 +749,8 @@ async def test_module_tool_call_collects_tool_deliveries_in_current_turn(tmp_pat
         "  type: object\n"
         "  properties: {}\n"
         "  additionalProperties: false\n"
-        "capabilities: []\n",
+        "capabilities: []\n"
+        "approval_policy: auto\n",
     )
     _write_module(
         agents,
@@ -1516,6 +1522,9 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
             parent_slot_path="test",
             context=[],
             session_id=child_session_id,
+            parent_scope=PrincipalScopeResolver(app.runtime_store).admit(
+                app.runner.principal_scope
+            ),
         )
     )
 
@@ -1523,6 +1532,16 @@ async def test_child_bound_route_receives_child_delivery_only(tmp_path):
     assert child_texts == ["child"]
     assert result.session_id == child_session_id
     assert result.content == "child"
+    owner = app.runtime_store.query(
+        RuntimeQuery(
+            table="session_owners",
+            where={"session_id": child_session_id},
+            limit=1,
+        )
+    ).rows[0]
+    assert owner["owner_kind"] == "delegated_agent"
+    assert owner["origin_session_id"] == parent_turn.session_id
+    assert owner["origin_turn_id"] == parent_turn.turn_id
 
 
 @pytest.mark.asyncio
@@ -1651,6 +1670,15 @@ async def test_agents_run_tool_allowlist_uses_exact_tool_ids(tmp_path):
 @pytest.mark.asyncio
 async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     agents = _copy_agents(tmp_path)
+    evolver_manifest = agents / "evolver" / "agent.yaml"
+    raw = yaml.safe_load(evolver_manifest.read_text(encoding="utf-8"))
+    raw.setdefault("capabilities", {}).setdefault("defaults", {})[
+        "mcp.connect:docs"
+    ] = {}
+    evolver_manifest.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
     mcp_dir = agents / "evolver" / "agent" / "mcp"
     mcp_dir.mkdir(parents=True, exist_ok=True)
     (mcp_dir / "docs.yaml").write_text(
@@ -1676,6 +1704,7 @@ async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     app = create_app(home=tmp_path / "home", provider_name="fake", agents_root=agents)
     connection = FakeMcpConnection([FakeMcpTool("lookup")])
     app.tool_runtime.mcp_runtime.client_factory = lambda *_args: connection
+    app.approval_runtime.provider = StaticApprovalProvider("allow")
     provider = RecordingProvider(responses=["parent", "child"])
     app.runner.provider = provider
 
@@ -1684,6 +1713,7 @@ async def test_agents_run_allows_first_use_child_mcp_tool_selection(tmp_path):
     assert [tool.name for tool in provider.requests[1].tools] == ["docs__lookup"]
     assert _delivery_texts(result) == ["parent", "docs__lookup"]
     assert connection.list_count == 1
+    assert connection.closed is True
 
 
 @pytest.mark.asyncio
@@ -1741,7 +1771,7 @@ async def test_agents_run_rejects_child_tool_call_when_tools_are_hidden(tmp_path
 
     result = await app.runner.run_turn("hello")
 
-    assert "builtin tool is not allowed: read_file" in _delivery_texts(result)[1]
+    assert "tool not found or not allowed: read_file" in _delivery_texts(result)[1]
 
 
 @pytest.mark.asyncio

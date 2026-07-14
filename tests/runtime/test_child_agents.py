@@ -149,6 +149,35 @@ def test_child_agent_tool_selection_errors(tmp_path, requested, message):
         app.runner.child_agents.resolve_tools(core, requested)
 
 
+def test_delegate_fork_context_uses_parent_turn_session(tmp_path):
+    app = create_app(home=tmp_path / "home", provider_name="fake")
+    session_a = app.runner.session_id
+    app.session_runtime.append_message(
+        session_a,
+        role="user",
+        content="history-A",
+        turn_id="turn_a",
+    )
+    session_b = app.session_runtime.create_session(
+        core_id="assistant",
+        core_revision="rev_b",
+    ).session_id
+    app.session_runtime.append_message(
+        session_b,
+        role="user",
+        content="history-B",
+        turn_id="turn_b",
+    )
+    app.runner.session_id = session_b
+
+    context = app.runner.child_agents.delegation_context(
+        "fork",
+        session_id=session_a,
+    )
+
+    assert context == ["Parent session fork context:\nuser: history-A"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "metadata", "message"),

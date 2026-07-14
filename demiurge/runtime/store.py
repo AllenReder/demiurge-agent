@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import random
 import sqlite3
 import time
@@ -9,11 +11,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar
 
-from demiurge.util import ensure_dir, utc_id
+from demiurge.runtime.conversation_keys import build_conversation_key
+from demiurge.runtime.scope import (
+    AuthorityKind,
+    PrincipalScope,
+    PrincipalScopeResolver,
+    _active_operator_authority,
+    _scope_from_record,
+)
+from demiurge.security.private_files import (
+    ensure_private_directory,
+    ensure_private_file,
+)
 from demiurge.storage import utc_now
+from demiurge.util import utc_id
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,11 +71,13 @@ class RuntimeQuery:
         "scheduler_instances",
         "runtime_work_items",
         "session_bindings",
+        "session_owners",
     ] = "runtime_events"
     where: dict[str, Any] | None = None
     order_by: str | None = None
     limit: int = 100
     offset: int = 0
+    descending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +95,10 @@ class RuntimeStore:
 
     def __init__(self, path: Path):
         self.path = path.expanduser().resolve()
-        ensure_dir(self.path.parent)
+        self._principal_scope_issuer = object()
+        ensure_private_directory(self.path.parent)
         self._initialize()
+        self._secure_database_files()
 
     @classmethod
     def default(cls, home: Path) -> "RuntimeStore":
@@ -143,6 +166,209 @@ class RuntimeStore:
         return self._write(write)
 
     def query(self, query: RuntimeQuery) -> ProjectionPage:
+        return self._query(query)
+
+    def query_owned(self, scope: PrincipalScope, query: RuntimeQuery) -> ProjectionPage:
+        PrincipalScopeResolver(self).validate_owned(scope)
+        owner_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "owner_session_id",
+        }.get(query.table)
+        if owner_field is None:
+            raise ValueError(f"runtime owner predicate is not defined for table: {query.table}")
+        if scope.authority is AuthorityKind.OPERATOR:
+            page = self._query(
+                query,
+                owner_field=owner_field,
+                require_durable_owner=True,
+            )
+        else:
+            page = self._query(
+                query,
+                owner_field=owner_field,
+                allowed_owner_ids=scope.allowed_session_ids,
+            )
+        self._audit_empty_owned_lookup(scope, query, owner_field=owner_field, page=page)
+        return page
+
+    def query_legacy_for_repair(
+        self,
+        scope: PrincipalScope,
+        query: RuntimeQuery,
+        *,
+        reason: str,
+    ) -> ProjectionPage:
+        scope = PrincipalScopeResolver(self).admit(scope)
+        if scope.authority is not AuthorityKind.OPERATOR:
+            raise PermissionError("legacy repair status requires operator authority")
+        owner_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "owner_session_id",
+        }.get(query.table)
+        lookup_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "task_id",
+        }.get(query.table)
+        if owner_field is None or lookup_field is None:
+            raise ValueError(f"legacy repair query is not defined for table: {query.table}")
+        where = query.where or {}
+        lookup_id = str(where.get(lookup_field) or "").strip()
+        if not lookup_id:
+            raise ValueError(f"legacy repair query requires exact {lookup_field}")
+        normalized_reason = " ".join(str(reason or "").split())
+        if not normalized_reason:
+            raise ValueError("legacy repair query reason is required")
+        if len(normalized_reason) > 300:
+            raise ValueError("legacy repair query reason must be at most 300 characters")
+        page = self._query(
+            query,
+            owner_field=owner_field,
+            required_owner_kind="legacy_local",
+        )
+        self.append(
+            [
+                RuntimeEvent(
+                    type="principal_scope.legacy_repair_accessed",
+                    aggregate_type="principal_scope",
+                    aggregate_id=scope.principal_id,
+                    payload={
+                        "table": query.table,
+                        "lookup_field": lookup_field,
+                        "lookup_id": lookup_id[:256],
+                        "lookup_id_truncated": len(lookup_id) > 256,
+                        "reason": normalized_reason,
+                        "result_count": len(page.rows),
+                    },
+                    actor={
+                        "kind": scope.authority.value,
+                        "principal_id": scope.principal_id,
+                    },
+                )
+            ]
+        )
+        return page
+
+    def _audit_empty_owned_lookup(
+        self,
+        scope: PrincipalScope,
+        query: RuntimeQuery,
+        *,
+        owner_field: str,
+        page: ProjectionPage,
+    ) -> None:
+        if page.rows:
+            return
+        lookup_field = {
+            "messages": "session_id",
+            "sessions": "session_id",
+            "tasks": "task_id",
+        }.get(query.table)
+        where = query.where or {}
+        lookup_id = str(where.get(lookup_field or "") or "").strip()
+        if lookup_field is None or not lookup_id:
+            return
+        target_table = "sessions" if query.table == "messages" else query.table
+        target_field = "session_id" if query.table == "messages" else lookup_field
+        target = self._query(
+            RuntimeQuery(
+                table=target_table,
+                where={target_field: lookup_id},
+                limit=1,
+            )
+        ).rows
+        reason = "not_found"
+        if target:
+            owner_session_id = (
+                lookup_id
+                if query.table == "messages"
+                else str(target[0].get(owner_field) or "")
+            )
+            owners = self._query(
+                RuntimeQuery(
+                    table="session_owners",
+                    where={"session_id": owner_session_id},
+                    limit=1,
+                )
+            ).rows
+            if not owners:
+                reason = "missing_durable_owner"
+            elif str(owners[0].get("owner_kind") or "") == "legacy_local":
+                reason = "legacy_owner_requires_repair"
+            elif (
+                scope.authority is AuthorityKind.OPERATOR
+                or owner_session_id in scope.allowed_session_ids
+            ):
+                return
+            else:
+                reason = "not_authorized"
+        self.append(
+            [
+                RuntimeEvent(
+                    type="principal_scope.owner_lookup_denied",
+                    aggregate_type="principal_scope",
+                    aggregate_id=scope.principal_id,
+                    payload={
+                        "table": query.table,
+                        "lookup_field": lookup_field,
+                        "lookup_id": lookup_id[:256],
+                        "lookup_id_truncated": len(lookup_id) > 256,
+                        "reason": reason,
+                    },
+                    actor={
+                        "kind": scope.authority.value,
+                        "principal_id": scope.principal_id,
+                    },
+                )
+            ]
+        )
+
+    def session_owner_exists(self, session_id: str) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM session_owners WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def session_owner_count(self) -> int:
+        with self._connection() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM session_owners").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def has_operator_scope_audit(
+        self,
+        *,
+        active_session_id: str,
+        principal_id: str,
+    ) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM runtime_events
+                WHERE aggregate_type = 'principal_scope'
+                  AND aggregate_id = ?
+                  AND type = 'principal_scope.operator_issued'
+                  AND json_extract(payload_json, '$.active_session_id') = ?
+                ORDER BY seq DESC
+                LIMIT 1
+                """,
+                (principal_id, active_session_id),
+            ).fetchone()
+        return row is not None
+
+    def _query(
+        self,
+        query: RuntimeQuery,
+        *,
+        owner_field: str | None = None,
+        allowed_owner_ids: frozenset[str] | None = None,
+        require_durable_owner: bool = False,
+        required_owner_kind: str | None = None,
+    ) -> ProjectionPage:
         if query.table not in _QUERY_TABLES:
             raise ValueError(f"unsupported runtime query table: {query.table}")
         where = query.where or {}
@@ -153,6 +379,27 @@ class RuntimeStore:
                 raise ValueError(f"invalid runtime query field: {key}")
             clauses.append(f"{key} = ?")
             values.append(value)
+        if owner_field is not None:
+            if required_owner_kind is not None:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM session_owners AS scope_owner "
+                    f"WHERE scope_owner.session_id = {query.table}.{owner_field} "
+                    "AND scope_owner.owner_kind = ?)"
+                )
+                values.append(required_owner_kind)
+            elif require_durable_owner:
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM session_owners AS scope_owner "
+                    f"WHERE scope_owner.session_id = {query.table}.{owner_field} "
+                    "AND scope_owner.owner_kind != 'legacy_local')"
+                )
+            else:
+                owner_ids = sorted(allowed_owner_ids or ())
+                if not owner_ids:
+                    return ProjectionPage(rows=(), limit=query.limit, offset=query.offset)
+                placeholders = ", ".join("?" for _ in owner_ids)
+                clauses.append(f"{owner_field} IN ({placeholders})")
+                values.extend(owner_ids)
         sql = f"SELECT * FROM {query.table}"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -160,6 +407,10 @@ class RuntimeStore:
             if query.order_by not in _QUERY_ORDER_FIELDS:
                 raise ValueError(f"invalid runtime query order_by: {query.order_by}")
             sql += f" ORDER BY {query.order_by}"
+            if query.descending:
+                sql += " DESC"
+        elif query.descending:
+            raise ValueError("runtime query descending requires order_by")
         sql += " LIMIT ? OFFSET ?"
         values.extend([query.limit, query.offset])
         with self._connection() as connection:
@@ -193,14 +444,241 @@ class RuntimeStore:
     def _initialize(self) -> None:
         with self._connection() as connection:
             current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current_version == 4:
+                with _runtime_migration_lock(self.path):
+                    current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    if current_version == 4:
+                        backup_path = self.path.with_name(
+                            f"{self.path.name}.v{current_version}.bak"
+                        )
+                        try:
+                            self._backup_before_migration(connection, current_version)
+                            self._migrate_v4_to_v5(connection, backup_path=backup_path)
+                        except Exception as exc:
+                            detail = str(exc)
+                            if "backup" in detail and (
+                                "invalid" in detail or "does not match" in detail
+                            ):
+                                recovery = (
+                                    "move the invalid or stale backup aside, then retry so the Host "
+                                    "can create a backup of the unchanged original database"
+                                )
+                            else:
+                                recovery = (
+                                    "restore by stopping Demiurge and replacing the original database "
+                                    "with that backup before retrying the upgrade"
+                                )
+                            raise RuntimeError(
+                                f"runtime database migration failed: {detail}; "
+                                f"original database remains unchanged at {self.path}; "
+                                f"pre-migration backup path: {backup_path.resolve()}; "
+                                f"{recovery}"
+                            ) from exc
+                        current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if current_version not in {0, SCHEMA_VERSION}:
                 raise RuntimeError(
                     f"unsupported runtime database schema version {current_version}; "
-                    f"expected {SCHEMA_VERSION}. Demiurge does not migrate old runtime state."
+                    f"expected 4 or {SCHEMA_VERSION}."
                 )
             connection.executescript(_SCHEMA_SQL)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
+
+    def _backup_before_migration(self, connection: sqlite3.Connection, version: int) -> None:
+        backup_path = self.path.with_name(f"{self.path.name}.v{version}.bak")
+        if backup_path.exists():
+            self._validate_migration_backup(
+                backup_path,
+                version,
+                source_connection=connection,
+            )
+            return
+        temporary_path = backup_path.with_name(f".{backup_path.name}.{os.getpid()}.tmp")
+        try:
+            temporary_path.unlink(missing_ok=True)
+            descriptor = os.open(
+                temporary_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            os.close(descriptor)
+            with closing(sqlite3.connect(temporary_path)) as backup:
+                connection.backup(backup)
+                backup.commit()
+            if os.name != "nt":
+                temporary_path.chmod(0o600)
+            os.replace(temporary_path, backup_path)
+            self._validate_migration_backup(
+                backup_path,
+                version,
+                source_connection=connection,
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _validate_migration_backup(
+        backup_path: Path,
+        version: int,
+        *,
+        source_connection: sqlite3.Connection | None = None,
+    ) -> None:
+        try:
+            with closing(
+                sqlite3.connect(
+                    f"{backup_path.resolve().as_uri()}?mode=ro",
+                    uri=True,
+                )
+            ) as backup:
+                backup_version = int(backup.execute("PRAGMA user_version").fetchone()[0])
+                integrity = str(backup.execute("PRAGMA integrity_check").fetchone()[0])
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError(f"runtime migration backup is invalid: {backup_path}") from exc
+        if backup_version != version or integrity.lower() != "ok":
+            raise RuntimeError(
+                f"runtime migration backup is invalid: {backup_path} "
+                f"(version={backup_version}, integrity={integrity})"
+            )
+        if source_connection is not None:
+            with closing(
+                sqlite3.connect(
+                    f"{backup_path.resolve().as_uri()}?mode=ro",
+                    uri=True,
+                )
+            ) as backup:
+                if RuntimeStore._database_fingerprint(backup) != RuntimeStore._database_fingerprint(
+                    source_connection
+                ):
+                    raise RuntimeError(
+                        "runtime migration backup does not match the current database: "
+                        f"{backup_path}"
+                    )
+
+    @staticmethod
+    def _database_fingerprint(connection: sqlite3.Connection) -> str:
+        digest = hashlib.sha256()
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        digest.update(f"user_version={version}\n".encode())
+        for statement in connection.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def _migrate_v4_to_v5(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        backup_path: Path,
+    ) -> None:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current_version == SCHEMA_VERSION:
+                connection.rollback()
+                return
+            if current_version != 4:
+                raise RuntimeError(
+                    f"runtime schema changed during migration: expected 4, found {current_version}"
+                )
+            self._validate_migration_backup(
+                backup_path,
+                current_version,
+                source_connection=connection,
+            )
+            _ensure_session_owner_schema(connection)
+            rows = connection.execute(
+                """
+                SELECT session_id, channel, target_json, created_at, updated_at
+                FROM sessions
+                """
+            ).fetchall()
+            for row in rows:
+                session_id = str(row[0])
+                channel = str(row[1]) if row[1] is not None else None
+                try:
+                    target = json.loads(str(row[2]) or "{}")
+                except (TypeError, ValueError):
+                    target = {}
+                if not isinstance(target, dict):
+                    target = {}
+                metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+                conversation_key = _optional_text(target.get("conversation_key"))
+                source = _optional_text(metadata.get("source"))
+                owner_kind, principal_id, owner_channel, owner_conversation = self._legacy_session_owner(
+                    connection,
+                    session_id=session_id,
+                    channel=channel,
+                    conversation_key=conversation_key,
+                    source=source,
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO session_owners (
+                        session_id, owner_kind, principal_id, channel,
+                        conversation_key, origin_session_id, origin_turn_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        owner_kind,
+                        principal_id,
+                        owner_channel,
+                        owner_conversation,
+                        str(row[3]),
+                        str(row[4]),
+                    ),
+                )
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+            if integrity.lower() != "ok":
+                raise RuntimeError(f"runtime database integrity check failed after migration: {integrity}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _legacy_session_owner(
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        channel: str | None,
+        conversation_key: str | None,
+        source: str | None,
+    ) -> tuple[str, str, str | None, str | None]:
+        if channel == "tui":
+            return "operator", build_conversation_key("principal", "operator", "local"), None, None
+        bindings = connection.execute(
+            """
+            SELECT channel, conversation_key
+            FROM session_bindings
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchall()
+        if (
+            channel
+            and conversation_key
+            and source
+            and channel != "webhook"
+            and len(bindings) == 1
+            and str(bindings[0][0]) == channel
+            and str(bindings[0][1]) == conversation_key
+        ):
+            principal_id = build_conversation_key(
+                "principal",
+                "conversation",
+                channel,
+                conversation_key,
+            )
+            return "conversation", principal_id, channel, conversation_key
+        return (
+            "legacy_local",
+            build_conversation_key("principal", "legacy_local", session_id),
+            None,
+            None,
+        )
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -210,10 +688,32 @@ class RuntimeStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=0.1)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            attempts = 6
+            for attempt in range(attempts):
+                try:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_busy(exc) or attempt == attempts - 1:
+                        raise
+                    time.sleep(0.025 * (2**attempt) + random.uniform(0, 0.01))
+            connection.execute("PRAGMA foreign_keys=ON")
+            self._secure_database_files()
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+    def _secure_database_files(self) -> None:
+        for path in (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        ):
+            if path.exists():
+                ensure_private_file(path)
 
     def _write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         attempts = 6
@@ -414,6 +914,7 @@ class RuntimeStore:
                 ),
             )
             self._project_session_binding(connection, event)
+            self._project_session_owner(connection, event)
         elif event_type == "session.binding.rebound":
             connection.execute(
                 """
@@ -768,6 +1269,52 @@ class RuntimeStore:
             (event["created_at"], core_id, channel, conversation_key, event["aggregate_id"]),
         )
 
+    def _project_session_owner(self, connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+        payload = event["payload"]
+        target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+        scope_record = target.get("principal_scope")
+        if isinstance(scope_record, dict):
+            scope = _scope_from_record(
+                scope_record,
+                issuer=self._principal_scope_issuer,
+                operator_authority=_active_operator_authority(self),
+            )
+            if scope.session_id != event["aggregate_id"]:
+                raise ValueError("persisted PrincipalScope session does not match session event")
+            owner_kind = scope.authority.value
+            principal_id = scope.principal_id
+            channel = scope.channel
+            conversation_key = scope.conversation_key
+            origin_session_id = scope.origin_session_id
+            origin_turn_id = scope.origin_turn_id
+        else:
+            owner_kind = "legacy_local"
+            principal_id = build_conversation_key("principal", "legacy_local", event["aggregate_id"])
+            channel = None
+            conversation_key = None
+            origin_session_id = None
+            origin_turn_id = None
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO session_owners (
+                session_id, owner_kind, principal_id, channel,
+                conversation_key, origin_session_id, origin_turn_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["aggregate_id"],
+                owner_kind,
+                principal_id,
+                channel,
+                conversation_key,
+                origin_session_id,
+                origin_turn_id,
+                payload.get("created_at") or event["created_at"],
+                payload.get("updated_at") or event["created_at"],
+            ),
+        )
+
 
 _QUERY_TABLES = {
     "runtime_events",
@@ -785,6 +1332,7 @@ _QUERY_TABLES = {
     "scheduler_instances",
     "runtime_work_items",
     "session_bindings",
+    "session_owners",
 }
 _QUERY_ORDER_FIELDS = {
     "seq",
@@ -802,6 +1350,32 @@ _QUERY_ORDER_FIELDS = {
 def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
     message = str(exc).lower()
     return "database is locked" in message or "database is busy" in message
+
+
+_SESSION_OWNER_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS session_owners (
+        session_id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        channel TEXT,
+        conversation_key TEXT,
+        origin_session_id TEXT,
+        origin_turn_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_owners_principal
+    ON session_owners (principal_id, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_owners_route
+    ON session_owners (channel, conversation_key)
+    """,
+)
+_SESSION_OWNER_SCHEMA_SQL = ";\n".join(_SESSION_OWNER_SCHEMA_STATEMENTS) + ";\n"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runtime_events (
@@ -986,4 +1560,42 @@ CREATE TABLE IF NOT EXISTS session_bindings (
     PRIMARY KEY (core_id, channel, conversation_key)
 );
 CREATE INDEX IF NOT EXISTS idx_session_bindings_session ON session_bindings (session_id);
-"""
+
+""" + _SESSION_OWNER_SCHEMA_SQL
+
+
+def _ensure_session_owner_schema(connection: sqlite3.Connection) -> None:
+    for statement in _SESSION_OWNER_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+@contextmanager
+def _runtime_migration_lock(database_path: Path) -> Iterator[None]:
+    lock_path = database_path.with_name(f"{database_path.name}.migrate.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(descriptor, "a+b") as lock_file:
+        if os.name != "nt":
+            lock_path.chmod(0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if os.name != "nt":
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)

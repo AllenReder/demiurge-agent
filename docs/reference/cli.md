@@ -55,6 +55,21 @@ Checks runtime/source template drift. It also reports runtime core repository
 consistency problems, such as a missing live ref, a live checkout that no
 longer matches `refs/demiurge/live`, or a rollback ref that needs repair.
 
+`doctor` and `init --check` use the same process exit contract:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The report is healthy (`ok: true` in JSON mode). |
+| `1` | The check completed and found one or more errors (`ok: false`). |
+| `2` | Arguments, configuration, or the check itself could not be processed. |
+
+JSON reports remain on stdout and machine-readable for both healthy and
+unhealthy results. In JSON mode, an execution failure also emits an `ok: false`
+payload with `error.code: doctor.execution_error`, without a traceback or raw
+configuration values. Callers must inspect the process status as well as the
+JSON payload. In particular, the managed `update` health gate now stops when
+`init --check` reports an unhealthy runtime.
+
 ## `core`
 
 ```bash
@@ -66,7 +81,7 @@ uv run demiurge core diff
 uv run demiurge core discard --yes
 uv run demiurge core evolve start Improve concise replies
 uv run demiurge core evolve review <run_id>
-uv run demiurge core evolve promote <run_id>
+uv run demiurge core evolve promote <run_id> --manual-review-token <token>
 uv run demiurge core evolve discard <run_id>
 uv run demiurge core rollback
 uv run demiurge core rollback <revision>
@@ -81,7 +96,11 @@ start` creates an isolated worktree under `.evolve/runs/<run_id>/agents`.
 Review records `refs/demiurge/runs/<run_id>`, promote advances
 `refs/demiurge/live`, and rollback creates a new rollback commit. Promotion
 rejects stale evolve proposals whose recorded base revision no longer matches
-the current live revision.
+the current live revision. If review reports an MCP declaration security diff,
+it also prints a content-bound `mcp-review:<sha256>` token. Pass that exact token
+to `core evolve promote --manual-review-token`; a missing or stale token leaves
+the Git refs unchanged. Runs without that security diff do not require the
+option.
 
 `core diff` shows local agent edits in `~/.demiurge/agents` without writing
 files. `core save` validates those edits and commits them as a new
@@ -108,6 +127,9 @@ uv run demiurge setup model set --core assistant --provider openai --model <mode
 uv run demiurge setup timezone set Asia/Shanghai
 uv run demiurge setup timezone clear
 ```
+
+`setup status` is read-only. It reports a missing runtime home or core without
+creating `config.yaml`, the Agent Core repository, or runtime templates.
 
 Provider presets currently include:
 

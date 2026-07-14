@@ -39,7 +39,8 @@ Capability 必须在以下任一位置声明：
 - `agent.yaml` 下的 `capabilities.slots.<slot_path>`
 - component manifest 的 `capabilities` 列表
 
-`mcp.call:*` 这样的 prefix grants 可以授予 `mcp.call:docs` 等 scoped capabilities。
+`mcp.connect:*` 与 `mcp.call:*` 这样的 prefix grants 可以授予
+`mcp.connect:docs`、`mcp.call:docs` 等 scoped capabilities。
 
 ## Approval Rule
 
@@ -54,6 +55,10 @@ Approval policy 可以来自：
 - channel/runtime approval provider behavior
 
 `deny` 始终是终止性结果。`prompt` 需要 approval provider。只有在 capability 和 workspace checks 通过之后，`auto` 才能不询问就运行。
+对于 terminal execution，`auto` 还要求 command guard 返回 `allow/low`。Global fallback
+policy 不能把 `prompt/high` 或 unknown terminal decision 降级为自动执行；hardline block
+不会进入 approval。执行 workspace/project code、应用显式 environment overlay，或绑定
+Host secret 都必须获得显式 approval。
 
 ## Workspace Rule
 
@@ -62,6 +67,15 @@ File writes、patches 和 terminal working directories 必须留在 resolved wor
 ## Secrets Rule
 
 Provider keys、bot tokens、webhook secrets、SMTP credentials 和 MCP secrets 属于 host config、environment variables 或 `.env`。Authored slots 和 tools 应报告 secret sources，而不是 secret values。
+
+Terminal subprocess 接收 allowlisted environment 与专用 runtime `HOME`，不会继承 Host
+credentials。Secret 只能通过 `secret.bind:<ENV_NAME>` 加一次性 approval 进入 foreground
+terminal effect；binding 最晚随 command timeout 过期，禁止 background 使用，audit 只记录
+source/name 而不记录 value，并对返回 stdout/stderr 中完全相同的绑定值进行脱敏。
+
+Grant 必须精确；不接受 `secret.bind:*`。Binding 不能以 `PATH`、`HOME`、shell selector、
+loader hook 或 language runtime search path 等 execution-control variable 为 target。最早
+expiry 会收紧 foreground subprocess deadline。
 
 ## Channel Rule
 

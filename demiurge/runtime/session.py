@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from demiurge.runtime.control import RuntimeControlPlane
 from demiurge.runtime.host_work import delivery_work_enqueued_event
+from demiurge.runtime.scope import PrincipalScope, PrincipalScopeResolver
 from demiurge.runtime.store import RuntimeEvent, RuntimeQuery
 from demiurge.storage import SessionMessage, SessionRecord, utc_now
 from demiurge.util import utc_id
@@ -117,6 +118,7 @@ class SessionRuntime:
         return bool(self.store.query(RuntimeQuery(table="sessions", where={"session_id": session_id}, limit=1)).rows)
 
     def ensure_session(self, session_id: str, **kwargs: Any) -> tuple[SessionRecord, bool]:
+        principal_scope = kwargs.pop("principal_scope", None)
         existing = self._resolve_binding_from_kwargs(kwargs)
         if existing is not None:
             record = self.update_session(existing, touch=False, **kwargs)
@@ -126,7 +128,7 @@ class SessionRuntime:
             record = self.update_session(session_id, touch=False, **kwargs)
             self._append_runtime_event(self._session_event(record, "session.resumed"))
             return record, False
-        return self.create_session(session_id=session_id, **kwargs), True
+        return self.create_session(session_id=session_id, principal_scope=principal_scope, **kwargs), True
 
     def create_session(
         self,
@@ -140,6 +142,7 @@ class SessionRuntime:
         provider: str | None = None,
         model: str | None = None,
         metadata: dict[str, Any] | None = None,
+        principal_scope: PrincipalScope | None = None,
     ) -> SessionRecord:
         now = utc_now()
         record = SessionRecord(
@@ -156,7 +159,13 @@ class SessionRuntime:
             metadata=metadata or {},
         )
         try:
-            self._append_runtime_event(self._session_event(record, "session.created"))
+            self._append_runtime_event(
+                self._session_event(
+                    record,
+                    "session.created",
+                    principal_scope=principal_scope,
+                )
+            )
         except RuntimeError:
             existing = self.resolve_interaction_session(
                 core_id=core_id,
@@ -299,13 +308,52 @@ class SessionRuntime:
             raise FileNotFoundError(f"session not found: {session_id}")
         return self._record_from_row(rows[0])
 
+    def get_owned_session(self, scope: PrincipalScope, session_id: str) -> SessionRecord:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
+        rows = self.store.query_owned(
+            scope,
+            RuntimeQuery(table="sessions", where={"session_id": session_id}, limit=1),
+        ).rows
+        if not rows:
+            raise FileNotFoundError(f"session not found: {session_id}")
+        return self._record_from_row(rows[0])
+
     def list_sessions(self, *, core_id: str | None = None, limit: int = 20) -> list[SessionRecord]:
-        rows = self.store.query(RuntimeQuery(table="sessions", order_by="updated_at", limit=max(limit * 5, limit))).rows
+        rows = self.store.query(
+            RuntimeQuery(
+                table="sessions",
+                where={"core_id": core_id} if core_id else None,
+                order_by="updated_at",
+                descending=True,
+                limit=limit,
+            )
+        ).rows
         records = [self._record_from_row(row) for row in rows]
-        if core_id:
-            records = [record for record in records if record.core_id == core_id]
         records.sort(key=lambda item: item.updated_at, reverse=True)
-        return records[:limit]
+        return records
+
+    def list_owned_sessions(
+        self,
+        scope: PrincipalScope,
+        *,
+        core_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionRecord]:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
+        where = {"core_id": core_id} if core_id else None
+        rows = self.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="sessions",
+                where=where,
+                order_by="updated_at",
+                descending=True,
+                limit=limit,
+            ),
+        ).rows
+        records = [self._record_from_row(row) for row in rows]
+        records.sort(key=lambda item: item.updated_at, reverse=True)
+        return records
 
     def resolve_interaction_session(self, *, core_id: str, channel: str | None, conversation_key: str | None) -> str | None:
         if not channel or not conversation_key:
@@ -475,6 +523,24 @@ class SessionRuntime:
         ).rows
         return [self._message_from_row(row) for row in rows]
 
+    def read_owned_messages(
+        self,
+        scope: PrincipalScope,
+        session_id: str,
+    ) -> list[SessionMessage]:
+        scope = PrincipalScopeResolver(self.store).admit(scope)
+        self.get_owned_session(scope, session_id)
+        rows = self.store.query_owned(
+            scope,
+            RuntimeQuery(
+                table="messages",
+                where={"session_id": session_id},
+                order_by="runtime_seq",
+                limit=10_000,
+            ),
+        ).rows
+        return [self._message_from_row(row) for row in rows]
+
     def message_count(self, session_id: str) -> int:
         return len(self.read_messages(session_id))
 
@@ -598,7 +664,13 @@ class SessionRuntime:
             touch=True,
         )
 
-    def _session_event(self, record: SessionRecord, event_type: str) -> RuntimeEvent:
+    def _session_event(
+        self,
+        record: SessionRecord,
+        event_type: str,
+        *,
+        principal_scope: PrincipalScope | None = None,
+    ) -> RuntimeEvent:
         target = {
             "conversation_key": record.conversation_key,
             "workspace": record.workspace,
@@ -612,12 +684,17 @@ class SessionRuntime:
             "metadata": record.metadata or {},
             "core_revision": record.core_revision,
         }
+        if principal_scope is not None:
+            PrincipalScopeResolver(self.store).validate(principal_scope)
+            if principal_scope.session_id != record.session_id:
+                raise ValueError("PrincipalScope session does not match SessionRecord")
+            target["principal_scope"] = principal_scope.to_record()
         with_existing = self.store.query(
             RuntimeQuery(table="sessions", where={"session_id": record.session_id}, limit=1)
         ).rows
         if with_existing:
             existing_target = with_existing[0].get("target") or {}
-            for key in ("bootstrap_context", "bootstrap_context_initialized"):
+            for key in ("bootstrap_context", "bootstrap_context_initialized", "principal_scope"):
                 if key in existing_target and key not in target:
                     target[key] = existing_target[key]
         return RuntimeEvent(
